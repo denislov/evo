@@ -582,8 +582,11 @@ impl Drop for DesktopRuntimeBootstrap {
 }
 
 impl DesktopRuntimeBridge {
-    #[cfg(test)]
-    pub(crate) fn disconnected_for_test() -> Self {
+    /// Creates an inert bridge for deterministic native rendering replays.
+    ///
+    /// The command and update peers are deliberately closed so the shell can
+    /// exercise its real window/render path without starting a product runtime.
+    pub(crate) fn disconnected_for_replay() -> Self {
         let (commands, command_rx) = mpsc::channel(DESKTOP_COMMAND_QUEUE_CAPACITY);
         drop(command_rx);
         let (priority_update_tx, priority_updates) =
@@ -605,6 +608,11 @@ impl DesktopRuntimeBridge {
                 pending_data_update: None,
             },
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disconnected_for_test() -> Self {
+        Self::disconnected_for_replay()
     }
 
     #[cfg(test)]

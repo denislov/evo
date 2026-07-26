@@ -1,3 +1,4 @@
+mod native_perf;
 mod native_shell;
 
 use std::time::Duration;
@@ -51,10 +52,19 @@ impl Render for StartupFailure {
 
 pub(crate) fn run(options: crate::DesktopApplicationOptions) {
     let crate::DesktopApplicationOptions { cwd, session_id } = options;
+    let native_performance_replay = native_perf::enabled();
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
         crate::actions::bind_keys(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+
+        if native_performance_replay {
+            if let Err(error) = native_perf::open(cx) {
+                eprintln!("desktop: native performance replay failed: {error}");
+                cx.quit();
+            }
+            return;
+        }
 
         let bootstrap = DesktopRuntimeBridge::spawn(CodingAgentEmbeddingOptions::new(cwd));
         cx.spawn(async move |cx| {

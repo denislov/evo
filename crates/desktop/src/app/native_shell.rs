@@ -4459,11 +4459,11 @@ mod tests {
         });
     }
 
-    fn add_visual_shell<'a>(
-        cx: &'a mut TestAppContext,
+    fn add_visual_shell(
+        cx: &mut TestAppContext,
         runtime: DesktopRuntimeBridge,
         projection: DesktopProjection,
-    ) -> (gpui::Entity<NativeShell>, &'a mut gpui::VisualTestContext) {
+    ) -> (gpui::Entity<NativeShell>, &mut gpui::VisualTestContext) {
         let shell_slot = Rc::new(RefCell::new(None));
         let shell_slot_for_window = Rc::clone(&shell_slot);
         let (_, visual_cx) = cx.add_window_view(move |window, cx| {
