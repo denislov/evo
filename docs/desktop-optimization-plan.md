@@ -204,6 +204,7 @@ NativeShell
 #### DESK-011 拆分 NativeShell 渲染实体
 
 - [ ] 拆出 TitleBar、Sessions、Conversation、Composer、Inspector、StatusBar、OverlayHost。
+- [x] Conversation transcript 已迁入独立 `ConversationPane` Entity；持久 row/size 通过 `WeakEntity<NativeShell>` 零拷贝读取，selection 通过 typed child event 回传。
 - [ ] token 更新只 notify Conversation/live row。
 - [ ] usage、telemetry 等低优先级信息最多 2–4Hz 更新。
 - [ ] 保持现有 typed command ledger、authorization 和 recovery 安全边界。
@@ -349,7 +350,8 @@ desktop.input.latency
 | DESK-008 | 完成 | typed delta 已贯穿 Projection→NativeShell；product event 只增量同步 dirty overlay，replace 路径保留全量重建 |
 | DESK-009 | 完成 | revision-aware bounded row cache 已接入 NativeShell；sanitized `Arc<str>`、稳定 Markdown state key 和 measured height 可复用 |
 | DESK-010 | 完成 | 持久 row/height/size、sequence→单 index 更新、bounded 结构回退、15Hz 单行补刷和 67ms resize debounce 已完成 |
-| DESK-011～018 | 待开始 | 下一步拆分 Conversation/Composer/Inspector entity，继续隔离重渲染范围 |
+| DESK-011 | 进行中 | Conversation transcript Entity 已完成；继续迁移 header/composer/sessions/inspector/status/overlay 并收敛 notify 范围 |
+| DESK-012～018 | 待开始 | DESK-011 完成后进入字体、颜色、消息组件和 Composer 视觉/交互重构 |
 
 ## 10. 完成定义
 

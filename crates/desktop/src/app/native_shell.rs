@@ -28,14 +28,13 @@ use desktop::shell::{
 use gpui::{
     AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
     ParentElement as _, Render, ScrollStrategy, SharedString, Styled as _, Subscription, Window,
-    WindowBounds, div, prelude::*, px, relative, rgb, rgba, size,
+    WindowBounds, div, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::{
     Disableable as _, VirtualListScrollHandle,
     button::Button,
     input::{Input, InputEvent, InputState},
     text::TextView,
-    v_virtual_list,
 };
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -136,7 +135,7 @@ fn conversation_text_element(
     text: Arc<str>,
     mode: ConversationTextRenderMode,
     window: &mut Window,
-    cx: &mut Context<NativeShell>,
+    cx: &mut gpui::App,
 ) -> AnyElement {
     let text = SharedString::new(text);
     match mode {
@@ -300,6 +299,7 @@ pub(super) struct NativeShell {
     conversation_width_pending: Option<(u32, Instant)>,
     conversation_height_refresh_deadline: Option<Instant>,
     conversation_height_refresh_full: bool,
+    conversation_pane: gpui::Entity<ConversationPane>,
     composer: ComposerState,
     composer_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
@@ -370,6 +370,8 @@ impl NativeShell {
                 .auto_grow(2, 8)
                 .placeholder("Describe the change you want to make…")
         });
+        let owner = cx.weak_entity();
+        let conversation_pane = cx.new(|_| ConversationPane::new(owner));
 
         let subscriptions = vec![
             cx.on_focus(&sessions_focus, window, |this, window, cx| {
@@ -401,6 +403,21 @@ impl NativeShell {
                         }
                     }
                     InputEvent::PressEnter { secondary: false } | InputEvent::Blur => {}
+                },
+            ),
+            cx.subscribe_in(
+                &conversation_pane,
+                window,
+                |this, pane, event: &ConversationPaneEvent, _, cx| match event {
+                    ConversationPaneEvent::Select { block_id, durable } => {
+                        if *durable {
+                            this.conversation_viewport
+                                .select(block_id.clone(), this.projection.conversation());
+                        } else {
+                            this.conversation_viewport.select_live(block_id.clone());
+                        }
+                        pane.update(cx, |_, cx| cx.notify());
+                    }
                 },
             ),
             cx.observe_window_bounds(window, Self::window_bounds_changed),
@@ -450,6 +467,7 @@ impl NativeShell {
             conversation_width_pending: None,
             conversation_height_refresh_deadline: None,
             conversation_height_refresh_full: false,
+            conversation_pane,
             composer: ComposerState::default(),
             composer_input,
             composer_needs_sync: false,
@@ -3119,7 +3137,14 @@ impl Render for NativeShell {
             })
             .detach();
         }
-        if let Some((delay, requires_full)) = self.prepare_conversation_rows(layout_width) {
+        let conversation_pane_dirty = self.conversation_render_full_dirty
+            || self.conversation_render_live_dirty
+            || self.conversation_render_width_bucket != Some(layout_width);
+        let conversation_refresh = self.prepare_conversation_rows(layout_width);
+        if conversation_pane_dirty {
+            self.conversation_pane.update(cx, |_, cx| cx.notify());
+        }
+        if let Some((delay, requires_full)) = conversation_refresh {
             let deadline = Instant::now() + delay;
             if self
                 .conversation_height_refresh_deadline
@@ -3468,234 +3493,7 @@ impl Render for NativeShell {
         let profile_count = project.profiles.len();
         let model_count = project.models.len();
         let config_diagnostic_count = project.diagnostics.len();
-        let transcript_rows = self.conversation_row_sizes.clone();
-        let transcript_list = v_virtual_list(
-            cx.entity(),
-            "conversation-transcript",
-            transcript_rows,
-            |this, visible_range, window, cx| {
-                visible_range
-                    .filter_map(|index| {
-                        let block = this.conversation_render_rows.get(index)?.clone();
-                        let selected = this.conversation_viewport.selected_block_id()
-                            == Some(block.row_id.as_ref());
-                        let block_id = block.row_id.to_string();
-                        let markdown_id = ElementId::Name(SharedString::new(
-                            block.markdown_state_key.clone(),
-                        ));
-                        let detail_markdown_id = ElementId::Name(SharedString::new(
-                            block.detail_markdown_state_key.clone(),
-                        ));
-                        let durable = block.durable;
-                        let text_render_mode = conversation_text_render_mode(block.done);
-                        let text = block.text.clone();
-                        let detail_text = block.detail.clone();
-                        let theme = SemanticTheme::GEEK_DARK;
-                        let visual =
-                            conversation_block_visual(block.kind, block.is_error, theme);
-                        let row_height = this
-                            .conversation_render_heights
-                            .get(index)
-                            .copied()
-                            .unwrap_or(block.measured_height);
-                        let is_assistant = block.kind == ConversationBlockKind::Assistant;
-                        let is_tool = block.kind == ConversationBlockKind::Tool;
-                        let terminal_label = if block.is_error {
-                            Some("failed")
-                        } else if !block.done {
-                            Some("streaming")
-                        } else {
-                            None
-                        };
-                        Some(
-                            div()
-                                .id(("conversation-block", index))
-                                .h(px(row_height))
-                                .px_4()
-                                .py_1()
-                                .flex()
-                                .items_start()
-                                .when(visual.align_right, |row| row.justify_end())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if durable {
-                                        this.conversation_viewport.select(
-                                            block_id.clone(),
-                                            this.projection.conversation(),
-                                        );
-                                    } else {
-                                        this.conversation_viewport.select_live(block_id.clone());
-                                    }
-                                    cx.notify();
-                                }))
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .h_full()
-                                        .when(visual.align_right, |card| {
-                                            card.w(relative(0.82))
-                                        })
-                                        .overflow_hidden()
-                                        .rounded_lg()
-                                        .border_1()
-                                        .border_color(if selected {
-                                            rgb(theme.focus_ring.value())
-                                        } else {
-                                            rgb(visual.accent.value())
-                                        })
-                                        .bg(rgb(visual.surface.value()))
-                                        .px_4()
-                                        .py_3()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_2()
-                                                        .child(
-                                                            div()
-                                                                .px_2()
-                                                                .py_1()
-                                                                .rounded_md()
-                                                                .bg(rgb(
-                                                                    theme.elevated.value(),
-                                                                ))
-                                                                .text_xs()
-                                                                .font_weight(
-                                                                    gpui::FontWeight::SEMIBOLD,
-                                                                )
-                                                                .text_color(rgb(
-                                                                    visual.accent.value(),
-                                                                ))
-                                                                .child(visual.glyph),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_sm()
-                                                                .font_weight(
-                                                                    gpui::FontWeight::MEDIUM,
-                                                                )
-                                                                .text_color(rgb(
-                                                                    theme.text.value(),
-                                                                ))
-                                                                .child(SharedString::new(
-                                                                    block.title.clone(),
-                                                                )),
-                                                        ),
-                                                )
-                                                .when_some(
-                                                    terminal_label,
-                                                    |header, label| {
-                                                        header.child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(rgb(
-                                                                    visual.accent.value(),
-                                                                ))
-                                                                .child(label),
-                                                        )
-                                                    },
-                                                ),
-                                        )
-                                        .when(is_assistant && !detail_text.is_empty(), |card| {
-                                            card.child(
-                                                div()
-                                                    .rounded_md()
-                                                    .border_l_3()
-                                                    .border_color(rgb(theme.focus_ring.value()))
-                                                    .bg(rgb(theme.thinking_surface.value()))
-                                                    .px_3()
-                                                    .py_2()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap_1()
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .font_weight(
-                                                                gpui::FontWeight::SEMIBOLD,
-                                                            )
-                                                            .text_color(rgb(
-                                                                theme.focus_ring.value(),
-                                                            ))
-                                                            .child("◇ REASONING"),
-                                                    )
-                                                    .child(conversation_text_element(
-                                                        detail_markdown_id.clone(),
-                                                        detail_text.clone(),
-                                                        text_render_mode,
-                                                        window,
-                                                        cx,
-                                                    )),
-                                            )
-                                        })
-                                        .when(!text.is_empty(), |card| {
-                                            card.child(conversation_text_element(
-                                                markdown_id,
-                                                text,
-                                                text_render_mode,
-                                                window,
-                                                cx,
-                                            ))
-                                        })
-                                        .when(!is_assistant && !detail_text.is_empty(), |card| {
-                                            card.child(
-                                                div()
-                                                    .mt_1()
-                                                    .rounded_md()
-                                                    .border_1()
-                                                    .border_color(rgb(theme.border.value()))
-                                                    .bg(rgb(theme.canvas.value()))
-                                                    .px_3()
-                                                    .py_2()
-                                                    .when(is_tool, |detail| {
-                                                        detail.font_family("monospace").text_xs()
-                                                    })
-                                                    .text_color(rgb(theme.muted_text.value()))
-                                                    .child(conversation_text_element(
-                                                        detail_markdown_id,
-                                                        detail_text,
-                                                        text_render_mode,
-                                                        window,
-                                                        cx,
-                                                    )),
-                                            )
-                                        })
-                                        .when(block.preview_truncated, |card| {
-                                            card.child(
-                                                div().text_color(rgb(theme.warning.value())).child(
-                                                    "! preview truncated at desktop safety limit",
-                                                ),
-                                            )
-                                        })
-                                        .when(block.media_neutralized, |card| {
-                                            card.child(
-                                                div()
-                                                    .text_color(rgb(theme.muted_text.value()))
-                                                    .child(
-                                                        "remote/inline media disabled in transcript",
-                                                    ),
-                                            )
-                                        })
-                                        .when(block.image_count > 0, |card| {
-                                            card.child(format!(
-                                                "▧ {} retained image attachment(s)",
-                                                block.image_count
-                                            ))
-                                        }),
-                                ),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .track_scroll(&self.conversation_scroll);
+        let transcript_list = self.conversation_pane.clone();
 
         let active_session_id = snapshot.session.session_id.clone();
         let session_rows = self
@@ -5043,6 +4841,21 @@ mod tests {
     }
 
     #[test]
+    fn conversation_transcript_rendering_is_owned_by_a_child_entity() {
+        let shell = include_str!("native_shell.rs");
+        let pane = include_str!("native_shell/conversation_pane.rs");
+        let virtual_list_call = ["v_virtual_", "list("].concat();
+        assert!(!shell.contains(&virtual_list_call));
+        assert!(pane.contains(&virtual_list_call));
+        assert!(shell.contains("conversation_pane: gpui::Entity<ConversationPane>"));
+        assert!(shell.contains("let conversation_pane = cx.new("));
+        assert!(shell.contains("let transcript_list = self.conversation_pane.clone()"));
+        assert!(pane.contains("impl EventEmitter<ConversationPaneEvent>"));
+        assert!(pane.contains("WeakEntity<NativeShell>"));
+        assert!(shell.contains("if conversation_pane_dirty"));
+    }
+
+    #[test]
     fn indexed_row_update_accepts_non_clone_history_and_changes_one_slot() {
         #[derive(Debug, PartialEq, Eq)]
         struct NonClone(usize);
@@ -5073,3 +4886,6 @@ mod tests {
         assert!(!notice.contains(SECRET));
     }
 }
+mod conversation_pane;
+
+use conversation_pane::{ConversationPane, ConversationPaneEvent};
