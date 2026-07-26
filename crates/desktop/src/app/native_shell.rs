@@ -6,10 +6,9 @@ use desktop::conversation::{
     ComposerAdmission, ComposerState, ComposerSubmissionKind, ConversationBlockKind,
     ConversationRowLayoutInput, ConversationRowLayoutState, ConversationRowRenderCache,
     ConversationRowRenderData, ConversationRowRenderSource, ConversationViewport,
+    TRANSCRIPT_ROW_MAX_HEIGHT, conversation_block_height, conversation_copy_text,
     conversation_width_bucket,
 };
-#[cfg(test)]
-use desktop::conversation::{TRANSCRIPT_ROW_MAX_HEIGHT, conversation_block_height};
 use desktop::file_review::DesktopFileReviewDocument;
 use desktop::preferences::{DesktopPreferences, PreferenceWriter};
 use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
@@ -32,7 +31,7 @@ use gpui_component::{
     text::TextView,
 };
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,6 +51,8 @@ const COMPOSER_MIN_HEIGHT: f32 = 88.;
 const COMPOSER_MAX_HEIGHT: f32 = 236.;
 const CONVERSATION_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(67);
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const MAX_EXPANDED_CONVERSATION_DETAILS: usize = 256;
+const COLLAPSED_CONVERSATION_DETAIL_HEIGHT: f32 = 36.;
 
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
@@ -161,6 +162,28 @@ fn root_projection_dirty(
     delta: Option<&desktop::projection::DesktopProjectionDelta>,
 ) -> bool {
     projection_replaced || delta.is_some_and(|delta| delta.authorizations)
+}
+
+fn conversation_row_target_height(
+    row: &ConversationRowRenderData,
+    expanded_details: &HashSet<String>,
+    panel_width: u32,
+) -> f32 {
+    if expanded_details.contains(row.row_id.as_ref()) {
+        return row.measured_height;
+    }
+    let collapsed = match row.kind {
+        ConversationBlockKind::Assistant if !row.detail.is_empty() => Some(
+            conversation_block_height(row.kind, &row.text, "", panel_width),
+        ),
+        ConversationBlockKind::Tool if !row.text.is_empty() || !row.detail.is_empty() => {
+            Some(conversation_block_height(row.kind, "", "", panel_width))
+        }
+        _ => None,
+    };
+    collapsed.map_or(row.measured_height, |height| {
+        (height + COLLAPSED_CONVERSATION_DETAIL_HEIGHT).min(TRANSCRIPT_ROW_MAX_HEIGHT)
+    })
 }
 
 fn upsert_indexed_item<T>(
@@ -364,6 +387,7 @@ pub(super) struct NativeShell {
     conversation_width_pending: Option<(u32, Instant)>,
     conversation_height_refresh_deadline: Option<Instant>,
     conversation_height_refresh_full: bool,
+    conversation_expanded_details: HashSet<String>,
     inspector_telemetry_last_refresh: Option<Instant>,
     inspector_telemetry_refresh_deadline: Option<Instant>,
     conversation_pane: gpui::Entity<ConversationPane>,
@@ -504,6 +528,12 @@ impl NativeShell {
                             this.reconcile_conversation_scroll(cx);
                         });
                     }
+                    ConversationPaneEvent::Copy { block_id } => {
+                        this.copy_conversation_row(block_id, cx);
+                    }
+                    ConversationPaneEvent::ToggleDetails { block_id } => {
+                        this.toggle_conversation_details(block_id, cx);
+                    }
                     ConversationPaneEvent::FollowLatest => this.follow_latest(cx),
                 },
             ),
@@ -638,6 +668,7 @@ impl NativeShell {
             conversation_width_pending: None,
             conversation_height_refresh_deadline: None,
             conversation_height_refresh_full: false,
+            conversation_expanded_details: HashSet::new(),
             inspector_telemetry_last_refresh: None,
             inspector_telemetry_refresh_deadline: None,
             conversation_pane,
@@ -2290,6 +2321,42 @@ impl NativeShell {
         cx.notify();
     }
 
+    fn copy_conversation_row(&mut self, block_id: &str, cx: &mut Context<Self>) {
+        let text = self
+            .projection
+            .conversation()
+            .block(block_id)
+            .map(desktop::conversation::ConversationBlock::copy_text)
+            .or_else(|| {
+                self.conversation_render_rows
+                    .iter()
+                    .find(|row| row.row_id.as_ref() == block_id)
+                    .map(|row| conversation_copy_text(&row.text, &row.detail))
+            });
+        let Some(text) = text else {
+            self.preference_notice = Some("Message is no longer available to copy.".into());
+            self.notify_status_bar(cx);
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.preference_notice = Some("Conversation message copied.".into());
+        self.notify_status_bar(cx);
+    }
+
+    fn toggle_conversation_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
+        if !self.conversation_expanded_details.remove(block_id) {
+            if self.conversation_expanded_details.len() >= MAX_EXPANDED_CONVERSATION_DETAILS {
+                self.conversation_expanded_details.clear();
+            }
+            self.conversation_expanded_details
+                .insert(block_id.to_owned());
+        }
+        self.conversation_render_full_dirty = true;
+        if !self.refresh_conversation_rows_at_current_width(cx) {
+            cx.notify();
+        }
+    }
+
     fn request_file_review(
         &mut self,
         request: CodingAgentFileReviewRequest,
@@ -3020,7 +3087,7 @@ impl NativeShell {
                     cache_key: &cache_key,
                     row_id: &row_id,
                     source_revision: tool.updated_sequence,
-                    title: Cow::Owned(format!("Tool · {} · live", tool.name)),
+                    title: Cow::Owned(format!("Tool · {}", tool.name)),
                     text: &tool.detail,
                     detail: &tool.arguments,
                     kind: ConversationBlockKind::Tool,
@@ -3115,7 +3182,7 @@ impl NativeShell {
                         cache_key: &cache_key,
                         row_id: &row_id,
                         source_revision: tool.updated_sequence,
-                        title: Cow::Owned(format!("Tool · {} · live", tool.name)),
+                        title: Cow::Owned(format!("Tool · {}", tool.name)),
                         text: &tool.detail,
                         detail: &tool.arguments,
                         kind: ConversationBlockKind::Tool,
@@ -3212,7 +3279,7 @@ impl NativeShell {
                         cache_key: &cache_key,
                         row_id: &row_id,
                         source_revision: tool.updated_sequence,
-                        title: Cow::Owned(format!("Tool · {} · live", tool.name)),
+                        title: Cow::Owned(format!("Tool · {}", tool.name)),
                         text: &tool.detail,
                         detail: &tool.arguments,
                         kind: ConversationBlockKind::Tool,
@@ -3259,7 +3326,11 @@ impl NativeShell {
         let layout = self.conversation_live_layout.resolve_one(
             ConversationRowLayoutInput {
                 key: row.cache_key.to_string(),
-                target_height: row.measured_height,
+                target_height: conversation_row_target_height(
+                    &row,
+                    &self.conversation_expanded_details,
+                    panel_width,
+                ),
                 streaming: !row.done,
             },
             panel_width,
@@ -3380,7 +3451,11 @@ impl NativeShell {
                 .iter()
                 .map(|row| ConversationRowLayoutInput {
                     key: row.cache_key.to_string(),
-                    target_height: row.measured_height,
+                    target_height: conversation_row_target_height(
+                        row,
+                        &self.conversation_expanded_details,
+                        layout_width,
+                    ),
                     streaming: !row.done,
                 })
                 .collect::<Vec<_>>();
@@ -3406,7 +3481,11 @@ impl NativeShell {
                 .iter()
                 .map(|row| ConversationRowLayoutInput {
                     key: row.cache_key.to_string(),
-                    target_height: row.measured_height,
+                    target_height: conversation_row_target_height(
+                        row,
+                        &self.conversation_expanded_details,
+                        layout_width,
+                    ),
                     streaming: !row.done,
                 })
                 .collect();
@@ -3432,7 +3511,11 @@ impl NativeShell {
                         .iter()
                         .map(|row| ConversationRowLayoutInput {
                             key: row.cache_key.to_string(),
-                            target_height: row.measured_height,
+                            target_height: conversation_row_target_height(
+                                row,
+                                &self.conversation_expanded_details,
+                                layout_width,
+                            ),
                             streaming: !row.done,
                         })
                         .collect();
@@ -3845,6 +3928,44 @@ mod tests {
         assert!(diagnostic < short_assistant);
         assert!(short_assistant < reasoning_assistant);
         assert_eq!(long_assistant, TRANSCRIPT_ROW_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn secondary_message_details_are_collapsed_by_default_and_height_aware() {
+        let mut cache = ConversationRowRenderCache::default();
+        let reasoning = "reasoning line\n".repeat(20);
+        cache.begin_frame();
+        let assistant = cache.resolve(
+            ConversationRowRenderSource {
+                cache_key: "assistant:reasoning",
+                row_id: "assistant:reasoning",
+                source_revision: 1,
+                title: Cow::Borrowed("Assistant"),
+                text: "Final answer",
+                detail: &reasoning,
+                kind: ConversationBlockKind::Assistant,
+                done: true,
+                is_error: false,
+                image_count: 0,
+                truncated: false,
+                durable: true,
+            },
+            900,
+        );
+        let collapsed = conversation_row_target_height(&assistant, &HashSet::new(), 900);
+        let expanded_ids = HashSet::from([assistant.row_id.to_string()]);
+        let expanded = conversation_row_target_height(&assistant, &expanded_ids, 900);
+        assert!(collapsed < expanded);
+        assert_eq!(expanded, assistant.measured_height);
+
+        let pane = include_str!("native_shell/conversation_pane.rs");
+        assert!(pane.contains("Reasoning · collapsed"));
+        assert!(pane.contains("output + arguments collapsed"));
+        assert!(pane.contains("ConversationPaneEvent::ToggleDetails"));
+        assert!(pane.contains("group_hover(hover_group"));
+        assert!(pane.contains(".absolute()"));
+        assert!(pane.contains("card.w(relative(0.70)).max_w(px(920.))"));
+        assert!(pane.contains("card.max_w(px(960.))"));
     }
 
     #[test]

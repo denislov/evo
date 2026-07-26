@@ -231,12 +231,12 @@ NativeShell
 
 #### DESK-013 重构消息组件
 
-- [ ] Assistant 默认无完整彩色外框，内容最大宽度 880–960px。
-- [ ] User 右对齐，最大宽度 68%–72%。
-- [ ] Reasoning 默认折叠，显示 streaming/duration 摘要。
-- [ ] Tool 默认展示 `name · status · duration`，command/output/arguments 按需展开。
-- [ ] Diagnostic/Error 保留高辨识度边框。
-- [ ] hover/focus 时显示 Copy、More、Copy code 等操作且不改变行高。
+- [x] Assistant 默认无完整彩色外框，使用中性 surface 与左侧状态标记，内容最大宽度 960px。
+- [x] User 右对齐，宽度上限为可用区域的 70%，同时受 920px 上限约束。
+- [ ] Reasoning 已默认折叠并区分 streaming/completed，折叠高度参与虚拟列表布局；duration 等待 product projection 提供权威时间字段。
+- [ ] Tool 已默认展示 `name · status`，output/arguments 按需展开；duration 等待 product projection 提供权威时间字段。
+- [x] Diagnostic/Error 保留红色高辨识度左侧边框，普通消息不复用 failure 语义。
+- [ ] hover/focus 使用绝对定位稳定槽显示 Copy、More 且不改变行高；Copy code 仍待 Markdown code-block action 接口。
 
 验收：普通对话、Reasoning、工具和错误的主次关系一眼可辨。
 
@@ -358,7 +358,8 @@ desktop.input.latency
 | DESK-010 | 完成 | 持久 row/height/size、sequence→单 index 更新、bounded 结构回退、15Hz 单行补刷和 67ms resize debounce 已完成 |
 | DESK-011 | 完成 | 所有计划区域 Entity 已拆分；token 流隔离到 Conversation 子树，usage-only telemetry 限制为 4Hz，typed command/authorization/recovery 边界测试通过 |
 | DESK-012 | 完成 | 系统 UI 字体与局部 monospace 已分层；中性 surface、蓝色 focus、紫色 reasoning 及 warning/danger 语义已解耦，嵌套边框已减少 |
-| DESK-013～018 | 待开始 | 继续消息组件、Composer、导航密度、响应式和 GUI 性能门禁重构 |
+| DESK-013 | 进行中 | Assistant/User 宽度、Reasoning/Tool 折叠、稳定 Copy/More 槽与 bounded live copy 已完成；待 duration 权威字段和 Copy code 接口 |
+| DESK-014～018 | 待开始 | 继续 Composer、导航密度、响应式和 GUI 性能门禁重构 |
 
 ## 10. 完成定义
 

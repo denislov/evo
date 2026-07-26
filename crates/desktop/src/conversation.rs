@@ -303,7 +303,7 @@ pub fn conversation_block_height(
     panel_width: u32,
 ) -> f32 {
     let effective_width = if kind == ConversationBlockKind::User {
-        panel_width.saturating_mul(82) / 100
+        panel_width.saturating_mul(70) / 100
     } else {
         panel_width
     };
@@ -376,14 +376,7 @@ pub struct ConversationBlock {
 
 impl ConversationBlock {
     pub fn copy_text(&self) -> String {
-        let mut text = self.text.clone();
-        if !self.detail.is_empty() {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(&self.detail);
-        }
-        truncate_bytes(text, MAX_COPY_BYTES).0
+        conversation_copy_text(&self.text, &self.detail)
     }
 
     fn retained_bytes(&self) -> usize {
@@ -393,6 +386,17 @@ impl ConversationBlock {
     fn refresh_source_revision(&mut self) {
         self.source_revision = conversation_block_revision(self);
     }
+}
+
+pub fn conversation_copy_text(text: &str, detail: &str) -> String {
+    let mut text = text.to_owned();
+    if !detail.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(detail);
+    }
+    truncate_bytes(text, MAX_COPY_BYTES).0
 }
 
 #[derive(Debug)]
@@ -1927,6 +1931,14 @@ mod tests {
         assert!(copied.len() <= MAX_COPY_BYTES);
         assert!(copied.is_char_boundary(copied.len()));
         assert!(block.truncated);
+    }
+
+    #[test]
+    fn live_row_copy_uses_the_same_bounded_utf8_safe_projection() {
+        assert_eq!(conversation_copy_text("answer", "detail"), "answer\ndetail");
+        let copied = conversation_copy_text("", &"界".repeat(MAX_COPY_BYTES));
+        assert!(copied.len() <= MAX_COPY_BYTES);
+        assert!(copied.is_char_boundary(copied.len()));
     }
 
     #[test]

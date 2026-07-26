@@ -13,6 +13,8 @@ use desktop::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConversationPaneEvent {
     Select { block_id: String, durable: bool },
+    Copy { block_id: String },
+    ToggleDetails { block_id: String },
     Scrolled,
     FollowLatest,
 }
@@ -68,7 +70,7 @@ impl Render for ConversationPane {
                 };
                 visible_range
                     .filter_map(|index| {
-                        let (block, row_height, selected) = {
+                        let (block, row_height, selected, detail_expanded) = {
                             let owner = owner.read(cx);
                             let block = owner.conversation_render_rows.get(index)?.clone();
                             let height = owner
@@ -78,9 +80,17 @@ impl Render for ConversationPane {
                                 .unwrap_or(block.measured_height);
                             let selected = owner.conversation_viewport.selected_block_id()
                                 == Some(block.row_id.as_ref());
-                            (block, height, selected)
+                            let detail_expanded = owner
+                                .conversation_expanded_details
+                                .contains(block.row_id.as_ref());
+                            (block, height, selected, detail_expanded)
                         };
                         let block_id = block.row_id.to_string();
+                        let copy_block_id = block_id.clone();
+                        let toggle_block_id = block_id.clone();
+                        let reasoning_toggle_block_id = block_id.clone();
+                        let tool_toggle_block_id = block_id.clone();
+                        let hover_group = SharedString::new(format!("conversation-card-{index}"));
                         let durable = block.durable;
                         let markdown_id = ElementId::Name(SharedString::new(
                             block.markdown_state_key.clone(),
@@ -102,10 +112,14 @@ impl Render for ConversationPane {
                         };
                         let is_assistant = block.kind == ConversationBlockKind::Assistant;
                         let is_tool = block.kind == ConversationBlockKind::Tool;
+                        let has_collapsible_detail = (is_assistant && !detail_text.is_empty())
+                            || (is_tool && (!text.is_empty() || !detail_text.is_empty()));
                         let terminal_label = if block.is_error {
                             Some("failed")
+                        } else if is_tool && block.done {
+                            Some("completed")
                         } else if !block.done {
-                            Some("streaming")
+                            Some(if is_tool { "running" } else { "streaming" })
                         } else {
                             None
                         };
@@ -126,9 +140,14 @@ impl Render for ConversationPane {
                                 }))
                                 .child(
                                     div()
+                                        .relative()
+                                        .group(hover_group.clone())
                                         .w_full()
                                         .h_full()
-                                        .when(visual.align_right, |card| card.w(relative(0.82)))
+                                        .when(visual.align_right, |card| {
+                                            card.w(relative(0.70)).max_w(px(920.))
+                                        })
+                                        .when(!visual.align_right, |card| card.max_w(px(960.)))
                                         .overflow_hidden()
                                         .rounded_lg()
                                         .border_l_2()
@@ -144,6 +163,7 @@ impl Render for ConversationPane {
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()
+                                                .pr_24()
                                                 .child(
                                                     div()
                                                         .flex()
@@ -185,7 +205,56 @@ impl Render for ConversationPane {
                                                     )
                                                 }),
                                         )
-                                        .when(is_assistant && !detail_text.is_empty(), |card| {
+                                        .when(
+                                            is_assistant
+                                                && !detail_text.is_empty()
+                                                && !detail_expanded,
+                                            |card| {
+                                                card.child(
+                                                    div()
+                                                        .rounded_md()
+                                                        .border_l_3()
+                                                        .border_color(rgb(theme.reasoning.value()))
+                                                        .bg(rgb(theme.thinking_surface.value()))
+                                                        .px_3()
+                                                        .py_2()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.reasoning.value()))
+                                                        .child(if block.done {
+                                                            "◇ Reasoning · collapsed"
+                                                        } else {
+                                                            "◇ Reasoning · streaming · collapsed"
+                                                        })
+                                                        .child(
+                                                            Button::new((
+                                                                "show-reasoning",
+                                                                index,
+                                                            ))
+                                                            .compact()
+                                                            .label("Show")
+                                                            .tooltip("Show reasoning details")
+                                                            .on_click(cx.listener(
+                                                                move |_, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    cx.emit(
+                                                                        ConversationPaneEvent::ToggleDetails {
+                                                                            block_id: reasoning_toggle_block_id.clone(),
+                                                                        },
+                                                                    );
+                                                                },
+                                                            )),
+                                                        ),
+                                                )
+                                            },
+                                        )
+                                        .when(
+                                            is_assistant
+                                                && !detail_text.is_empty()
+                                                && detail_expanded,
+                                            |card| {
                                             card.child(
                                                 div()
                                                     .rounded_md()
@@ -216,8 +285,9 @@ impl Render for ConversationPane {
                                                         cx,
                                                     )),
                                             )
-                                        })
-                                        .when(!text.is_empty(), |card| {
+                                        },
+                                        )
+                                        .when(!text.is_empty() && (!is_tool || detail_expanded), |card| {
                                             card.child(conversation_text_element(
                                                 markdown_id,
                                                 text,
@@ -226,7 +296,11 @@ impl Render for ConversationPane {
                                                 cx,
                                             ))
                                         })
-                                        .when(!is_assistant && !detail_text.is_empty(), |card| {
+                                        .when(
+                                            !is_assistant
+                                                && !detail_text.is_empty()
+                                                && (!is_tool || detail_expanded),
+                                            |card| {
                                             card.child(
                                                 div()
                                                     .mt_1()
@@ -250,6 +324,43 @@ impl Render for ConversationPane {
                                                         cx,
                                                     )),
                                             )
+                                        },
+                                        )
+                                        .when(is_tool && has_collapsible_detail && !detail_expanded, |card| {
+                                            card.child(
+                                                div()
+                                                    .rounded_md()
+                                                    .bg(rgb(theme.canvas.value()))
+                                                    .px_3()
+                                                    .py_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .font_family(MONOSPACE_FONT_FAMILY)
+                                                    .text_xs()
+                                                    .text_color(rgb(theme.muted_text.value()))
+                                                    .child(if block.done {
+                                                        "output + arguments collapsed"
+                                                    } else {
+                                                        "running · output + arguments collapsed"
+                                                    })
+                                                    .child(
+                                                        Button::new(("show-tool-details", index))
+                                                            .compact()
+                                                            .label("Show")
+                                                            .tooltip("Show tool output and arguments")
+                                                            .on_click(cx.listener(
+                                                                move |_, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    cx.emit(
+                                                                        ConversationPaneEvent::ToggleDetails {
+                                                                            block_id: tool_toggle_block_id.clone(),
+                                                                        },
+                                                                    );
+                                                                },
+                                                            )),
+                                                    ),
+                                            )
                                         })
                                         .when(block.preview_truncated, |card| {
                                             card.child(
@@ -272,7 +383,62 @@ impl Render for ConversationPane {
                                                 "▧ {} retained image attachment(s)",
                                                 block.image_count
                                             ))
-                                        }),
+                                        })
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top_2()
+                                                .right_2()
+                                                .flex()
+                                                .gap_1()
+                                                .invisible()
+                                                .group_hover(hover_group, |style| style.visible())
+                                                .when(selected, |actions| actions.visible())
+                                                .when(has_collapsible_detail, |actions| {
+                                                    actions.child(
+                                                        Button::new((
+                                                            "toggle-conversation-details",
+                                                            index,
+                                                        ))
+                                                        .compact()
+                                                        .label(if detail_expanded {
+                                                            "Hide"
+                                                        } else {
+                                                            "More"
+                                                        })
+                                                        .tooltip(
+                                                            "Show or hide secondary message details",
+                                                        )
+                                                        .on_click(cx.listener(
+                                                            move |_, _, _, cx| {
+                                                                cx.stop_propagation();
+                                                                cx.emit(
+                                                                    ConversationPaneEvent::ToggleDetails {
+                                                                        block_id: toggle_block_id.clone(),
+                                                                    },
+                                                                );
+                                                            },
+                                                        )),
+                                                    )
+                                                })
+                                                .child(
+                                                    Button::new(("copy-conversation-row", index))
+                                                        .compact()
+                                                        .label("Copy")
+                                                        .tooltip("Copy this bounded message")
+                                                        .on_click(cx.listener(
+                                                            move |_, _, _, cx| {
+                                                                cx.stop_propagation();
+                                                                cx.emit(
+                                                                    ConversationPaneEvent::Copy {
+                                                                        block_id: copy_block_id
+                                                                            .clone(),
+                                                                    },
+                                                                );
+                                                            },
+                                                        )),
+                                                ),
+                                        ),
                                 ),
                         )
                     })
