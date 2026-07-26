@@ -121,6 +121,7 @@ fn transcript_items_from_rust_native(
             args,
             result,
             is_error,
+            ..
         } => TranscriptItem::Tool {
             call_id,
             name,

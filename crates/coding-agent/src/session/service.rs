@@ -2521,6 +2521,8 @@ pub(crate) fn coding_transcript_item_from_replay(
             arguments,
             status,
             summary,
+            duration_millis,
+            ..
         } => CodingAgentSessionTranscriptItem::Tool {
             call_id: tool_call_id,
             name,
@@ -2531,6 +2533,7 @@ pub(crate) fn coding_transcript_item_from_replay(
                 Some(summary)
             },
             is_error: matches!(status, ToolCallStatus::Failed),
+            duration_millis,
         },
         TranscriptItem::DelegationBlock {
             tool_call_id,
@@ -2862,6 +2865,28 @@ mod tests {
                     mime_type: "image/png".into(),
                     data: "cG5n".into(),
                 }]
+        ));
+    }
+
+    #[test]
+    fn replay_hydration_preserves_authoritative_tool_duration() {
+        let item = coding_transcript_item_from_replay(TranscriptItem::ToolCall {
+            tool_call_id: "tool-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path": "src/lib.rs"}),
+            status: ToolCallStatus::Completed,
+            summary: "ok".into(),
+            started_at: "2026-07-27T00:00:00Z".into(),
+            duration_millis: Some(1_250),
+        });
+
+        assert!(matches!(
+            item,
+            CodingAgentSessionTranscriptItem::Tool {
+                call_id,
+                duration_millis: Some(1_250),
+                ..
+            } if call_id == "tool-1"
         ));
     }
 

@@ -284,6 +284,9 @@ pub enum CodingAgentSessionTranscriptItem {
         args: serde_json::Value,
         result: Option<String>,
         is_error: bool,
+        /// Durable wall-clock duration between `tool.call.started` and its
+        /// terminal session event. `None` means running or unavailable.
+        duration_millis: Option<u64>,
     },
     Delegation {
         tool_call_id: String,

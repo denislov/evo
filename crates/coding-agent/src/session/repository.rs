@@ -2309,6 +2309,8 @@ mod tests {
                     arguments: serde_json::json!({"path": "src/lib.rs"}),
                     status: ToolCallStatus::Completed,
                     summary: "ok".into(),
+                    started_at: "2026-06-29T00:00:01Z".into(),
+                    duration_millis: Some(0),
                 },
             ]
         );

@@ -176,10 +176,13 @@ impl Render for ConversationPane {
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()
+                                                .gap_3()
                                                 .pr_24()
                                                 .child(
                                                     div()
                                                         .flex()
+                                                        .flex_1()
+                                                        .min_w_0()
                                                         .items_center()
                                                         .gap_2()
                                                         .child(
@@ -212,6 +215,7 @@ impl Render for ConversationPane {
                                                 .when_some(terminal_label, |header, label| {
                                                     header.child(
                                                         div()
+                                                            .flex_shrink_0()
                                                             .text_xs()
                                                             .text_color(rgb(visual.accent.value()))
                                                             .child(label),

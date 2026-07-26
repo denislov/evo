@@ -310,6 +310,7 @@ impl RuntimeService {
                     arguments,
                     status: status @ (ToolCallStatus::Completed | ToolCallStatus::Failed),
                     summary,
+                    ..
                 } => {
                     pending_replay_assistant_message(&mut pending_assistant, runtime, index)
                         .content
@@ -821,6 +822,8 @@ mod tests {
                     arguments: serde_json::json!({"path": "src/lib.rs"}),
                     status: ToolCallStatus::Completed,
                     summary: "tool output".into(),
+                    started_at: "2026-07-27T00:00:00Z".into(),
+                    duration_millis: Some(120),
                 },
                 TranscriptItem::AssistantMessage {
                     message_id: "msg_cancelled".into(),

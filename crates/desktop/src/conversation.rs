@@ -1468,6 +1468,7 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
             args,
             result,
             is_error,
+            duration_millis,
         } => {
             let arguments = serde_json::to_string_pretty(&args)
                 .unwrap_or_else(|_| "<invalid tool arguments>".into());
@@ -1477,7 +1478,7 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
             (
                 ConversationBlockKind::Tool,
                 call_id,
-                format!("Tool · {name}"),
+                tool_title(&name, duration_millis),
                 result,
                 arguments,
                 true,
@@ -1554,6 +1555,29 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
     };
     block.refresh_source_revision();
     block
+}
+
+fn tool_title(name: &str, duration_millis: Option<u64>) -> String {
+    match duration_millis {
+        Some(duration_millis) => {
+            format!("Tool · {name} · {}", compact_duration(duration_millis))
+        }
+        None => format!("Tool · {name}"),
+    }
+}
+
+fn compact_duration(duration_millis: u64) -> String {
+    if duration_millis < 1_000 {
+        return format!("{duration_millis} ms");
+    }
+    if duration_millis < 60_000 {
+        let rounded_tenths = duration_millis.saturating_add(50) / 100;
+        if rounded_tenths < 600 {
+            return format!("{}.{:01} s", rounded_tenths / 10, rounded_tenths % 10);
+        }
+    }
+    let rounded_seconds = duration_millis.saturating_add(500) / 1_000;
+    format!("{}m {:02}s", rounded_seconds / 60, rounded_seconds % 60)
 }
 
 fn conversation_block_revision(block: &ConversationBlock) -> u64 {
@@ -2508,13 +2532,27 @@ mod tests {
                 args: serde_json::json!({"command": "x".repeat(MAX_TOOL_ARGUMENT_BYTES)}),
                 result: Some("界".repeat(MAX_BLOCK_TEXT_BYTES)),
                 is_error: false,
+                duration_millis: Some(1_240),
             },
         ]));
         let block = projection.blocks().front().unwrap();
+        assert_eq!(block.title, "Tool · shell · 1.2 s");
         let copied = block.copy_text();
         assert!(copied.len() <= MAX_COPY_BYTES);
         assert!(copied.is_char_boundary(copied.len()));
         assert!(block.truncated);
+    }
+
+    #[test]
+    fn tool_duration_uses_compact_stable_units() {
+        assert_eq!(compact_duration(0), "0 ms");
+        assert_eq!(compact_duration(999), "999 ms");
+        assert_eq!(compact_duration(1_049), "1.0 s");
+        assert_eq!(compact_duration(1_050), "1.1 s");
+        assert_eq!(compact_duration(59_949), "59.9 s");
+        assert_eq!(compact_duration(59_950), "1m 00s");
+        assert_eq!(compact_duration(60_000), "1m 00s");
+        assert_eq!(compact_duration(125_600), "2m 06s");
     }
 
     #[test]

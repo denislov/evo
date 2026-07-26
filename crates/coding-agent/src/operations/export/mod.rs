@@ -130,6 +130,7 @@ fn export_item_from_replay(item: TranscriptItem) -> CodingAgentSessionExportItem
             arguments,
             status,
             summary,
+            ..
         } => CodingAgentSessionExportItem::Tool {
             call_id: tool_call_id,
             name,

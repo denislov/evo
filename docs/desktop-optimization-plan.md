@@ -233,12 +233,14 @@ NativeShell
 
 - [x] Assistant 默认无完整彩色外框，使用中性 surface 与左侧状态标记，内容最大宽度 960px。
 - [x] User 右对齐，宽度上限为可用区域的 70%，同时受 920px 上限约束。
-- [ ] Reasoning 已默认折叠并区分 streaming/completed，折叠高度参与虚拟列表布局；duration 等待 product projection 提供权威时间字段。
-- [ ] Tool 已默认展示 `name · status`，output/arguments 按需展开；duration 等待 product projection 提供权威时间字段。
+- [ ] Reasoning 已默认折叠并区分 streaming/completed，折叠高度参与虚拟列表布局；当前持久化协议只有 Assistant message 的 started/completed，Thinking payload 仅随 message completion 到达，没有独立 Reasoning 生命周期，不能用整条 Assistant 时长冒充 Reasoning duration。
+- [x] Tool 默认展示 `name · duration`，status 保留为独立状态标签，output/arguments 按需展开；duration 由持久化 `tool.call.started` 与 completed/failed/cancelled 终止事件的 RFC3339 `created_at` 计算并投影为 `duration_millis`，运行中、时间缺失/无效/倒置时不展示。
 - [x] Diagnostic/Error 保留红色高辨识度左侧边框，普通消息不复用 failure 语义。
 - [x] hover/focus 使用绝对定位稳定槽显示 Copy、More 且不改变行高；最终 Markdown code block 通过组件公开 action 接口提供 32px `Copy code` 并复制精确代码内容。
 
-验收：普通对话、Reasoning、工具和错误的主次关系一眼可辨。
+Tool duration 兼容契约：历史 transcript 与运行中 Tool 使用 `None`；public facade 使用可选 `duration_millis`，RPC 以 additive `durationMillis` 输出；product transcript sanitizer 必须原样保留权威值。desktop 使用稳定单位（`ms`、0.1 秒、分秒）格式化，单位跨界采用舍入后的下一档，避免 `60.0 s` 到 `1m 00s` 的瞬时跳变。
+
+验收：普通对话、Reasoning、工具和错误的主次关系一眼可辨；Tool 成功、失败、取消时长口径一致，缺少权威证据时不猜测。
 
 #### DESK-014 重构 Composer 操作模型
 
@@ -361,7 +363,7 @@ desktop.input.latency
 | DESK-010 | 完成 | 持久 row/height/size、sequence→单 index 更新、bounded 结构回退、15Hz 单行补刷和 67ms resize debounce 已完成 |
 | DESK-011 | 完成 | 所有计划区域 Entity 已拆分；token 流隔离到 Conversation 子树，usage-only telemetry 限制为 4Hz，typed command/authorization/recovery 边界测试通过 |
 | DESK-012 | 完成 | 系统 UI 字体与局部 monospace 已分层；中性 surface、蓝色 focus、紫色 reasoning 及 warning/danger 语义已解耦，嵌套边框已减少 |
-| DESK-013 | 进行中 | Assistant/User 宽度、Reasoning/Tool 折叠、稳定 Copy/More 槽、bounded live copy 与 Markdown Copy code 已完成；待 duration 权威字段 |
+| DESK-013 | 进行中 | Assistant/User 宽度、Reasoning/Tool 折叠、稳定 Copy/More 槽、bounded live copy、Markdown Copy code 与持久化 Tool duration 已完成；仅待产品协议提供独立 Reasoning 生命周期后补齐 Reasoning duration |
 | DESK-014 | 完成 | Idle/Running 均为单主操作；每 session draft/mode、pending/authorization/rejected 文案与 InputState IME 边界已落实 |
 | DESK-015 | 完成 | Sessions 搜索/相对时间/自动刷新与 Inspector 按需分区已完成；sidebar 宽度可持久化、拖动和双击复位，窄屏继续使用 drawer |
 | DESK-016 | 进行中 | 区域/消息键盘导航、overlay focus restore、focus-visible 与 32x32 primary hit-target 门禁已完成；待 GPUI accessibility tree 收口 |

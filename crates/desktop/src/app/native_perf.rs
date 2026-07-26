@@ -212,6 +212,7 @@ fn visual_projection() -> Result<DesktopProjection, String> {
             args: serde_json::json!({"path": "crates/desktop/src/app/native_shell.rs"}),
             result: Some("Loaded the native shell layout and render boundaries.".into()),
             is_error: false,
+            duration_millis: Some(842),
         },
         CodingAgentSessionTranscriptItem::Diagnostic {
             message: "One stale render sample was discarded and recovered without losing product events."

@@ -8,6 +8,7 @@ use crate::session::event::{
 };
 use agent_core::api::compaction::calculate_context_tokens;
 use ai::api::conversation::Usage;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OperationReplayStatus {
@@ -117,6 +118,8 @@ pub(crate) enum TranscriptItem {
         arguments: serde_json::Value,
         status: ToolCallStatus,
         summary: String,
+        started_at: String,
+        duration_millis: Option<u64>,
     },
     DelegationBlock {
         tool_call_id: String,
@@ -585,6 +588,8 @@ impl ReplayBuilder {
                     arguments: arguments.clone(),
                     status: ToolCallStatus::Started,
                     summary: String::new(),
+                    started_at: event.created_at.clone(),
+                    duration_millis: None,
                 });
             }
             SessionEventData::ToolCallUpdated {
@@ -607,7 +612,7 @@ impl ReplayBuilder {
                 result,
             } => {
                 if self
-                    .set_tool_status(tool_call_id, ToolCallStatus::Completed)
+                    .set_tool_status(tool_call_id, ToolCallStatus::Completed, &event.created_at)
                     .is_err()
                 {
                     self.warn(format!(
@@ -622,7 +627,7 @@ impl ReplayBuilder {
                 message,
             } => {
                 if self
-                    .set_tool_status(tool_call_id, ToolCallStatus::Failed)
+                    .set_tool_status(tool_call_id, ToolCallStatus::Failed, &event.created_at)
                     .is_err()
                 {
                     self.warn(format!(
@@ -637,7 +642,7 @@ impl ReplayBuilder {
                 reason,
             } => {
                 if self
-                    .set_tool_status(tool_call_id, ToolCallStatus::Cancelled)
+                    .set_tool_status(tool_call_id, ToolCallStatus::Cancelled, &event.created_at)
                     .is_err()
                 {
                     self.warn(format!(
@@ -814,13 +819,22 @@ impl ReplayBuilder {
         }
     }
 
-    fn set_tool_status(&mut self, tool_call_id: &str, status: ToolCallStatus) -> Result<(), ()> {
+    fn set_tool_status(
+        &mut self,
+        tool_call_id: &str,
+        status: ToolCallStatus,
+        terminal_at: &str,
+    ) -> Result<(), ()> {
         let index = *self.tool_indices.get(tool_call_id).ok_or(())?;
         match self.transcript.get_mut(index).ok_or(())? {
             TranscriptItem::ToolCall {
-                status: current, ..
+                status: current,
+                started_at,
+                duration_millis,
+                ..
             } => {
                 *current = status;
+                *duration_millis = elapsed_millis(started_at, terminal_at);
                 Ok(())
             }
             _ => Err(()),
@@ -884,6 +898,12 @@ impl ReplayBuilder {
             }
         }
     }
+}
+
+fn elapsed_millis(started_at: &str, terminal_at: &str) -> Option<u64> {
+    let started_at = OffsetDateTime::parse(started_at, &Rfc3339).ok()?;
+    let terminal_at = OffsetDateTime::parse(terminal_at, &Rfc3339).ok()?;
+    u64::try_from((terminal_at - started_at).whole_milliseconds()).ok()
 }
 
 struct DelegationBlockUpdate {
@@ -960,6 +980,16 @@ mod tests {
 
     fn op_event(event_id: &str, data: SessionEventData) -> SessionEventEnvelope {
         event(event_id, Some("op_1"), Some("turn_1"), data)
+    }
+
+    fn op_event_at(
+        event_id: &str,
+        created_at: &str,
+        data: SessionEventData,
+    ) -> SessionEventEnvelope {
+        let mut event = op_event(event_id, data);
+        event.created_at = created_at.into();
+        event
     }
 
     fn authorization_request() -> ToolAuthorizationRequest {
@@ -1259,6 +1289,8 @@ mod tests {
                     arguments: serde_json::json!({"path": "src/lib.rs"}),
                     status: ToolCallStatus::Completed,
                     summary: "ok".into(),
+                    started_at: "2026-06-29T00:00:00Z".into(),
+                    duration_millis: Some(0),
                 },
                 TranscriptItem::Diagnostic {
                     level: DiagnosticLevel::Info,
@@ -1272,6 +1304,58 @@ mod tests {
                 level: DiagnosticLevel::Info,
                 message: "note".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn tool_duration_uses_durable_terminal_event_time() {
+        let events = vec![
+            op_event(
+                "evt_1",
+                SessionEventData::OperationStarted {
+                    operation: OperationKind::Prompt,
+                    runtime_generation: Default::default(),
+                },
+            ),
+            op_event_at(
+                "evt_2",
+                "2026-06-29T00:00:00.250Z",
+                SessionEventData::ToolCallStarted {
+                    tool_call_id: "tool_timed".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "src/lib.rs"}),
+                },
+            ),
+            op_event_at(
+                "evt_3",
+                "2026-06-29T00:00:01.500Z",
+                SessionEventData::ToolCallCompleted {
+                    tool_call_id: "tool_timed".into(),
+                    result: PersistedToolResult::Text { text: "ok".into() },
+                },
+            ),
+            op_event(
+                "evt_4",
+                SessionEventData::OperationCommitted { new_leaf_id: None },
+            ),
+        ];
+
+        let replay = fold_events(&events);
+        assert!(matches!(
+            replay.transcript.as_slice(),
+            [TranscriptItem::ToolCall {
+                tool_call_id,
+                duration_millis: Some(1_250),
+                ..
+            }] if tool_call_id == "tool_timed"
+        ));
+        assert_eq!(
+            elapsed_millis("not-a-timestamp", "2026-06-29T00:00:01Z"),
+            None
+        );
+        assert_eq!(
+            elapsed_millis("2026-06-29T00:00:02Z", "2026-06-29T00:00:01Z"),
+            None
         );
     }
 
@@ -1386,6 +1470,8 @@ mod tests {
                     arguments: serde_json::json!({"cmd": "cargo test"}),
                     status: ToolCallStatus::Cancelled,
                     summary: "abort".into(),
+                    started_at: "2026-06-29T00:00:00Z".into(),
+                    duration_millis: Some(0),
                 },
             ]
         );

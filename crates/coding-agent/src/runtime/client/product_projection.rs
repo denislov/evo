@@ -933,6 +933,7 @@ fn sanitize_transcript_item(
             args,
             result,
             is_error,
+            duration_millis,
         } => {
             let (call_id, call_id_truncated) = bounded_prefix(&call_id, MAX_ID_BYTES);
             let (name, name_truncated) = bounded_prefix(&name, MAX_ID_BYTES);
@@ -955,6 +956,7 @@ fn sanitize_transcript_item(
                 args,
                 result,
                 is_error,
+                duration_millis,
             }
         }
         CodingAgentSessionTranscriptItem::Delegation {
@@ -1882,6 +1884,28 @@ mod tests {
         assert_eq!(projection.recoveries()[0].recovery_id, "recovery-1");
         assert_eq!(projection.recoveries()[0].attempt_count, 2);
         assert_eq!(projection.recoveries()[0].updated_sequence, 7);
+    }
+
+    #[test]
+    fn transcript_sanitization_preserves_authoritative_tool_duration() {
+        let (item, _, truncated) =
+            sanitize_transcript_item(CodingAgentSessionTranscriptItem::Tool {
+                call_id: "tool-1".into(),
+                name: "read".into(),
+                args: serde_json::json!({"path": "src/lib.rs"}),
+                result: Some("ok".into()),
+                is_error: false,
+                duration_millis: Some(1_250),
+            });
+
+        assert!(!truncated);
+        assert!(matches!(
+            item,
+            CodingAgentSessionTranscriptItem::Tool {
+                duration_millis: Some(1_250),
+                ..
+            }
+        ));
     }
 
     #[test]

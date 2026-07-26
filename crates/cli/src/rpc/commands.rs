@@ -1874,6 +1874,7 @@ fn rpc_transcript_item(item: CodingAgentSessionTranscriptItem) -> serde_json::Va
             args,
             result,
             is_error,
+            duration_millis,
         } => serde_json::json!({
             "role": "tool",
             "callId": call_id,
@@ -1881,6 +1882,7 @@ fn rpc_transcript_item(item: CodingAgentSessionTranscriptItem) -> serde_json::Va
             "arguments": args,
             "result": result,
             "isError": is_error,
+            "durationMillis": duration_millis,
         }),
         CodingAgentSessionTranscriptItem::Delegation {
             tool_call_id,
@@ -1916,4 +1918,23 @@ fn rpc_transcript_item(item: CodingAgentSessionTranscriptItem) -> serde_json::Va
 
 pub(super) fn has_images(images: &Option<Vec<CodingAgentPromptImage>>) -> bool {
     images.as_ref().is_some_and(|images| !images.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_tool_transcript_projects_optional_authoritative_duration() {
+        let item = CodingAgentSessionTranscriptItem::Tool {
+            call_id: "tool-1".into(),
+            name: "read".into(),
+            args: serde_json::json!({"path": "src/lib.rs"}),
+            result: Some("ok".into()),
+            is_error: false,
+            duration_millis: Some(1_250),
+        };
+
+        assert_eq!(rpc_transcript_item(item)["durationMillis"], 1_250);
+    }
 }
