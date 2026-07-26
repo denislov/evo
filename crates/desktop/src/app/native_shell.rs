@@ -28,7 +28,6 @@ use gpui::{
 };
 use gpui_component::{
     VirtualListScrollHandle,
-    button::Button,
     input::{InputEvent, InputState},
     text::TextView,
 };
@@ -120,6 +119,13 @@ fn conversation_header_projection_dirty(
 
 fn overlay_host_projection_dirty(delta: &desktop::projection::DesktopProjectionDelta) -> bool {
     conversation_header_projection_dirty(delta) || delta.authorizations
+}
+
+fn root_projection_dirty(
+    projection_replaced: bool,
+    delta: Option<&desktop::projection::DesktopProjectionDelta>,
+) -> bool {
+    projection_replaced || delta.is_some_and(|delta| delta.authorizations)
 }
 
 fn upsert_indexed_item<T>(
@@ -445,7 +451,7 @@ impl NativeShell {
             cx.subscribe_in(
                 &conversation_pane,
                 window,
-                |this, pane, event: &ConversationPaneEvent, _, cx| match event {
+                |this, pane, event: &ConversationPaneEvent, window, cx| match event {
                     ConversationPaneEvent::Select { block_id, durable } => {
                         if *durable {
                             this.conversation_viewport
@@ -456,6 +462,12 @@ impl NativeShell {
                         pane.update(cx, |_, cx| cx.notify());
                         this.notify_conversation_header(cx);
                     }
+                    ConversationPaneEvent::Scrolled => {
+                        cx.defer_in(window, |this, _, cx| {
+                            this.reconcile_conversation_scroll(cx);
+                        });
+                    }
+                    ConversationPaneEvent::FollowLatest => this.follow_latest(cx),
                 },
             ),
             cx.subscribe_in(
@@ -713,6 +725,7 @@ impl NativeShell {
         let mut status_bar_dirty = false;
         let mut conversation_header_dirty = false;
         let mut overlay_host_dirty = false;
+        let mut root_dirty = false;
         while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
             let Some(update) = self.runtime_updates.pop_front() else {
                 break;
@@ -724,6 +737,7 @@ impl NativeShell {
                 status_bar_dirty = true;
                 conversation_header_dirty = true;
                 overlay_host_dirty = true;
+                root_dirty = true;
             }
             let update = match update {
                 desktop::runtime::DesktopRuntimeUpdate::FileReviewed { command_id, review } => {
@@ -1177,6 +1191,9 @@ impl NativeShell {
             }
             let had_active_operation = self.projection.snapshot().active_operation.is_some();
             let outcome = self.projection.apply(update);
+            if root_projection_dirty(outcome.is_replaced(), outcome.delta()) {
+                root_dirty = true;
+            }
             if had_active_operation != self.projection.snapshot().active_operation.is_some() {
                 sessions_pane_dirty = true;
             }
@@ -1392,7 +1409,12 @@ impl NativeShell {
             self.preference_notice = Some(error);
             status_bar_dirty = true;
         }
-        if applied > 0 {
+        let conversation_needs_refresh =
+            self.conversation_render_full_dirty || self.conversation_render_live_dirty;
+        if conversation_needs_refresh && !self.refresh_conversation_rows_at_current_width(cx) {
+            root_dirty = true;
+        }
+        if root_dirty {
             cx.notify();
         }
         if sessions_pane_dirty {
@@ -3374,6 +3396,61 @@ impl NativeShell {
         next_refresh_after.map(|delay| (delay, refresh_requires_full))
     }
 
+    fn refresh_conversation_rows_at_width(&mut self, layout_width: u32, cx: &mut Context<Self>) {
+        let pane_dirty = self.conversation_render_full_dirty
+            || self.conversation_render_live_dirty
+            || self.conversation_render_width_bucket != Some(layout_width);
+        let refresh = self.prepare_conversation_rows(layout_width);
+        if pane_dirty {
+            self.conversation_pane.update(cx, |_, cx| cx.notify());
+        }
+        self.schedule_conversation_height_refresh(refresh, cx);
+    }
+
+    fn refresh_conversation_rows_at_current_width(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(layout_width) = self.conversation_render_width_bucket else {
+            return false;
+        };
+        self.refresh_conversation_rows_at_width(layout_width, cx);
+        true
+    }
+
+    fn schedule_conversation_height_refresh(
+        &mut self,
+        refresh: Option<(std::time::Duration, bool)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((delay, requires_full)) = refresh else {
+            return;
+        };
+        let deadline = Instant::now() + delay;
+        if self
+            .conversation_height_refresh_deadline
+            .is_none_or(|scheduled| scheduled > deadline)
+        {
+            self.conversation_height_refresh_deadline = Some(deadline);
+            self.conversation_height_refresh_full = requires_full;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.conversation_height_refresh_deadline == Some(deadline) {
+                        this.conversation_height_refresh_deadline = None;
+                        if this.conversation_height_refresh_full {
+                            this.conversation_render_full_dirty = true;
+                        } else {
+                            this.conversation_render_live_dirty = true;
+                        }
+                        this.conversation_height_refresh_full = false;
+                        let _ = this.refresh_conversation_rows_at_current_width(cx);
+                    }
+                });
+            })
+            .detach();
+        } else if requires_full {
+            self.conversation_height_refresh_full = true;
+        }
+    }
+
     fn focus_active_target(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.focus.active() {
             FocusTarget::Sessions => self.sessions_focus.focus(window),
@@ -3455,56 +3532,9 @@ impl Render for NativeShell {
             })
             .detach();
         }
-        let conversation_pane_dirty = self.conversation_render_full_dirty
-            || self.conversation_render_live_dirty
-            || self.conversation_render_width_bucket != Some(layout_width);
-        let conversation_refresh = self.prepare_conversation_rows(layout_width);
-        if conversation_pane_dirty {
-            self.conversation_pane.update(cx, |_, cx| cx.notify());
-        }
-        if let Some((delay, requires_full)) = conversation_refresh {
-            let deadline = Instant::now() + delay;
-            if self
-                .conversation_height_refresh_deadline
-                .is_none_or(|scheduled| scheduled > deadline)
-            {
-                self.conversation_height_refresh_deadline = Some(deadline);
-                self.conversation_height_refresh_full = requires_full;
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(delay).await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this.conversation_height_refresh_deadline == Some(deadline) {
-                            this.conversation_height_refresh_deadline = None;
-                            if this.conversation_height_refresh_full {
-                                this.conversation_render_full_dirty = true;
-                            } else {
-                                this.conversation_render_live_dirty = true;
-                            }
-                            this.conversation_height_refresh_full = false;
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            } else if requires_full {
-                self.conversation_height_refresh_full = true;
-            }
-        }
+        self.refresh_conversation_rows_at_width(layout_width, cx);
         let authorization_present = !self.projection.snapshot().pending_authorizations.is_empty();
         self.reconcile_authorization_overlay(authorization_present, window, cx);
-        let event_count = self.projection.recent_events().len();
-        let message_count = self.projection.messages().len();
-        let tool_count = self.projection.tools().len();
-        let visible_conversation_count = self.visible_conversation_count();
-        let unseen_conversation_updates = self.conversation_viewport.unseen_updates();
-        let follow_latest_label = if unseen_conversation_updates == 0 {
-            "Latest ↓".to_owned()
-        } else {
-            format!("↓ {unseen_conversation_updates} new")
-        };
-        let omitted_transcript_count = self.projection.conversation().omitted_blocks();
-        let transcript_list = self.conversation_pane.clone();
-
         let sessions_panel = layout.sessions.map(|_| self.sessions_pane.clone());
 
         let context_panel = layout.context.map(|_| self.inspector_pane.clone());
@@ -3519,77 +3549,7 @@ impl Render for NativeShell {
             .flex_col()
             .bg(rgb(theme.canvas.value()))
             .child(self.conversation_header.clone())
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .when(visible_conversation_count == 0, |content| {
-                        content.child(
-                            div()
-                                .p_5()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .text_color(rgb(theme.muted_text.value()))
-                                .child("Native runtime connected")
-                                .child("No durable conversation blocks yet.")
-                                .child(format!("project events  {event_count}"))
-                                .child(format!("message overlays  {message_count}"))
-                                .child(format!("tool overlays     {tool_count}")),
-                        )
-                    })
-                    .when(visible_conversation_count > 0, |content| {
-                        content
-                            .when(omitted_transcript_count > 0, |content| {
-                                content.child(
-                                    div()
-                                        .px_4()
-                                        .py_2()
-                                        .text_color(rgb(theme.warning.value()))
-                                        .child(format!(
-                                            "{omitted_transcript_count} older blocks omitted by \
-                                             desktop retention bounds"
-                                        )),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .id("conversation-scroll-region")
-                                    .flex_1()
-                                    .min_h_0()
-                                    .on_scroll_wheel(cx.listener(|_, _, window, cx| {
-                                        cx.defer_in(window, |this, _, cx| {
-                                            this.reconcile_conversation_scroll(cx);
-                                        });
-                                    }))
-                                    .child(transcript_list),
-                            )
-                            .when(!self.conversation_viewport.follow_latest(), |content| {
-                                content.child(
-                                    div()
-                                        .absolute()
-                                        .right_4()
-                                        .bottom_4()
-                                        .rounded_lg()
-                                        .border_1()
-                                        .border_color(rgb(theme.accent.value()))
-                                        .bg(rgb(theme.elevated.value()))
-                                        .child(
-                                            Button::new("follow-latest")
-                                                .compact()
-                                                .label(follow_latest_label.clone())
-                                                .tooltip("Jump to latest output · End")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.follow_latest(cx);
-                                                })),
-                                        ),
-                                )
-                            })
-                    }),
-            )
+            .child(self.conversation_pane.clone())
             .child(self.composer_pane.clone());
 
         let status_bar = self.status_bar.clone();
@@ -3892,8 +3852,11 @@ mod tests {
             .expect("native render implementation remains present")
             .1;
         let prepare_call = ["prepare_conversation_", "rows("].concat();
+        let refresh_call = ["refresh_conversation_rows_", "at_width(layout_width, cx)"].concat();
         let legacy_rebuild_call = ["rebuild_conversation_", "render_rows("].concat();
-        assert_eq!(render.matches(&prepare_call).count(), 1);
+        assert_eq!(source.matches(&prepare_call).count(), 2);
+        assert_eq!(render.matches(&prepare_call).count(), 0);
+        assert_eq!(render.matches(&refresh_call).count(), 1);
         assert_eq!(render.matches(&legacy_rebuild_call).count(), 0);
     }
 
@@ -3902,14 +3865,46 @@ mod tests {
         let shell = include_str!("native_shell.rs");
         let pane = include_str!("native_shell/conversation_pane.rs");
         let virtual_list_call = ["v_virtual_", "list("].concat();
+        let scroll_region_id = ["conversation-scroll-", "region"].concat();
+        let follow_latest_button = ["Button::new(\"follow-", "latest\")"].concat();
         assert!(!shell.contains(&virtual_list_call));
         assert!(pane.contains(&virtual_list_call));
         assert!(shell.contains("conversation_pane: gpui::Entity<ConversationPane>"));
         assert!(shell.contains("let conversation_pane = cx.new("));
-        assert!(shell.contains("let transcript_list = self.conversation_pane.clone()"));
+        assert!(shell.contains(".child(self.conversation_pane.clone())"));
         assert!(pane.contains("impl EventEmitter<ConversationPaneEvent>"));
         assert!(pane.contains("WeakEntity<NativeShell>"));
-        assert!(shell.contains("if conversation_pane_dirty"));
+        assert!(shell.contains("if pane_dirty"));
+        assert!(shell.contains("self.conversation_pane.update(cx, |_, cx| cx.notify())"));
+        assert!(!shell.contains(&scroll_region_id));
+        assert!(!shell.contains(&follow_latest_button));
+        assert!(pane.contains(&scroll_region_id));
+        assert!(pane.contains(&follow_latest_button));
+        assert!(pane.contains("ConversationPaneEvent::Scrolled"));
+        assert!(pane.contains("ConversationPaneEvent::FollowLatest"));
+    }
+
+    #[test]
+    fn streaming_only_projection_delta_does_not_dirty_native_shell_root() {
+        let streaming = desktop::projection::DesktopProjectionDelta {
+            cursor: true,
+            conversation: true,
+            tools: true,
+            ..Default::default()
+        };
+        assert!(!root_projection_dirty(false, Some(&streaming)));
+        assert!(root_projection_dirty(true, Some(&streaming)));
+
+        let authorization = desktop::projection::DesktopProjectionDelta {
+            authorizations: true,
+            ..Default::default()
+        };
+        assert!(root_projection_dirty(false, Some(&authorization)));
+
+        let shell = include_str!("native_shell.rs");
+        assert!(!shell.contains("if applied > 0 {\n            cx.notify();"));
+        assert!(shell.contains("if root_dirty {\n            cx.notify();"));
+        assert!(shell.contains("refresh_conversation_rows_at_current_width(cx)"));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use gpui::{
     ElementId, EventEmitter, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
     WeakEntity, Window, div, prelude::*, px, relative, rgb,
 };
-use gpui_component::v_virtual_list;
+use gpui_component::{button::Button, v_virtual_list};
 
 use super::{
     ConversationBlockKind, NativeShell, conversation_block_visual, conversation_text_element,
@@ -13,6 +13,8 @@ use desktop::shell::SemanticTheme;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConversationPaneEvent {
     Select { block_id: String, durable: bool },
+    Scrolled,
+    FollowLatest,
 }
 
 pub(super) struct ConversationPane {
@@ -32,11 +34,28 @@ impl Render for ConversationPane {
         let Some(owner) = self.owner.upgrade() else {
             return div().flex_1();
         };
-        let (transcript_rows, scroll_handle) = {
+        let (
+            transcript_rows,
+            scroll_handle,
+            visible_count,
+            event_count,
+            message_count,
+            tool_count,
+            omitted_count,
+            follow_latest,
+            unseen_updates,
+        ) = {
             let owner = owner.read(cx);
             (
                 owner.conversation_row_sizes.clone(),
                 owner.conversation_scroll.clone(),
+                owner.visible_conversation_count(),
+                owner.projection.recent_events().len(),
+                owner.projection.messages().len(),
+                owner.projection.tools().len(),
+                owner.projection.conversation().omitted_blocks(),
+                owner.conversation_viewport.follow_latest(),
+                owner.conversation_viewport.unseen_updates(),
             )
         };
         let transcript_list = v_virtual_list(
@@ -257,6 +276,77 @@ impl Render for ConversationPane {
         )
         .track_scroll(&scroll_handle);
 
-        div().flex_1().min_h_0().child(transcript_list)
+        let theme = SemanticTheme::GEEK_DARK;
+        let follow_latest_label = if unseen_updates == 0 {
+            "Latest ↓".to_owned()
+        } else {
+            format!("↓ {unseen_updates} new")
+        };
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .when(visible_count == 0, |content| {
+                content.child(
+                    div()
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .text_color(rgb(theme.muted_text.value()))
+                        .child("Native runtime connected")
+                        .child("No durable conversation blocks yet.")
+                        .child(format!("project events  {event_count}"))
+                        .child(format!("message overlays  {message_count}"))
+                        .child(format!("tool overlays     {tool_count}")),
+                )
+            })
+            .when(visible_count > 0, |content| {
+                content
+                    .when(omitted_count > 0, |content| {
+                        content.child(
+                            div()
+                                .px_4()
+                                .py_2()
+                                .text_color(rgb(theme.warning.value()))
+                                .child(format!(
+                                    "{omitted_count} older blocks omitted by desktop retention bounds"
+                                )),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id("conversation-scroll-region")
+                            .flex_1()
+                            .min_h_0()
+                            .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                                cx.emit(ConversationPaneEvent::Scrolled);
+                            }))
+                            .child(transcript_list),
+                    )
+                    .when(!follow_latest, |content| {
+                        content.child(
+                            div()
+                                .absolute()
+                                .right_4()
+                                .bottom_4()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(theme.accent.value()))
+                                .bg(rgb(theme.elevated.value()))
+                                .child(
+                                    Button::new("follow-latest")
+                                        .compact()
+                                        .label(follow_latest_label.clone())
+                                        .tooltip("Jump to latest output · End")
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(ConversationPaneEvent::FollowLatest);
+                                        })),
+                                ),
+                        )
+                    })
+            })
     }
 }
