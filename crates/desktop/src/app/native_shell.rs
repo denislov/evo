@@ -1,6 +1,4 @@
-use coding_agent::api::authorization::{
-    ToolAuthorizationDecision, ToolAuthorizationIdentity, ToolAuthorizationScope,
-};
+use coding_agent::api::authorization::{ToolAuthorizationDecision, ToolAuthorizationIdentity};
 use coding_agent::api::embedding::CodingAgentThinkingLevel;
 use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
@@ -26,10 +24,10 @@ use desktop::shell::{
 use gpui::{
     AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
     ParentElement as _, Render, ScrollStrategy, SharedString, Styled as _, Subscription, Window,
-    WindowBounds, div, prelude::*, px, rgb, rgba, size,
+    WindowBounds, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    Disableable as _, VirtualListScrollHandle,
+    VirtualListScrollHandle,
     button::Button,
     input::{InputEvent, InputState},
     text::TextView,
@@ -118,6 +116,10 @@ fn conversation_header_projection_dirty(
         .contains(desktop::projection::ContextDirtyFlags::OPERATIONS)
         || delta.lifecycle
         || delta.session
+}
+
+fn overlay_host_projection_dirty(delta: &desktop::projection::DesktopProjectionDelta) -> bool {
+    conversation_header_projection_dirty(delta) || delta.authorizations
 }
 
 fn upsert_indexed_item<T>(
@@ -327,6 +329,7 @@ pub(super) struct NativeShell {
     composer_pane: gpui::Entity<ComposerPane>,
     inspector_pane: gpui::Entity<InspectorPane>,
     status_bar: gpui::Entity<StatusBar>,
+    overlay_host: gpui::Entity<OverlayHost>,
     composer: ComposerState,
     composer_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
@@ -403,7 +406,8 @@ impl NativeShell {
         let sessions_pane = cx.new(|_| SessionsPane::new(owner.clone()));
         let composer_pane = cx.new(|_| ComposerPane::new(owner.clone()));
         let inspector_pane = cx.new(|_| InspectorPane::new(owner.clone()));
-        let status_bar = cx.new(|_| StatusBar::new(owner));
+        let status_bar = cx.new(|_| StatusBar::new(owner.clone()));
+        let overlay_host = cx.new(|_| OverlayHost::new(owner));
 
         let subscriptions = vec![
             cx.on_focus(&sessions_focus, window, |this, window, cx| {
@@ -519,6 +523,25 @@ impl NativeShell {
                     StatusBarEvent::CycleThinking => this.cycle_thinking_selection(cx),
                 },
             ),
+            cx.subscribe_in(
+                &overlay_host,
+                window,
+                |this, _, event: &OverlayHostEvent, window, cx| match event {
+                    OverlayHostEvent::ExecutePalette(command) => {
+                        this.command_palette.close();
+                        this.dismiss_overlay(window, cx);
+                        this.execute_palette_command(*command, window, cx);
+                    }
+                    OverlayHostEvent::CreateSession => this.create_session(cx),
+                    OverlayHostEvent::RefreshSessions => this.request_session_catalog(cx),
+                    OverlayHostEvent::OpenSession(session_id) => {
+                        this.open_session(session_id.clone(), cx);
+                    }
+                    OverlayHostEvent::DecideAuthorization { identity, decision } => {
+                        this.decide_tool_authorization(identity.clone(), decision.clone(), cx);
+                    }
+                },
+            ),
             cx.observe_window_bounds(window, Self::window_bounds_changed),
         ];
 
@@ -572,6 +595,7 @@ impl NativeShell {
             composer_pane,
             inspector_pane,
             status_bar,
+            overlay_host,
             composer: ComposerState::default(),
             composer_input,
             composer_needs_sync: false,
@@ -674,6 +698,7 @@ impl NativeShell {
         }
         self.schedule_preferences();
         self.notify_inspector_pane(cx);
+        self.notify_overlay_host(cx);
         cx.notify();
     }
 
@@ -687,6 +712,7 @@ impl NativeShell {
         let mut inspector_pane_dirty = false;
         let mut status_bar_dirty = false;
         let mut conversation_header_dirty = false;
+        let mut overlay_host_dirty = false;
         while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
             let Some(update) = self.runtime_updates.pop_front() else {
                 break;
@@ -697,6 +723,7 @@ impl NativeShell {
             ) {
                 status_bar_dirty = true;
                 conversation_header_dirty = true;
+                overlay_host_dirty = true;
             }
             let update = match update {
                 desktop::runtime::DesktopRuntimeUpdate::FileReviewed { command_id, review } => {
@@ -1169,6 +1196,9 @@ impl NativeShell {
             {
                 conversation_header_dirty = true;
             }
+            if outcome.is_replaced() || outcome.delta().is_some_and(overlay_host_projection_dirty) {
+                overlay_host_dirty = true;
+            }
             if outcome.is_replaced() {
                 sessions_pane_dirty = true;
                 self.conversation_render_full_dirty = true;
@@ -1352,6 +1382,7 @@ impl NativeShell {
                 inspector_pane_dirty = true;
                 status_bar_dirty = true;
                 conversation_header_dirty = true;
+                overlay_host_dirty = true;
             }
             applied += 1;
         }
@@ -1379,6 +1410,9 @@ impl NativeShell {
         if conversation_header_dirty {
             self.notify_conversation_header(cx);
         }
+        if overlay_host_dirty {
+            self.notify_overlay_host(cx);
+        }
         !matches!(
             self.projection.lifecycle(),
             DesktopProjectionLifecycle::Stopped
@@ -1388,6 +1422,7 @@ impl NativeShell {
     fn notify_sessions_pane(&self, cx: &mut Context<Self>) {
         self.sessions_pane.update(cx, |_, cx| cx.notify());
         self.notify_status_bar(cx);
+        self.notify_overlay_host(cx);
     }
 
     fn composer_pane_state(&self) -> (bool, bool, bool, bool) {
@@ -1414,6 +1449,10 @@ impl NativeShell {
 
     fn notify_conversation_header(&self, cx: &mut Context<Self>) {
         self.conversation_header.update(cx, |_, cx| cx.notify());
+    }
+
+    fn notify_overlay_host(&self, cx: &mut Context<Self>) {
+        self.overlay_host.update(cx, |_, cx| cx.notify());
     }
 
     fn schedule_preferences(&mut self) {
@@ -2123,6 +2162,7 @@ impl NativeShell {
             }
         }
         self.notify_status_bar(cx);
+        self.notify_overlay_host(cx);
         cx.notify();
     }
 
@@ -2304,6 +2344,7 @@ impl NativeShell {
             DesktopOverlayKind::NarrowSessions => self.narrow_sessions_focus.focus(window),
             DesktopOverlayKind::NarrowContext => self.context_focus.focus(window),
         }
+        self.notify_overlay_host(cx);
         cx.notify();
     }
 
@@ -2311,6 +2352,7 @@ impl NativeShell {
         self.active_overlay = None;
         self.focus.close_overlay(self.layout(window));
         self.focus_active_target(window, cx);
+        self.notify_overlay_host(cx);
         cx.notify();
     }
 
@@ -2696,11 +2738,13 @@ impl NativeShell {
 
     fn on_palette_previous(&mut self, _: &PalettePrevious, _: &mut Window, cx: &mut Context<Self>) {
         self.command_palette.move_selection(true);
+        self.notify_overlay_host(cx);
         cx.notify();
     }
 
     fn on_palette_next(&mut self, _: &PaletteNext, _: &mut Window, cx: &mut Context<Self>) {
         self.command_palette.move_selection(false);
+        self.notify_overlay_host(cx);
         cx.notify();
     }
 
@@ -3446,14 +3490,8 @@ impl Render for NativeShell {
                 self.conversation_height_refresh_full = true;
             }
         }
-        let authorization_request = self
-            .projection
-            .snapshot()
-            .pending_authorizations
-            .first()
-            .cloned();
-        self.reconcile_authorization_overlay(authorization_request.is_some(), window, cx);
-        let snapshot = self.projection.snapshot();
+        let authorization_present = !self.projection.snapshot().pending_authorizations.is_empty();
+        self.reconcile_authorization_overlay(authorization_present, window, cx);
         let event_count = self.projection.recent_events().len();
         let message_count = self.projection.messages().len();
         let tool_count = self.projection.tools().len();
@@ -3465,51 +3503,11 @@ impl Render for NativeShell {
             format!("↓ {unseen_conversation_updates} new")
         };
         let omitted_transcript_count = self.projection.conversation().omitted_blocks();
-        let composer_running = snapshot.active_operation.is_some();
-        let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
-        let session_pending = self.command_ledger.contains_where(|intent| {
-            matches!(
-                intent,
-                DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
-            )
-        });
-        let session_catalog_pending = self
-            .command_ledger
-            .contains(&DesktopCommandIntent::ListSessions);
         let transcript_list = self.conversation_pane.clone();
 
-        let active_session_id = snapshot.session.session_id.clone();
-        let narrow_session_rows = self
-            .session_catalog
-            .iter()
-            .enumerate()
-            .map(|(index, session)| {
-                let target = session.session_id.clone();
-                let active = target == active_session_id;
-                Button::new(("narrow-open-session", index))
-                    .label(format!(
-                        "{} {} · {}",
-                        if active { "●" } else { "○" },
-                        truncate_label(&target, 32),
-                        truncate_label(&session.updated_at, 20)
-                    ))
-                    .tooltip(if active {
-                        "Active coding-agent session"
-                    } else {
-                        "Open this coding-agent session"
-                    })
-                    .disabled(
-                        active || composer_running || awaiting_prompt_start || session_pending,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_session(target.clone(), cx);
-                    }))
-            })
-            .collect::<Vec<_>>();
         let sessions_panel = layout.sessions.map(|_| self.sessions_pane.clone());
 
-        let context_panel = (layout.context.is_some() || self.narrow_context_open)
-            .then(|| self.inspector_pane.clone());
+        let context_panel = layout.context.map(|_| self.inspector_pane.clone());
 
         let conversation = div()
             .id("conversation-panel")
@@ -3596,297 +3594,7 @@ impl Render for NativeShell {
 
         let status_bar = self.status_bar.clone();
 
-        let palette_rows = PALETTE_ENTRIES
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                let command = entry.command;
-                let selected = self.command_palette.selected() == index;
-                let label = entry.shortcut.map_or_else(
-                    || entry.label.to_owned(),
-                    |shortcut| format!("{}    {shortcut}", entry.label),
-                );
-                div()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(if selected {
-                        theme.focus_ring.value()
-                    } else {
-                        theme.border.value()
-                    }))
-                    .child(
-                        Button::new(("palette-command", index))
-                            .label(label)
-                            .tooltip(entry.semantic_label)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.command_palette.close();
-                                this.dismiss_overlay(window, cx);
-                                this.execute_palette_command(command, window, cx);
-                            })),
-                    )
-            })
-            .collect::<Vec<_>>();
-        let command_palette_overlay = self.command_palette.is_open().then(|| {
-            let max_height = px((f32::from(window.viewport_size().height) * 0.8).max(320.));
-            div()
-                .id("command-palette-overlay")
-                .key_context(actions::PALETTE_KEY_CONTEXT)
-                .absolute()
-                .size_full()
-                .occlude()
-                .track_focus(&self.command_palette_focus)
-                .bg(rgba(0x0b0e14dd))
-                .p_4()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .id("command-palette-dialog")
-                        .w_full()
-                        .max_w(px(680.))
-                        .max_h(max_height)
-                        .overflow_y_scroll()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(theme.focus_ring.value()))
-                        .bg(rgb(theme.elevated.value()))
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(rgb(theme.accent.value()))
-                                .child("COMMAND PALETTE · typed desktop actions"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(theme.muted_text.value()))
-                                .child("Up/Down or Tab selects · Enter runs · Esc closes"),
-                        )
-                        .children(palette_rows),
-                )
-        });
-
-        let narrow_sessions_overlay = self.narrow_sessions_open.then(|| {
-            let max_height = px((f32::from(window.viewport_size().height) * 0.8).max(320.));
-            div()
-                .id("narrow-sessions-overlay")
-                .key_context(actions::NARROW_SESSIONS_KEY_CONTEXT)
-                .absolute()
-                .size_full()
-                .occlude()
-                .track_focus(&self.narrow_sessions_focus)
-                .bg(rgba(0x0b0e14dd))
-                .p_4()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .id("narrow-sessions-dialog")
-                        .w_full()
-                        .max_w(px(520.))
-                        .max_h(max_height)
-                        .overflow_y_scroll()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(theme.focus_ring.value()))
-                        .bg(rgb(theme.elevated.value()))
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .text_color(rgb(theme.accent.value()))
-                                .child("SESSIONS · narrow layout dialog")
-                                .child("Esc closes"),
-                        )
-                        .child(
-                            Button::new("narrow-create-session")
-                                .label("New session · Ctrl/Cmd+N")
-                                .tooltip("Create a new coding-agent session")
-                                .disabled(
-                                    composer_running || awaiting_prompt_start || session_pending,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.create_session(cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("narrow-refresh-sessions")
-                                .label(if session_catalog_pending {
-                                    "Loading sessions…"
-                                } else {
-                                    "Refresh sessions"
-                                })
-                                .tooltip("Load the bounded project session catalog")
-                                .disabled(session_catalog_pending || composer_running)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.request_session_catalog(cx);
-                                })),
-                        )
-                        .children(narrow_session_rows)
-                        .when(self.omitted_sessions > 0, |dialog| {
-                            dialog.child(div().text_color(rgb(theme.warning.value())).child(
-                                format!(
-                                    "{} older session(s) omitted at the desktop limit",
-                                    self.omitted_sessions
-                                ),
-                            ))
-                        }),
-                )
-        });
-
-        let authorization_overlay = authorization_request.map(|request| {
-            let decision_pending = self.command_ledger.authorization().is_some_and(
-                |(_, authorization_id, operation_id)| {
-                    authorization_id == request.authorization_id
-                        && operation_id == request.operation_id
-                },
-            );
-            let mut details = vec![
-                format!("operation  {}", request.operation_id),
-                format!(
-                    "tool       {} · {}",
-                    request.tool_name, request.tool_call_id
-                ),
-                format!("risk       {:?}", request.risk),
-                format!("scope      {}", authorization_scope_text(&request.scope)),
-            ];
-            if let Some(path) = request.preview.path.as_ref() {
-                details.push(format!("path       {path}"));
-            }
-            if let Some(cwd) = request.preview.cwd.as_ref() {
-                details.push(format!("cwd        {cwd}"));
-            }
-            if let Some(command) = request.preview.command.as_ref() {
-                details.push(format!("command\n{command}"));
-            }
-            if let Some(content) = request.preview.content_preview.as_ref() {
-                details.push(format!("content preview\n{content}"));
-            }
-            let identity = request.identity();
-            let allow_once_identity = identity.clone();
-            let allow_operation_identity = identity.clone();
-            let deny_identity = identity;
-            let max_height = px((f32::from(window.viewport_size().height) * 0.8).max(320.));
-            div()
-                .id("authorization-overlay")
-                .key_context(actions::AUTHORIZATION_KEY_CONTEXT)
-                .absolute()
-                .size_full()
-                .occlude()
-                .track_focus(&self.authorization_focus)
-                .bg(rgba(0x0b0e14dd))
-                .p_4()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(720.))
-                        .max_h(max_height)
-                        .overflow_hidden()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(theme.warning.value()))
-                        .bg(rgb(theme.elevated.value()))
-                        .p_5()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .text_color(rgb(theme.warning.value()))
-                                .child("AUTHORIZATION REQUIRED")
-                                .child(if decision_pending {
-                                    "decision pending…"
-                                } else {
-                                    "explicit decision required"
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_color(rgb(theme.text.value()))
-                                .whitespace_normal()
-                                .child(request.preview.summary),
-                        )
-                        .child(
-                            div()
-                                .id("authorization-details")
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .children(details.into_iter().map(|detail| {
-                                    div()
-                                        .whitespace_normal()
-                                        .text_color(rgb(theme.muted_text.value()))
-                                        .child(detail)
-                                })),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(
-                                    Button::new("deny-authorization")
-                                        .label("1 · Deny")
-                                        .tooltip("Deny this authorization request · 1")
-                                        .disabled(decision_pending)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.decide_tool_authorization(
-                                                deny_identity.clone(),
-                                                ToolAuthorizationDecision::Deny {
-                                                    reason: Some(
-                                                        "denied from native desktop".into(),
-                                                    ),
-                                                },
-                                                cx,
-                                            );
-                                        })),
-                                )
-                                .child(
-                                    Button::new("allow-authorization-once")
-                                        .label("2 · Allow once")
-                                        .tooltip("Allow this exact request once · 2")
-                                        .disabled(decision_pending)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.decide_tool_authorization(
-                                                allow_once_identity.clone(),
-                                                ToolAuthorizationDecision::AllowOnce,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                                .child(
-                                    Button::new("allow-authorization-operation")
-                                        .label("3 · Allow for operation")
-                                        .tooltip("Allow this scope for the current operation · 3")
-                                        .disabled(decision_pending)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.decide_tool_authorization(
-                                                allow_operation_identity.clone(),
-                                                ToolAuthorizationDecision::AllowForOperation,
-                                                cx,
-                                            );
-                                        })),
-                                ),
-                        ),
-                )
-        });
+        let overlay_host = self.overlay_host.clone();
 
         div()
             .key_context(actions::ROOT_KEY_CONTEXT)
@@ -3926,26 +3634,7 @@ impl Render for NativeShell {
                     .children(context_panel),
             )
             .child(status_bar)
-            .children(narrow_sessions_overlay)
-            .children(command_palette_overlay)
-            .children(authorization_overlay)
-    }
-}
-
-fn authorization_scope_text(scope: &ToolAuthorizationScope) -> String {
-    match scope {
-        ToolAuthorizationScope::Path { path } => format!("path · {path}"),
-        ToolAuthorizationScope::FilesystemTarget {
-            path,
-            target_fingerprint,
-        } => format!("filesystem target · {path} · {target_fingerprint}"),
-        ToolAuthorizationScope::Shell {
-            cwd,
-            command_fingerprint,
-        } => format!("shell · {cwd} · {command_fingerprint}"),
-        ToolAuthorizationScope::ToolArguments { fingerprint } => {
-            format!("tool arguments · {fingerprint}")
-        }
+            .child(overlay_host)
     }
 }
 
@@ -4363,6 +4052,45 @@ mod tests {
     }
 
     #[test]
+    fn overlay_rendering_is_owned_by_a_typed_child_entity() {
+        let shell = include_str!("native_shell.rs");
+        let host = include_str!("native_shell/overlay_host.rs");
+        let authorization_id = ["\"authorization-", "overlay\""].concat();
+        let palette_id = ["\"command-palette-", "overlay\""].concat();
+        let narrow_sessions_id = ["\"narrow-sessions-", "overlay\""].concat();
+
+        assert!(!shell.contains(&authorization_id));
+        assert!(!shell.contains(&palette_id));
+        assert!(!shell.contains(&narrow_sessions_id));
+        assert!(host.contains(&authorization_id));
+        assert!(host.contains(&palette_id));
+        assert!(host.contains(&narrow_sessions_id));
+        assert!(shell.contains("overlay_host: gpui::Entity<OverlayHost>"));
+        assert!(shell.contains(".child(overlay_host)"));
+        assert!(host.contains("impl EventEmitter<OverlayHostEvent>"));
+        assert!(host.contains("DecideAuthorization"));
+        assert!(shell.contains("this.decide_tool_authorization("));
+        assert!(shell.contains("Self::on_trap_overlay_focus"));
+        assert!(host.contains("owner.inspector_pane.clone()"));
+        assert!(!host.contains("try_decide_tool_authorization"));
+        assert!(!host.contains("command_ledger.reserve"));
+    }
+
+    #[test]
+    fn streaming_only_projection_delta_does_not_dirty_overlay_host() {
+        let mut streaming = desktop::projection::DesktopProjectionDelta {
+            cursor: true,
+            conversation: true,
+            tools: true,
+            ..Default::default()
+        };
+        assert!(!overlay_host_projection_dirty(&streaming));
+
+        streaming.authorizations = true;
+        assert!(overlay_host_projection_dirty(&streaming));
+    }
+
+    #[test]
     fn indexed_row_update_accepts_non_clone_history_and_changes_one_slot() {
         #[derive(Debug, PartialEq, Eq)]
         struct NonClone(usize);
@@ -4397,6 +4125,7 @@ mod composer_pane;
 mod conversation_header;
 mod conversation_pane;
 mod inspector_pane;
+mod overlay_host;
 mod sessions_pane;
 mod status_bar;
 
@@ -4404,5 +4133,6 @@ use composer_pane::{ComposerPane, ComposerPaneEvent};
 use conversation_header::{ConversationHeader, ConversationHeaderEvent};
 use conversation_pane::{ConversationPane, ConversationPaneEvent};
 use inspector_pane::{InspectorPane, InspectorPaneEvent};
+use overlay_host::{OverlayHost, OverlayHostEvent};
 use sessions_pane::{SessionsPane, SessionsPaneEvent};
 use status_bar::{StatusBar, StatusBarEvent};

@@ -203,13 +203,14 @@ NativeShell
 
 #### DESK-011 拆分 NativeShell 渲染实体
 
-- [ ] 拆出 TitleBar、Sessions、Conversation、Composer、Inspector、StatusBar、OverlayHost。
+- [x] 拆出 TitleBar、Sessions、Conversation、Composer、Inspector、StatusBar、OverlayHost。
 - [x] Conversation transcript 已迁入独立 `ConversationPane` Entity；持久 row/size 通过 `WeakEntity<NativeShell>` 零拷贝读取，selection 通过 typed child event 回传。
 - [x] Sessions 已迁入独立 `SessionsPane` Entity；新建、刷新、打开会话通过 typed child event 回传，streaming token 不 notify 该区域。
 - [x] Composer 已迁入独立 `ComposerPane` Entity；输入变化仅 notify Composer，Submit/Steer/Follow-up 通过 typed child event 进入原 command ledger 路径。
 - [x] Inspector/Context 已迁入独立 `InspectorPane` Entity；file review、external editor、recovery 仅通过 typed child event 回到父级安全命令路径，conversation/tools-only delta 不触发 Inspector render。
 - [x] StatusBar 已迁入独立 `StatusBar` Entity；model/profile/thinking 选择通过 typed child event 回传，conversation/tools/cursor-only delta 不触发 StatusBar render。
 - [x] Conversation Header/TitleBar 已迁入独立 `ConversationHeader` Entity；Sessions/Context/Reload/Copy/Abort 通过 typed child event 回传，固定 divider focus indicator 不改变布局尺寸。
+- [x] Command Palette、窄屏 Sessions/Context、Authorization 已统一迁入独立 `OverlayHost` Entity；focus trap 与 authorization command ledger 仍由 `NativeShell` 持有。
 - [ ] token 更新只 notify Conversation/live row。
 - [ ] usage、telemetry 等低优先级信息最多 2–4Hz 更新。
 - [ ] 保持现有 typed command ledger、authorization 和 recovery 安全边界。
@@ -355,7 +356,7 @@ desktop.input.latency
 | DESK-008 | 完成 | typed delta 已贯穿 Projection→NativeShell；product event 只增量同步 dirty overlay，replace 路径保留全量重建 |
 | DESK-009 | 完成 | revision-aware bounded row cache 已接入 NativeShell；sanitized `Arc<str>`、稳定 Markdown state key 和 measured height 可复用 |
 | DESK-010 | 完成 | 持久 row/height/size、sequence→单 index 更新、bounded 结构回退、15Hz 单行补刷和 67ms resize debounce 已完成 |
-| DESK-011 | 进行中 | Conversation transcript、Header、Sessions、Composer、Inspector、StatusBar Entity 已完成；继续迁移 overlay 并收敛 root notify 范围 |
+| DESK-011 | 进行中 | 所有计划区域 Entity 已拆分；继续收敛 root notify、低频 telemetry 刷新和安全/焦点回归门禁 |
 | DESK-012～018 | 待开始 | DESK-011 完成后进入字体、颜色、消息组件和 Composer 视觉/交互重构 |
 
 ## 10. 完成定义

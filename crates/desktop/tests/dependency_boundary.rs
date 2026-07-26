@@ -108,6 +108,23 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
         .expect("desktop action owner should be readable");
     let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
         .expect("desktop native shell should be readable");
+    let native_ui = [
+        "composer_pane.rs",
+        "conversation_header.rs",
+        "conversation_pane.rs",
+        "inspector_pane.rs",
+        "overlay_host.rs",
+        "sessions_pane.rs",
+        "status_bar.rs",
+    ]
+    .into_iter()
+    .map(|name| {
+        fs::read_to_string(manifest_dir.join("src/app/native_shell").join(name)).unwrap_or_else(
+            |error| panic!("desktop native UI owner {name} should be readable: {error}"),
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
     let runtime = fs::read_to_string(manifest_dir.join("src/runtime.rs"))
         .expect("desktop runtime should be readable");
 
@@ -129,13 +146,16 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
     assert!(shell.contains("InputEvent::PressEnter { secondary: true }"));
     assert!(shell.contains("fn submit_primary_composer("));
     assert!(shell.contains(".key_context(actions::ROOT_KEY_CONTEXT)"));
-    assert!(shell.contains(".key_context(actions::PALETTE_KEY_CONTEXT)"));
-    assert!(shell.contains(".key_context(actions::AUTHORIZATION_KEY_CONTEXT)"));
-    assert!(shell.matches(".tooltip(").count() >= 20);
-    assert!(shell.contains("motion reduced"));
-    assert!(shell.contains("motion static"));
+    assert!(native_ui.contains(".key_context(actions::PALETTE_KEY_CONTEXT)"));
+    assert!(native_ui.contains(".key_context(actions::AUTHORIZATION_KEY_CONTEXT)"));
+    assert!(shell.matches(".tooltip(").count() + native_ui.matches(".tooltip(").count() >= 20);
+    assert!(native_ui.contains("motion reduced"));
+    assert!(native_ui.contains("motion static"));
     assert!(
-        !shell.contains("Timer::after") && !shell.contains("Animation"),
+        !shell.contains("Timer::after")
+            && !shell.contains("Animation")
+            && !native_ui.contains("Timer::after")
+            && !native_ui.contains("Animation"),
         "native shell must not run an idle presentation timer or ambient animation"
     );
 
@@ -378,6 +398,8 @@ fn desktop_file_review_uses_product_authority_and_argument_safe_adapter_bounds()
         .expect("desktop runtime owner should be readable");
     let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
         .expect("desktop native shell should be readable");
+    let inspector = fs::read_to_string(manifest_dir.join("src/app/native_shell/inspector_pane.rs"))
+        .expect("desktop inspector pane should be readable");
 
     for bound in [
         "MAX_VISIBLE_FILE_CHANGES: usize = 64",
@@ -400,7 +422,9 @@ fn desktop_file_review_uses_product_authority_and_argument_safe_adapter_bounds()
     assert!(!review.contains(".arg(\"-c\")"));
     assert!(!shell.contains("std::fs"));
     assert!(!shell.contains("std::process::Command"));
-    assert!(shell.contains(".take(MAX_VISIBLE_FILE_CHANGES)"));
+    assert!(!inspector.contains("std::fs"));
+    assert!(!inspector.contains("std::process::Command"));
+    assert!(inspector.contains(".take(MAX_VISIBLE_FILE_CHANGES)"));
     assert!(shell.contains("DesktopCommandIntent::FileReview"));
     assert!(shell.contains("DesktopCommandIntent::ExternalEditor"));
 }
