@@ -94,6 +94,7 @@ impl Render for StatusBar {
                     .text_color(rgb(theme.muted_text.value()))
                     .child(
                         Button::new("cycle-model")
+                            .debug_selector(|| "desktop-hit-cycle-model".into())
                             .compact()
                             .label(format!("M {status_model}"))
                             .tooltip("Select the next configured text model")

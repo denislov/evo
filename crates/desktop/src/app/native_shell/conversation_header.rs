@@ -79,6 +79,7 @@ impl Render for ConversationHeader {
                     .gap_2()
                     .child(
                         Button::new("toggle-sessions")
+                            .debug_selector(|| "desktop-hit-toggle-sessions".into())
                             .compact()
                             .label("Sessions")
                             .tooltip("Show or hide Sessions")

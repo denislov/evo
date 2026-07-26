@@ -125,6 +125,7 @@ impl Render for ComposerPane {
                             .when(!composer_running, |actions| {
                                 actions.child(
                                     Button::new("submit-composer")
+                                        .debug_selector(|| "desktop-hit-submit-composer".into())
                                         .label(if composer_pending {
                                             "Sending…"
                                         } else {

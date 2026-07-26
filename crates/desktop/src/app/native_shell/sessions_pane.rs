@@ -171,6 +171,7 @@ impl Render for SessionsPane {
                     .child("SESSIONS")
                     .child(
                         Button::new("create-session")
+                            .debug_selector(|| "desktop-hit-create-session".into())
                             .compact()
                             .label("New")
                             .tooltip("Create a new session · Ctrl/Cmd+N")

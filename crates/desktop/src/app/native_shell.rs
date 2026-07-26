@@ -4453,6 +4453,17 @@ mod tests {
         ]
     }
 
+    fn assert_minimum_hit_target(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing hit-target selector {selector}"));
+        assert!(
+            f32::from(bounds.size.width) >= 32. && f32::from(bounds.size.height) >= 32.,
+            "{selector} must retain a 32x32 desktop hit target, got {:?}",
+            bounds.size
+        );
+    }
+
     #[gpui::test]
     fn native_shell_focus_and_responsive_bounds_are_stable(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
@@ -4509,6 +4520,32 @@ mod tests {
         let narrow_layout = ShellLayout::resolve(700, 900, PanelVisibility::default());
         assert!(narrow_layout.sessions.is_none());
         assert!(narrow_layout.context.is_none());
+    }
+
+    #[gpui::test]
+    fn native_shell_primary_controls_keep_minimum_hit_targets(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+
+        for width in [1_300., 700.] {
+            cx.simulate_resize(size(px(width), px(900.)));
+            cx.run_until_parked();
+            for selector in [
+                "desktop-hit-toggle-sessions",
+                "desktop-hit-submit-composer",
+                "desktop-hit-cycle-model",
+            ] {
+                assert_minimum_hit_target(cx, selector);
+            }
+        }
+
+        cx.simulate_resize(size(px(1_300.), px(900.)));
+        cx.run_until_parked();
+        assert_minimum_hit_target(cx, "desktop-hit-create-session");
     }
 
     #[gpui::test]
