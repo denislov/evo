@@ -1813,6 +1813,115 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "release performance gate"]
+    fn desktop_release_scale_content_and_streaming_matrix() {
+        const FRAME_BUDGET_MICROS: u128 = 16_700;
+        const FINAL_PARSE_BUDGET_MICROS: u128 = 150_000;
+
+        for block_count in [1, 100, 1_000, MAX_TRANSCRIPT_BLOCKS] {
+            let items = (0..block_count)
+                .map(user)
+                .collect::<Vec<CodingAgentSessionTranscriptItem>>();
+            let started = std::time::Instant::now();
+            let projection = ConversationProjection::hydrate(transcript(items));
+            let hydration_micros = started.elapsed().as_micros();
+            println!(
+                "desktop_perf\tscale_blocks={block_count}\thydration_us={hydration_micros}\t\
+                 retained_bytes={}",
+                projection.retained_bytes()
+            );
+            assert_eq!(projection.blocks().len(), block_count);
+        }
+
+        let table_row = format!(
+            "| {} |\n",
+            (0..32).map(|_| "cell").collect::<Vec<_>>().join(" | ")
+        );
+        let content_cases = [
+            (
+                "markdown_256k",
+                format!(
+                    "# heading\n\n{}",
+                    "paragraph **bold** `code`\n".repeat(10_000)
+                ),
+            ),
+            ("reasoning_512k", "reasoning step 中文 🧠\n".repeat(24_000)),
+            (
+                "bash_output",
+                format!("```text\n{}\n```", "build output\n".repeat(80_000)),
+            ),
+            ("table", table_row.repeat(1_000)),
+            (
+                "code_cjk_emoji",
+                format!(
+                    "```rust\n{}\n```\n{}",
+                    "fn main() {}\n".repeat(12_000),
+                    "中文🙂🚀\n".repeat(12_000)
+                ),
+            ),
+        ];
+        for (name, payload) in content_cases {
+            let mut samples = Vec::with_capacity(20);
+            for _ in 0..20 {
+                let started = std::time::Instant::now();
+                let preview = bounded_markdown_preview(&payload);
+                std::hint::black_box(preview);
+                samples.push(started.elapsed().as_micros());
+            }
+            let parse_p95_micros = percentile_95(&mut samples);
+            println!(
+                "desktop_perf\tcontent={name}\tinput_bytes={}\tparse_p95_us={parse_p95_micros}",
+                payload.len()
+            );
+            assert!(
+                parse_p95_micros <= FINAL_PARSE_BUDGET_MICROS,
+                "{name} bounded final parse P95 exceeded 150ms: {parse_p95_micros} us"
+            );
+        }
+
+        let streaming_text = "streaming 中文 🙂 output ".repeat(128);
+        for events_per_second in [10, 50, 200] {
+            let mut cache = ConversationRowRenderCache::default();
+            let mut samples = Vec::with_capacity(events_per_second);
+            for revision in 1..=events_per_second {
+                cache.begin_frame();
+                let started = std::time::Instant::now();
+                let row = cache.resolve(
+                    ConversationRowRenderSource {
+                        cache_key: "live:assistant:performance",
+                        row_id: "live:assistant:performance",
+                        source_revision: revision as u64,
+                        title: Cow::Borrowed("Assistant"),
+                        text: &streaming_text,
+                        detail: "",
+                        kind: ConversationBlockKind::Assistant,
+                        done: false,
+                        is_error: false,
+                        image_count: 0,
+                        truncated: false,
+                        durable: false,
+                    },
+                    900,
+                );
+                std::hint::black_box(row);
+                cache.finish_incremental();
+                samples.push(started.elapsed().as_micros());
+            }
+            let event_p95_micros = percentile_95(&mut samples);
+            println!(
+                "desktop_perf\tstream_events_per_s={events_per_second}\t\
+                 event_p95_us={event_p95_micros}\tcache_bytes={}",
+                cache.retained_bytes
+            );
+            assert!(
+                event_p95_micros <= FRAME_BUDGET_MICROS,
+                "{events_per_second} events/s row preparation P95 exceeded one frame: \
+                 {event_p95_micros} us"
+            );
+        }
+    }
+
     fn percentile_95(samples: &mut [u128]) -> u128 {
         samples.sort_unstable();
         let index = (samples.len() * 95).div_ceil(100).saturating_sub(1);
