@@ -291,6 +291,7 @@ impl Render for InspectorPane {
 
         div()
             .id("context-panel")
+            .debug_selector(|| "desktop-context-panel".into())
             .when(context_is_overlay, |panel| {
                 panel
                     .key_context(actions::NARROW_CONTEXT_KEY_CONTEXT)

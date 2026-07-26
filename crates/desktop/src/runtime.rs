@@ -556,6 +556,60 @@ impl Drop for DesktopRuntimeBootstrap {
 }
 
 impl DesktopRuntimeBridge {
+    #[cfg(test)]
+    pub(crate) fn disconnected_for_test() -> Self {
+        let (commands, command_rx) = mpsc::channel(DESKTOP_COMMAND_QUEUE_CAPACITY);
+        drop(command_rx);
+        let (priority_update_tx, priority_updates) =
+            mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
+        drop(priority_update_tx);
+        let (data_update_tx, data_updates) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
+        drop(data_update_tx);
+        let (shutdown, _) = watch::channel(false);
+        Self {
+            shutdown: DesktopRuntimeShutdownGuard {
+                shutdown,
+                runtime_thread: None,
+            },
+            commands: Some(commands),
+            events: DesktopRuntimeEventStream {
+                priority_updates,
+                data_updates,
+                pending_priority_update: None,
+                pending_data_update: None,
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn instrumented_for_test() -> (Self, DesktopRuntimeTestHarness) {
+        let (commands, command_rx) = mpsc::channel(DESKTOP_COMMAND_QUEUE_CAPACITY);
+        let (priority_update_tx, priority_updates) =
+            mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
+        let (data_update_tx, data_updates) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
+        let (shutdown, _) = watch::channel(false);
+        (
+            Self {
+                shutdown: DesktopRuntimeShutdownGuard {
+                    shutdown,
+                    runtime_thread: None,
+                },
+                commands: Some(commands),
+                events: DesktopRuntimeEventStream {
+                    priority_updates,
+                    data_updates,
+                    pending_priority_update: None,
+                    pending_data_update: None,
+                },
+            },
+            DesktopRuntimeTestHarness {
+                commands: command_rx,
+                _priority_update_tx: priority_update_tx,
+                _data_update_tx: data_update_tx,
+            },
+        )
+    }
+
     /// Spawn runtime initialization without waiting for configuration/session I/O.
     pub fn spawn(
         options: CodingAgentEmbeddingOptions,
@@ -811,6 +865,24 @@ impl DesktopRuntimeBridge {
 
     fn join_runtime_thread(&mut self) -> Result<(), DesktopRuntimeShutdownError> {
         self.shutdown.join()
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct DesktopRuntimeTestHarness {
+    commands: mpsc::Receiver<DesktopRuntimeCommand>,
+    _priority_update_tx: mpsc::Sender<DesktopRuntimeUpdate>,
+    _data_update_tx: mpsc::Sender<DesktopRuntimeUpdate>,
+}
+
+#[cfg(test)]
+impl DesktopRuntimeTestHarness {
+    pub(crate) fn drain_command_kinds(&mut self) -> Vec<DesktopRuntimeCommandKind> {
+        let mut kinds = Vec::new();
+        while let Ok(command) = self.commands.try_recv() {
+            kinds.push(command.kind());
+        }
+        kinds
     }
 }
 

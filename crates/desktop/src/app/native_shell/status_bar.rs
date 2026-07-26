@@ -63,6 +63,7 @@ impl Render for StatusBar {
 
         div()
             .id("status-panel")
+            .debug_selector(|| "desktop-status-panel".into())
             .track_focus(&owner.status_focus)
             .h(px(STATUS_HEIGHT as f32))
             .px_3()

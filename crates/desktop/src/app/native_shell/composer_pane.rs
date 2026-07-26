@@ -81,6 +81,7 @@ impl Render for ComposerPane {
 
         div()
             .id("composer-panel")
+            .debug_selector(|| "desktop-composer-panel".into())
             .min_h(px(COMPOSER_MIN_HEIGHT))
             .max_h(px(COMPOSER_MAX_HEIGHT))
             .flex_shrink_0()

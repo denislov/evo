@@ -146,6 +146,7 @@ impl Render for SessionsPane {
 
         div()
             .id("sessions-panel")
+            .debug_selector(|| "desktop-sessions-panel".into())
             .track_focus(&owner.sessions_focus)
             .w(px(panel_width as f32))
             .h_full()

@@ -1611,6 +1611,126 @@ mod tests {
     }
 
     #[test]
+    fn session_scoped_cache_keys_prevent_cross_session_state_reuse() {
+        let mut cache = ConversationRowRenderCache::default();
+        cache.begin_frame();
+        let first = cache.resolve(
+            ConversationRowRenderSource {
+                cache_key: "session-a:user:0",
+                row_id: "user:0",
+                source_revision: 7,
+                title: Cow::Borrowed("You"),
+                text: "session A content",
+                detail: "",
+                kind: ConversationBlockKind::User,
+                done: true,
+                is_error: false,
+                image_count: 0,
+                truncated: false,
+                durable: true,
+            },
+            900,
+        );
+        cache.finish_frame();
+
+        cache.begin_frame();
+        let second = cache.resolve(
+            ConversationRowRenderSource {
+                cache_key: "session-b:user:0",
+                row_id: "user:0",
+                source_revision: 7,
+                title: Cow::Borrowed("You"),
+                text: "session B content",
+                detail: "",
+                kind: ConversationBlockKind::User,
+                done: true,
+                is_error: false,
+                image_count: 0,
+                truncated: false,
+                durable: true,
+            },
+            900,
+        );
+        cache.finish_frame();
+
+        assert_eq!(first.row_id.as_ref(), second.row_id.as_ref());
+        assert_eq!(first.source_revision, second.source_revision);
+        assert_ne!(first.cache_key, second.cache_key);
+        assert_eq!(first.text.as_ref(), "session A content");
+        assert_eq!(second.text.as_ref(), "session B content");
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.entries.contains_key("session-b:user:0"));
+    }
+
+    #[test]
+    fn streaming_to_final_revision_sanitizes_once_and_freezes_final_state() {
+        let mut cache = ConversationRowRenderCache::default();
+        cache.begin_frame();
+        let streaming = cache.resolve(
+            ConversationRowRenderSource {
+                cache_key: "session-a:assistant:1",
+                row_id: "assistant:1",
+                source_revision: 1,
+                title: Cow::Borrowed("Assistant"),
+                text: "**partial",
+                detail: "reasoning in progress",
+                kind: ConversationBlockKind::Assistant,
+                done: false,
+                is_error: false,
+                image_count: 0,
+                truncated: false,
+                durable: false,
+            },
+            900,
+        );
+        assert_eq!(streaming.text.as_ref(), "**partial");
+        assert_eq!(cache.sanitization_count, 0);
+
+        cache.begin_frame();
+        let final_row = cache.resolve(
+            ConversationRowRenderSource {
+                cache_key: "session-a:assistant:1",
+                row_id: "assistant:1",
+                source_revision: 2,
+                title: Cow::Borrowed("Assistant"),
+                text: "**final**",
+                detail: "reasoning complete",
+                kind: ConversationBlockKind::Assistant,
+                done: true,
+                is_error: false,
+                image_count: 0,
+                truncated: false,
+                durable: true,
+            },
+            900,
+        );
+        assert_eq!(cache.sanitization_count, 1);
+        assert_eq!(final_row.sanitized_revision, 2);
+        assert!(!Arc::ptr_eq(&streaming.text, &final_row.text));
+
+        let frozen = cache.resolve(
+            ConversationRowRenderSource {
+                cache_key: "session-a:assistant:1",
+                row_id: "assistant:1",
+                source_revision: 2,
+                title: Cow::Borrowed("Assistant"),
+                text: "ignored identical revision payload",
+                detail: "ignored identical revision detail",
+                kind: ConversationBlockKind::Assistant,
+                done: true,
+                is_error: false,
+                image_count: 0,
+                truncated: false,
+                durable: true,
+            },
+            900,
+        );
+        assert_eq!(cache.sanitization_count, 1);
+        assert!(Arc::ptr_eq(&final_row.text, &frozen.text));
+        assert!(Arc::ptr_eq(&final_row.detail, &frozen.detail));
+    }
+
+    #[test]
     fn row_render_cache_drops_stale_entries_and_enforces_bounds() {
         let mut cache = ConversationRowRenderCache::with_limits(2, 128 * 1024);
         cache.begin_frame();

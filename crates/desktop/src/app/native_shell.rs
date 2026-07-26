@@ -4183,6 +4183,7 @@ impl Render for NativeShell {
 
         let conversation = div()
             .id("conversation-panel")
+            .debug_selector(|| "desktop-conversation-panel".into())
             .key_context(actions::CONVERSATION_KEY_CONTEXT)
             .track_focus(&self.conversation_focus)
             .flex_1()
@@ -4321,6 +4322,361 @@ fn safe_runtime_rejection_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    use coding_agent::api::authorization::{
+        ToolAuthorizationPreview, ToolAuthorizationRequest, ToolAuthorizationRisk,
+        ToolAuthorizationScope,
+    };
+    use coding_agent::api::client::{
+        CodingAgentContextSnapshot, CodingAgentFileChangeSnapshot, CodingAgentRecoveryPending,
+        CodingAgentSnapshot, CodingAgentSnapshotCursor, UI_SNAPSHOT_PROTOCOL_VERSION,
+    };
+    use coding_agent::api::embedding::{
+        CodingAgentEmbeddingSnapshot, CodingAgentResourceSummary, CodingAgentSettingsSummary,
+    };
+    use coding_agent::api::view::{
+        CodingAgentCapabilities, CodingAgentSessionView, CodingAgentTranscriptSnapshot, ProfileId,
+    };
+    use gpui::TestAppContext;
+    use gpui_component::{Theme, ThemeMode};
+
+    fn visual_test_snapshot() -> desktop::runtime::DesktopRuntimeHydratedSnapshot {
+        let session_id = "desktop-visual-test".to_owned();
+        desktop::runtime::DesktopRuntimeHydratedSnapshot {
+            project: CodingAgentEmbeddingSnapshot {
+                cwd: std::path::PathBuf::from("/desktop-visual-test"),
+                global_config_dir: std::path::PathBuf::from("/desktop-visual-test/config"),
+                selected_model_id: "test-model".into(),
+                default_agent_profile_id: ProfileId::from("default"),
+                models: Vec::new(),
+                profiles: Vec::new(),
+                resources: CodingAgentResourceSummary {
+                    skill_names: Vec::new(),
+                    prompt_template_names: Vec::new(),
+                    commands: Vec::new(),
+                    context_files: Vec::new(),
+                },
+                settings: CodingAgentSettingsSummary {
+                    default_provider: None,
+                    default_model: None,
+                    default_thinking_level: None,
+                    session_dir: None,
+                    no_context_files: true,
+                },
+                diagnostics: Vec::new(),
+            },
+            session: CodingAgentSnapshot {
+                cursor: CodingAgentSnapshotCursor {
+                    stream_id: "desktop-visual-test-stream".into(),
+                    snapshot_protocol_major: UI_SNAPSHOT_PROTOCOL_VERSION.major,
+                    last_event_sequence: 0,
+                    last_session_sequence: 0,
+                    capability_generation: 0,
+                },
+                version: UI_SNAPSHOT_PROTOCOL_VERSION,
+                session: CodingAgentSessionView {
+                    session_id: session_id.clone(),
+                    default_agent_profile_id: ProfileId::from("default"),
+                },
+                capabilities: CodingAgentCapabilities::idle(false),
+                active_operation: None,
+                drafts: Vec::new(),
+                submitted_operation: None,
+                pending_authorizations: Vec::new(),
+                context: CodingAgentContextSnapshot::default(),
+            },
+            transcript: CodingAgentTranscriptSnapshot {
+                session_id,
+                active_leaf_id: None,
+                items: Vec::new(),
+            },
+            pending_recoveries: Vec::new(),
+        }
+    }
+
+    fn visual_test_projection() -> DesktopProjection {
+        DesktopProjection::new(visual_test_snapshot())
+            .expect("visual test fixture is a valid product projection")
+    }
+
+    fn initialize_visual_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            actions::bind_keys(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+    }
+
+    fn add_visual_shell<'a>(
+        cx: &'a mut TestAppContext,
+        runtime: DesktopRuntimeBridge,
+        projection: DesktopProjection,
+    ) -> (gpui::Entity<NativeShell>, &'a mut gpui::VisualTestContext) {
+        let shell_slot = Rc::new(RefCell::new(None));
+        let shell_slot_for_window = Rc::clone(&shell_slot);
+        let (_, visual_cx) = cx.add_window_view(move |window, cx| {
+            let shell = cx.new(|cx| {
+                NativeShell::new(
+                    NativeShellInit {
+                        runtime,
+                        projection,
+                        preferences: DesktopPreferences::default(),
+                        preference_writer: None,
+                        preference_notice: None,
+                        initial_session_id: None,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            shell_slot_for_window.replace(Some(shell.clone()));
+            gpui_component::Root::new(shell, window, cx)
+        });
+        let shell = shell_slot
+            .borrow_mut()
+            .take()
+            .expect("visual shell entity was captured");
+        (shell, visual_cx)
+    }
+
+    fn desktop_region_bounds(
+        cx: &mut gpui::VisualTestContext,
+    ) -> [Option<gpui::Bounds<gpui::Pixels>>; 5] {
+        [
+            cx.debug_bounds("desktop-sessions-panel"),
+            cx.debug_bounds("desktop-conversation-panel"),
+            cx.debug_bounds("desktop-composer-panel"),
+            cx.debug_bounds("desktop-context-panel"),
+            cx.debug_bounds("desktop-status-panel"),
+        ]
+    }
+
+    #[gpui::test]
+    fn native_shell_focus_and_responsive_bounds_are_stable(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+
+        cx.simulate_resize(size(px(1_300.), px(900.)));
+        cx.run_until_parked();
+        let wide_before_focus = desktop_region_bounds(cx);
+        assert!(wide_before_focus.iter().all(Option::is_some));
+        cx.dispatch_action(FocusNextRegion);
+        cx.run_until_parked();
+        assert_eq!(desktop_region_bounds(cx), wide_before_focus);
+
+        cx.simulate_resize(size(px(1_000.), px(900.)));
+        cx.run_until_parked();
+        let medium = desktop_region_bounds(cx);
+        assert!(medium[0].is_some());
+        assert!(medium[1].is_some());
+        assert!(medium[2].is_some());
+        assert!(medium[4].is_some());
+        assert_eq!(f32::from(medium[0].unwrap().size.width), 240.);
+        assert_eq!(f32::from(medium[1].unwrap().size.width), 760.);
+        assert_eq!(f32::from(medium[2].unwrap().size.width), 760.);
+        assert_eq!(f32::from(medium[4].unwrap().size.width), 1_000.);
+
+        cx.simulate_resize(size(px(700.), px(900.)));
+        cx.run_until_parked();
+        let narrow = desktop_region_bounds(cx);
+        assert!(narrow[1].is_some());
+        assert!(narrow[2].is_some());
+        assert!(narrow[4].is_some());
+        assert_eq!(f32::from(narrow[1].unwrap().size.width), 700.);
+        assert_eq!(f32::from(narrow[2].unwrap().size.width), 700.);
+        assert_eq!(f32::from(narrow[4].unwrap().size.width), 700.);
+
+        let medium_layout = ShellLayout::resolve(1_000, 900, PanelVisibility::default());
+        assert!(medium_layout.sessions.is_some());
+        assert!(medium_layout.context.is_none());
+        let narrow_layout = ShellLayout::resolve(700, 900, PanelVisibility::default());
+        assert!(narrow_layout.sessions.is_none());
+        assert!(narrow_layout.context.is_none());
+    }
+
+    #[gpui::test]
+    fn native_shell_command_palette_smoke_uses_overlay_focus_and_restores_it(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, visual_test_projection());
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        cx.dispatch_action(OpenCommandPalette);
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_overlay),
+            Some(DesktopOverlayKind::CommandPalette)
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Overlay
+        );
+
+        cx.dispatch_action(EscapeHierarchy);
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_overlay), None);
+        assert_ne!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Overlay
+        );
+    }
+
+    #[gpui::test]
+    fn native_shell_authorization_smoke_traps_focus_and_submits_a_typed_decision(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let mut snapshot = visual_test_snapshot();
+        snapshot
+            .session
+            .pending_authorizations
+            .push(ToolAuthorizationRequest {
+                authorization_id: "authorization-visual-test".into(),
+                operation_id: "operation-visual-test".into(),
+                turn_id: "turn-visual-test".into(),
+                tool_call_id: "tool-call-visual-test".into(),
+                tool_name: "bash".into(),
+                risk: ToolAuthorizationRisk::ShellExecution,
+                scope: ToolAuthorizationScope::Shell {
+                    cwd: "/desktop-visual-test".into(),
+                    command_fingerprint: "command-fingerprint".into(),
+                },
+                preview: ToolAuthorizationPreview {
+                    summary: "Run a visual-test command".into(),
+                    path: None,
+                    command: Some("true".into()),
+                    cwd: Some("/desktop-visual-test".into()),
+                    content_preview: None,
+                },
+                capability_generation: 0,
+                requested_at: "2026-07-27T00:00:00Z".into(),
+            });
+        let projection = DesktopProjection::new(snapshot)
+            .expect("authorization visual fixture is a valid product projection");
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, projection);
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_overlay),
+            Some(DesktopOverlayKind::Authorization)
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Overlay
+        );
+
+        cx.dispatch_action(AuthorizationDeny);
+        cx.run_until_parked();
+        assert!(
+            runtime_harness
+                .drain_command_kinds()
+                .contains(&desktop::runtime::DesktopRuntimeCommandKind::DecideToolAuthorization)
+        );
+        assert!(shell.read_with(cx, |shell, _| {
+            shell.command_ledger.contains_where(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::Authorization {
+                        authorization_id,
+                        ..
+                    } if authorization_id == "authorization-visual-test"
+                )
+            })
+        }));
+    }
+
+    #[gpui::test]
+    fn native_shell_inspector_smoke_submits_recovery_and_file_review_commands(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let recovery = CodingAgentRecoveryPending {
+            operation_id: "operation-recovery".into(),
+            recovery_id: "recovery-visual-test".into(),
+            operation_kind: Some("prompt".into()),
+            record_version: 3,
+            descriptor_revision: 2,
+            capability_generation: Some(0),
+            attempt_count: 1,
+            last_attempt_at: Some("2026-07-27T00:00:00Z".into()),
+            next_attempt_at: None,
+        };
+        let change = CodingAgentFileChangeSnapshot {
+            path: "crates/desktop/src/app/native_shell.rs".into(),
+            mutation_kind: "edit".into(),
+            operation_id: "operation-file-review".into(),
+            tool_call_id: Some("tool-call-file-review".into()),
+            updated_sequence: 7,
+            first_changed_line: Some(1),
+            added_lines: Some(2),
+            removed_lines: Some(1),
+            diff: Some("@@ -1 +1 @@".into()),
+        };
+        let recovery_identity = DesktopRecoveryIdentity::from(&recovery);
+        let review_request = CodingAgentFileReviewRequest::from(&change);
+        let mut snapshot = visual_test_snapshot();
+        snapshot.pending_recoveries.push(recovery);
+        snapshot.session.context.changes.push(change);
+        let projection = DesktopProjection::new(snapshot)
+            .expect("inspector visual fixture is a valid product projection");
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, projection);
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+        let inspector = shell.read_with(cx, |shell, _| shell.inspector_pane.clone());
+
+        inspector.update(cx, |_, cx| {
+            cx.emit(InspectorPaneEvent::Recovery {
+                identity: recovery_identity,
+                action: DesktopRecoveryAction::Retry,
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            runtime_harness
+                .drain_command_kinds()
+                .contains(&desktop::runtime::DesktopRuntimeCommandKind::RetryRecovery)
+        );
+        assert!(shell.read_with(cx, |shell, _| {
+            shell.command_ledger.contains_where(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::Recovery {
+                        recovery_id,
+                        action: DesktopRecoveryAction::Retry,
+                    } if recovery_id == "recovery-visual-test"
+                )
+            })
+        }));
+
+        inspector.update(cx, |_, cx| {
+            cx.emit(InspectorPaneEvent::RequestFileReview(
+                review_request.clone(),
+            ));
+        });
+        cx.run_until_parked();
+        assert!(
+            runtime_harness
+                .drain_command_kinds()
+                .contains(&desktop::runtime::DesktopRuntimeCommandKind::ReviewChangedFile)
+        );
+        assert!(shell.read_with(cx, |shell, _| {
+            matches!(
+                &shell.file_review,
+                DesktopFileReviewState::Loading(request) if request == &review_request
+            )
+        }));
+    }
 
     #[test]
     fn runtime_and_recovery_labels_are_exhaustive_and_typed() {

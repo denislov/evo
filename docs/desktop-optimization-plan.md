@@ -112,11 +112,11 @@ NativeShell
 #### DESK-002 消除 Conversation 焦点几何跳变
 
 - [x] 确认根因：focused 分支动态调用 `border_1()`。
-- [ ] 删除动态几何样式。
-- [ ] 使用已有 header divider 的颜色变化表达键盘焦点，焦点样式不参与布局。
-- [ ] 鼠标操作和键盘 focus-visible 语义分离；当前阶段先保证几何稳定，输入模态检测在 DESK-016 完成。
-- [ ] 增加源码不变量/纯逻辑回归测试。
-- [ ] 后续增加 GPUI bounds 组件测试。
+- [x] 删除动态几何样式。
+- [x] 使用已有 header divider 的颜色变化表达键盘焦点，焦点样式不参与布局。
+- [x] 鼠标操作和键盘 focus-visible 语义分离。
+- [x] 增加源码不变量/纯逻辑回归测试。
+- [x] 增加真实 NativeShell 的 GPUI bounds 组件测试，覆盖聚焦前后和宽/中/窄三档窗口。
 
 验收：Conversation 聚焦前后 bounds、viewport 宽高和换行完全一致；不再出现完整紫色外框。
 
@@ -136,7 +136,7 @@ NativeShell
 - [ ] 新增轻量 `StreamingText` 组件。
 - [ ] streaming 阶段按 16–33ms 合并 append-only fragment，以 plain/rich-inline text 呈现。
 - [ ] 80–120ms 无新内容时允许后台生成阶段性 Markdown。
-- [ ] terminal 后执行一次最终 Markdown parse，并冻结结果。
+- [ ] terminal 后执行一次最终 Markdown parse，并冻结结果；当前已验证 final revision 只安全清洗一次并冻结缓存，尚缺 Markdown parser 级计数。
 - [ ] 过期 revision 的后台结果不得覆盖新内容。
 - [ ] Reasoning 和 tool output 使用同一 revision 协议。
 
@@ -147,7 +147,7 @@ NativeShell
 - [x] Markdown keyed state 从列表 index 改为现有稳定 block/message/tool ID。
 - [ ] 为 durable、submitted、message、tool 和 diagnostic 定义稳定 typed key。
 - [ ] `TextView::markdown`、row element 和 selection 使用稳定 key，不使用 index。
-- [ ] session 切换和 transcript 头部淘汰后不复用错误的 TextView state。
+- [x] cache key 纳入 session ID；session 切换和 transcript 头部淘汰后不复用错误的 TextView state。
 
 验收：切换 session、前部 eviction 和 live→durable reconciliation 后内容与 selection 身份正确。
 
@@ -281,12 +281,14 @@ NativeShell
 
 #### DESK-018 组件、截图和端到端回归
 
-- [ ] Focus bounds 组件测试。
-- [ ] Stable key/session switch 测试。
-- [ ] Following/Paused scroll anchor 测试。
-- [ ] Streaming→Final Markdown revision 测试。
+- [x] Focus bounds 组件测试。
+- [x] Stable key/session switch 测试。
+- [x] Following/Paused scroll anchor 测试。
+- [x] Streaming→Final Markdown revision 测试。
 - [ ] 宽、中、窄窗口截图 golden tests。
-- [ ] Authorization、recovery、file review 和 command palette 端到端 smoke test。
+- [x] Authorization、recovery、file review 和 command palette 端到端 smoke test。
+
+自动化证据：`native_shell_focus_and_responsive_bounds_are_stable` 在真实 NativeShell/GPUI 组件树上验证焦点零几何位移与三档响应式 bounds；`session_scoped_cache_keys_prevent_cross_session_state_reuse`、`paused_anchor_survives_growth_insertion_and_eviction_above_it` 和 `streaming_to_final_revision_sanitizes_once_and_freezes_final_state` 覆盖 identity、scroll anchor 与 revision；三条 NativeShell smoke test 通过真实 action/subview event 到达 overlay focus 和 runtime command queue。当前 GPUI 0.2.2 的 headless `VisualTestContext` 提供组件 bounds，但不提供像素捕获接口，因此 screenshot golden 保持待办，不以 bounds 断言冒充截图门禁。
 
 ## 6. 建议 PR 顺序
 
@@ -363,7 +365,7 @@ desktop.input.latency
 | DESK-015 | 完成 | Sessions 搜索/相对时间/自动刷新与 Inspector 按需分区已完成；sidebar 宽度可持久化、拖动和双击复位，窄屏继续使用 drawer |
 | DESK-016 | 进行中 | 区域/消息键盘导航、overlay focus restore 和 focus-visible 已完成；待 GPUI accessibility tree 与统一 hit target 收口 |
 | DESK-017 | 进行中 | release scale/content/streaming matrix 与本地门禁已完成；待真实 GPUI frame/paint/input/allocation/memory 曲线 |
-| DESK-018 | 待开始 | 继续组件、截图和端到端回归收口 |
+| DESK-018 | 进行中 | Focus bounds、session key、scroll anchor、Streaming→Final 与四条关键流程 smoke 已覆盖；待 screenshot golden 基础设施 |
 
 ## 10. 完成定义
 
