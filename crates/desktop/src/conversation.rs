@@ -445,6 +445,7 @@ pub struct ConversationBlock {
     pub done: bool,
     pub is_error: bool,
     pub image_count: usize,
+    pub reasoning_duration_millis: Option<u64>,
     pub truncated: bool,
 }
 
@@ -484,6 +485,7 @@ pub struct ConversationRowRenderSource<'a> {
     pub done: bool,
     pub is_error: bool,
     pub image_count: usize,
+    pub reasoning_duration_millis: Option<u64>,
     pub truncated: bool,
     pub durable: bool,
 }
@@ -515,6 +517,7 @@ pub struct ConversationRowRenderData {
     pub done: bool,
     pub is_error: bool,
     pub image_count: usize,
+    pub reasoning_duration_millis: Option<u64>,
     pub preview_truncated: bool,
     pub media_neutralized: bool,
     pub durable: bool,
@@ -676,6 +679,7 @@ impl ConversationRowRenderCache {
             done: source.done,
             is_error: source.is_error,
             image_count: source.image_count,
+            reasoning_duration_millis: source.reasoning_duration_millis,
             preview_truncated,
             media_neutralized,
             durable: source.durable,
@@ -1425,6 +1429,13 @@ impl ComposerState {
 }
 
 fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> ConversationBlock {
+    let reasoning_duration_millis = match &item {
+        CodingAgentSessionTranscriptItem::Assistant {
+            reasoning_duration_millis,
+            ..
+        } => *reasoning_duration_millis,
+        _ => None,
+    };
     let (kind, source_id, title, text, detail, done, is_error, image_count, truncated) = match item
     {
         CodingAgentSessionTranscriptItem::User { text } => {
@@ -1447,6 +1458,7 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
             thinking,
             images,
             done,
+            ..
         } => {
             let (text, text_truncated) = truncate_bytes(text, MAX_BLOCK_TEXT_BYTES);
             let (thinking, thinking_truncated) = truncate_bytes(thinking, MAX_THINKING_TEXT_BYTES);
@@ -1551,6 +1563,7 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
         done,
         is_error,
         image_count,
+        reasoning_duration_millis,
         truncated,
     };
     block.refresh_source_revision();
@@ -1566,7 +1579,8 @@ fn tool_title(name: &str, duration_millis: Option<u64>) -> String {
     }
 }
 
-fn compact_duration(duration_millis: u64) -> String {
+/// Formats an authoritative lifecycle duration using stable compact units.
+pub fn compact_duration(duration_millis: u64) -> String {
     if duration_millis < 1_000 {
         return format!("{duration_millis} ms");
     }
@@ -1606,6 +1620,13 @@ fn conversation_block_revision(block: &ConversationBlock) -> u64 {
     hash = update(hash, &[u8::from(block.done)]);
     hash = update(hash, &[u8::from(block.is_error)]);
     hash = update(hash, &(block.image_count as u64).to_le_bytes());
+    hash = update(
+        hash,
+        &block
+            .reasoning_duration_millis
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     update(hash, &[u8::from(block.truncated)])
 }
 
@@ -1696,6 +1717,7 @@ mod tests {
             done,
             is_error: false,
             image_count: 0,
+            reasoning_duration_millis: None,
             truncated: false,
             durable: true,
         }
@@ -1794,6 +1816,7 @@ mod tests {
                 done: true,
                 is_error: false,
                 image_count: 0,
+                reasoning_duration_millis: None,
                 truncated: false,
                 durable: true,
             },
@@ -1817,6 +1840,7 @@ mod tests {
                 done: true,
                 is_error: false,
                 image_count: 0,
+                reasoning_duration_millis: None,
                 truncated: false,
                 durable: true,
             },
@@ -1912,6 +1936,7 @@ mod tests {
                 done: false,
                 is_error: false,
                 image_count: 0,
+                reasoning_duration_millis: None,
                 truncated: false,
                 durable: false,
             },
@@ -1936,6 +1961,7 @@ mod tests {
                 done: true,
                 is_error: false,
                 image_count: 0,
+                reasoning_duration_millis: Some(2_430),
                 truncated: false,
                 durable: true,
             },
@@ -1960,6 +1986,7 @@ mod tests {
                 done: true,
                 is_error: false,
                 image_count: 0,
+                reasoning_duration_millis: Some(2_430),
                 truncated: false,
                 durable: true,
             },
@@ -2394,6 +2421,7 @@ mod tests {
                         done: false,
                         is_error: false,
                         image_count: 0,
+                        reasoning_duration_millis: None,
                         truncated: false,
                         durable: false,
                     },
@@ -2556,6 +2584,26 @@ mod tests {
     }
 
     #[test]
+    fn assistant_hydration_preserves_reasoning_duration_for_disclosure() {
+        let projection = ConversationProjection::hydrate(transcript(vec![
+            CodingAgentSessionTranscriptItem::Assistant {
+                id: "message-reasoning".into(),
+                text: "answer".into(),
+                thinking: "reasoning".into(),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: Some(2_430),
+            },
+        ]));
+        let block = projection.blocks().front().unwrap();
+        assert_eq!(block.reasoning_duration_millis, Some(2_430));
+        assert_eq!(
+            compact_duration(block.reasoning_duration_millis.unwrap()),
+            "2.4 s"
+        );
+    }
+
+    #[test]
     fn live_row_copy_uses_the_same_bounded_utf8_safe_projection() {
         assert_eq!(conversation_copy_text("answer", "detail"), "answer\ndetail");
         let copied = conversation_copy_text("", &"界".repeat(MAX_COPY_BYTES));
@@ -2572,6 +2620,7 @@ mod tests {
                 thinking: String::new(),
                 images: Vec::new(),
                 done: true,
+                reasoning_duration_millis: None,
             },
         ]));
         let mut viewport = ConversationViewport::new(1);

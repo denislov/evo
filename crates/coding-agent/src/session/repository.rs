@@ -2302,6 +2302,7 @@ mod tests {
                     message_id: "msg_1".into(),
                     content: vec![PersistedContentBlock::Text { text: "hi".into() }],
                     status: MessageStatus::Completed,
+                    reasoning_duration_millis: None,
                 },
                 TranscriptItem::ToolCall {
                     tool_call_id: "tool_1".into(),

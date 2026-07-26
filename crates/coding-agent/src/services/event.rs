@@ -1607,6 +1607,7 @@ pub(crate) struct AgentEventMappingContext {
     operation_id: String,
     turn_id: String,
     assistant_message_id: Option<String>,
+    reasoning_duration_millis: Option<u64>,
 }
 
 impl AgentEventMappingContext {
@@ -1615,11 +1616,17 @@ impl AgentEventMappingContext {
             operation_id: operation_id.into(),
             turn_id: turn_id.into(),
             assistant_message_id: None,
+            reasoning_duration_millis: None,
         }
     }
 
     pub(crate) fn with_assistant_message_id(mut self, message_id: impl Into<String>) -> Self {
         self.assistant_message_id = Some(message_id.into());
+        self
+    }
+
+    pub(crate) fn with_reasoning_duration_millis(mut self, duration_millis: Option<u64>) -> Self {
+        self.reasoning_duration_millis = duration_millis;
         self
     }
 }
@@ -1760,6 +1767,7 @@ fn map_assistant_event(
                 final_text: assistant_text(&message.content),
                 images: assistant_images(&message.content),
                 usage: message.usage.clone(),
+                reasoning_duration_millis: context.reasoning_duration_millis,
             })]
         }
         AssistantMessageEvent::TextEnd { .. }
@@ -2526,6 +2534,7 @@ mod tests {
                 message_id: Some("msg_1".into()),
                 final_text: "done".into(),
                 images: Vec::new(),
+                reasoning_duration_millis: None,
                 usage: Usage::default(),
             })]
         );
@@ -2569,6 +2578,7 @@ mod tests {
                     mime_type: "image/png".into(),
                     data: "cG5n".into(),
                 }],
+                reasoning_duration_millis: None,
                 usage: Usage::default(),
             })]
         );

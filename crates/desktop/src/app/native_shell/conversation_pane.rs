@@ -7,6 +7,7 @@ use gpui_component::{button::Button, v_virtual_list};
 use super::{
     ConversationBlockKind, NativeShell, conversation_block_visual, streaming_text::StreamingText,
 };
+use desktop::conversation::compact_duration;
 use desktop::shell::{
     ASSISTANT_MESSAGE_MAX_WIDTH, MONOSPACE_FONT_FAMILY, SemanticTheme, USER_MESSAGE_MAX_WIDTH,
     USER_MESSAGE_WIDTH_PERCENT,
@@ -116,6 +117,9 @@ impl Render for ConversationPane {
                             theme.border
                         };
                         let is_assistant = block.kind == ConversationBlockKind::Assistant;
+                        let reasoning_duration_label = block
+                            .reasoning_duration_millis
+                            .map(compact_duration);
                         let is_tool = block.kind == ConversationBlockKind::Tool;
                         let has_collapsible_detail = (is_assistant && !detail_text.is_empty())
                             || (is_tool && (!text.is_empty() || !detail_text.is_empty()));
@@ -240,10 +244,16 @@ impl Render for ConversationPane {
                                                         .justify_between()
                                                         .text_xs()
                                                         .text_color(rgb(theme.reasoning.value()))
-                                                        .child(if block.done {
-                                                            "◇ Reasoning · collapsed"
+                                                        .child(if let Some(duration) = &reasoning_duration_label {
+                                                            SharedString::new(format!(
+                                                                "◇ Reasoning · {duration} · collapsed"
+                                                            ))
+                                                        } else if block.done {
+                                                            SharedString::new("◇ Reasoning · collapsed")
                                                         } else {
-                                                            "◇ Reasoning · streaming · collapsed"
+                                                            SharedString::new(
+                                                                "◇ Reasoning · streaming · collapsed",
+                                                            )
                                                         })
                                                         .child(
                                                             Button::new((
@@ -292,7 +302,14 @@ impl Render for ConversationPane {
                                                             .text_color(rgb(
                                                                 theme.reasoning.value(),
                                                             ))
-                                                            .child("◇ REASONING"),
+                                                            .child(match &reasoning_duration_label {
+                                                                Some(duration) => SharedString::new(
+                                                                    format!("◇ REASONING · {duration}"),
+                                                                ),
+                                                                None => SharedString::new(
+                                                                    "◇ REASONING",
+                                                                ),
+                                                            }),
                                                     )
                                                     .child(
                                                         StreamingText::new(

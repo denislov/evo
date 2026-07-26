@@ -277,6 +277,9 @@ pub enum CodingAgentSessionTranscriptItem {
         thinking: String,
         images: Vec<crate::events::CodingAgentImageContent>,
         done: bool,
+        /// Sum of completed reasoning-segment lifetimes. `None` means the
+        /// lifecycle was not observed or the message is still streaming.
+        reasoning_duration_millis: Option<u64>,
     },
     Tool {
         call_id: String,

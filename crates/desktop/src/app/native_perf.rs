@@ -305,6 +305,7 @@ fn visual_projection() -> Result<DesktopProjection, String> {
                 .into(),
             images: Vec::new(),
             done: true,
+            reasoning_duration_millis: Some(2_430),
         },
     ];
     projection_with_transcript("desktop-native-visual", items)

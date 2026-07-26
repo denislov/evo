@@ -116,6 +116,7 @@ pub struct CodingAgentClientMessage {
     pub message_id: Option<String>,
     pub text: String,
     pub thinking: String,
+    pub reasoning_duration_millis: Option<u64>,
     pub status: CodingAgentClientMessageStatus,
     pub updated_sequence: u64,
     pub truncated: bool,
@@ -533,6 +534,7 @@ impl CodingAgentClientProjection {
                         .map(|value| bounded_text(value, MAX_ID_BYTES)),
                     text: String::new(),
                     thinking: String::new(),
+                    reasoning_duration_millis: None,
                     status: CodingAgentClientMessageStatus::Streaming,
                     updated_sequence: event.sequence(),
                     truncated: false,
@@ -550,11 +552,16 @@ impl CodingAgentClientProjection {
                 current.truncated |=
                     append_bounded(&mut current.thinking, text, MAX_THINKING_BYTES);
             }
-            CodingAgentMessageProductEvent::Completed { final_text, .. } => {
+            CodingAgentMessageProductEvent::Completed {
+                final_text,
+                reasoning_duration_millis,
+                ..
+            } => {
                 let (text, truncated) = bounded_prefix(final_text, MAX_MESSAGE_BYTES);
                 current.text = text;
                 current.truncated |= truncated;
                 current.status = CodingAgentClientMessageStatus::Completed;
+                current.reasoning_duration_millis = *reasoning_duration_millis;
             }
         }
         trim_messages(&mut self.messages);
@@ -897,6 +904,7 @@ fn sanitize_transcript_item(
             thinking,
             images,
             done,
+            reasoning_duration_millis,
         } => {
             let (id, id_truncated) = bounded_prefix(&id, MAX_ID_BYTES);
             let (text, text_truncated) = bounded_prefix(&text, MAX_MESSAGE_BYTES);
@@ -925,6 +933,7 @@ fn sanitize_transcript_item(
                 thinking,
                 images,
                 done,
+                reasoning_duration_millis,
             }
         }
         CodingAgentSessionTranscriptItem::Tool {
@@ -1675,6 +1684,7 @@ mod tests {
                     thinking: String::new(),
                     images: Vec::new(),
                     done: true,
+                    reasoning_duration_millis: None,
                 },
                 CodingAgentSessionTranscriptItem::Delegation {
                     tool_call_id: "tool-1".into(),
@@ -1769,6 +1779,7 @@ mod tests {
                 message_id: Some("message-1".into()),
                 final_text: "done".into(),
                 images: Vec::new(),
+                reasoning_duration_millis: None,
                 usage: CodingAgentProductEventUsage {
                     input: 10,
                     output: 2,
@@ -2007,6 +2018,7 @@ mod tests {
                     message_id: Some(format!("message-{index}")),
                     final_text,
                     images: Vec::new(),
+                    reasoning_duration_millis: None,
                     usage: CodingAgentProductEventUsage {
                         input: 0,
                         output: 0,
@@ -2431,6 +2443,7 @@ mod tests {
                 })
                 .collect(),
             done: true,
+            reasoning_duration_millis: None,
         });
         transcript_items.push(CodingAgentSessionTranscriptItem::Assistant {
             id: "oversized-image".into(),
@@ -2447,6 +2460,7 @@ mod tests {
                 },
             ],
             done: true,
+            reasoning_duration_millis: None,
         });
         let recoveries = (0..MAX_RECOVERIES + 2)
             .map(|index| pending_recovery(&format!("recovery-{index}")))

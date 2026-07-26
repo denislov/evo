@@ -2508,12 +2508,14 @@ pub(crate) fn coding_transcript_item_from_replay(
             message_id,
             content,
             status,
+            reasoning_duration_millis,
         } => CodingAgentSessionTranscriptItem::Assistant {
             id: message_id,
             text: persisted_content_blocks_text(&content),
             thinking: persisted_content_blocks_thinking(&content),
             images: persisted_content_blocks_images(&content),
             done: !matches!(status, MessageStatus::Started),
+            reasoning_duration_millis,
         },
         TranscriptItem::ToolCall {
             tool_call_id,
@@ -2849,6 +2851,7 @@ mod tests {
                 },
             ],
             status: MessageStatus::Completed,
+            reasoning_duration_millis: Some(2_430),
         });
 
         assert!(matches!(
@@ -2858,6 +2861,7 @@ mod tests {
                 thinking,
                 images,
                 done: true,
+                reasoning_duration_millis: Some(2_430),
                 ..
             } if text == "answer"
                 && thinking == "reasoning"

@@ -437,6 +437,8 @@ pub enum CodingAgentMessageProductEvent {
         final_text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<CodingAgentImageContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_duration_millis: Option<u64>,
         usage: CodingAgentProductEventUsage,
     },
 }
@@ -1601,6 +1603,7 @@ mod tests {
                 message_id: Some("message".into()),
                 final_text: "done".into(),
                 images: Vec::new(),
+                reasoning_duration_millis: None,
                 usage,
             },
         ]
@@ -1855,11 +1858,13 @@ mod tests {
                 mime_type: "image/png".into(),
                 data: "cG5n".into(),
             }],
+            reasoning_duration_millis: Some(2_430),
             usage: usage.clone(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["images"][0]["mime_type"], "image/png");
         assert_eq!(json["images"][0]["data"], "cG5n");
+        assert_eq!(json["reasoning_duration_millis"], 2_430);
         assert!(json["usage"].get("cost_known").is_none());
 
         let unknown_cost = CodingAgentProductEventUsage {
@@ -1877,6 +1882,7 @@ mod tests {
             message_id: Some("message-1".into()),
             final_text: "text only".into(),
             images: Vec::new(),
+            reasoning_duration_millis: None,
             usage,
         };
         assert!(serde_json::to_value(empty).unwrap().get("images").is_none());

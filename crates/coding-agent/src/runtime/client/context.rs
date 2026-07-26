@@ -345,6 +345,7 @@ mod tests {
                     message_id: Some("message-1".into()),
                     final_text: "done".into(),
                     images: Vec::new(),
+                    reasoning_duration_millis: None,
                     usage: CodingAgentProductEventUsage {
                         input: 100,
                         output: 20,
@@ -448,6 +449,7 @@ mod tests {
                     message_id: None,
                     final_text: String::new(),
                     images: Vec::new(),
+                    reasoning_duration_millis: None,
                     usage: CodingAgentProductEventUsage {
                         input: 1,
                         output: 1,

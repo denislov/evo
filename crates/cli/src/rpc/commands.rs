@@ -1860,6 +1860,7 @@ fn rpc_transcript_item(item: CodingAgentSessionTranscriptItem) -> serde_json::Va
             thinking,
             images,
             done,
+            reasoning_duration_millis,
         } => serde_json::json!({
             "role": "assistant",
             "id": id,
@@ -1867,6 +1868,7 @@ fn rpc_transcript_item(item: CodingAgentSessionTranscriptItem) -> serde_json::Va
             "thinking": thinking,
             "images": images,
             "done": done,
+            "reasoningDurationMillis": reasoning_duration_millis,
         }),
         CodingAgentSessionTranscriptItem::Tool {
             call_id,
@@ -1936,5 +1938,19 @@ mod tests {
         };
 
         assert_eq!(rpc_transcript_item(item)["durationMillis"], 1_250);
+    }
+
+    #[test]
+    fn rpc_assistant_transcript_projects_optional_reasoning_duration() {
+        let item = CodingAgentSessionTranscriptItem::Assistant {
+            id: "message-1".into(),
+            text: "answer".into(),
+            thinking: "reasoning".into(),
+            images: Vec::new(),
+            done: true,
+            reasoning_duration_millis: Some(2_430),
+        };
+
+        assert_eq!(rpc_transcript_item(item)["reasoningDurationMillis"], 2_430);
     }
 }

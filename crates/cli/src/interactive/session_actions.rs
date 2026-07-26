@@ -99,6 +99,7 @@ fn transcript_items_from_rust_native(
             thinking,
             images,
             done,
+            ..
         } => {
             let mut items = Vec::with_capacity(1 + images.len());
             if !text.trim().is_empty() || !thinking.trim().is_empty() {
@@ -321,6 +322,7 @@ mod hydration_tests {
                     data: "cG5n".into(),
                 }],
                 done: true,
+                reasoning_duration_millis: None,
             });
         assert!(matches!(
             &assistant[0],
@@ -360,6 +362,7 @@ mod hydration_tests {
                     data: "anBlZw==".into(),
                 }],
                 done: true,
+                reasoning_duration_millis: None,
             });
         assert_eq!(image_only.len(), 1);
         assert!(matches!(

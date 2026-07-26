@@ -234,6 +234,16 @@ pub(crate) enum SessionEventData {
         message_id: String,
         role: PersistedRole,
     },
+    #[serde(rename = "message.reasoning.started")]
+    MessageReasoningStarted {
+        message_id: String,
+        content_index: u32,
+    },
+    #[serde(rename = "message.reasoning.completed")]
+    MessageReasoningCompleted {
+        message_id: String,
+        content_index: u32,
+    },
     #[serde(rename = "message.completed")]
     MessageCompleted {
         message_id: String,
@@ -699,6 +709,20 @@ mod tests {
                     role: PersistedRole::Assistant,
                 },
                 "message.started",
+            ),
+            (
+                SessionEventData::MessageReasoningStarted {
+                    message_id: "msg_1".into(),
+                    content_index: 0,
+                },
+                "message.reasoning.started",
+            ),
+            (
+                SessionEventData::MessageReasoningCompleted {
+                    message_id: "msg_1".into(),
+                    content_index: 0,
+                },
+                "message.reasoning.completed",
             ),
             (
                 SessionEventData::MessageCompleted {

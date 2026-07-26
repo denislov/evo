@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use agent_core::api::agent::{Agent, AgentEvent, AgentResources, ProviderStreamer, ThinkingLevel};
 use agent_core::api::tool::{AgentTool, AgentToolResult, ToolExecutionContext, ToolExecutionMode};
@@ -604,6 +605,7 @@ pub(crate) struct PromptTurnContext {
     delegation_authorization_decisions: Vec<DelegationAuthorizationDecision>,
     assistant_session_message_id: Option<String>,
     completed_assistant_session_message_id: Option<String>,
+    reasoning_duration: ReasoningDurationTracker,
     live_event_service: Option<EventService>,
     prompt_control_receiver: Option<PromptControlReceiver>,
     operation_cancellation: Option<CancellationToken>,
@@ -647,6 +649,7 @@ impl PromptTurnContext {
             delegation_authorization_decisions: Vec::new(),
             assistant_session_message_id: None,
             completed_assistant_session_message_id: None,
+            reasoning_duration: ReasoningDurationTracker::default(),
             live_event_service: None,
             prompt_control_receiver: None,
             operation_cancellation: None,
@@ -930,6 +933,7 @@ impl PromptTurnContext {
                         .unwrap_or_else(|| format!("msg_{}", self.turn_id())),
                     content,
                     status: MessageStatus::Completed,
+                    reasoning_duration_millis: None,
                 });
             }
         }
@@ -1008,6 +1012,15 @@ impl PromptTurnContext {
         event: AgentEvent,
     ) -> Result<Vec<PromptStreamEvent>, CodingSessionError> {
         self.record_agent_event_to_transaction(&event)?;
+        self.reasoning_duration.observe(&event);
+        let reasoning_duration_millis = if matches!(
+            event,
+            AgentEvent::LlmEvent(AssistantMessageEvent::Done { .. })
+        ) {
+            self.reasoning_duration.take_duration_millis()
+        } else {
+            None
+        };
         let mut mapping_context = AgentEventMappingContext::new(
             self.operation_id().to_owned(),
             self.turn_id().to_owned(),
@@ -1018,6 +1031,10 @@ impl PromptTurnContext {
             .or_else(|| self.completed_assistant_session_message_id.clone())
         {
             mapping_context = mapping_context.with_assistant_message_id(message_id);
+        }
+        if reasoning_duration_millis.is_some() {
+            mapping_context =
+                mapping_context.with_reasoning_duration_millis(reasoning_duration_millis);
         }
         let coding_events = map_agent_event(&mapping_context, &event);
         self.record_delegation_requests(&coding_events);
@@ -1165,7 +1182,6 @@ impl PromptTurnContext {
         match event {
             AssistantMessageEvent::Start { .. }
             | AssistantMessageEvent::TextStart { .. }
-            | AssistantMessageEvent::ThinkingStart { .. }
             | AssistantMessageEvent::TextDelta { .. }
             | AssistantMessageEvent::ThinkingDelta { .. }
             | AssistantMessageEvent::ToolcallStart { .. }
@@ -1173,6 +1189,20 @@ impl PromptTurnContext {
             | AssistantMessageEvent::ToolcallEnd { .. } => {
                 self.ensure_assistant_session_message_started()?;
                 Ok(())
+            }
+            AssistantMessageEvent::ThinkingStart { content_index, .. } => {
+                let message_id = self.ensure_assistant_session_message_started()?;
+                self.transaction_mut_required()?
+                    .start_assistant_reasoning(message_id, *content_index)
+            }
+            AssistantMessageEvent::ThinkingEnd { content_index, .. } => {
+                let message_id = self.assistant_session_message_id.clone().ok_or_else(|| {
+                    CodingSessionError::Session {
+                        message: "assistant reasoning ended before its message started".into(),
+                    }
+                })?;
+                self.transaction_mut_required()?
+                    .complete_assistant_reasoning(message_id, *content_index)
             }
             AssistantMessageEvent::Done { message, .. } => {
                 self.complete_current_assistant_message(message)
@@ -1186,9 +1216,7 @@ impl PromptTurnContext {
                         .unwrap_or_else(|| "assistant stream failed".into()),
                 )
             }
-            AssistantMessageEvent::TextEnd { .. } | AssistantMessageEvent::ThinkingEnd { .. } => {
-                Ok(())
-            }
+            AssistantMessageEvent::TextEnd { .. } => Ok(()),
         }
     }
 
@@ -1351,6 +1379,75 @@ impl PromptTurnContext {
             diagnostics: self.diagnostics.clone(),
         }
     }
+}
+
+#[derive(Default)]
+struct ReasoningDurationTracker {
+    open: HashMap<u32, Instant>,
+    completed_millis: u64,
+    observed: bool,
+}
+
+impl ReasoningDurationTracker {
+    fn observe(&mut self, event: &AgentEvent) {
+        let AgentEvent::LlmEvent(event) = event else {
+            return;
+        };
+        let now = Instant::now();
+        match event {
+            AssistantMessageEvent::ThinkingStart { content_index, .. } => {
+                self.start_at(*content_index, now);
+            }
+            AssistantMessageEvent::ThinkingEnd { content_index, .. } => {
+                self.complete_at(*content_index, now);
+            }
+            AssistantMessageEvent::Done { .. } => self.finish_at(now),
+            AssistantMessageEvent::Error { .. } => *self = Self::default(),
+            _ => {}
+        }
+    }
+
+    fn start_at(&mut self, content_index: u32, now: Instant) {
+        self.observed = true;
+        self.open.entry(content_index).or_insert(now);
+    }
+
+    fn complete_at(&mut self, content_index: u32, now: Instant) {
+        let Some(started_at) = self.open.remove(&content_index) else {
+            return;
+        };
+        self.completed_millis = self
+            .completed_millis
+            .saturating_add(duration_millis(started_at, now));
+    }
+
+    fn finish_at(&mut self, now: Instant) {
+        let open = std::mem::take(&mut self.open);
+        for started_at in open.into_values() {
+            self.completed_millis = self
+                .completed_millis
+                .saturating_add(duration_millis(started_at, now));
+        }
+    }
+
+    fn duration_millis(&self) -> Option<u64> {
+        self.observed.then_some(self.completed_millis)
+    }
+
+    fn take_duration_millis(&mut self) -> Option<u64> {
+        let duration = self.duration_millis();
+        *self = Self::default();
+        duration
+    }
+}
+
+fn duration_millis(started_at: Instant, completed_at: Instant) -> u64 {
+    u64::try_from(
+        completed_at
+            .saturating_duration_since(started_at)
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 fn stop_reason_string(message: &AssistantMessage) -> Option<String> {
@@ -1862,5 +1959,23 @@ mod tests {
                 diagnostics: vec![CodingDiagnostic::error("provider failed")],
             }
         );
+    }
+
+    #[test]
+    fn reasoning_duration_tracker_sums_segments_and_closes_open_work() {
+        let base = Instant::now();
+        let mut tracker = ReasoningDurationTracker::default();
+        tracker.start_at(0, base);
+        tracker.complete_at(0, base + std::time::Duration::from_millis(750));
+        tracker.start_at(2, base + std::time::Duration::from_secs(5));
+        tracker.finish_at(base + std::time::Duration::from_millis(6_250));
+
+        assert_eq!(tracker.take_duration_millis(), Some(2_000));
+        assert!(tracker.open.is_empty());
+        assert_eq!(tracker.duration_millis(), None);
+
+        tracker.start_at(0, base);
+        tracker.complete_at(0, base + std::time::Duration::from_millis(125));
+        assert_eq!(tracker.take_duration_millis(), Some(125));
     }
 }

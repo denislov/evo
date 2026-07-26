@@ -583,6 +583,7 @@ where
     pending_events: Vec<SessionEventEnvelope>,
     committed_session_sequence: Option<u64>,
     open_messages: HashSet<String>,
+    open_reasoning: HashSet<(String, u32)>,
     open_tool_calls: HashSet<String>,
     state: TransactionState,
 }
@@ -654,6 +655,7 @@ where
             pending_events: Vec::new(),
             committed_session_sequence: None,
             open_messages: HashSet::new(),
+            open_reasoning: HashSet::new(),
             open_tool_calls: HashSet::new(),
             state: TransactionState::Open,
         };
@@ -712,12 +714,63 @@ where
         self.ensure_open()?;
         let message_id = message_id.into();
         self.ensure_message_open(&message_id)?;
+        self.complete_open_reasoning(&message_id);
         self.open_messages.remove(&message_id);
         self.push_event(SessionEventData::MessageCompleted {
             message_id,
             content,
             finish_reason,
             usage,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn start_assistant_reasoning(
+        &mut self,
+        message_id: impl Into<String>,
+        content_index: u32,
+    ) -> Result<(), CodingSessionError> {
+        self.ensure_open()?;
+        let message_id = message_id.into();
+        self.ensure_message_open(&message_id)?;
+        if !self
+            .open_reasoning
+            .insert((message_id.clone(), content_index))
+        {
+            return Err(CodingSessionError::Session {
+                message: format!(
+                    "assistant reasoning segment is already open: {message_id}/{content_index}"
+                ),
+            });
+        }
+        self.push_event(SessionEventData::MessageReasoningStarted {
+            message_id,
+            content_index,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn complete_assistant_reasoning(
+        &mut self,
+        message_id: impl Into<String>,
+        content_index: u32,
+    ) -> Result<(), CodingSessionError> {
+        self.ensure_open()?;
+        let message_id = message_id.into();
+        self.ensure_message_open(&message_id)?;
+        if !self
+            .open_reasoning
+            .remove(&(message_id.clone(), content_index))
+        {
+            return Err(CodingSessionError::Session {
+                message: format!(
+                    "assistant reasoning segment is not open: {message_id}/{content_index}"
+                ),
+            });
+        }
+        self.push_event(SessionEventData::MessageReasoningCompleted {
+            message_id,
+            content_index,
         });
         Ok(())
     }
@@ -731,6 +784,8 @@ where
         self.ensure_open()?;
         let message_id = message_id.into();
         self.ensure_message_open(&message_id)?;
+        self.open_reasoning
+            .retain(|(open_message_id, _)| open_message_id != &message_id);
         self.open_messages.remove(&message_id);
         self.push_event(SessionEventData::MessageCancelled {
             message_id,
@@ -1171,6 +1226,8 @@ where
     fn cancel_open_lifecycle_events(&mut self, reason: &str) {
         let open_messages = self.open_messages.drain().collect::<Vec<_>>();
         for message_id in open_messages {
+            self.open_reasoning
+                .retain(|(open_message_id, _)| open_message_id != &message_id);
             self.push_event(SessionEventData::MessageCancelled {
                 message_id,
                 reason: reason.to_owned(),
@@ -1182,6 +1239,25 @@ where
             self.push_event(SessionEventData::ToolCallCancelled {
                 tool_call_id,
                 reason: reason.to_owned(),
+            });
+        }
+    }
+
+    fn complete_open_reasoning(&mut self, message_id: &str) {
+        let mut content_indices = self
+            .open_reasoning
+            .iter()
+            .filter_map(|(open_message_id, content_index)| {
+                (open_message_id == message_id).then_some(*content_index)
+            })
+            .collect::<Vec<_>>();
+        content_indices.sort_unstable();
+        for content_index in content_indices {
+            self.open_reasoning
+                .remove(&(message_id.to_owned(), content_index));
+            self.push_event(SessionEventData::MessageReasoningCompleted {
+                message_id: message_id.to_owned(),
+                content_index,
             });
         }
     }
@@ -1658,6 +1734,8 @@ mod tests {
                 SessionEventData::TurnStarted {} => "turn.started",
                 SessionEventData::TurnInputRecorded { .. } => "turn.input.recorded",
                 SessionEventData::MessageStarted { .. } => "message.started",
+                SessionEventData::MessageReasoningStarted { .. } => "message.reasoning.started",
+                SessionEventData::MessageReasoningCompleted { .. } => "message.reasoning.completed",
                 SessionEventData::MessageCompleted { .. } => "message.completed",
                 SessionEventData::MessageCancelled { .. } => "message.cancelled",
                 SessionEventData::ToolCallStarted { .. } => "tool.call.started",
@@ -2017,6 +2095,56 @@ mod tests {
         );
         assert_eq!(tool_error.code(), "session");
         assert!(tool_error.to_string().contains("tool call is not open"));
+    }
+
+    #[test]
+    fn message_completion_closes_open_reasoning_segments_in_index_order() {
+        let (_temp, store, handle) = setup();
+        let mut tx = begin(&store, handle.clone());
+        let message_id = tx.start_assistant_message().unwrap();
+        tx.start_assistant_reasoning(&message_id, 3).unwrap();
+        tx.start_assistant_reasoning(&message_id, 1).unwrap();
+        tx.complete_assistant_reasoning(&message_id, 3).unwrap();
+        tx.complete_assistant_message(&message_id, Vec::new(), None, Default::default())
+            .unwrap();
+        tx.commit(None).unwrap();
+
+        let reasoning_events = store
+            .read_events(&handle)
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| match event.data {
+                SessionEventData::MessageReasoningStarted { content_index, .. } => {
+                    Some(("started", content_index))
+                }
+                SessionEventData::MessageReasoningCompleted { content_index, .. } => {
+                    Some(("completed", content_index))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasoning_events,
+            vec![
+                ("started", 3),
+                ("started", 1),
+                ("completed", 3),
+                ("completed", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn reasoning_lifecycle_rejects_duplicate_and_missing_segments() {
+        let (_temp, store, handle) = setup();
+        let mut tx = begin(&store, handle);
+        let message_id = tx.start_assistant_message().unwrap();
+        tx.start_assistant_reasoning(&message_id, 0).unwrap();
+
+        let duplicate = tx.start_assistant_reasoning(&message_id, 0).unwrap_err();
+        let missing = tx.complete_assistant_reasoning(&message_id, 4).unwrap_err();
+        assert!(duplicate.to_string().contains("already open"));
+        assert!(missing.to_string().contains("is not open"));
     }
 
     #[test]

@@ -289,6 +289,8 @@ impl RuntimeService {
                     message_id,
                     content,
                     status: MessageStatus::Completed,
+                    reasoning_duration_millis: None,
+                    ..
                 } => {
                     flush_replay_hydration_group(
                         agent,
@@ -815,6 +817,7 @@ mod tests {
                         },
                     ],
                     status: MessageStatus::Completed,
+                    reasoning_duration_millis: None,
                 },
                 TranscriptItem::ToolCall {
                     tool_call_id: "tool_1".into(),
@@ -831,6 +834,7 @@ mod tests {
                         text: "cancelled answer".into(),
                     }],
                     status: MessageStatus::Cancelled,
+                    reasoning_duration_millis: None,
                 },
                 TranscriptItem::Diagnostic {
                     level: DiagnosticLevel::Warn,

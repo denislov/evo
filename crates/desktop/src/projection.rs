@@ -214,6 +214,7 @@ pub struct DesktopMessageOverlay {
     pub message_id: Option<String>,
     pub text: String,
     pub thinking: String,
+    pub reasoning_duration_millis: Option<u64>,
     pub status: DesktopMessageStatus,
     pub updated_sequence: u64,
     pub truncated: bool,
@@ -227,6 +228,7 @@ impl From<&CodingAgentClientMessage> for DesktopMessageOverlay {
             message_id: message.message_id.clone(),
             text: message.text.clone(),
             thinking: message.thinking.clone(),
+            reasoning_duration_millis: message.reasoning_duration_millis,
             status: match message.status {
                 CodingAgentClientMessageStatus::Streaming => DesktopMessageStatus::Streaming,
                 CodingAgentClientMessageStatus::Completed => DesktopMessageStatus::Completed,

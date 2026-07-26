@@ -119,6 +119,7 @@ fn export_item_from_replay(item: TranscriptItem) -> CodingAgentSessionExportItem
             message_id,
             content,
             status,
+            ..
         } => CodingAgentSessionExportItem::Assistant {
             id: message_id,
             text: persisted_content_blocks_text(&content),

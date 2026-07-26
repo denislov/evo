@@ -281,6 +281,7 @@ fn coding_event_adapter_maps_prompt_sequence_to_protocol_events() {
             message_id: Some("msg_1".into()),
             final_text: "hello".into(),
             images: Vec::new(),
+            reasoning_duration_millis: None,
             usage: product_usage(),
         }),
         CodingAgentProductEventKind::Workflow(CodingAgentWorkflowProductEvent::PromptCompleted {
@@ -346,6 +347,7 @@ fn product_event_protocol_adapter_does_not_emit_flow_node_fields() {
             message_id: Some("msg_prompt".into()),
             final_text: "hello".into(),
             images: Vec::new(),
+            reasoning_duration_millis: None,
             usage: product_usage(),
         }),
         CodingAgentProductEventKind::Workflow(CodingAgentWorkflowProductEvent::PromptCompleted {

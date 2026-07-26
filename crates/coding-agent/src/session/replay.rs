@@ -111,6 +111,7 @@ pub(crate) enum TranscriptItem {
         message_id: String,
         content: Vec<PersistedContentBlock>,
         status: MessageStatus,
+        reasoning_duration_millis: Option<u64>,
     },
     ToolCall {
         tool_call_id: String,
@@ -192,6 +193,7 @@ struct ReplayBuilder {
     tree_labels: HashMap<String, ReplayTreeLabel>,
     diagnostics: Vec<ReplayDiagnostic>,
     message_indices: HashMap<String, usize>,
+    reasoning_started_at: HashMap<(String, u32), String>,
     tool_indices: HashMap<String, usize>,
     delegation_indices: HashMap<String, usize>,
     operation_kinds: HashMap<String, crate::session::event::OperationKind>,
@@ -550,7 +552,60 @@ impl ReplayBuilder {
                     message_id: message_id.clone(),
                     content: Vec::new(),
                     status: MessageStatus::Started,
+                    reasoning_duration_millis: None,
                 });
+            }
+            SessionEventData::MessageReasoningStarted {
+                message_id,
+                content_index,
+            } => {
+                if !self.message_indices.contains_key(message_id) {
+                    self.warn(format!(
+                        "reasoning start references unknown message: {message_id}/{content_index}"
+                    ));
+                } else {
+                    let duplicate = match self
+                        .reasoning_started_at
+                        .entry((message_id.clone(), *content_index))
+                    {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(event.created_at.clone());
+                            false
+                        }
+                        std::collections::hash_map::Entry::Occupied(_) => true,
+                    };
+                    if duplicate {
+                        self.warn(format!(
+                            "duplicate reasoning start: {message_id}/{content_index}"
+                        ));
+                    }
+                }
+            }
+            SessionEventData::MessageReasoningCompleted {
+                message_id,
+                content_index,
+            } => {
+                let key = (message_id.clone(), *content_index);
+                let Some(started_at) = self.reasoning_started_at.remove(&key) else {
+                    self.warn(format!(
+                        "reasoning completion has no matching start: {message_id}/{content_index}"
+                    ));
+                    return;
+                };
+                let Some(duration_millis) = elapsed_millis(&started_at, &event.created_at) else {
+                    self.warn(format!(
+                        "reasoning lifecycle has invalid timestamps: {message_id}/{content_index}"
+                    ));
+                    return;
+                };
+                if self
+                    .add_reasoning_duration(message_id, duration_millis)
+                    .is_err()
+                {
+                    self.warn(format!(
+                        "reasoning completion references unknown message: {message_id}/{content_index}"
+                    ));
+                }
             }
             SessionEventData::MessageCompleted {
                 message_id,
@@ -566,6 +621,8 @@ impl ReplayBuilder {
                 }
             }
             SessionEventData::MessageCancelled { message_id, .. } => {
+                self.reasoning_started_at
+                    .retain(|(open_message_id, _), _| open_message_id != message_id);
                 if self
                     .set_message_status(message_id, MessageStatus::Cancelled)
                     .is_err()
@@ -806,6 +863,24 @@ impl ReplayBuilder {
         }
     }
 
+    fn add_reasoning_duration(&mut self, message_id: &str, duration_millis: u64) -> Result<(), ()> {
+        let index = *self.message_indices.get(message_id).ok_or(())?;
+        match self.transcript.get_mut(index).ok_or(())? {
+            TranscriptItem::AssistantMessage {
+                reasoning_duration_millis,
+                ..
+            } => {
+                *reasoning_duration_millis = Some(
+                    reasoning_duration_millis
+                        .unwrap_or_default()
+                        .saturating_add(duration_millis),
+                );
+                Ok(())
+            }
+            _ => Err(()),
+        }
+    }
+
     fn set_message_status(&mut self, message_id: &str, status: MessageStatus) -> Result<(), ()> {
         let index = *self.message_indices.get(message_id).ok_or(())?;
         match self.transcript.get_mut(index).ok_or(())? {
@@ -897,6 +972,8 @@ impl ReplayBuilder {
                 | TranscriptItem::Diagnostic { .. } => {}
             }
         }
+        self.reasoning_started_at
+            .retain(|(message_id, _), _| self.message_indices.contains_key(message_id));
     }
 }
 
@@ -1282,6 +1359,7 @@ mod tests {
                     message_id: "msg_1".into(),
                     content: vec![PersistedContentBlock::Text { text: "hi".into() }],
                     status: MessageStatus::Completed,
+                    reasoning_duration_millis: None,
                 },
                 TranscriptItem::ToolCall {
                     tool_call_id: "tool_1".into(),
@@ -1357,6 +1435,87 @@ mod tests {
             elapsed_millis("2026-06-29T00:00:02Z", "2026-06-29T00:00:01Z"),
             None
         );
+    }
+
+    #[test]
+    fn reasoning_duration_sums_independent_durable_segments() {
+        let events = vec![
+            op_event(
+                "evt_0",
+                SessionEventData::OperationStarted {
+                    operation: OperationKind::Prompt,
+                    runtime_generation: Default::default(),
+                },
+            ),
+            op_event_at(
+                "evt_1",
+                "2026-06-29T00:00:00Z",
+                SessionEventData::MessageStarted {
+                    message_id: "msg_timed".into(),
+                    role: PersistedRole::Assistant,
+                },
+            ),
+            op_event_at(
+                "evt_2",
+                "2026-06-29T00:00:00.100Z",
+                SessionEventData::MessageReasoningStarted {
+                    message_id: "msg_timed".into(),
+                    content_index: 0,
+                },
+            ),
+            op_event_at(
+                "evt_3",
+                "2026-06-29T00:00:01.350Z",
+                SessionEventData::MessageReasoningCompleted {
+                    message_id: "msg_timed".into(),
+                    content_index: 0,
+                },
+            ),
+            op_event_at(
+                "evt_4",
+                "2026-06-29T00:00:05Z",
+                SessionEventData::MessageReasoningStarted {
+                    message_id: "msg_timed".into(),
+                    content_index: 2,
+                },
+            ),
+            op_event_at(
+                "evt_5",
+                "2026-06-29T00:00:05.750Z",
+                SessionEventData::MessageReasoningCompleted {
+                    message_id: "msg_timed".into(),
+                    content_index: 2,
+                },
+            ),
+            op_event_at(
+                "evt_6",
+                "2026-06-29T00:00:08Z",
+                SessionEventData::MessageCompleted {
+                    message_id: "msg_timed".into(),
+                    content: vec![PersistedContentBlock::Text {
+                        text: "answer".into(),
+                    }],
+                    finish_reason: Some("stop".into()),
+                    usage: Default::default(),
+                },
+            ),
+            op_event(
+                "evt_7",
+                SessionEventData::OperationCommitted { new_leaf_id: None },
+            ),
+        ];
+
+        let replay = fold_events(&events);
+        assert!(matches!(
+            replay.transcript.as_slice(),
+            [TranscriptItem::AssistantMessage {
+                message_id,
+                reasoning_duration_millis: Some(2_000),
+                status: MessageStatus::Completed,
+                ..
+            }] if message_id == "msg_timed"
+        ));
+        assert!(replay.diagnostics.is_empty());
     }
 
     #[test]
@@ -1463,6 +1622,7 @@ mod tests {
                     message_id: "msg_1".into(),
                     content: Vec::new(),
                     status: MessageStatus::Cancelled,
+                    reasoning_duration_millis: None,
                 },
                 TranscriptItem::ToolCall {
                     tool_call_id: "tool_1".into(),
@@ -1795,6 +1955,7 @@ mod tests {
                         text: "kept answer".into(),
                     }],
                     status: MessageStatus::Completed,
+                    reasoning_duration_millis: None,
                 },
             ]
         );

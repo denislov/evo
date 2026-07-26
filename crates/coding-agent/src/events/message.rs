@@ -31,6 +31,7 @@ pub(crate) enum MessageEvent {
         final_text: String,
         images: Vec<CodingAgentImageContent>,
         usage: Usage,
+        reasoning_duration_millis: Option<u64>,
     },
 }
 
@@ -84,6 +85,7 @@ impl MessageEvent {
                 final_text,
                 images,
                 usage,
+                reasoning_duration_millis,
             } => (
                 CodingAgentMessageProductEvent::Completed {
                     operation_id: operation_id.clone(),
@@ -91,6 +93,7 @@ impl MessageEvent {
                     message_id,
                     final_text,
                     images,
+                    reasoning_duration_millis,
                     usage: CodingAgentProductEventUsage {
                         input: usage.input,
                         output: usage.output,

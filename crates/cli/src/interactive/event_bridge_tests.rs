@@ -150,6 +150,7 @@ fn coding_event_bridge_maps_assistant_events() {
             message_id: Some("msg_1".to_string()),
             final_text: "hello".to_string(),
             images: Vec::new(),
+            reasoning_duration_millis: None,
             usage: CodingAgentProductEventUsage {
                 input: 100,
                 output: 50,
@@ -190,6 +191,7 @@ fn coding_event_bridge_maps_assistant_events() {
             message_id: Some("msg_2".to_string()),
             final_text: "world".to_string(),
             images: Vec::new(),
+            reasoning_duration_millis: None,
             usage: CodingAgentProductEventUsage {
                 input: 30,
                 output: 20,
@@ -231,6 +233,7 @@ fn coding_event_bridge_marks_zero_usage_context_unknown() {
             message_id: Some("msg_1".to_string()),
             final_text: "hello".to_string(),
             images: Vec::new(),
+            reasoning_duration_millis: None,
             usage: empty_usage(),
         },
     )));
@@ -265,6 +268,7 @@ fn coding_event_bridge_projects_assistant_images_as_structured_blocks() {
             message_id: Some("msg_1".into()),
             final_text: "caption".into(),
             images: vec![image.clone()],
+            reasoning_duration_millis: None,
             usage: empty_usage(),
         },
     )));
