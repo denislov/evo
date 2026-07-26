@@ -99,6 +99,29 @@ mod allocation_probe {
             bytes: ALLOCATED_BYTES.load(Ordering::Relaxed),
         }
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn resident_bytes() -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        parse_linux_resident_bytes(&status)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn resident_bytes() -> Option<u64> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn parse_linux_resident_bytes(status: &str) -> Option<u64> {
+        let kibibytes = status.lines().find_map(|line| {
+            line.strip_prefix("VmRSS:")?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })?;
+        kibibytes.checked_mul(1024)
+    }
 }
 
 /// Supported startup inputs for the native desktop application.
@@ -137,6 +160,21 @@ pub fn run(options: DesktopApplicationOptions) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_resident_memory_parser_requires_vmrss_and_converts_kibibytes() {
+        assert_eq!(
+            super::allocation_probe::parse_linux_resident_bytes(
+                "Name:\tdesktop\nVmSize:\t9000 kB\nVmRSS:\t1234 kB\n"
+            ),
+            Some(1_263_616)
+        );
+        assert_eq!(
+            super::allocation_probe::parse_linux_resident_bytes("VmSize:\t9000 kB\n"),
+            None
+        );
+    }
+
     #[test]
     fn categorized_product_runtime_facade_is_importable() {
         let options = coding_agent::api::runtime::CodingAgentSessionOptions::new();

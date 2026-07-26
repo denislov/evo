@@ -32,6 +32,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
 };
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -53,6 +54,39 @@ const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250
 const MAX_EXPANDED_CONVERSATION_DETAILS: usize = 256;
 const COLLAPSED_CONVERSATION_DETAIL_HEIGHT: f32 = 36.;
 const MAX_COMPOSER_SESSION_STATES: usize = 256;
+
+#[derive(Debug, Default)]
+struct InputRenderLatencyProbe {
+    pending_change: Cell<Option<Instant>>,
+    #[cfg(test)]
+    last_observed: Cell<Option<Duration>>,
+}
+
+impl InputRenderLatencyProbe {
+    fn mark_changed(&self) {
+        self.mark_changed_at(Instant::now());
+    }
+
+    fn mark_changed_at(&self, now: Instant) {
+        self.pending_change.set(Some(now));
+    }
+
+    fn observe_render(&self) {
+        let _ = self.observe_render_at(Instant::now());
+    }
+
+    fn observe_render_at(&self, now: Instant) -> Option<Duration> {
+        let latency = now.saturating_duration_since(self.pending_change.take()?);
+        tracing::trace!(
+            target: "desktop",
+            latency_micros = u64::try_from(latency.as_micros()).unwrap_or(u64::MAX),
+            "desktop.input.to_render"
+        );
+        #[cfg(test)]
+        self.last_observed.set(Some(latency));
+        Some(latency)
+    }
+}
 const SESSION_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy)]
@@ -443,6 +477,7 @@ pub(super) struct NativeShell {
     status_bar: gpui::Entity<StatusBar>,
     overlay_host: gpui::Entity<OverlayHost>,
     composer: ComposerState,
+    composer_input_latency: InputRenderLatencyProbe,
     composer_input: gpui::Entity<InputState>,
     sessions_search_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
@@ -548,6 +583,7 @@ impl NativeShell {
                 |this, input, event: &InputEvent, window, cx| match event {
                     InputEvent::Change => {
                         let _span = tracing::trace_span!("desktop.input.change").entered();
+                        this.composer_input_latency.mark_changed();
                         this.composer.edit(input.read(cx).value().to_string());
                         this.notify_composer_pane(cx);
                     }
@@ -755,6 +791,7 @@ impl NativeShell {
             status_bar,
             overlay_host,
             composer: ComposerState::default(),
+            composer_input_latency: InputRenderLatencyProbe::default(),
             composer_input,
             sessions_search_input,
             composer_needs_sync: false,
@@ -4546,6 +4583,51 @@ mod tests {
         cx.simulate_resize(size(px(1_300.), px(900.)));
         cx.run_until_parked();
         assert_minimum_hit_target(cx, "desktop-hit-create-session");
+    }
+
+    #[test]
+    fn input_render_latency_uses_latest_change_and_consumes_it_once() {
+        let probe = InputRenderLatencyProbe::default();
+        let started = Instant::now();
+        probe.mark_changed_at(started);
+        probe.mark_changed_at(started + Duration::from_millis(3));
+
+        assert_eq!(
+            probe.observe_render_at(started + Duration::from_millis(8)),
+            Some(Duration::from_millis(5))
+        );
+        assert_eq!(probe.last_observed.get(), Some(Duration::from_millis(5)));
+        assert_eq!(
+            probe.observe_render_at(started + Duration::from_millis(9)),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn composer_pane_render_consumes_pending_input_latency(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+        cx.run_until_parked();
+
+        let changed_at = Instant::now();
+        shell.update(cx, |shell, cx| {
+            shell.composer_input_latency.mark_changed_at(changed_at);
+            shell.notify_composer_pane(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(shell.read_with(cx, |shell, _| {
+            shell.composer_input_latency.pending_change.get().is_none()
+                && shell
+                    .composer_input_latency
+                    .last_observed
+                    .get()
+                    .is_some_and(|latency| latency <= changed_at.elapsed())
+        }));
     }
 
     #[gpui::test]

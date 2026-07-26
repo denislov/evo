@@ -2150,6 +2150,7 @@ mod tests {
         const FRAME_BUDGET_MICROS: u128 = 16_700;
         const HYDRATION_ALLOCATION_BUDGET: u64 = 40_064;
         const HYDRATION_ALLOCATED_BYTE_BUDGET: u64 = 8 * 1024 * 1024;
+        const HYDRATION_RSS_GROWTH_BUDGET: u64 = 64 * 1024 * 1024;
 
         let payload = format!(
             "# streamed message\n\n{}\n\n```text\n{}\n```",
@@ -2170,12 +2171,15 @@ mod tests {
             .sum::<usize>();
         assert!(fixture_bytes >= 10 * 1024 * 1024);
 
+        let rss_before = crate::allocation_probe::resident_bytes();
         let allocations_before = crate::allocation_probe::snapshot();
         let hydration_started = std::time::Instant::now();
         let projection = ConversationProjection::hydrate(transcript(items));
         let hydration_micros = hydration_started.elapsed().as_micros();
         let hydration_allocations =
             crate::allocation_probe::snapshot().delta_since(allocations_before);
+        let rss_after = crate::allocation_probe::resident_bytes();
+        let rss_growth = resident_growth(rss_before, rss_after);
         assert_eq!(projection.blocks().len(), MAX_TRANSCRIPT_BLOCKS);
 
         let mut viewport = ConversationViewport::new(VISIBLE_BLOCKS);
@@ -2212,10 +2216,15 @@ mod tests {
         println!(
             "desktop_perf\tfixture_bytes={fixture_bytes}\thydration_us={hydration_micros}\t\
              hydration_allocations={}\thydration_allocated_bytes={}\tretained_bytes={}\t\
+             rss_supported={}\trss_before_bytes={}\trss_after_bytes={}\trss_growth_bytes={}\t\
              scroll_render_p95_us={scroll_p95_micros}\tinput_p95_us={input_p95_micros}",
             hydration_allocations.count(),
             hydration_allocations.bytes(),
-            projection.retained_bytes()
+            projection.retained_bytes(),
+            rss_before.is_some() && rss_after.is_some(),
+            rss_before.unwrap_or_default(),
+            rss_after.unwrap_or_default(),
+            rss_growth.unwrap_or_default()
         );
         assert!(
             scroll_p95_micros <= FRAME_BUDGET_MICROS,
@@ -2236,6 +2245,12 @@ mod tests {
             "10 MiB transcript hydration copied too much retained content: {} bytes",
             hydration_allocations.bytes()
         );
+        if let Some(rss_growth) = rss_growth {
+            assert!(
+                rss_growth <= HYDRATION_RSS_GROWTH_BUDGET,
+                "10 MiB transcript hydration RSS growth exceeded 64 MiB: {rss_growth} bytes"
+            );
+        }
     }
 
     #[test]
@@ -2243,23 +2258,32 @@ mod tests {
     fn desktop_release_scale_content_and_streaming_matrix() {
         const FRAME_BUDGET_MICROS: u128 = 16_700;
         const FINAL_PARSE_BUDGET_MICROS: u128 = 150_000;
+        const HYDRATION_RSS_GROWTH_BUDGET: u64 = 64 * 1024 * 1024;
 
         for block_count in [1, 100, 1_000, MAX_TRANSCRIPT_BLOCKS] {
             let items = (0..block_count)
                 .map(user)
                 .collect::<Vec<CodingAgentSessionTranscriptItem>>();
+            let rss_before = crate::allocation_probe::resident_bytes();
             let allocations_before = crate::allocation_probe::snapshot();
             let started = std::time::Instant::now();
             let projection = ConversationProjection::hydrate(transcript(items));
             let hydration_micros = started.elapsed().as_micros();
             let hydration_allocations =
                 crate::allocation_probe::snapshot().delta_since(allocations_before);
+            let rss_after = crate::allocation_probe::resident_bytes();
+            let rss_growth = resident_growth(rss_before, rss_after);
             println!(
                 "desktop_perf\tscale_blocks={block_count}\thydration_us={hydration_micros}\t\
-                 hydration_allocations={}\thydration_allocated_bytes={}\tretained_bytes={}",
+                 hydration_allocations={}\thydration_allocated_bytes={}\tretained_bytes={}\t\
+                 rss_supported={}\trss_before_bytes={}\trss_after_bytes={}\trss_growth_bytes={}",
                 hydration_allocations.count(),
                 hydration_allocations.bytes(),
-                projection.retained_bytes()
+                projection.retained_bytes(),
+                rss_before.is_some() && rss_after.is_some(),
+                rss_before.unwrap_or_default(),
+                rss_after.unwrap_or_default(),
+                rss_growth.unwrap_or_default()
             );
             assert_eq!(projection.blocks().len(), block_count);
             assert!(
@@ -2270,6 +2294,12 @@ mod tests {
                 hydration_allocations.bytes() <= block_count as u64 * 512 + 4_096,
                 "{block_count}-block hydration allocated-byte count exceeded the linear budget"
             );
+            if let Some(rss_growth) = rss_growth {
+                assert!(
+                    rss_growth <= HYDRATION_RSS_GROWTH_BUDGET,
+                    "{block_count}-block hydration RSS growth exceeded 64 MiB"
+                );
+            }
         }
 
         let table_row = format!(
@@ -2367,6 +2397,10 @@ mod tests {
         samples.sort_unstable();
         let index = (samples.len() * 95).div_ceil(100).saturating_sub(1);
         samples[index]
+    }
+
+    fn resident_growth(before: Option<u64>, after: Option<u64>) -> Option<u64> {
+        Some(after?.saturating_sub(before?))
     }
 
     #[test]

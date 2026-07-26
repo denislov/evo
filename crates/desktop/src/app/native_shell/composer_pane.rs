@@ -45,6 +45,7 @@ impl Render for ComposerPane {
             keyboard_focus_visible,
         ) = {
             let owner = owner.read(cx);
+            owner.composer_input_latency.observe_render();
             (
                 owner.composer_input.clone(),
                 matches!(
