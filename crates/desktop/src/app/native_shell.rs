@@ -547,6 +547,7 @@ impl NativeShell {
                 window,
                 |this, input, event: &InputEvent, window, cx| match event {
                     InputEvent::Change => {
+                        let _span = tracing::trace_span!("desktop.input.change").entered();
                         this.composer.edit(input.read(cx).value().to_string());
                         this.notify_composer_pane(cx);
                     }
@@ -3845,6 +3846,12 @@ impl NativeShell {
         &mut self,
         layout_width: u32,
     ) -> Option<(std::time::Duration, bool)> {
+        let _span = tracing::trace_span!(
+            "desktop.render.prepare_rows",
+            layout_width,
+            visible_rows = self.visible_conversation_count()
+        )
+        .entered();
         let visible_conversation_count = self.visible_conversation_count();
         let previous_scroll_top = (!self.conversation_viewport.follow_latest())
             .then(|| (-f32::from(self.conversation_scroll.offset().y)).max(0.0));
@@ -4094,6 +4101,7 @@ impl NativeShell {
 
 impl Render for NativeShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = tracing::trace_span!("desktop.render").entered();
         if self.composer_needs_sync {
             let draft = self.composer.draft().to_owned();
             self.composer_input.update(cx, |input, cx| {

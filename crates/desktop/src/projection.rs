@@ -442,6 +442,12 @@ impl DesktopProjection {
     }
 
     pub fn apply(&mut self, update: DesktopRuntimeUpdate) -> DesktopProjectionApply {
+        let _span = tracing::trace_span!(
+            "desktop.projection.apply",
+            update_kind = update.kind_label(),
+            cursor = self.cursor().last_event_sequence
+        )
+        .entered();
         match update {
             DesktopRuntimeUpdate::Reloaded { metadata, .. }
             | DesktopRuntimeUpdate::SelectionChanged { metadata, .. } => {

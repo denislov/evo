@@ -33,6 +33,7 @@ use coding_agent::api::view::{CodingAgentTranscriptSnapshot, ProfileId};
 use tokio::runtime;
 use tokio::sync::{mpsc, watch};
 use tokio::task;
+use tracing::Instrument as _;
 
 use crate::file_review::{
     DesktopExternalEditorConfig, DesktopExternalEditorLaunchError, launch_external_editor,
@@ -394,6 +395,31 @@ pub enum DesktopRuntimeUpdate {
         error: DesktopRuntimeError,
     },
     Stopped,
+}
+
+impl DesktopRuntimeUpdate {
+    pub(crate) const fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Reloaded { .. } => "reloaded",
+            Self::Resynced { .. } => "resynced",
+            Self::SessionChanged { .. } => "session_changed",
+            Self::SessionsListed { .. } => "sessions_listed",
+            Self::SelectionChanged { .. } => "selection_changed",
+            Self::PromptAccepted { .. } => "prompt_accepted",
+            Self::PromptStarted { .. } => "prompt_started",
+            Self::ProductEvent { .. } => "product_event",
+            Self::ResyncRequired { .. } => "resync_required",
+            Self::ControlAccepted { .. } => "control_accepted",
+            Self::AuthorizationDecisionAccepted { .. } => "authorization_decision_accepted",
+            Self::RecoveryChanged { .. } => "recovery_changed",
+            Self::FileReviewed { .. } => "file_reviewed",
+            Self::ExternalEditorOpened { .. } => "external_editor_opened",
+            Self::PromptFinished { .. } => "prompt_finished",
+            Self::CommandRejected { .. } => "command_rejected",
+            Self::RuntimeFailed { .. } => "runtime_failed",
+            Self::Stopped => "stopped",
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -913,8 +939,23 @@ impl DesktopRuntimeEventStream {
     /// Control, recovery, terminal, failure, and shutdown updates return
     /// immediately, including when they interrupt an active data batch.
     pub async fn next_update_batch(&mut self) -> Option<Vec<DesktopRuntimeUpdate>> {
-        let first = self.next_update().await?;
+        let wait_started = std::time::Instant::now();
+        let first = self
+            .next_update()
+            .instrument(tracing::trace_span!("desktop.runtime.batch_wait"))
+            .await?;
+        tracing::trace!(
+            target: "desktop",
+            wait_micros = wait_started.elapsed().as_micros() as u64,
+            update_kind = first.kind_label(),
+            "desktop.runtime.receive"
+        );
         if !is_streaming_data_update(&first) {
+            tracing::trace!(
+                target: "desktop",
+                batch_size = 1_u64,
+                "desktop.runtime.batch_size"
+            );
             return Some(vec![first]);
         }
         let mut updates = Vec::with_capacity(MAX_STREAMING_DELIVERIES_PER_BATCH);
@@ -939,6 +980,11 @@ impl DesktopRuntimeEventStream {
                 _ = &mut deadline => break,
             }
         }
+        tracing::trace!(
+            target: "desktop",
+            batch_size = updates.len() as u64,
+            "desktop.runtime.batch_size"
+        );
         Some(updates)
     }
 

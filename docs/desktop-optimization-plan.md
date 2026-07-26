@@ -102,12 +102,12 @@ NativeShell
 
 #### DESK-001 建立优化基线
 
-- [ ] 为 runtime batch 大小、等待时长、projection apply、view render、Markdown parse 和 list layout 建立 tracing/计时点。
-- [ ] 准备可重复 replay fixture：1、100、1,000、10,000 条历史消息。
-- [ ] 准备 10、50、200 events/s 的流式回放模式。
+- [ ] 已为 runtime batch/wait、projection apply、preview sanitize、row height/layout、row prepare、view render 和 input handler 建立 opt-in tracing；真实 Markdown parser、paint 与端到端 input latency 仍缺公开 hook。
+- [x] release replay fixture 可重复生成 1、100、1,000、10,000 条历史消息并输出 hydration/prepare 数据。
+- [x] release fixture 覆盖 10、50、200 次 streaming revision 回放。
 - [ ] 记录改造前 frame time、输入延迟、分配量和滚动行为。
 
-验收：同一 fixture 可在本地重复执行并产生可比较数据。
+验收：`scripts/desktop-perf-gate.sh` 串行执行同一 fixture、断言预算并将完整结果写入 `target/desktop-perf/latest.log`；GPU frame/paint、allocator 与端到端输入基线仍待 instrumented window harness。
 
 #### DESK-002 消除 Conversation 焦点几何跳变
 
@@ -348,7 +348,7 @@ desktop.input.latency
 
 | 任务 | 状态 | 备注 |
 |---|---|---|
-| DESK-001 | 待开始 | 先完成最小性能 fixture，再扩展完整基准 |
+| DESK-001 | 进行中 | release replay/streaming fixture、可比较日志与主要 CPU tracing 边界已完成；待 GPUI paint/input、allocator/memory 和 Markdown parser hook |
 | DESK-002 | 完成 | 已移除动态面板边框，改用已有 header divider 和标题颜色；回归测试已通过 |
 | DESK-003 | 完成 | ShellLayout 改为稳定 workspace 模型；sidebar/composer/status/content width 共享 token，响应式临界点与 width bucket 均有回归 |
 | DESK-004 | 进行中 | StreamingText 三态 revision 协议、16ms 合批、100ms settling 与 stale rejection 已完成；待后台 Markdown parser 和 final parse 计数 |

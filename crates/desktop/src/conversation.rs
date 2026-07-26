@@ -58,6 +58,7 @@ pub struct MarkdownPreview {
 /// conversation must not initiate ambient media loading. Explicit product
 /// image attachments remain represented by the transcript block's image count.
 pub fn bounded_markdown_preview(raw: &str) -> MarkdownPreview {
+    let _span = tracing::trace_span!("desktop.preview.sanitize", input_bytes = raw.len()).entered();
     let mut preview = MarkdownPreviewBuilder::new();
     let mut fence = None;
     let mut code_bytes = 0;
@@ -898,6 +899,12 @@ impl ConversationRowLayoutState {
         width_bucket: u32,
         now: Instant,
     ) -> ConversationRowLayoutSingleResolution {
+        let _span = tracing::trace_span!(
+            "desktop.list.height_update",
+            width_bucket,
+            streaming = input.streaming
+        )
+        .entered();
         #[cfg(test)]
         {
             self.single_row_updates = self.single_row_updates.saturating_add(1);
@@ -950,6 +957,12 @@ impl ConversationRowLayoutState {
         now: Instant,
         paused_scroll_top: Option<f32>,
     ) -> ConversationRowLayoutResolution {
+        let _span = tracing::trace_span!(
+            "desktop.list.layout",
+            width_bucket,
+            row_count = inputs.len()
+        )
+        .entered();
         #[cfg(test)]
         {
             self.full_input_visits = self.full_input_visits.saturating_add(inputs.len());
