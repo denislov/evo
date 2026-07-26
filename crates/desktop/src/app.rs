@@ -52,15 +52,22 @@ impl Render for StartupFailure {
 
 pub(crate) fn run(options: crate::DesktopApplicationOptions) {
     let crate::DesktopApplicationOptions { cwd, session_id } = options;
-    let native_performance_replay = native_perf::enabled();
+    let native_replay = native_perf::request();
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
         crate::actions::bind_keys(cx);
         Theme::change(ThemeMode::Dark, None, cx);
 
-        if native_performance_replay {
-            if let Err(error) = native_perf::open(cx) {
-                eprintln!("desktop: native performance replay failed: {error}");
+        if let Some(request) = match native_replay {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("desktop: native replay configuration failed: {error}");
+                cx.quit();
+                return;
+            }
+        } {
+            if let Err(error) = native_perf::open(cx, request) {
+                eprintln!("desktop: native replay failed: {error}");
                 cx.quit();
             }
             return;

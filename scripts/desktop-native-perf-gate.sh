@@ -46,12 +46,21 @@ if [[ "${sample_count}" -ne 200 ]]; then
 fi
 
 p95_index=$(( (sample_count * 95 + 99) / 100 ))
+p99_index=$(( (sample_count * 99 + 99) / 100 ))
 p95_micros="$(sed -n "${p95_index}p" "${samples_file}")"
-budget_micros=16700
-printf 'desktop_perf\tnative_gpu_present_frame_p95_us=%s\tnative_frame_budget_us=%s\n' \
-    "${p95_micros}" "${budget_micros}" | tee -a "${log_file}"
+p99_micros="$(sed -n "${p99_index}p" "${samples_file}")"
+p95_budget_micros=16700
+p99_budget_micros=33000
+printf 'desktop_perf\tnative_gpu_present_frame_p95_us=%s\tnative_gpu_present_frame_p99_us=%s\tnative_frame_p95_budget_us=%s\tnative_frame_p99_budget_us=%s\n' \
+    "${p95_micros}" "${p99_micros}" "${p95_budget_micros}" "${p99_budget_micros}" \
+    | tee -a "${log_file}"
 
-if [[ "${p95_micros}" -gt "${budget_micros}" ]]; then
+if [[ "${p95_micros}" -gt "${p95_budget_micros}" ]]; then
     echo "native GPU/present frame P95 exceeded one frame: ${p95_micros} us" >&2
+    exit 1
+fi
+
+if [[ "${p99_micros}" -gt "${p99_budget_micros}" ]]; then
+    echo "native GPU/present frame P99 exceeded two frames: ${p99_micros} us" >&2
     exit 1
 fi
