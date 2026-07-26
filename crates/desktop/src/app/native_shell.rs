@@ -110,6 +110,16 @@ fn status_projection_dirty(delta: &desktop::projection::DesktopProjectionDelta) 
     inspector_projection_dirty(delta) || delta.authorizations || delta.terminal
 }
 
+fn conversation_header_projection_dirty(
+    delta: &desktop::projection::DesktopProjectionDelta,
+) -> bool {
+    delta
+        .context
+        .contains(desktop::projection::ContextDirtyFlags::OPERATIONS)
+        || delta.lifecycle
+        || delta.session
+}
+
 fn upsert_indexed_item<T>(
     items: &mut Vec<T>,
     existing_index: Option<usize>,
@@ -312,6 +322,7 @@ pub(super) struct NativeShell {
     conversation_height_refresh_deadline: Option<Instant>,
     conversation_height_refresh_full: bool,
     conversation_pane: gpui::Entity<ConversationPane>,
+    conversation_header: gpui::Entity<ConversationHeader>,
     sessions_pane: gpui::Entity<SessionsPane>,
     composer_pane: gpui::Entity<ComposerPane>,
     inspector_pane: gpui::Entity<InspectorPane>,
@@ -388,6 +399,7 @@ impl NativeShell {
         });
         let owner = cx.weak_entity();
         let conversation_pane = cx.new(|_| ConversationPane::new(owner.clone()));
+        let conversation_header = cx.new(|_| ConversationHeader::new(owner.clone()));
         let sessions_pane = cx.new(|_| SessionsPane::new(owner.clone()));
         let composer_pane = cx.new(|_| ComposerPane::new(owner.clone()));
         let inspector_pane = cx.new(|_| InspectorPane::new(owner.clone()));
@@ -438,7 +450,21 @@ impl NativeShell {
                             this.conversation_viewport.select_live(block_id.clone());
                         }
                         pane.update(cx, |_, cx| cx.notify());
+                        this.notify_conversation_header(cx);
                     }
+                },
+            ),
+            cx.subscribe_in(
+                &conversation_header,
+                window,
+                |this, _, event: &ConversationHeaderEvent, window, cx| match event {
+                    ConversationHeaderEvent::ToggleSessions => this.toggle_sessions(window, cx),
+                    ConversationHeaderEvent::ToggleContext => this.toggle_context(window, cx),
+                    ConversationHeaderEvent::Reload => this.reload_local_resources(cx),
+                    ConversationHeaderEvent::CopySelected => {
+                        this.copy_selected_conversation(cx);
+                    }
+                    ConversationHeaderEvent::Abort => this.abort_active_operation(cx),
                 },
             ),
             cx.subscribe_in(
@@ -541,6 +567,7 @@ impl NativeShell {
             conversation_height_refresh_deadline: None,
             conversation_height_refresh_full: false,
             conversation_pane,
+            conversation_header,
             sessions_pane,
             composer_pane,
             inspector_pane,
@@ -593,6 +620,9 @@ impl NativeShell {
         }
         if previous == FocusTarget::Sessions || target == FocusTarget::Sessions {
             self.notify_sessions_pane(cx);
+        }
+        if previous == FocusTarget::Conversation || target == FocusTarget::Conversation {
+            self.notify_conversation_header(cx);
         }
         if previous == FocusTarget::Composer || target == FocusTarget::Composer {
             self.notify_composer_pane(cx);
@@ -656,6 +686,7 @@ impl NativeShell {
         let mut composer_pane_dirty = false;
         let mut inspector_pane_dirty = false;
         let mut status_bar_dirty = false;
+        let mut conversation_header_dirty = false;
         while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
             let Some(update) = self.runtime_updates.pop_front() else {
                 break;
@@ -665,6 +696,7 @@ impl NativeShell {
                 desktop::runtime::DesktopRuntimeUpdate::ProductEvent { .. }
             ) {
                 status_bar_dirty = true;
+                conversation_header_dirty = true;
             }
             let update = match update {
                 desktop::runtime::DesktopRuntimeUpdate::FileReviewed { command_id, review } => {
@@ -1130,6 +1162,13 @@ impl NativeShell {
             if outcome.is_replaced() || outcome.delta().is_some_and(status_projection_dirty) {
                 status_bar_dirty = true;
             }
+            if outcome.is_replaced()
+                || outcome
+                    .delta()
+                    .is_some_and(conversation_header_projection_dirty)
+            {
+                conversation_header_dirty = true;
+            }
             if outcome.is_replaced() {
                 sessions_pane_dirty = true;
                 self.conversation_render_full_dirty = true;
@@ -1312,6 +1351,7 @@ impl NativeShell {
                 composer_pane_dirty = true;
                 inspector_pane_dirty = true;
                 status_bar_dirty = true;
+                conversation_header_dirty = true;
             }
             applied += 1;
         }
@@ -1335,6 +1375,9 @@ impl NativeShell {
         }
         if status_bar_dirty {
             self.notify_status_bar(cx);
+        }
+        if conversation_header_dirty {
+            self.notify_conversation_header(cx);
         }
         !matches!(
             self.projection.lifecycle(),
@@ -1367,6 +1410,10 @@ impl NativeShell {
 
     fn notify_status_bar(&self, cx: &mut Context<Self>) {
         self.status_bar.update(cx, |_, cx| cx.notify());
+    }
+
+    fn notify_conversation_header(&self, cx: &mut Context<Self>) {
+        self.conversation_header.update(cx, |_, cx| cx.notify());
     }
 
     fn schedule_preferences(&mut self) {
@@ -1691,6 +1738,7 @@ impl NativeShell {
         }
         self.notify_composer_pane(cx);
         self.notify_inspector_pane(cx);
+        self.notify_conversation_header(cx);
         cx.notify();
     }
 
@@ -1762,6 +1810,7 @@ impl NativeShell {
         }
         self.notify_composer_pane(cx);
         self.notify_inspector_pane(cx);
+        self.notify_conversation_header(cx);
         cx.notify();
     }
 
@@ -1802,6 +1851,7 @@ impl NativeShell {
             }
         }
         self.notify_status_bar(cx);
+        self.notify_conversation_header(cx);
         cx.notify();
     }
 
@@ -1842,6 +1892,7 @@ impl NativeShell {
             }
         }
         self.notify_status_bar(cx);
+        self.notify_conversation_header(cx);
         cx.notify();
     }
 
@@ -1995,6 +2046,7 @@ impl NativeShell {
             }
         }
         self.notify_status_bar(cx);
+        self.notify_conversation_header(cx);
         cx.notify();
     }
 
@@ -3415,13 +3467,6 @@ impl Render for NativeShell {
         let omitted_transcript_count = self.projection.conversation().omitted_blocks();
         let composer_running = snapshot.active_operation.is_some();
         let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
-        let abort_pending = self
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Abort { .. }));
-        let reload_pending = self.command_ledger.contains(&DesktopCommandIntent::Reload);
-        let selection_pending = self
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)));
         let session_pending = self.command_ledger.contains_where(|intent| {
             matches!(
                 intent,
@@ -3431,14 +3476,6 @@ impl Render for NativeShell {
         let session_catalog_pending = self
             .command_ledger
             .contains(&DesktopCommandIntent::ListSessions);
-        let reload_disabled =
-            composer_running || awaiting_prompt_start || reload_pending || selection_pending;
-        let conversation_focused = self.conversation_focus.is_focused(window);
-        let conversation_focus_accent = conversation_focus_accent(conversation_focused, theme);
-        let committed_selection = self
-            .conversation_viewport
-            .selected_block_id()
-            .is_some_and(|id| self.projection.conversation().block(id).is_some());
         let transcript_list = self.conversation_pane.clone();
 
         let active_session_id = snapshot.session.session_id.clone();
@@ -3483,89 +3520,7 @@ impl Render for NativeShell {
             .flex()
             .flex_col()
             .bg(rgb(theme.canvas.value()))
-            .child(
-                div()
-                    .h_12()
-                    .px_4()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(conversation_focus_accent.value()))
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(if conversation_focused {
-                                theme.accent.value()
-                            } else {
-                                theme.text.value()
-                            }))
-                            .child("EVO · CONVERSATION"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                Button::new("toggle-sessions")
-                                    .compact()
-                                    .label("Sessions")
-                                    .tooltip("Show or hide Sessions")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_sessions(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("toggle-context")
-                                    .compact()
-                                    .label("Context")
-                                    .tooltip("Show or hide Context · Ctrl/Cmd+\\")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_context(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("reload-local-resources")
-                                    .compact()
-                                    .label(if reload_pending {
-                                        "Reloading…"
-                                    } else {
-                                        "Reload"
-                                    })
-                                    .tooltip("Reload product-owned local resources")
-                                    .disabled(reload_disabled)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.reload_local_resources(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("copy-conversation-block")
-                                    .compact()
-                                    .label("Copy")
-                                    .tooltip("Copy the selected durable conversation block")
-                                    .disabled(!committed_selection)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.copy_selected_conversation(cx);
-                                    })),
-                            )
-                            .when(composer_running, |actions| {
-                                actions.child(
-                                    Button::new("abort-operation")
-                                        .compact()
-                                        .label(if abort_pending {
-                                            "Aborting…"
-                                        } else {
-                                            "Abort"
-                                        })
-                                        .tooltip("Abort the active operation · Ctrl/Cmd+Esc")
-                                        .disabled(abort_pending)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.abort_active_operation(cx);
-                                        })),
-                                )
-                            }),
-                    ),
-            )
+            .child(self.conversation_header.clone())
             .child(
                 div()
                     .relative()
@@ -4191,18 +4146,10 @@ mod tests {
         assert_eq!(conversation_focus_accent(false, theme), theme.border);
         assert_eq!(conversation_focus_accent(true, theme), theme.accent);
 
-        let source = include_str!("native_shell.rs");
-        let conversation_start = source
-            .find("let conversation = div()")
-            .expect("conversation panel source remains present");
-        let composer_start = source[conversation_start..]
-            .find(".child(self.composer_pane.clone())")
-            .map(|offset| conversation_start + offset)
-            .expect("composer follows the conversation transcript");
-        let conversation_source = &source[conversation_start..composer_start];
-
-        assert!(conversation_source.contains("conversation_focus_accent.value()"));
-        assert!(!conversation_source.contains("panel.border_1()"));
+        let header = include_str!("native_shell/conversation_header.rs");
+        assert!(header.contains("focus_accent.value()"));
+        assert!(header.contains(".border_b_1()"));
+        assert!(!header.contains(".border_1()"));
     }
 
     #[test]
@@ -4349,6 +4296,39 @@ mod tests {
     }
 
     #[test]
+    fn conversation_header_rendering_is_owned_by_a_non_streaming_child_entity() {
+        let shell = include_str!("native_shell.rs");
+        let header = include_str!("native_shell/conversation_header.rs");
+        let header_id = [".id(\"conversation-", "header\")"].concat();
+
+        assert!(!shell.contains(&header_id));
+        assert!(header.contains(&header_id));
+        assert!(shell.contains("conversation_header: gpui::Entity<ConversationHeader>"));
+        assert!(shell.contains(".child(self.conversation_header.clone())"));
+        assert!(header.contains("impl EventEmitter<ConversationHeaderEvent>"));
+        assert!(shell.contains("ConversationHeaderEvent::ToggleSessions"));
+        assert!(shell.contains("ConversationHeaderEvent::ToggleContext"));
+        assert!(shell.contains("ConversationHeaderEvent::Reload"));
+        assert!(shell.contains("ConversationHeaderEvent::CopySelected"));
+        assert!(shell.contains("ConversationHeaderEvent::Abort"));
+        assert!(!header.contains("conversation_render_dirty_sequences"));
+    }
+
+    #[test]
+    fn streaming_only_projection_delta_does_not_dirty_conversation_header() {
+        let mut streaming = desktop::projection::DesktopProjectionDelta {
+            cursor: true,
+            conversation: true,
+            tools: true,
+            ..Default::default()
+        };
+        assert!(!conversation_header_projection_dirty(&streaming));
+
+        streaming.lifecycle = true;
+        assert!(conversation_header_projection_dirty(&streaming));
+    }
+
+    #[test]
     fn status_bar_rendering_is_owned_by_a_non_streaming_child_entity() {
         let shell = include_str!("native_shell.rs");
         let bar = include_str!("native_shell/status_bar.rs");
@@ -4414,12 +4394,14 @@ mod tests {
     }
 }
 mod composer_pane;
+mod conversation_header;
 mod conversation_pane;
 mod inspector_pane;
 mod sessions_pane;
 mod status_bar;
 
 use composer_pane::{ComposerPane, ComposerPaneEvent};
+use conversation_header::{ConversationHeader, ConversationHeaderEvent};
 use conversation_pane::{ConversationPane, ConversationPaneEvent};
 use inspector_pane::{InspectorPane, InspectorPaneEvent};
 use sessions_pane::{SessionsPane, SessionsPaneEvent};
