@@ -4760,6 +4760,16 @@ mod tests {
             projection,
         );
         cx.run_until_parked();
+        cx.refresh()
+            .expect("Markdown prewarm redraws the test window");
+        cx.run_until_parked();
+        std::thread::sleep(
+            streaming_text::MARKDOWN_BACKGROUND_WAIT + std::time::Duration::from_millis(50),
+        );
+        cx.run_until_parked();
+        cx.refresh()
+            .expect("Markdown background completion redraws the test window");
+        cx.run_until_parked();
 
         let bounds = cx
             .debug_bounds("desktop-copy-markdown-code")

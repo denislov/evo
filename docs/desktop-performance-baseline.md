@@ -44,9 +44,9 @@ It builds the real release binary, opens a deterministic 1,300×900 NativeShell 
 | Same NativeShell, 200 real InputState changes | headless input roundtrip P95 | 1,212 µs |
 | Same input replay | change handler → ComposerPane render P95 | 170 µs |
 | Same NativeShell after projection construction | Linux window/component RSS before / after / growth | 24,223,744 / 49,217,536 / 24,993,792 bytes |
-| Same 10,000-block fixture in a real X11 window, 200 post-warmup forced redraws | native GPU/present frame P95 | 2,803 µs |
-| Same native replay | native GPU/present frame P99 | 3,030 µs |
-| Same native replay | platform frame callback cadence P95 | 8,378 µs |
+| Same 10,000-block fixture in a real X11 window, 200 post-warmup forced redraws | native GPU/present frame P95 | 3,089 µs |
+| Same native replay | native GPU/present frame P99 | 3,393 µs |
+| Same native replay | platform frame callback cadence P95 | 8,381 µs |
 | 1 / 100 / 1,000 / 10,000 short blocks | hydration | 8 / 47 / 531 / 2,869 µs |
 | Same scale matrix | hydration allocations | 6 / 308 / 3,011 / 30,015 |
 | Same scale matrix | cumulative allocated bytes | 522 / 32,955 / 272,295 / 4,201,695 bytes |
@@ -89,4 +89,4 @@ The separate native replay uses the production binary rather than a GPUI test bi
 
 The test binary uses a test-only counting system allocator to report cumulative successful allocations around hydration. The release gate is single-threaded so unrelated tests cannot contaminate the deltas. On Linux it additionally samples `VmRSS` immediately before and after hydration; fixture construction is outside that window. RSS is allocator- and scheduler-sensitive, so the gate uses a regression ceiling rather than treating small deltas as exact retained-heap measurements. Other platforms report `rss_supported=false`; their numeric RSS fields are zero sentinels and must not be interpreted as measurements.
 
-The desktop adapter now exposes opt-in `tracing` spans/events for `desktop.runtime.batch_wait`, `desktop.runtime.receive`, `desktop.runtime.batch_size`, `desktop.projection.apply`, `desktop.preview.sanitize`, `desktop.list.height_update`, `desktop.list.layout`, `desktop.render.prepare_rows`, `desktop.render`, `desktop.input.change`, and `desktop.input.to_render`. The last event measures the latest Composer change handler to the next ComposerPane render and is consumed exactly once. The host application or benchmark harness owns subscriber installation; the desktop library does not replace a process-global subscriber. These spans provide CPU/render-preparation timing boundaries but do not claim GPU paint or end-to-end input latency.
+The desktop adapter now exposes opt-in `tracing` spans/events for `desktop.runtime.batch_wait`, `desktop.runtime.receive`, `desktop.runtime.batch_size`, `desktop.projection.apply`, `desktop.preview.sanitize`, `desktop.list.height_update`, `desktop.list.layout`, `desktop.render.prepare_rows`, `desktop.render`, `desktop.input.change`, `desktop.input.to_render`, and `desktop.markdown.parse_request`. The input event measures the latest Composer change handler to the next ComposerPane render and is consumed exactly once. The Markdown event is emitted once per visible keyed text/detail background submission and distinguishes settling from final content. The host application or benchmark harness owns subscriber installation; the desktop library does not replace a process-global subscriber. These spans provide CPU/render-preparation timing boundaries but do not claim GPU paint or end-to-end input latency.

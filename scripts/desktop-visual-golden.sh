@@ -161,6 +161,12 @@ capture_layout() {
     fi
     stop_current_replay
 
+    if [[ "${mode}" == "warmup" ]]; then
+        printf 'desktop_visual\tlayout=%s\tsize=%s\trenderer=warm\n' \
+            "${layout}" "${actual_size}"
+        return
+    fi
+
     if [[ "${mode}" == "update" ]]; then
         cp "${current_png}" "${golden_dir}/${layout}.png"
         printf 'desktop_visual\tlayout=%s\tsize=%s\tgolden=updated\n' \
@@ -208,6 +214,15 @@ capture_layout() {
 }
 
 cargo build -p desktop --release
+
+# The first GPU window after a fresh release build can populate driver/font
+# caches with measurably different edge antialiasing. Exercise and discard one
+# exact app-window capture so compared images all use the warm render path.
+requested_mode="${mode}"
+mode="warmup"
+capture_layout wide
+mode="${requested_mode}"
+
 capture_layout wide
 capture_layout medium
 capture_layout narrow

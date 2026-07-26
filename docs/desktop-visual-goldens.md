@@ -10,7 +10,7 @@ Run this from an interactive X11 desktop with GNOME Screenshot and ImageMagick i
 ./scripts/desktop-visual-golden.sh
 ```
 
-The script builds the release binary once and captures these logical viewports:
+The script builds the release binary once, exercises and discards one wide renderer warm-up window to eliminate first-process GPU/font-cache noise, and then captures these logical viewports:
 
 | Key | Requested viewport | Expected responsive result |
 |---|---:|---|
