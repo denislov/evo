@@ -102,12 +102,12 @@ NativeShell
 
 #### DESK-001 建立优化基线
 
-- [ ] 已为 runtime batch/wait、projection apply、preview sanitize、row height/layout、row prepare、view render、input handler 和最新 change→ComposerPane render 建立 opt-in tracing；release gate 另覆盖完整 GPUI headless CPU frame/input roundtrip，opt-in native gate 覆盖真实 draw+GPU/present P95/P99；真实 Markdown parser 与 click-to-photon latency 仍缺公开 hook。
+- [ ] 已为 runtime batch/wait、projection apply、preview sanitize、row height/layout、row prepare、view render、input handler 和最新 change→ComposerPane render 建立 opt-in tracing；release gate 另覆盖完整 GPUI headless CPU frame/input roundtrip，opt-in native gate 覆盖真实 draw+GPU/present P95/P99，以及 50 个真实 InputState 模拟按键从 dispatch 到首个 post-render callback 的保守上界；真实 Markdown parser 与包含显示扫描的 click-to-photon latency 仍缺公开 hook/外部光学观测。
 - [x] release replay fixture 可重复生成 1、100、1,000、10,000 条历史消息并输出 hydration/prepare 数据。
 - [x] release fixture 覆盖 10、50、200 次 streaming revision 回放。
 - [ ] 记录改造前 frame time、输入延迟、分配量和滚动行为。
 
-验收：`scripts/desktop-perf-gate.sh` 串行执行 headless fixture 并写入 `target/desktop-perf/latest.log`；`scripts/desktop-native-perf-gate.sh` 在交互式 display 上执行相同 10k fixture、断言真实 GPUI draw/present P95/P99 并写入 `target/desktop-perf/native-latest.log`；click-to-photon 输入仍待外部呈现观测能力。
+验收：`scripts/desktop-perf-gate.sh` 串行执行 headless fixture 并写入 `target/desktop-perf/latest.log`；`scripts/desktop-native-perf-gate.sh` 在交互式 display 上执行相同 10k fixture、断言真实 GPUI draw/present P95/P99，并对 50 个输入配对样本断言 dispatch→post-render P95 ≤ 50ms，结果写入 `target/desktop-perf/native-latest.log`；该内部上界覆盖应用渲染与 present submit，但 click-to-photon 仍待外部呈现观测能力。
 
 #### DESK-002 消除 Conversation 焦点几何跳变
 
@@ -278,9 +278,9 @@ Tool duration 兼容契约：历史 transcript 与运行中 Tool 使用 `None`�
 
 - [x] release gate 覆盖 1/100/1,000/10,000 条消息和 10/50/200 次增量 row revision。
 - [x] release gate 覆盖 256KB Markdown、512KB Reasoning、1MB Bash output、表格、代码块、CJK 和 Emoji。
-- [ ] release hydration 已输出 allocation count/cumulative bytes/retained bytes 线性曲线和 Linux RSS before/after/growth；10,000-block NativeShell 已输出 headless CPU frame/input roundtrip P95、额外 window/component RSS，并通过 production binary 输出 native draw+GPU/present P95/P99；click-to-photon input 和跨平台窗口 memory 仍待补齐。
+- [ ] release hydration 已输出 allocation count/cumulative bytes/retained bytes 线性曲线和 Linux RSS before/after/growth；10,000-block NativeShell 已输出 headless CPU frame/input roundtrip P95、额外 window/component RSS，并通过 production binary 输出 native draw+GPU/present P95/P99 与 InputState dispatch→post-render P95/P99；包含 OS 输入队列和显示扫描的 click-to-photon input，以及跨平台窗口 memory 仍待补齐。
 - [x] `scripts/desktop-perf-gate.sh` 提供串行、可重复的本地 release benchmark，并断言 headless full-tree CPU frame、真实 InputState roundtrip、frame preparation、Composer edit、allocation/RSS 和 final parse 预算；基线记录在 `docs/desktop-performance-baseline.md`。
-- [x] `scripts/desktop-native-perf-gate.sh` 在显式 X11/Wayland display 上启动无 runtime 的确定性 production replay，预热 20 帧后门禁 200 个 GPUI draw+present 样本的 P95 ≤ 16.7ms、P99 ≤ 33ms；无 display 时明确拒绝运行。
+- [x] `scripts/desktop-native-perf-gate.sh` 在显式 X11/Wayland display 上启动无 runtime 的确定性 production replay，预热 20 帧后门禁 200 个 GPUI draw+present 样本的 P95 ≤ 16.7ms、P99 ≤ 33ms，并门禁 50 个 InputState dispatch→post-render 配对样本的 P95 ≤ 50ms；无 display 时明确拒绝运行。
 
 #### DESK-018 组件、截图和端到端回归
 
@@ -351,7 +351,7 @@ desktop.input.latency
 
 | 任务 | 状态 | 备注 |
 |---|---|---|
-| DESK-001 | 进行中 | release replay/streaming fixture、可比较日志、主要 CPU tracing、uncached GPUI headless CPU frame、native GPU/present P95/P99 与 input change→render 已完成；待 click-to-photon input 和 Markdown parser hook |
+| DESK-001 | 进行中 | release replay/streaming fixture、可比较日志、主要 CPU tracing、uncached GPUI headless CPU frame、native GPU/present P95/P99、input change→render 与 50 样本 InputState dispatch→post-render 上界已完成；待包含显示扫描的 click-to-photon input 和 Markdown parser hook |
 | DESK-002 | 完成 | 已移除动态面板边框，改用已有 header divider 和标题颜色；回归测试已通过 |
 | DESK-003 | 完成 | ShellLayout 改为稳定 workspace 模型；sidebar/composer/status/content width 共享 token，响应式临界点与 width bucket 均有回归 |
 | DESK-004 | 完成 | StreamingText 三态 revision 协议、16ms 合批、100ms settling、stale rejection、keyed 空状态预热、后台正文 parse 与单次请求计数均已完成 |
@@ -367,7 +367,7 @@ desktop.input.latency
 | DESK-014 | 完成 | Idle/Running 均为单主操作；每 session draft/mode、pending/authorization/rejected 文案与 InputState IME 边界已落实 |
 | DESK-015 | 完成 | Sessions 搜索/相对时间/自动刷新与 Inspector 按需分区已完成；sidebar 宽度可持久化、拖动和双击复位，窄屏继续使用 drawer |
 | DESK-016 | 进行中 | 区域/消息键盘导航、overlay focus restore、focus-visible 与 32x32 primary hit-target 门禁已完成；待 GPUI accessibility tree 收口 |
-| DESK-017 | 进行中 | release scale/content/streaming/allocation/Linux hydration+window RSS、10k NativeShell headless frame 与 production native GPU/present P95/P99 门禁已完成；待 click-to-photon input 和跨平台窗口 memory 曲线 |
+| DESK-017 | 进行中 | release scale/content/streaming/allocation/Linux hydration+window RSS、10k NativeShell headless frame、production native GPU/present P95/P99 与 InputState dispatch→post-render P95/P99 门禁已完成；待外部 click-to-photon input 和跨平台窗口 memory 曲线 |
 | DESK-018 | 完成 | Focus bounds、session key、scroll anchor、Streaming→Final、四条关键流程 smoke 与 production wide/medium/narrow screenshot golden 均已覆盖 |
 
 ## 10. 完成定义

@@ -64,3 +64,42 @@ if [[ "${p99_micros}" -gt "${p99_budget_micros}" ]]; then
     echo "native GPU/present frame P99 exceeded two frames: ${p99_micros} us" >&2
     exit 1
 fi
+
+read -r input_sample_count input_p95_micros input_p99_micros < <(
+    awk -F '\t' '
+        /native_input_dispatch_to_post_render_p95_us=/ {
+            samples = ""
+            p95 = ""
+            p99 = ""
+            for (i = 1; i <= NF; i++) {
+                split($i, field, "=")
+                if (field[1] == "native_input_samples") samples = field[2]
+                if (field[1] == "native_input_dispatch_to_post_render_p95_us") p95 = field[2]
+                if (field[1] == "native_input_dispatch_to_post_render_p99_us") p99 = field[2]
+            }
+            print samples, p95, p99
+            exit
+        }
+    ' "${log_file}"
+)
+
+if [[ -z "${input_sample_count:-}" || -z "${input_p95_micros:-}" || -z "${input_p99_micros:-}" ]]; then
+    echo "native input-to-post-render metrics were not emitted" >&2
+    exit 1
+fi
+
+expected_input_samples=50
+input_p95_budget_micros=50000
+printf 'desktop_perf\tnative_input_samples=%s\tnative_input_dispatch_to_post_render_p95_us=%s\tnative_input_dispatch_to_post_render_p99_us=%s\tnative_input_p95_budget_us=%s\n' \
+    "${input_sample_count}" "${input_p95_micros}" "${input_p99_micros}" "${input_p95_budget_micros}" \
+    | tee -a "${log_file}"
+
+if [[ "${input_sample_count}" -ne "${expected_input_samples}" ]]; then
+    echo "expected ${expected_input_samples} paired native input samples, found ${input_sample_count}" >&2
+    exit 1
+fi
+
+if [[ "${input_p95_micros}" -gt "${input_p95_budget_micros}" ]]; then
+    echo "native input dispatch-to-post-render P95 exceeded 50 ms: ${input_p95_micros} us" >&2
+    exit 1
+fi

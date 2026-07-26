@@ -1,6 +1,6 @@
 # Desktop performance baseline
 
-This document records the repeatable headless and opt-in native release gates introduced for DESK-017. The native gate measures GPUI's real `draw + platform_window.draw/present` boundary at P95 and P99; neither gate claims click-to-photon input latency.
+This document records the repeatable headless and opt-in native release gates introduced for DESK-017. The native gate measures GPUI's real `draw + platform_window.draw/present` boundary at P95 and P99. It also pairs 50 simulated keystrokes dispatched through the focused production InputState with the first following GPUI post-render callback; this is a conservative internal render/present-submit upper bound, not a claim of click-to-photon latency.
 
 ## Run the gate
 
@@ -16,7 +16,7 @@ On a machine with an interactive X11 or Wayland display, run the native platform
 ./scripts/desktop-native-perf-gate.sh
 ```
 
-It builds the real release binary, opens a deterministic 1,300×900 NativeShell containing 10,000 transcript blocks, warms 20 frames, forces 200 further redraws, and exits automatically. GPUI's `ZED_MEASUREMENTS` hook brackets `Window::draw` and `Window::present`, including the platform renderer's draw/present call. The script normalizes GPUI's duration units, requires exactly 200 post-warmup samples, calculates nearest-rank P95/P99, asserts them against 16.7/33 ms, and writes `target/desktop-perf/native-latest.log`. It intentionally fails early when neither `DISPLAY` nor `WAYLAND_DISPLAY` is available instead of silently substituting the headless platform.
+It builds the real release binary, opens a deterministic 1,300×900 NativeShell containing 10,000 transcript blocks, warms 20 frames, forces 200 further redraws, and exits automatically. GPUI's `ZED_MEASUREMENTS` hook brackets `Window::draw` and `Window::present`, including the platform renderer's draw/present call. Every fourth measured frame also dispatches one simulated `a` keystroke through the focused Composer InputState; the next post-render callback closes that input sample. The script requires exactly 200 frame and 50 paired input samples, calculates nearest-rank P95/P99, asserts frame time against 16.7/33 ms and the input upper-bound P95 against 50 ms, and writes `target/desktop-perf/native-latest.log`. It intentionally fails early when neither `DISPLAY` nor `WAYLAND_DISPLAY` is available instead of silently substituting the headless platform.
 
 ## Baseline environment
 
@@ -44,9 +44,10 @@ It builds the real release binary, opens a deterministic 1,300×900 NativeShell 
 | Same NativeShell, 200 real InputState changes | headless input roundtrip P95 | 1,212 µs |
 | Same input replay | change handler → ComposerPane render P95 | 170 µs |
 | Same NativeShell after projection construction | Linux window/component RSS before / after / growth | 24,223,744 / 49,217,536 / 24,993,792 bytes |
-| Same 10,000-block fixture in a real X11 window, 200 post-warmup forced redraws | native GPU/present frame P95 | 3,089 µs |
-| Same native replay | native GPU/present frame P99 | 3,393 µs |
-| Same native replay | platform frame callback cadence P95 | 8,381 µs |
+| Same 10,000-block fixture in a real X11 window, 200 post-warmup forced redraws | native GPU/present frame P95 | 3,181 µs |
+| Same native replay | native GPU/present frame P99 | 3,444 µs |
+| Same native replay | platform frame callback cadence P95 | 8,422 µs |
+| Same native replay, 50 InputState keystrokes | dispatch → first post-render callback P95 / P99 | 9,094 / 9,369 µs |
 | 1 / 100 / 1,000 / 10,000 short blocks | hydration | 8 / 47 / 531 / 2,869 µs |
 | Same scale matrix | hydration allocations | 6 / 308 / 3,011 / 30,015 |
 | Same scale matrix | cumulative allocated bytes | 522 / 32,955 / 272,295 / 4,201,695 bytes |
@@ -65,6 +66,7 @@ Timing at this scale varies with CPU frequency, scheduler activity, and compiler
 - forced full-tree headless CPU frame and real InputState roundtrip P95: no more than 16.7 ms;
 - native GPUI draw + platform GPU/present frame P95: no more than 16.7 ms;
 - native GPUI draw + platform GPU/present frame P99: no more than 33 ms;
+- native InputState dispatch to first post-render callback P95: no more than 50 ms;
 - 10,000-block NativeShell window/component-tree RSS growth on Linux: no more than 64 MiB;
 - bounded final-content parse P95: no more than 150 ms;
 - hydration: no more than four allocations per block plus fixed slack;
@@ -76,7 +78,7 @@ Timing at this scale varies with CPU frequency, scheduler activity, and compiler
 - transcript scales of 1, 100, 1,000, and 10,000 blocks;
 - a retained transcript larger than 10 MiB;
 - a real 10,000-block NativeShell/GPUI component tree with 200 forced uncached CPU frames and 200 InputState changes;
-- the same deterministic tree in an opt-in native window with 20 warmup and 200 measured GPU/present redraws;
+- the same deterministic tree in an opt-in native window with 20 warmup, 200 measured GPU/present redraws, and 50 paired InputState dispatch-to-post-render samples;
 - simulated incremental rates of 10, 50, and 200 row revisions per second;
 - Markdown, Reasoning, Bash output, tables, fenced code, CJK, and Emoji;
 - bounded parse, hydration, hydration allocation pressure, Linux process RSS, visible-window preparation, Composer state update, cache-retained bytes, and projection-retained bytes.
@@ -85,7 +87,7 @@ Timing at this scale varies with CPU frequency, scheduler activity, and compiler
 
 The headless GPUI release replay constructs the 10,000-block projection before its window RSS baseline, then measures the additional NativeShell/component-tree footprint after the first completed render. It calls `Window::refresh()` before every timing sample, so entity caching cannot turn the measurement into an idle no-op. `VisualTestContext` executes the real NativeShell render, layout, prepaint, CPU paint, InputState event, and child-entity notification paths. Its test platform deliberately does not implement platform `on_request_frame`, GPU submission, or presentation; `headless_cpu_frame` and `headless_input_roundtrip` therefore must not be reported as GPU frame or click-to-photon latency.
 
-The separate native replay uses the production binary rather than a GPUI test binary because only the production platform loop exposes GPUI's internal `frame duration` measurement. It records exact nearest-rank P95/P99 values for the locked GPUI draw/present boundary and an informational callback-cadence P95; cadence reflects display refresh scheduling and is not added to draw/present time. DESK-017 remains open for click-to-photon input latency and a cross-platform resident-memory curve. DESK-018's production-window screenshot/golden coverage is documented in `docs/desktop-visual-goldens.md`.
+The separate native replay uses the production binary rather than a GPUI test binary because only the production platform loop exposes GPUI's internal `frame duration` measurement. It records exact nearest-rank P95/P99 values for the locked GPUI draw/present boundary and an informational callback-cadence P95; cadence reflects display refresh scheduling and is not added to draw/present time. For input, GPUI documents `on_next_frame` as running directly after the current frame is rendered. The replay therefore dispatches a keystroke before the current draw and timestamps the next callback, proving that InputState handling and at least one changed frame completed inside the measured interval. The value deliberately includes callback scheduling delay and is treated as a conservative upper bound. It excludes the physical keyboard/OS queue before dispatch and display scanout after present, so DESK-017 remains open for externally observed click-to-photon latency and a cross-platform resident-memory curve. DESK-018's production-window screenshot/golden coverage is documented in `docs/desktop-visual-goldens.md`.
 
 The test binary uses a test-only counting system allocator to report cumulative successful allocations around hydration. The release gate is single-threaded so unrelated tests cannot contaminate the deltas. On Linux it additionally samples `VmRSS` immediately before and after hydration; fixture construction is outside that window. RSS is allocator- and scheduler-sensitive, so the gate uses a regression ceiling rather than treating small deltas as exact retained-heap measurements. Other platforms report `rss_supported=false`; their numeric RSS fields are zero sentinels and must not be interpreted as measurements.
 

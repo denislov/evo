@@ -13,7 +13,9 @@ use coding_agent::api::view::{
     CodingAgentCapabilities, CodingAgentSessionTranscriptItem, CodingAgentSessionView,
     CodingAgentTranscriptSnapshot, ProfileId,
 };
-use gpui::{App, Bounds, Window, WindowBounds, WindowOptions, point, prelude::*, px, size};
+use gpui::{
+    App, Bounds, Keystroke, Window, WindowBounds, WindowOptions, point, prelude::*, px, size,
+};
 use gpui_component::Root;
 
 use super::native_shell::{NativeShell, NativeShellInit};
@@ -25,6 +27,8 @@ const PERFORMANCE_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_PERF_REPLAY";
 const VISUAL_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_VISUAL_REPLAY";
 const WARMUP_FRAMES: usize = 20;
 const SAMPLE_FRAMES: usize = 200;
+const INPUT_SAMPLE_FRAMES: usize = 50;
+const INPUT_SAMPLE_STRIDE: usize = SAMPLE_FRAMES / INPUT_SAMPLE_FRAMES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NativeReplayRequest {
@@ -72,6 +76,63 @@ struct NativeFrameReplay {
     callbacks: usize,
     last_callback_at: Option<Instant>,
     cadence_samples: Vec<u128>,
+    pending_input_at: Option<Instant>,
+    input_dispatches: usize,
+    input_post_render_samples: Vec<u128>,
+}
+
+impl NativeFrameReplay {
+    fn new() -> Self {
+        Self {
+            callbacks: 0,
+            last_callback_at: None,
+            cadence_samples: Vec::with_capacity(SAMPLE_FRAMES),
+            pending_input_at: None,
+            input_dispatches: 0,
+            input_post_render_samples: Vec::with_capacity(INPUT_SAMPLE_FRAMES),
+        }
+    }
+
+    fn observe_frame_callback(&mut self, now: Instant) {
+        // The input is dispatched from the previous frame callback, before
+        // that frame draws. GPUI runs this callback after that frame renders,
+        // so the interval is a conservative app/render/present-submit upper
+        // bound. It deliberately does not claim display click-to-photon time.
+        if let Some(dispatched_at) = self.pending_input_at.take() {
+            self.input_post_render_samples
+                .push(now.saturating_duration_since(dispatched_at).as_micros());
+        }
+        if let Some(previous) = self.last_callback_at
+            && self.callbacks >= WARMUP_FRAMES
+            && self.cadence_samples.len() < SAMPLE_FRAMES
+        {
+            self.cadence_samples
+                .push(now.saturating_duration_since(previous).as_micros());
+        }
+        self.last_callback_at = Some(now);
+        self.callbacks += 1;
+    }
+
+    fn should_dispatch_input(&self) -> bool {
+        self.pending_input_at.is_none()
+            && self.input_dispatches < INPUT_SAMPLE_FRAMES
+            && !self.cadence_samples.is_empty()
+            && self
+                .cadence_samples
+                .len()
+                .is_multiple_of(INPUT_SAMPLE_STRIDE)
+    }
+
+    fn mark_input_dispatched(&mut self, now: Instant) {
+        self.pending_input_at = Some(now);
+        self.input_dispatches += 1;
+    }
+
+    fn complete(&self) -> bool {
+        self.cadence_samples.len() >= SAMPLE_FRAMES
+            && self.input_post_render_samples.len() >= INPUT_SAMPLE_FRAMES
+            && self.pending_input_at.is_none()
+    }
 }
 
 pub(super) fn request() -> Result<Option<NativeReplayRequest>, String> {
@@ -105,11 +166,7 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             performance_projection()?,
             (1_300., 900.),
             "evo · native performance replay".to_owned(),
-            Some(Rc::new(RefCell::new(NativeFrameReplay {
-                callbacks: 0,
-                last_callback_at: None,
-                cadence_samples: Vec::with_capacity(SAMPLE_FRAMES),
-            }))),
+            Some(Rc::new(RefCell::new(NativeFrameReplay::new()))),
         ),
         NativeReplayRequest::Visual(layout) => (
             visual_projection()?,
@@ -156,28 +213,42 @@ fn schedule_frame(window: &mut Window, replay: Rc<RefCell<NativeFrameReplay>>) {
     window.on_next_frame(move |window, cx| {
         let now = Instant::now();
         let mut replay_ref = replay.borrow_mut();
-        if let Some(previous) = replay_ref.last_callback_at
-            && replay_ref.callbacks >= WARMUP_FRAMES
-        {
-            replay_ref
-                .cadence_samples
-                .push(now.saturating_duration_since(previous).as_micros());
-        }
-        replay_ref.last_callback_at = Some(now);
-        replay_ref.callbacks += 1;
-        let complete = replay_ref.cadence_samples.len() >= SAMPLE_FRAMES;
+        replay_ref.observe_frame_callback(now);
+        let dispatch_input = replay_ref.should_dispatch_input();
+        let complete = replay_ref.complete();
         drop(replay_ref);
 
         if complete {
             let mut replay_ref = replay.borrow_mut();
-            let cadence_p95_micros = percentile_95(&mut replay_ref.cadence_samples);
+            let cadence_p95_micros = percentile(&mut replay_ref.cadence_samples, 95);
+            let input_post_render_p95_micros =
+                percentile(&mut replay_ref.input_post_render_samples, 95);
+            let input_post_render_p99_micros =
+                percentile(&mut replay_ref.input_post_render_samples, 99);
             println!(
                 "desktop_perf\tnative_presented_frames={}\t\
-                 native_frame_cadence_p95_us={cadence_p95_micros}",
-                replay_ref.cadence_samples.len()
+                 native_frame_cadence_p95_us={cadence_p95_micros}\t\
+                 native_input_samples={}\t\
+                 native_input_dispatch_to_post_render_p95_us={input_post_render_p95_micros}\t\
+                 native_input_dispatch_to_post_render_p99_us={input_post_render_p99_micros}",
+                replay_ref.cadence_samples.len(),
+                replay_ref.input_post_render_samples.len()
             );
             cx.quit();
         } else {
+            if dispatch_input {
+                let dispatched_at = Instant::now();
+                let keystroke =
+                    Keystroke::parse("a").expect("the native replay input keystroke remains valid");
+                if !window.dispatch_keystroke(keystroke, cx) {
+                    eprintln!(
+                        "desktop native performance replay could not dispatch composer input"
+                    );
+                    cx.quit();
+                    return;
+                }
+                replay.borrow_mut().mark_input_dispatched(dispatched_at);
+            }
             schedule_frame(window, Rc::clone(&replay));
             window.refresh();
         }
@@ -185,9 +256,17 @@ fn schedule_frame(window: &mut Window, replay: Rc<RefCell<NativeFrameReplay>>) {
     window.refresh();
 }
 
-fn percentile_95(samples: &mut [u128]) -> u128 {
+fn percentile(samples: &mut [u128], percentile: usize) -> u128 {
+    assert!(
+        !samples.is_empty(),
+        "percentile requires at least one sample"
+    );
+    assert!(
+        (1..=100).contains(&percentile),
+        "percentile must be between 1 and 100"
+    );
     samples.sort_unstable();
-    let index = (samples.len() * 95).div_ceil(100).saturating_sub(1);
+    let index = (samples.len() * percentile).div_ceil(100).saturating_sub(1);
     samples[index]
 }
 
@@ -317,7 +396,33 @@ mod tests {
     #[test]
     fn native_replay_percentile_uses_nearest_rank() {
         let mut samples = (1..=200).rev().collect::<Vec<u128>>();
-        assert_eq!(percentile_95(&mut samples), 190);
+        assert_eq!(percentile(&mut samples, 95), 190);
+        assert_eq!(percentile(&mut samples, 99), 198);
+    }
+
+    #[test]
+    fn native_replay_pairs_input_with_the_next_post_render_callback() {
+        let mut replay = NativeFrameReplay::new();
+        let started_at = Instant::now();
+
+        for callback in 0..300 {
+            let now = started_at + std::time::Duration::from_millis(callback * 8);
+            replay.observe_frame_callback(now);
+            if replay.should_dispatch_input() {
+                replay.mark_input_dispatched(now);
+            }
+            if replay.complete() {
+                break;
+            }
+        }
+
+        assert!(replay.complete());
+        assert_eq!(replay.cadence_samples.len(), SAMPLE_FRAMES);
+        assert_eq!(replay.input_dispatches, INPUT_SAMPLE_FRAMES);
+        assert_eq!(
+            replay.input_post_render_samples,
+            vec![8_000; INPUT_SAMPLE_FRAMES]
+        );
     }
 
     #[test]
