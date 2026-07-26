@@ -33,6 +33,8 @@ pub const FOLLOW_LATEST_PAUSE_THRESHOLD_PX: f32 = 48.0;
 /// A paused reader must return this close to the bottom before following resumes.
 pub const FOLLOW_LATEST_RESUME_THRESHOLD_PX: f32 = 32.0;
 pub const STREAMING_ROW_HEIGHT_INTERVAL: Duration = Duration::from_millis(67);
+pub const STREAMING_MARKDOWN_SETTLE_DELAY: Duration = Duration::from_millis(100);
+pub const MAX_SETTLING_MARKDOWN_BYTES: usize = 64 * 1024;
 pub const CONVERSATION_WIDTH_BUCKET_PX: u32 = 24;
 pub const MAX_ROW_RENDER_CACHE_ENTRIES: usize = MAX_TRANSCRIPT_BLOCKS + 256;
 pub const MAX_ROW_RENDER_CACHE_BYTES: usize = 40 * 1024 * 1024;
@@ -415,13 +417,14 @@ impl ConversationItemKey {
         Arc::clone(&self.stable_id)
     }
 
-    fn markdown_state_key(&self, detail: bool) -> Arc<str> {
+    fn markdown_state_key(&self, detail: bool, revision: u64, final_state: bool) -> Arc<str> {
         let namespace = if detail {
             "transcript-detail-markdown"
         } else {
             "transcript-markdown"
         };
-        Arc::from(format!("{namespace}:{}", self.stable_id))
+        let phase = if final_state { "final" } else { "settling" };
+        Arc::from(format!("{namespace}:{}:{phase}:{revision}", self.stable_id))
     }
 
     fn retained_bytes(&self) -> usize {
@@ -484,6 +487,13 @@ pub struct ConversationRowRenderSource<'a> {
     pub durable: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamingTextPhase {
+    StreamingPlainText,
+    SettlingMarkdown,
+    FinalMarkdown,
+}
+
 /// Cheaply cloned render input for a conversation row.
 ///
 /// Completed Markdown and its stable GPUI state keys remain frozen until the
@@ -498,6 +508,8 @@ pub struct ConversationRowRenderData {
     pub detail: Arc<str>,
     pub markdown_state_key: Arc<str>,
     pub detail_markdown_state_key: Arc<str>,
+    pub text_phase: StreamingTextPhase,
+    pub next_text_phase_after: Option<Duration>,
     pub kind: ConversationBlockKind,
     pub done: bool,
     pub is_error: bool,
@@ -526,6 +538,7 @@ struct ConversationRowRenderCacheEntry {
     data: ConversationRowRenderData,
     retained_bytes: usize,
     touched_generation: u64,
+    source_updated_at: Instant,
 }
 
 /// Revision-aware, memory-bounded cache for transcript row presentation.
@@ -564,11 +577,40 @@ impl ConversationRowRenderCache {
         source: ConversationRowRenderSource<'_>,
         width_bucket: u32,
     ) -> ConversationRowRenderData {
+        self.resolve_at(source, width_bucket, Instant::now())
+    }
+
+    fn resolve_at(
+        &mut self,
+        source: ConversationRowRenderSource<'_>,
+        width_bucket: u32,
+        now: Instant,
+    ) -> ConversationRowRenderData {
+        if let Some(entry) = self.entries.get_mut(&source.item_key)
+            && entry.data.source_revision > source.source_revision
+        {
+            entry.touched_generation = self.generation;
+            return entry.data.clone();
+        }
         if let Some(entry) = self.entries.get_mut(&source.item_key)
             && entry.data.source_revision == source.source_revision
             && entry.data.sanitized_revision == source.source_revision
+            && entry.data.done == source.done
         {
             entry.touched_generation = self.generation;
+            if !source.done
+                && entry.data.text_phase == StreamingTextPhase::StreamingPlainText
+                && entry.data.next_text_phase_after.is_some()
+            {
+                let elapsed = now.saturating_duration_since(entry.source_updated_at);
+                if elapsed >= STREAMING_MARKDOWN_SETTLE_DELAY {
+                    entry.data.text_phase = StreamingTextPhase::SettlingMarkdown;
+                    entry.data.next_text_phase_after = None;
+                } else {
+                    entry.data.next_text_phase_after =
+                        Some(STREAMING_MARKDOWN_SETTLE_DELAY.saturating_sub(elapsed));
+                }
+            }
             if entry.data.width_bucket != width_bucket {
                 entry.data.width_bucket = width_bucket;
                 entry.data.measured_height = conversation_block_height(
@@ -603,8 +645,25 @@ impl ConversationRowRenderCache {
             )
         };
         let data = ConversationRowRenderData {
-            markdown_state_key: source.item_key.markdown_state_key(false),
-            detail_markdown_state_key: source.item_key.markdown_state_key(true),
+            markdown_state_key: source.item_key.markdown_state_key(
+                false,
+                source.source_revision,
+                source.done,
+            ),
+            detail_markdown_state_key: source.item_key.markdown_state_key(
+                true,
+                source.source_revision,
+                source.done,
+            ),
+            text_phase: if source.done {
+                StreamingTextPhase::FinalMarkdown
+            } else {
+                StreamingTextPhase::StreamingPlainText
+            },
+            next_text_phase_after: (!source.done
+                && source.text.len().saturating_add(source.detail.len())
+                    <= MAX_SETTLING_MARKDOWN_BYTES)
+                .then_some(STREAMING_MARKDOWN_SETTLE_DELAY),
             item_key: source.item_key.clone(),
             source_revision: source.source_revision,
             sanitized_revision: source.source_revision,
@@ -626,6 +685,7 @@ impl ConversationRowRenderCache {
             data: data.clone(),
             retained_bytes,
             touched_generation: self.generation,
+            source_updated_at: now,
         };
         if let Some(previous) = self.entries.insert(source.item_key, entry) {
             self.retained_bytes = self.retained_bytes.saturating_sub(previous.retained_bytes);
@@ -1764,13 +1824,21 @@ mod tests {
         );
         assert!(
             durable
-                .markdown_state_key(false)
-                .ends_with(durable.stable_id())
+                .markdown_state_key(false, 7, false)
+                .contains(durable.stable_id())
         );
         assert!(
             durable
-                .markdown_state_key(true)
-                .ends_with(durable.stable_id())
+                .markdown_state_key(true, 7, true)
+                .contains(durable.stable_id())
+        );
+        assert_ne!(
+            durable.markdown_state_key(false, 7, false),
+            durable.markdown_state_key(false, 7, true)
+        );
+        assert_ne!(
+            durable.markdown_state_key(false, 7, true),
+            durable.markdown_state_key(false, 8, true)
         );
         assert_ne!(
             ConversationItemKey::new(
@@ -1863,6 +1931,76 @@ mod tests {
         assert_eq!(cache.sanitization_count, 1);
         assert!(Arc::ptr_eq(&final_row.text, &frozen.text));
         assert!(Arc::ptr_eq(&final_row.detail, &frozen.detail));
+    }
+
+    #[test]
+    fn streaming_revision_settles_after_quiet_window_and_rejects_stale_results() {
+        let mut cache = ConversationRowRenderCache::default();
+        let started = Instant::now();
+        cache.begin_frame();
+        let active = cache.resolve_at(
+            render_source("assistant:quiet", 2, "new revision", false),
+            900,
+            started,
+        );
+        assert_eq!(active.text_phase, StreamingTextPhase::StreamingPlainText);
+        assert_eq!(
+            active.next_text_phase_after,
+            Some(STREAMING_MARKDOWN_SETTLE_DELAY)
+        );
+
+        let before_settle = cache.resolve_at(
+            render_source("assistant:quiet", 2, "new revision", false),
+            900,
+            started + STREAMING_MARKDOWN_SETTLE_DELAY - Duration::from_millis(1),
+        );
+        assert_eq!(
+            before_settle.text_phase,
+            StreamingTextPhase::StreamingPlainText
+        );
+        assert_eq!(
+            before_settle.next_text_phase_after,
+            Some(Duration::from_millis(1))
+        );
+
+        let settled = cache.resolve_at(
+            render_source("assistant:quiet", 2, "new revision", false),
+            900,
+            started + STREAMING_MARKDOWN_SETTLE_DELAY,
+        );
+        assert_eq!(settled.text_phase, StreamingTextPhase::SettlingMarkdown);
+        assert_eq!(settled.next_text_phase_after, None);
+
+        let stale = cache.resolve_at(
+            render_source("assistant:quiet", 1, "stale revision", false),
+            900,
+            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(1),
+        );
+        assert_eq!(stale.source_revision, 2);
+        assert_eq!(stale.text.as_ref(), "new revision");
+        assert_eq!(stale.text_phase, StreamingTextPhase::SettlingMarkdown);
+        assert_eq!(stale.markdown_state_key, settled.markdown_state_key);
+
+        let final_row = cache.resolve_at(
+            render_source("assistant:quiet", 3, "**final**", true),
+            900,
+            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(2),
+        );
+        assert_eq!(final_row.text_phase, StreamingTextPhase::FinalMarkdown);
+        assert_eq!(final_row.next_text_phase_after, None);
+        assert_ne!(final_row.markdown_state_key, settled.markdown_state_key);
+
+        let oversized = "x".repeat(MAX_SETTLING_MARKDOWN_BYTES + 1);
+        let oversized_row = cache.resolve_at(
+            render_source("assistant:oversized", 1, &oversized, false),
+            900,
+            started + STREAMING_MARKDOWN_SETTLE_DELAY,
+        );
+        assert_eq!(
+            oversized_row.text_phase,
+            StreamingTextPhase::StreamingPlainText
+        );
+        assert_eq!(oversized_row.next_text_phase_after, None);
     }
 
     #[test]

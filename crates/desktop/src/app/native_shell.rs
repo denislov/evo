@@ -23,20 +23,17 @@ use desktop::shell::{
     truncate_label,
 };
 use gpui::{
-    AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Render, ScrollStrategy, SharedString, Styled as _, Subscription, Window, WindowBounds, div,
-    prelude::*, px, rgb, size,
+    ClipboardItem, Context, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, ScrollStrategy,
+    Styled as _, Subscription, Window, WindowBounds, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     VirtualListScrollHandle,
     input::{InputEvent, InputState},
-    text::TextView,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::actions::{
@@ -68,20 +65,6 @@ struct ConversationBlockVisual {
 
 fn conversation_focus_accent(focused: bool, theme: SemanticTheme) -> SemanticColor {
     if focused { theme.accent } else { theme.border }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConversationTextRenderMode {
-    StreamingPlainText,
-    FinalMarkdown,
-}
-
-fn conversation_text_render_mode(done: bool) -> ConversationTextRenderMode {
-    if done {
-        ConversationTextRenderMode::FinalMarkdown
-    } else {
-        ConversationTextRenderMode::StreamingPlainText
-    }
 }
 
 fn conversation_distance_to_bottom(offset_y: f32, max_offset_y: f32) -> f32 {
@@ -220,26 +203,6 @@ fn message_conversation_block_id(message: &desktop::projection::DesktopMessageOv
 
 fn tool_conversation_block_id(tool: &desktop::projection::DesktopToolOverlay) -> String {
     format!("tool:{}", tool.tool_call_id)
-}
-
-fn conversation_text_element(
-    id: ElementId,
-    text: Arc<str>,
-    mode: ConversationTextRenderMode,
-    window: &mut Window,
-    cx: &mut gpui::App,
-) -> AnyElement {
-    let text = SharedString::new(text);
-    match mode {
-        ConversationTextRenderMode::StreamingPlainText => div()
-            .w_full()
-            .whitespace_normal()
-            .child(text)
-            .into_any_element(),
-        ConversationTextRenderMode::FinalMarkdown => {
-            TextView::markdown(id, text, window, cx).into_any_element()
-        }
-    }
 }
 
 fn conversation_block_visual(
@@ -3987,6 +3950,18 @@ impl NativeShell {
             }
             self.conversation_render_live_dirty = false;
         }
+        let mut text_phase_requires_full = false;
+        let text_phase_refresh = self
+            .conversation_render_rows
+            .iter()
+            .filter_map(|row| {
+                let delay = row.next_text_phase_after?;
+                text_phase_requires_full |= row.durable;
+                Some(delay)
+            })
+            .min();
+        next_refresh_after = minimum_duration(next_refresh_after, text_phase_refresh);
+        refresh_requires_full |= text_phase_requires_full;
         debug_assert_eq!(
             self.conversation_render_rows.len(),
             visible_conversation_count
@@ -4985,21 +4960,18 @@ mod tests {
     }
 
     #[test]
-    fn conversation_streaming_text_avoids_debounced_markdown_until_final() {
-        assert_eq!(
-            conversation_text_render_mode(false),
-            ConversationTextRenderMode::StreamingPlainText
-        );
-        assert_eq!(
-            conversation_text_render_mode(true),
-            ConversationTextRenderMode::FinalMarkdown
-        );
-
+    fn conversation_streaming_text_uses_revision_phase_and_stable_markdown_identity() {
         let source = include_str!("native_shell.rs");
-        assert!(source.contains("block.markdown_state_key.clone()"));
-        assert!(source.contains("block.detail_markdown_state_key.clone()"));
         let pane = include_str!("native_shell/conversation_pane.rs");
+        let streaming = include_str!("native_shell/streaming_text.rs");
+        assert!(pane.contains("block.markdown_state_key.clone()"));
+        assert!(pane.contains("block.detail_markdown_state_key.clone()"));
+        assert!(pane.contains("let text_phase = block.text_phase"));
         assert!(pane.contains("block.item_key.stable_id_arc()"));
+        assert!(streaming.contains("StreamingTextPhase::StreamingPlainText"));
+        assert!(streaming.contains("StreamingTextPhase::SettlingMarkdown"));
+        assert!(streaming.contains("StreamingTextPhase::FinalMarkdown"));
+        assert!(streaming.contains("TextView::markdown"));
         assert!(!pane.contains(".id((\"conversation-block\", index))"));
         assert!(!source.contains("(\"transcript-markdown\", index)"));
         assert!(!source.contains("(\"transcript-detail-markdown\", index)"));
@@ -5402,6 +5374,7 @@ mod inspector_pane;
 mod overlay_host;
 mod sessions_pane;
 mod status_bar;
+mod streaming_text;
 
 use composer_pane::{ComposerPane, ComposerPaneEvent};
 use conversation_header::{ConversationHeader, ConversationHeaderEvent};

@@ -133,14 +133,14 @@ NativeShell
 #### DESK-004 引入 StreamingText 双阶段渲染
 
 - [x] 最小路径：未完成内容绕过带 200ms 防抖的 Markdown，以轻量可换行文本呈现；完成态再进入最终 Markdown。
-- [ ] 新增轻量 `StreamingText` 组件。
-- [ ] streaming 阶段按 16–33ms 合并 append-only fragment，以 plain/rich-inline text 呈现。
-- [ ] 80–120ms 无新内容时允许后台生成阶段性 Markdown。
+- [x] 新增轻量 `StreamingText` 组件，以 typed revision phase 选择 plain、settling Markdown 或 final Markdown。
+- [x] streaming delivery 在 runtime 按 16ms 有界窗口合并，active revision 由 `StreamingText` 的 plain wrapping path 呈现。
+- [ ] 100ms 无新内容时已自动进入 revision-bound Settling Markdown；当前 `TextView::markdown` 仍在 GPUI render path，同步 parser 尚未迁到后台。
 - [ ] terminal 后执行一次最终 Markdown parse，并冻结结果；当前已验证 final revision 只安全清洗一次并冻结缓存，尚缺 Markdown parser 级计数。
-- [ ] 过期 revision 的后台结果不得覆盖新内容。
-- [ ] Reasoning 和 tool output 使用同一 revision 协议。
+- [x] row cache 单调接受 revision，过期 revision/result 不得覆盖当前内容、phase 或 final state。
+- [x] 正文、Reasoning 和 Tool output/detail 均使用同一 `StreamingTextPhase` revision 协议。
 
-验收：连续输出期间可见更新间隔不超过 50ms；不存在依赖 200ms 静默的冻结。
+验收：连续输出由 16ms runtime coalescing 驱动且不依赖 200ms Markdown debounce；100ms quiet transition、stale revision rejection 和 Streaming→Settling→Final 均有确定时钟测试。剩余工作是将 staged/final Markdown parser 迁到 revision-bound 后台任务并增加 parser 调用计数。
 
 #### DESK-005 使用稳定 ConversationItemKey
 
@@ -351,7 +351,7 @@ desktop.input.latency
 | DESK-001 | 待开始 | 先完成最小性能 fixture，再扩展完整基准 |
 | DESK-002 | 完成 | 已移除动态面板边框，改用已有 header divider 和标题颜色；回归测试已通过 |
 | DESK-003 | 完成 | ShellLayout 改为稳定 workspace 模型；sidebar/composer/status/content width 共享 token，响应式临界点与 width bucket 均有回归 |
-| DESK-004 | 进行中 | 最小双阶段路径已完成；后续抽取 StreamingText、revision 和后台 settling parse |
+| DESK-004 | 进行中 | StreamingText 三态 revision 协议、16ms 合批、100ms settling 与 stale rejection 已完成；待后台 Markdown parser 和 final parse 计数 |
 | DESK-005 | 完成 | typed ConversationItemKey 已统一 cache/Markdown/row element/hover/layout/selection 身份，并覆盖 session 与 durable/live 隔离 |
 | DESK-006 | 完成 | 基于真实 offset 的迟滞状态机、streaming unseen 计数和无布局占位的浮动 pill 已完成；GUI 像素门禁归入 DESK-017 |
 | DESK-007 | 完成 | 文本保持 16ms 批次，行高约 15Hz；Following 底部锚定、Paused offset compensation 和 Unicode display width 已完成 |

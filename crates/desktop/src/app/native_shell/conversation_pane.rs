@@ -5,8 +5,7 @@ use gpui::{
 use gpui_component::{button::Button, v_virtual_list};
 
 use super::{
-    ConversationBlockKind, NativeShell, conversation_block_visual, conversation_text_element,
-    conversation_text_render_mode,
+    ConversationBlockKind, NativeShell, conversation_block_visual, streaming_text::StreamingText,
 };
 use desktop::shell::{
     ASSISTANT_MESSAGE_MAX_WIDTH, MONOSPACE_FONT_FAMILY, SemanticTheme, USER_MESSAGE_MAX_WIDTH,
@@ -104,7 +103,7 @@ impl Render for ConversationPane {
                         let detail_markdown_id = ElementId::Name(SharedString::new(
                             block.detail_markdown_state_key.clone(),
                         ));
-                        let text_render_mode = conversation_text_render_mode(block.done);
+                        let text_phase = block.text_phase;
                         let text = block.text.clone();
                         let detail_text = block.detail.clone();
                         let theme = SemanticTheme::GEEK_DARK;
@@ -291,24 +290,26 @@ impl Render for ConversationPane {
                                                             ))
                                                             .child("◇ REASONING"),
                                                     )
-                                                    .child(conversation_text_element(
-                                                        detail_markdown_id.clone(),
-                                                        detail_text.clone(),
-                                                        text_render_mode,
-                                                        window,
-                                                        cx,
-                                                    )),
+                                                    .child(
+                                                        StreamingText::new(
+                                                            detail_markdown_id.clone(),
+                                                            detail_text.clone(),
+                                                            text_phase,
+                                                        )
+                                                        .into_any_element(window, cx),
+                                                    ),
                                             )
                                         },
                                         )
                                         .when(!text.is_empty() && (!is_tool || detail_expanded), |card| {
-                                            card.child(conversation_text_element(
-                                                markdown_id,
-                                                text,
-                                                text_render_mode,
-                                                window,
-                                                cx,
-                                            ))
+                                            card.child(
+                                                StreamingText::new(
+                                                    markdown_id,
+                                                    text,
+                                                    text_phase,
+                                                )
+                                                .into_any_element(window, cx),
+                                            )
                                         })
                                         .when(
                                             !is_assistant
@@ -330,13 +331,14 @@ impl Render for ConversationPane {
                                                             .text_xs()
                                                     })
                                                     .text_color(rgb(theme.muted_text.value()))
-                                                    .child(conversation_text_element(
-                                                        detail_markdown_id,
-                                                        detail_text,
-                                                        text_render_mode,
-                                                        window,
-                                                        cx,
-                                                    )),
+                                                    .child(
+                                                        StreamingText::new(
+                                                            detail_markdown_id,
+                                                            detail_text,
+                                                            text_phase,
+                                                        )
+                                                        .into_any_element(window, cx),
+                                                    ),
                                             )
                                         },
                                         )
