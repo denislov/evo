@@ -1,4 +1,4 @@
-use desktop::shell::{SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
+use desktop::shell::{MONOSPACE_FONT_FAMILY, SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
 use gpui::{
     EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
     prelude::*, px, rgb,
@@ -65,6 +65,7 @@ impl Render for SessionsPane {
                 );
                 Button::new(("open-session", index))
                     .compact()
+                    .font_family(MONOSPACE_FONT_FAMILY)
                     .label(label)
                     .tooltip(if active {
                         "Active coding-agent session"
@@ -126,6 +127,7 @@ impl Render for SessionsPane {
                             .rounded_md()
                             .p_3()
                             .bg(rgb(theme.elevated.value()))
+                            .font_family(MONOSPACE_FONT_FAMILY)
                             .child(current_session_label),
                     )
                     .child(

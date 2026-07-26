@@ -19,7 +19,7 @@ use desktop::runtime::{
 };
 use desktop::shell::{
     FocusState, FocusTarget, PanelVisibility, SemanticColor, SemanticStatus, SemanticTheme,
-    ShellLayout, truncate_label,
+    ShellLayout, UI_FONT_FAMILY, truncate_label,
 };
 use gpui::{
     AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
@@ -243,14 +243,14 @@ fn conversation_block_visual(
             accent: if is_error {
                 theme.danger
             } else {
-                theme.warning
+                theme.muted_text
             },
             align_right: false,
         },
         ConversationBlockKind::Delegation => ConversationBlockVisual {
             glyph: "AGENT",
-            surface: theme.thinking_surface,
-            accent: theme.focus_ring,
+            surface: theme.summary_surface,
+            accent: theme.accent,
             align_right: false,
         },
         ConversationBlockKind::CompactionSummary | ConversationBlockKind::BranchSummary => {
@@ -3665,7 +3665,7 @@ impl Render for NativeShell {
             .size_full()
             .flex()
             .flex_col()
-            .font_family("monospace")
+            .font_family(UI_FONT_FAMILY)
             .text_sm()
             .bg(rgb(theme.canvas.value()))
             .text_color(rgb(theme.text.value()))
@@ -3863,6 +3863,7 @@ mod tests {
         let assistant = conversation_block_visual(ConversationBlockKind::Assistant, false, theme);
         let tool = conversation_block_visual(ConversationBlockKind::Tool, false, theme);
         let failed_tool = conversation_block_visual(ConversationBlockKind::Tool, true, theme);
+        let delegation = conversation_block_visual(ConversationBlockKind::Delegation, false, theme);
         let diagnostic = conversation_block_visual(ConversationBlockKind::Diagnostic, true, theme);
 
         assert!(user.align_right);
@@ -3872,6 +3873,26 @@ mod tests {
         assert_ne!(tool.surface, failed_tool.surface);
         assert_eq!(failed_tool.surface, diagnostic.surface);
         assert_ne!(tool.accent, failed_tool.accent);
+        assert_eq!(tool.accent, theme.muted_text);
+        assert_eq!(delegation.accent, theme.accent);
+        assert_ne!(delegation.surface, theme.thinking_surface);
+    }
+
+    #[test]
+    fn desktop_typography_uses_system_ui_with_local_monospace_data_regions() {
+        let shell = include_str!("native_shell.rs");
+        let conversation = include_str!("native_shell/conversation_pane.rs");
+        let sessions = include_str!("native_shell/sessions_pane.rs");
+        let inspector = include_str!("native_shell/inspector_pane.rs");
+        let status = include_str!("native_shell/status_bar.rs");
+        let overlays = include_str!("native_shell/overlay_host.rs");
+
+        assert!(shell.contains(".font_family(UI_FONT_FAMILY)"));
+        for local_data_surface in [conversation, sessions, inspector, status, overlays] {
+            assert!(local_data_surface.contains("MONOSPACE_FONT_FAMILY"));
+        }
+        assert!(conversation.contains("theme.reasoning.value()"));
+        assert!(!conversation.contains("border_color(rgb(visual.accent.value()))"));
     }
 
     #[test]

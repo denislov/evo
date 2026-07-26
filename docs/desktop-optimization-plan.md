@@ -221,11 +221,11 @@ NativeShell
 
 #### DESK-012 字体、颜色和层级
 
-- [ ] 根 UI 改用系统 sans-serif。
-- [ ] code、command、path、ID 和 telemetry 局部使用 monospace。
-- [ ] 统一 canvas/surface/elevated 三层中性色。
-- [ ] 蓝色用于 action/focus，低饱和紫色仅用于 Reasoning，黄色仅用于 running/warning，红色仅用于 failure/destructive。
-- [ ] 减少嵌套完整边框，以背景、间距和 divider 表达层级。
+- [x] 根 UI 使用 GPUI 跨平台 `.SystemUIFont`，启动失败面也保持相同字体继承。
+- [x] code、command、path、ID 和 telemetry 局部使用 `monospace`；Sessions ID、Inspector 数据、Status 数据和 authorization details 均已显式限定。
+- [x] 统一 canvas/surface/elevated 三层中性色，并为 user、assistant、reasoning、tool、diagnostic、summary 提供低饱和语义 surface。
+- [x] 蓝色用于 action/focus，低饱和紫色仅用于 Reasoning，黄色仅用于 running/warning，红色仅用于 failure/destructive；语义角色与 WCAG 文本对比均有测试。
+- [x] 减少嵌套完整边框：普通消息卡和 Palette row 使用固定宽度左侧标记，区域层级主要使用 surface、间距和 divider。
 
 验收：正文阅读层级明确；focus、selection、reasoning、warning 和 error 不再共用同一视觉语义。
 
@@ -357,7 +357,8 @@ desktop.input.latency
 | DESK-009 | 完成 | revision-aware bounded row cache 已接入 NativeShell；sanitized `Arc<str>`、稳定 Markdown state key 和 measured height 可复用 |
 | DESK-010 | 完成 | 持久 row/height/size、sequence→单 index 更新、bounded 结构回退、15Hz 单行补刷和 67ms resize debounce 已完成 |
 | DESK-011 | 完成 | 所有计划区域 Entity 已拆分；token 流隔离到 Conversation 子树，usage-only telemetry 限制为 4Hz，typed command/authorization/recovery 边界测试通过 |
-| DESK-012～018 | 待开始 | DESK-011 完成后进入字体、颜色、消息组件和 Composer 视觉/交互重构 |
+| DESK-012 | 完成 | 系统 UI 字体与局部 monospace 已分层；中性 surface、蓝色 focus、紫色 reasoning 及 warning/danger 语义已解耦，嵌套边框已减少 |
+| DESK-013～018 | 待开始 | 继续消息组件、Composer、导航密度、响应式和 GUI 性能门禁重构 |
 
 ## 10. 完成定义
 

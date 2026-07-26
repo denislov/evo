@@ -1,4 +1,4 @@
-use desktop::shell::{STATUS_HEIGHT, SemanticTheme, truncate_label};
+use desktop::shell::{MONOSPACE_FONT_FAMILY, STATUS_HEIGHT, SemanticTheme, truncate_label};
 use gpui::{
     EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
     prelude::*, px, rgb,
@@ -89,6 +89,7 @@ impl Render for StatusBar {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .font_family(MONOSPACE_FONT_FAMILY)
                     .text_color(rgb(theme.muted_text.value()))
                     .child(
                         Button::new("cycle-model")

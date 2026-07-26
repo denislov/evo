@@ -10,6 +10,8 @@ pub const CONTEXT_PANEL_WIDTH: u32 = 320;
 pub const MIN_CONVERSATION_WIDTH: u32 = 520;
 pub const COMPOSER_HEIGHT: u32 = 112;
 pub const STATUS_HEIGHT: u32 = 30;
+pub const UI_FONT_FAMILY: &str = ".SystemUIFont";
+pub const MONOSPACE_FONT_FAMILY: &str = "monospace";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -270,27 +272,29 @@ pub struct SemanticTheme {
     pub warning: SemanticColor,
     pub danger: SemanticColor,
     pub focus_ring: SemanticColor,
+    pub reasoning: SemanticColor,
 }
 
 impl SemanticTheme {
     pub const GEEK_DARK: Self = Self {
-        canvas: SemanticColor::rgb(0x080b10),
-        surface: SemanticColor::rgb(0x0f141c),
-        elevated: SemanticColor::rgb(0x161d28),
-        user_surface: SemanticColor::rgb(0x10253c),
-        assistant_surface: SemanticColor::rgb(0x111923),
-        thinking_surface: SemanticColor::rgb(0x1c1830),
-        tool_surface: SemanticColor::rgb(0x211a10),
-        diagnostic_surface: SemanticColor::rgb(0x251318),
-        summary_surface: SemanticColor::rgb(0x171b26),
-        border: SemanticColor::rgb(0x293446),
-        text: SemanticColor::rgb(0xe6edf3),
-        muted_text: SemanticColor::rgb(0x94a3b8),
-        accent: SemanticColor::rgb(0x58a6ff),
+        canvas: SemanticColor::rgb(0x0b0e14),
+        surface: SemanticColor::rgb(0x11161f),
+        elevated: SemanticColor::rgb(0x18202c),
+        user_surface: SemanticColor::rgb(0x10243a),
+        assistant_surface: SemanticColor::rgb(0x121923),
+        thinking_surface: SemanticColor::rgb(0x1d1930),
+        tool_surface: SemanticColor::rgb(0x151a22),
+        diagnostic_surface: SemanticColor::rgb(0x26151a),
+        summary_surface: SemanticColor::rgb(0x171c26),
+        border: SemanticColor::rgb(0x2a3442),
+        text: SemanticColor::rgb(0xe8edf4),
+        muted_text: SemanticColor::rgb(0x9aa8ba),
+        accent: SemanticColor::rgb(0x60a5fa),
         success: SemanticColor::rgb(0x56d364),
         warning: SemanticColor::rgb(0xe3b341),
         danger: SemanticColor::rgb(0xff7b72),
-        focus_ring: SemanticColor::rgb(0xb392f0),
+        focus_ring: SemanticColor::rgb(0x60a5fa),
+        reasoning: SemanticColor::rgb(0xb49aef),
     };
 
     #[cfg(test)]
@@ -303,6 +307,7 @@ impl SemanticTheme {
             self.warning,
             self.danger,
             self.focus_ring,
+            self.reasoning,
         ]
         .into_iter()
         .all(|color| color.contrast_ratio(self.canvas) >= 4.5)
@@ -479,6 +484,20 @@ mod tests {
     #[test]
     fn semantic_theme_meets_text_contrast_floor() {
         assert!(SemanticTheme::GEEK_DARK.has_readable_contrast());
+    }
+
+    #[test]
+    fn semantic_theme_keeps_focus_reasoning_warning_and_failure_distinct() {
+        let theme = SemanticTheme::GEEK_DARK;
+        assert_eq!(theme.focus_ring, theme.accent);
+        assert_ne!(theme.reasoning, theme.focus_ring);
+        assert_ne!(theme.reasoning, theme.warning);
+        assert_ne!(theme.reasoning, theme.danger);
+        assert_ne!(theme.warning, theme.danger);
+        assert_ne!(theme.canvas, theme.surface);
+        assert_ne!(theme.surface, theme.elevated);
+        assert_eq!(UI_FONT_FAMILY, ".SystemUIFont");
+        assert_eq!(MONOSPACE_FONT_FAMILY, "monospace");
     }
 
     #[test]

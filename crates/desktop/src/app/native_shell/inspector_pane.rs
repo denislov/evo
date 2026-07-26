@@ -1,7 +1,9 @@
 use coding_agent::api::review::CodingAgentFileReviewRequest;
 use desktop::file_review::{DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES};
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
-use desktop::shell::{CONTEXT_PANEL_WIDTH, SemanticColor, SemanticTheme, truncate_label};
+use desktop::shell::{
+    CONTEXT_PANEL_WIDTH, MONOSPACE_FONT_FAMILY, SemanticColor, SemanticTheme, truncate_label,
+};
 use gpui::{
     EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
     prelude::*, px, rgb,
@@ -326,6 +328,7 @@ impl Render for InspectorPane {
                     .min_h_0()
                     .overflow_y_scroll()
                     .p_4()
+                    .font_family(MONOSPACE_FONT_FAMILY)
                     .flex()
                     .flex_col()
                     .gap_3()

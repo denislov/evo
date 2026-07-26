@@ -8,7 +8,7 @@ use super::{
     ConversationBlockKind, NativeShell, conversation_block_visual, conversation_text_element,
     conversation_text_render_mode,
 };
-use desktop::shell::SemanticTheme;
+use desktop::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConversationPaneEvent {
@@ -93,6 +93,13 @@ impl Render for ConversationPane {
                         let detail_text = block.detail.clone();
                         let theme = SemanticTheme::GEEK_DARK;
                         let visual = conversation_block_visual(block.kind, block.is_error, theme);
+                        let card_border = if selected {
+                            theme.focus_ring
+                        } else if block.is_error || block.kind == ConversationBlockKind::Diagnostic {
+                            theme.danger
+                        } else {
+                            theme.border
+                        };
                         let is_assistant = block.kind == ConversationBlockKind::Assistant;
                         let is_tool = block.kind == ConversationBlockKind::Tool;
                         let terminal_label = if block.is_error {
@@ -124,12 +131,8 @@ impl Render for ConversationPane {
                                         .when(visual.align_right, |card| card.w(relative(0.82)))
                                         .overflow_hidden()
                                         .rounded_lg()
-                                        .border_1()
-                                        .border_color(if selected {
-                                            rgb(theme.focus_ring.value())
-                                        } else {
-                                            rgb(visual.accent.value())
-                                        })
+                                        .border_l_2()
+                                        .border_color(rgb(card_border.value()))
                                         .bg(rgb(visual.surface.value()))
                                         .px_4()
                                         .py_3()
@@ -187,7 +190,7 @@ impl Render for ConversationPane {
                                                 div()
                                                     .rounded_md()
                                                     .border_l_3()
-                                                    .border_color(rgb(theme.focus_ring.value()))
+                                                    .border_color(rgb(theme.reasoning.value()))
                                                     .bg(rgb(theme.thinking_surface.value()))
                                                     .px_3()
                                                     .py_2()
@@ -201,7 +204,7 @@ impl Render for ConversationPane {
                                                                 gpui::FontWeight::SEMIBOLD,
                                                             )
                                                             .text_color(rgb(
-                                                                theme.focus_ring.value(),
+                                                                theme.reasoning.value(),
                                                             ))
                                                             .child("◇ REASONING"),
                                                     )
@@ -234,7 +237,9 @@ impl Render for ConversationPane {
                                                     .px_3()
                                                     .py_2()
                                                     .when(is_tool, |detail| {
-                                                        detail.font_family("monospace").text_xs()
+                                                        detail
+                                                            .font_family(MONOSPACE_FONT_FAMILY)
+                                                            .text_xs()
                                                     })
                                                     .text_color(rgb(theme.muted_text.value()))
                                                     .child(conversation_text_element(
@@ -298,9 +303,16 @@ impl Render for ConversationPane {
                         .text_color(rgb(theme.muted_text.value()))
                         .child("Native runtime connected")
                         .child("No durable conversation blocks yet.")
-                        .child(format!("project events  {event_count}"))
-                        .child(format!("message overlays  {message_count}"))
-                        .child(format!("tool overlays     {tool_count}")),
+                        .child(
+                            div()
+                                .font_family(MONOSPACE_FONT_FAMILY)
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(format!("project events   {event_count}"))
+                                .child(format!("message overlays {message_count}"))
+                                .child(format!("tool overlays    {tool_count}")),
+                        ),
                 )
             })
             .when(visible_count > 0, |content| {

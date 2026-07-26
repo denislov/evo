@@ -15,7 +15,7 @@ use crate::preferences::{
 };
 use crate::projection::DesktopProjection;
 use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeStartError};
-use crate::shell::{SemanticTheme, truncate_label};
+use crate::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme, UI_FONT_FAMILY, truncate_label};
 
 const BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
@@ -32,7 +32,7 @@ impl Render for StartupFailure {
             .flex()
             .flex_col()
             .gap_4()
-            .font_family("monospace")
+            .font_family(UI_FONT_FAMILY)
             .bg(rgb(theme.canvas.value()))
             .text_color(rgb(theme.text.value()))
             .child(
@@ -41,7 +41,11 @@ impl Render for StartupFailure {
                     .text_color(rgb(theme.danger.value()))
                     .child("× Desktop runtime failed to start"),
             )
-            .child(self.message.clone())
+            .child(
+                div()
+                    .font_family(MONOSPACE_FONT_FAMILY)
+                    .child(self.message.clone()),
+            )
     }
 }
 

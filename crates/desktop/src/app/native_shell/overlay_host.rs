@@ -1,7 +1,7 @@
 use coding_agent::api::authorization::{
     ToolAuthorizationDecision, ToolAuthorizationIdentity, ToolAuthorizationScope,
 };
-use desktop::shell::{SemanticTheme, truncate_label};
+use desktop::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme, truncate_label};
 use gpui::{
     EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
     prelude::*, px, rgb, rgba,
@@ -62,6 +62,7 @@ impl Render for OverlayHost {
                 let target = session.session_id.clone();
                 let active = target == active_session_id;
                 Button::new(("narrow-open-session", index))
+                    .font_family(MONOSPACE_FONT_FAMILY)
                     .label(format!(
                         "{} {} · {}",
                         if active { "●" } else { "○" },
@@ -92,8 +93,9 @@ impl Render for OverlayHost {
                     |shortcut| format!("{}    {shortcut}", entry.label),
                 );
                 div()
+                    .font_family(MONOSPACE_FONT_FAMILY)
                     .rounded_md()
-                    .border_1()
+                    .border_l_2()
                     .border_color(rgb(if selected {
                         theme.focus_ring.value()
                     } else {
@@ -281,6 +283,7 @@ impl Render for OverlayHost {
                                         .flex_1()
                                         .min_h_0()
                                         .overflow_y_scroll()
+                                        .font_family(MONOSPACE_FONT_FAMILY)
                                         .flex()
                                         .flex_col()
                                         .gap_2()
