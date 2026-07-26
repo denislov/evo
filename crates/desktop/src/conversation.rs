@@ -22,6 +22,10 @@ pub const MAX_MARKDOWN_MARKERS_PER_LINE: usize = 128;
 pub const MAX_MARKDOWN_TABLE_ROWS: usize = 256;
 pub const MAX_MARKDOWN_TABLE_CELLS: usize = 64;
 pub const MAX_CODE_BLOCK_PREVIEW_BYTES: usize = 128 * 1024;
+/// A reader who moves farther than this from the bottom owns the viewport.
+pub const FOLLOW_LATEST_PAUSE_THRESHOLD_PX: f32 = 48.0;
+/// A paused reader must return this close to the bottom before following resumes.
+pub const FOLLOW_LATEST_RESUME_THRESHOLD_PX: f32 = 32.0;
 
 const TRUNCATED_LINE_NOTICE: &str = "\n\n> … line truncated by desktop preview bounds …\n";
 const TRUNCATED_CODE_NOTICE: &str = "\n… code block truncated by desktop preview bounds …\n";
@@ -426,6 +430,9 @@ pub struct ConversationViewport {
     first_visible: usize,
     visible_count: usize,
     follow_latest: bool,
+    block_count: usize,
+    unseen_updates: usize,
+    content_revision: Option<u64>,
 }
 
 impl ConversationViewport {
@@ -435,6 +442,9 @@ impl ConversationViewport {
             first_visible: 0,
             visible_count: visible_count.max(1),
             follow_latest: true,
+            block_count: 0,
+            unseen_updates: 0,
+            content_revision: None,
         }
     }
 
@@ -451,12 +461,43 @@ impl ConversationViewport {
         self.follow_latest
     }
 
+    pub const fn unseen_updates(&self) -> usize {
+        self.unseen_updates
+    }
+
+    /// Reconcile follow-latest with the actual pixel distance from the bottom.
+    ///
+    /// Separate pause and resume thresholds add hysteresis around the bottom so
+    /// fractional layout changes do not flicker between modes.
+    pub fn reconcile_scroll_distance(&mut self, distance_to_bottom: f32) -> bool {
+        let previous_follow_latest = self.follow_latest;
+        let previous_unseen_updates = self.unseen_updates;
+        let distance_to_bottom = if distance_to_bottom.is_finite() {
+            distance_to_bottom.max(0.0)
+        } else {
+            f32::INFINITY
+        };
+
+        if self.follow_latest {
+            if distance_to_bottom > FOLLOW_LATEST_PAUSE_THRESHOLD_PX {
+                self.follow_latest = false;
+            }
+        } else if distance_to_bottom <= FOLLOW_LATEST_RESUME_THRESHOLD_PX {
+            self.follow_latest = true;
+            self.unseen_updates = 0;
+        }
+
+        self.follow_latest != previous_follow_latest
+            || self.unseen_updates != previous_unseen_updates
+    }
+
     pub fn pause_follow_latest(&mut self) {
         self.follow_latest = false;
     }
 
     pub fn resume_latest(&mut self, block_count: usize) {
         self.follow_latest = true;
+        self.unseen_updates = 0;
         self.on_blocks_changed(block_count);
     }
 
@@ -475,7 +516,12 @@ impl ConversationViewport {
         self.selected_block_id = Some(block_id.into());
     }
 
-    pub fn reconcile_hydration(&mut self, projection: &ConversationProjection) {
+    pub fn reconcile_hydration(
+        &mut self,
+        projection: &ConversationProjection,
+        visible_block_count: usize,
+        content_revision: u64,
+    ) {
         if self
             .selected_block_id
             .as_deref()
@@ -483,7 +529,7 @@ impl ConversationViewport {
         {
             self.selected_block_id = None;
         }
-        self.on_blocks_changed(projection.blocks.len());
+        self.on_content_changed(visible_block_count, content_revision);
     }
 
     pub fn reconcile_live_selection(&mut self, live_id: &str, durable_id: &str) {
@@ -497,20 +543,45 @@ impl ConversationViewport {
         let max_first = block_count.saturating_sub(self.visible_count);
         self.first_visible = first_visible.min(max_first);
         self.follow_latest = self.first_visible.saturating_add(self.visible_count) >= block_count;
+        self.block_count = block_count;
+        if self.follow_latest {
+            self.unseen_updates = 0;
+        }
     }
 
     pub fn on_blocks_changed(&mut self, block_count: usize) {
+        self.reconcile_blocks(block_count, 0);
+    }
+
+    /// Record a projection revision that can change an existing streaming row
+    /// without increasing the row count.
+    pub fn on_content_changed(&mut self, block_count: usize, content_revision: u64) {
+        let revision_changed = self
+            .content_revision
+            .replace(content_revision)
+            .is_some_and(|previous| previous != content_revision);
+        self.reconcile_blocks(block_count, usize::from(revision_changed));
+    }
+
+    fn reconcile_blocks(&mut self, block_count: usize, minimum_unseen_updates: usize) {
+        let appended = block_count.saturating_sub(self.block_count);
+        self.block_count = block_count;
         let max_first = block_count.saturating_sub(self.visible_count);
         if self.follow_latest {
             self.first_visible = max_first;
+            self.unseen_updates = 0;
         } else {
             self.first_visible = self.first_visible.min(max_first);
+            self.unseen_updates = self
+                .unseen_updates
+                .saturating_add(appended.max(minimum_unseen_updates));
         }
     }
 
     #[cfg(test)]
     pub fn home(&mut self, projection: &ConversationProjection) {
         self.follow_latest = false;
+        self.block_count = projection.blocks.len();
         self.first_visible = 0;
         self.selected_block_id = projection.blocks.front().map(|block| block.id.clone());
     }
@@ -1144,7 +1215,7 @@ mod tests {
         let selected = projection.blocks().front().unwrap().id.clone();
         let mut viewport = ConversationViewport::new(1);
         viewport.select(selected.clone(), &projection);
-        viewport.reconcile_hydration(&projection);
+        viewport.reconcile_hydration(&projection, projection.blocks().len(), 1);
         assert_eq!(viewport.selected_block_id(), Some(selected.as_str()));
         assert_eq!(
             viewport.copy_selected(&projection).as_deref(),
@@ -1183,7 +1254,7 @@ mod tests {
         ]));
         let mut viewport = ConversationViewport::new(1);
         viewport.select_live("assistant:message-7");
-        viewport.reconcile_hydration(&projection);
+        viewport.reconcile_hydration(&projection, projection.blocks().len(), 1);
         assert_eq!(viewport.selected_block_id(), Some("assistant:message-7"));
     }
 
@@ -1221,6 +1292,52 @@ mod tests {
         viewport.resume_latest(25);
         assert!(viewport.follow_latest());
         assert_eq!(viewport.first_visible(), 20);
+        assert_eq!(viewport.unseen_updates(), 0);
+    }
+
+    #[test]
+    fn pixel_scroll_distance_uses_hysteresis_and_ignores_bottom_jitter() {
+        let mut viewport = ConversationViewport::new(5);
+
+        assert!(!viewport.reconcile_scroll_distance(47.9));
+        assert!(viewport.follow_latest());
+        assert!(viewport.reconcile_scroll_distance(48.1));
+        assert!(!viewport.follow_latest());
+
+        assert!(!viewport.reconcile_scroll_distance(32.1));
+        assert!(!viewport.follow_latest());
+        assert!(viewport.reconcile_scroll_distance(31.9));
+        assert!(viewport.follow_latest());
+        assert!(!viewport.reconcile_scroll_distance(0.0));
+    }
+
+    #[test]
+    fn paused_reader_accumulates_appended_blocks_until_resuming() {
+        let mut viewport = ConversationViewport::new(5);
+        viewport.on_blocks_changed(20);
+        viewport.pause_follow_latest();
+
+        viewport.on_blocks_changed(23);
+        viewport.on_blocks_changed(25);
+        assert_eq!(viewport.unseen_updates(), 5);
+
+        assert!(viewport.reconcile_scroll_distance(0.0));
+        assert!(viewport.follow_latest());
+        assert_eq!(viewport.unseen_updates(), 0);
+    }
+
+    #[test]
+    fn paused_reader_counts_streaming_revisions_without_new_rows() {
+        let mut viewport = ConversationViewport::new(5);
+        viewport.on_content_changed(20, 40);
+        viewport.pause_follow_latest();
+
+        viewport.on_content_changed(20, 41);
+        viewport.on_content_changed(20, 41);
+        assert_eq!(viewport.unseen_updates(), 1);
+
+        viewport.on_content_changed(22, 42);
+        assert_eq!(viewport.unseen_updates(), 3);
     }
 
     #[test]
@@ -1281,7 +1398,7 @@ mod tests {
             .unwrap();
         assert_eq!(reconciled_live, live_id);
         viewport.reconcile_live_selection(&reconciled_live, &durable_id);
-        viewport.reconcile_hydration(&projection);
+        viewport.reconcile_hydration(&projection, projection.blocks().len(), 1);
         assert_eq!(viewport.selected_block_id(), Some(durable_id.as_str()));
         assert!(composer.submitted().is_none());
         assert!(composer.rejection().is_none());

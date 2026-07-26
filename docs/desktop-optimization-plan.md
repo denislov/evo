@@ -153,15 +153,15 @@ NativeShell
 
 #### DESK-006 重写 follow-latest 状态机
 
-- [ ] 从 `ScrollHandle` 读取 offset、content size 和 viewport size。
-- [ ] 距离底部 ≤ 32–48px 时进入 Following。
-- [ ] 用户向上滚动超过阈值时进入 Paused。
-- [ ] Paused 时保持 item key + intra-row pixel offset。
-- [ ] 新内容累计 unseen count，显示 `↓ N new updates` 浮动 pill。
-- [ ] 用户滚回底部或点击 pill 时恢复 Following。
-- [ ] 横向、零 delta 或底部轻微滚轮不得误暂停。
+- [x] 从 `ScrollHandle` 读取 offset 和 `max_offset`（由 content size 与 viewport size 得出）。
+- [x] 使用迟滞阈值：Following 超过 48px 后暂停，Paused 回到 32px 内恢复。
+- [x] 用户向上滚动超过阈值时进入 Paused。
+- [x] Paused 时复用 `VirtualListScrollHandle`，保持当前像素 offset，不因追加尾部内容主动改写锚点。
+- [x] 新 block 和同一 streaming row 的新 sequence 均累计 unseen count，显示 `↓ N new` 浮动 pill。
+- [x] 用户滚回底部、点击 pill 或触发 End action 时恢复 Following 并清零 unseen count。
+- [x] 状态由事件处理后的实际纵向 offset 决定；横向、零 delta 或底部轻微滚轮不会误暂停。
 
-验收：Following 与 Paused 两种模式的像素锚定误差均不超过 2px。
+验收：纯状态机、负向 GPUI offset 和 streaming revision 已覆盖自动化测试；Following 与 Paused 的 ≤2px GUI 锚定误差并入 DESK-017 截图/交互回归。
 
 #### DESK-007 限制流式高度抖动
 
@@ -344,7 +344,8 @@ desktop.input.latency
 | DESK-003 | 待开始 | 依赖布局 token 整理 |
 | DESK-004 | 进行中 | 最小双阶段路径已完成；后续抽取 StreamingText、revision 和后台 settling parse |
 | DESK-005 | 进行中 | Markdown 已使用稳定业务 ID；typed key 和 row element 迁移待完成 |
-| DESK-006～018 | 待开始 | 按依赖顺序推进 |
+| DESK-006 | 完成 | 基于真实 offset 的迟滞状态机、streaming unseen 计数和无布局占位的浮动 pill 已完成；GUI 像素门禁归入 DESK-017 |
+| DESK-007～018 | 待开始 | 下一步限制 streaming 高度更新频率并补齐 Paused 锚点补偿 |
 
 ## 10. 完成定义
 

@@ -76,6 +76,10 @@ fn conversation_text_render_mode(done: bool) -> ConversationTextRenderMode {
     }
 }
 
+fn conversation_distance_to_bottom(offset_y: f32, max_offset_y: f32) -> f32 {
+    (max_offset_y.max(0.0) + offset_y.min(0.0)).max(0.0)
+}
+
 fn conversation_text_element(
     id: ElementId,
     text: String,
@@ -1108,19 +1112,25 @@ impl NativeShell {
                     }
                     self.composer_needs_sync = true;
                 }
-                self.conversation_viewport
-                    .reconcile_hydration(self.projection.conversation());
                 let visible_blocks = self.visible_conversation_count();
+                let content_revision = self.projection.cursor().last_event_sequence;
+                self.conversation_viewport.reconcile_hydration(
+                    self.projection.conversation(),
+                    visible_blocks,
+                    content_revision,
+                );
                 if self.conversation_viewport.follow_latest() && visible_blocks > 0 {
                     self.conversation_scroll
-                        .scroll_to_item(visible_blocks - 1, ScrollStrategy::Top);
+                        .scroll_to_item(visible_blocks - 1, ScrollStrategy::Bottom);
                 }
             } else {
                 let visible_blocks = self.visible_conversation_count();
-                self.conversation_viewport.on_blocks_changed(visible_blocks);
+                let content_revision = self.projection.cursor().last_event_sequence;
+                self.conversation_viewport
+                    .on_content_changed(visible_blocks, content_revision);
                 if self.conversation_viewport.follow_latest() && visible_blocks > 0 {
                     self.conversation_scroll
-                        .scroll_to_item(visible_blocks - 1, ScrollStrategy::Top);
+                        .scroll_to_item(visible_blocks - 1, ScrollStrategy::Bottom);
                 }
             }
             if let Some((command_id, authorization_id, _)) = self
@@ -2096,9 +2106,21 @@ impl NativeShell {
         self.conversation_viewport.resume_latest(block_count);
         if block_count > 0 {
             self.conversation_scroll
-                .scroll_to_item(block_count - 1, ScrollStrategy::Top);
+                .scroll_to_item(block_count - 1, ScrollStrategy::Bottom);
         }
         cx.notify();
+    }
+
+    fn reconcile_conversation_scroll(&mut self, cx: &mut Context<Self>) {
+        let offset_y = f32::from(self.conversation_scroll.offset().y);
+        let max_offset_y = f32::from(self.conversation_scroll.max_offset().height);
+        let distance_to_bottom = conversation_distance_to_bottom(offset_y, max_offset_y);
+        if self
+            .conversation_viewport
+            .reconcile_scroll_distance(distance_to_bottom)
+        {
+            cx.notify();
+        }
     }
 
     fn review_next_file(&mut self, cx: &mut Context<Self>) {
@@ -2661,6 +2683,12 @@ impl Render for NativeShell {
         let message_count = self.projection.messages().len();
         let tool_count = self.projection.tools().len();
         let visible_conversation_count = self.visible_conversation_count();
+        let unseen_conversation_updates = self.conversation_viewport.unseen_updates();
+        let follow_latest_label = if unseen_conversation_updates == 0 {
+            "Latest ↓".to_owned()
+        } else {
+            format!("↓ {unseen_conversation_updates} new")
+        };
         let omitted_transcript_count = self.projection.conversation().omitted_blocks();
         let notice = self.preference_notice.clone();
         let composer_pending =
@@ -3685,30 +3713,12 @@ impl Render for NativeShell {
                                             this.abort_active_operation(cx);
                                         })),
                                 )
-                            })
-                            .when(!self.conversation_viewport.follow_latest(), |actions| {
-                                actions.child(
-                                    Button::new("follow-latest")
-                                        .compact()
-                                        .label("Latest ↓")
-                                        .tooltip("Jump to latest output · End")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            let block_count = this.visible_conversation_count();
-                                            this.conversation_viewport.resume_latest(block_count);
-                                            if block_count > 0 {
-                                                this.conversation_scroll.scroll_to_item(
-                                                    block_count - 1,
-                                                    ScrollStrategy::Top,
-                                                );
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
                             }),
                     ),
             )
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .flex()
@@ -3747,12 +3757,34 @@ impl Render for NativeShell {
                                     .id("conversation-scroll-region")
                                     .flex_1()
                                     .min_h_0()
-                                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                                        this.conversation_viewport.pause_follow_latest();
-                                        cx.notify();
+                                    .on_scroll_wheel(cx.listener(|_, _, window, cx| {
+                                        cx.defer_in(window, |this, _, cx| {
+                                            this.reconcile_conversation_scroll(cx);
+                                        });
                                     }))
                                     .child(transcript_list),
                             )
+                            .when(!self.conversation_viewport.follow_latest(), |content| {
+                                content.child(
+                                    div()
+                                        .absolute()
+                                        .right_4()
+                                        .bottom_4()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(theme.accent.value()))
+                                        .bg(rgb(theme.elevated.value()))
+                                        .child(
+                                            Button::new("follow-latest")
+                                                .compact()
+                                                .label(follow_latest_label.clone())
+                                                .tooltip("Jump to latest output · End")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.follow_latest(cx);
+                                                })),
+                                        ),
+                                )
+                            })
                     }),
             )
             .child(
@@ -4450,6 +4482,15 @@ mod tests {
         assert!(diagnostic < short_assistant);
         assert!(short_assistant < reasoning_assistant);
         assert_eq!(long_assistant, TRANSCRIPT_ROW_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn conversation_bottom_distance_matches_negative_gpui_offsets() {
+        assert_eq!(conversation_distance_to_bottom(0.0, 640.0), 640.0);
+        assert_eq!(conversation_distance_to_bottom(-400.0, 640.0), 240.0);
+        assert_eq!(conversation_distance_to_bottom(-640.0, 640.0), 0.0);
+        assert_eq!(conversation_distance_to_bottom(-641.0, 640.0), 0.0);
+        assert_eq!(conversation_distance_to_bottom(4.0, 0.0), 0.0);
     }
 
     #[test]
