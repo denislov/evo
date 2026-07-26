@@ -55,6 +55,7 @@ use crate::command_ledger::{DesktopCommandIntent, DesktopCommandLedger};
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const COMPOSER_MIN_HEIGHT: f32 = 88.;
 const COMPOSER_MAX_HEIGHT: f32 = 236.;
+const CONVERSATION_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(67);
 
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
@@ -253,9 +254,17 @@ pub(super) struct NativeShell {
     conversation_viewport: ConversationViewport,
     conversation_scroll: VirtualListScrollHandle,
     conversation_layout: ConversationRowLayoutState,
+    conversation_live_layout: ConversationRowLayoutState,
     conversation_render_cache: ConversationRowRenderCache,
     conversation_render_rows: Vec<ConversationRowRenderData>,
+    conversation_render_heights: Vec<f32>,
+    conversation_row_sizes: Rc<Vec<gpui::Size<gpui::Pixels>>>,
+    conversation_render_full_dirty: bool,
+    conversation_render_live_dirty: bool,
+    conversation_render_width_bucket: Option<u32>,
+    conversation_width_pending: Option<(u32, Instant)>,
     conversation_height_refresh_deadline: Option<Instant>,
+    conversation_height_refresh_full: bool,
     composer: ComposerState,
     composer_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
@@ -393,9 +402,17 @@ impl NativeShell {
             conversation_viewport: ConversationViewport::new(8),
             conversation_scroll: VirtualListScrollHandle::new(),
             conversation_layout: ConversationRowLayoutState::default(),
+            conversation_live_layout: ConversationRowLayoutState::default(),
             conversation_render_cache: ConversationRowRenderCache::default(),
             conversation_render_rows: Vec::new(),
+            conversation_render_heights: Vec::new(),
+            conversation_row_sizes: Rc::new(Vec::new()),
+            conversation_render_full_dirty: true,
+            conversation_render_live_dirty: true,
+            conversation_render_width_bucket: None,
+            conversation_width_pending: None,
             conversation_height_refresh_deadline: None,
+            conversation_height_refresh_full: false,
             composer: ComposerState::default(),
             composer_input,
             composer_needs_sync: false,
@@ -635,6 +652,7 @@ impl NativeShell {
                         && self.composer.accepted(*command_id).is_ok()
                     {
                         self.composer_needs_sync = true;
+                        self.conversation_render_live_dirty = true;
                     }
                 }
                 desktop::runtime::DesktopRuntimeUpdate::PromptStarted { command_id, .. } => {
@@ -934,6 +952,12 @@ impl NativeShell {
             let conversation_dirty = outcome
                 .delta()
                 .is_some_and(|delta| delta.conversation || delta.tools);
+            if outcome.is_replaced() {
+                self.conversation_render_full_dirty = true;
+                self.conversation_render_live_dirty = true;
+            } else if conversation_dirty {
+                self.conversation_render_live_dirty = true;
+            }
             let file_changes_dirty = outcome.delta().is_some_and(|delta| {
                 delta
                     .context
@@ -2522,6 +2546,241 @@ impl NativeShell {
         self.conversation_render_rows = rows;
     }
 
+    fn rebuild_live_conversation_render_rows(&mut self, panel_width: u32) {
+        let durable_count = self.projection.conversation().blocks().len();
+        if self.conversation_render_rows.len() < durable_count
+            || self.conversation_render_rows[..durable_count]
+                .iter()
+                .any(|row| !row.durable)
+        {
+            self.rebuild_conversation_render_rows(panel_width);
+            self.conversation_render_full_dirty = false;
+            return;
+        }
+
+        let session_id = self.projection.conversation().session_id.clone();
+        self.conversation_render_rows.truncate(durable_count);
+        self.conversation_render_cache.begin_frame();
+
+        if let Some(submitted) = self.composer.submitted() {
+            let row_id = submitted.block_id();
+            let cache_key = format!("{session_id}:{row_id}");
+            self.conversation_render_rows
+                .push(self.conversation_render_cache.resolve(
+                    ConversationRowRenderSource {
+                        cache_key: &cache_key,
+                        row_id: &row_id,
+                        source_revision: submitted.command_id,
+                        title: Cow::Borrowed("You · submitted"),
+                        text: &submitted.payload,
+                        detail: "",
+                        kind: ConversationBlockKind::User,
+                        done: false,
+                        is_error: false,
+                        image_count: 0,
+                        truncated: false,
+                        durable: false,
+                    },
+                    panel_width,
+                ));
+        }
+
+        for message in self.projection.messages() {
+            let row_id = message_conversation_block_id(message);
+            let cache_key = format!("{session_id}:{row_id}");
+            self.conversation_render_rows
+                .push(self.conversation_render_cache.resolve(
+                    ConversationRowRenderSource {
+                        cache_key: &cache_key,
+                        row_id: &row_id,
+                        source_revision: message.updated_sequence,
+                        title: Cow::Borrowed("Assistant · live"),
+                        text: &message.text,
+                        detail: &message.thinking,
+                        kind: ConversationBlockKind::Assistant,
+                        done: matches!(
+                            message.status,
+                            desktop::projection::DesktopMessageStatus::Completed
+                        ),
+                        is_error: false,
+                        image_count: 0,
+                        truncated: message.truncated,
+                        durable: false,
+                    },
+                    panel_width,
+                ));
+        }
+
+        for tool in self.projection.tools() {
+            let row_id = tool_conversation_block_id(tool);
+            let cache_key = format!("{session_id}:{row_id}");
+            self.conversation_render_rows
+                .push(self.conversation_render_cache.resolve(
+                    ConversationRowRenderSource {
+                        cache_key: &cache_key,
+                        row_id: &row_id,
+                        source_revision: tool.updated_sequence,
+                        title: Cow::Owned(format!("Tool · {} · live", tool.name)),
+                        text: &tool.detail,
+                        detail: &tool.arguments,
+                        kind: ConversationBlockKind::Tool,
+                        done: !matches!(
+                            tool.status,
+                            desktop::projection::DesktopToolStatus::Running
+                        ),
+                        is_error: matches!(
+                            tool.status,
+                            desktop::projection::DesktopToolStatus::Failed
+                        ),
+                        image_count: 0,
+                        truncated: tool.truncated,
+                        durable: false,
+                    },
+                    panel_width,
+                ));
+        }
+        self.conversation_render_cache.finish_incremental();
+    }
+
+    fn conversation_width_for_render(&mut self, requested: u32) -> (u32, Option<(u32, Instant)>) {
+        let Some(active) = self.conversation_render_width_bucket else {
+            self.conversation_width_pending = None;
+            return (requested, None);
+        };
+        if active == requested {
+            self.conversation_width_pending = None;
+            return (active, None);
+        }
+
+        let now = Instant::now();
+        if let Some((pending, deadline)) = self.conversation_width_pending
+            && pending == requested
+        {
+            if now >= deadline {
+                self.conversation_width_pending = None;
+                self.conversation_render_full_dirty = true;
+                return (requested, None);
+            }
+            return (active, None);
+        }
+
+        let deadline = now + CONVERSATION_RESIZE_DEBOUNCE;
+        self.conversation_width_pending = Some((requested, deadline));
+        (active, Some((requested, deadline)))
+    }
+
+    fn prepare_conversation_rows(
+        &mut self,
+        layout_width: u32,
+    ) -> Option<(std::time::Duration, bool)> {
+        let visible_conversation_count = self.visible_conversation_count();
+        let previous_scroll_top = (!self.conversation_viewport.follow_latest())
+            .then(|| (-f32::from(self.conversation_scroll.offset().y)).max(0.0));
+        let full_render_update = self.conversation_render_full_dirty
+            || self.conversation_render_width_bucket != Some(layout_width);
+        let mut paused_scroll_top = None;
+        let mut next_refresh_after = None;
+        let mut refresh_requires_full = false;
+        if full_render_update {
+            self.rebuild_conversation_render_rows(layout_width);
+            let row_layout_inputs = self
+                .conversation_render_rows
+                .iter()
+                .map(|row| ConversationRowLayoutInput {
+                    key: row.cache_key.to_string(),
+                    target_height: row.measured_height,
+                    streaming: !row.done,
+                })
+                .collect::<Vec<_>>();
+            let row_layout = self.conversation_layout.resolve(
+                row_layout_inputs,
+                layout_width,
+                Instant::now(),
+                previous_scroll_top,
+            );
+            paused_scroll_top = row_layout.paused_scroll_top;
+            next_refresh_after = row_layout.next_refresh_after;
+            refresh_requires_full = next_refresh_after.is_some();
+            self.conversation_render_heights = row_layout.heights;
+            self.conversation_row_sizes = Rc::new(
+                self.conversation_render_heights
+                    .iter()
+                    .map(|height| size(px(0.), px(*height)))
+                    .collect(),
+            );
+
+            let durable_count = self.projection.conversation().blocks().len();
+            let live_inputs = self.conversation_render_rows[durable_count..]
+                .iter()
+                .map(|row| ConversationRowLayoutInput {
+                    key: row.cache_key.to_string(),
+                    target_height: row.measured_height,
+                    streaming: !row.done,
+                })
+                .collect();
+            let _ = self.conversation_live_layout.resolve(
+                live_inputs,
+                layout_width,
+                Instant::now(),
+                None,
+            );
+            self.conversation_render_width_bucket = Some(layout_width);
+            self.conversation_render_full_dirty = false;
+            self.conversation_render_live_dirty = false;
+        } else if self.conversation_render_live_dirty {
+            let durable_count = self.projection.conversation().blocks().len();
+            self.rebuild_live_conversation_render_rows(layout_width);
+            let live_inputs = self.conversation_render_rows[durable_count..]
+                .iter()
+                .map(|row| ConversationRowLayoutInput {
+                    key: row.cache_key.to_string(),
+                    target_height: row.measured_height,
+                    streaming: !row.done,
+                })
+                .collect();
+            let live_layout = self.conversation_live_layout.resolve(
+                live_inputs,
+                layout_width,
+                Instant::now(),
+                None,
+            );
+            next_refresh_after = live_layout.next_refresh_after;
+            self.conversation_render_heights.truncate(durable_count);
+            self.conversation_render_heights
+                .extend(live_layout.heights.iter().copied());
+            let sizes = Rc::make_mut(&mut self.conversation_row_sizes);
+            sizes.truncate(durable_count);
+            sizes.extend(
+                live_layout
+                    .heights
+                    .into_iter()
+                    .map(|height| size(px(0.), px(height))),
+            );
+            self.conversation_render_live_dirty = false;
+        }
+        debug_assert_eq!(
+            self.conversation_render_rows.len(),
+            visible_conversation_count
+        );
+        debug_assert_eq!(
+            self.conversation_render_heights.len(),
+            visible_conversation_count
+        );
+        if let (Some(previous_scroll_top), Some(adjusted_scroll_top)) =
+            (previous_scroll_top, paused_scroll_top)
+            && (previous_scroll_top - adjusted_scroll_top).abs() > 0.5
+        {
+            let mut offset = self.conversation_scroll.offset();
+            offset.y = px(-adjusted_scroll_top);
+            self.conversation_scroll.set_offset(offset);
+        }
+        if self.conversation_viewport.follow_latest() && visible_conversation_count > 0 {
+            self.conversation_scroll
+                .scroll_to_item(visible_conversation_count - 1, ScrollStrategy::Bottom);
+        }
+        next_refresh_after.map(|delay| (delay, refresh_requires_full))
+    }
+
     fn focus_active_target(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.focus.active() {
             FocusTarget::Sessions => self.sessions_focus.focus(window),
@@ -2586,8 +2845,51 @@ impl Render for NativeShell {
         let theme = SemanticTheme::GEEK_DARK;
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
-        let layout_width = conversation_width_bucket(layout.conversation.width);
-        self.rebuild_conversation_render_rows(layout_width);
+        let requested_layout_width = conversation_width_bucket(layout.conversation.width);
+        let (layout_width, width_refresh) =
+            self.conversation_width_for_render(requested_layout_width);
+        if let Some((requested, deadline)) = width_refresh {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(CONVERSATION_RESIZE_DEBOUNCE)
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.conversation_width_pending == Some((requested, deadline)) {
+                        this.conversation_render_full_dirty = true;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        if let Some((delay, requires_full)) = self.prepare_conversation_rows(layout_width) {
+            let deadline = Instant::now() + delay;
+            if self
+                .conversation_height_refresh_deadline
+                .is_none_or(|scheduled| scheduled > deadline)
+            {
+                self.conversation_height_refresh_deadline = Some(deadline);
+                self.conversation_height_refresh_full = requires_full;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.conversation_height_refresh_deadline == Some(deadline) {
+                            this.conversation_height_refresh_deadline = None;
+                            if this.conversation_height_refresh_full {
+                                this.conversation_render_full_dirty = true;
+                            } else {
+                                this.conversation_render_live_dirty = true;
+                            }
+                            this.conversation_height_refresh_full = false;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            } else if requires_full {
+                self.conversation_height_refresh_full = true;
+            }
+        }
         let status = self.semantic_status();
         let authorization_request = self
             .projection
@@ -2909,62 +3211,7 @@ impl Render for NativeShell {
         let profile_count = project.profiles.len();
         let model_count = project.models.len();
         let config_diagnostic_count = project.diagnostics.len();
-        let row_layout_inputs = self
-            .conversation_render_rows
-            .iter()
-            .map(|row| ConversationRowLayoutInput {
-                key: row.cache_key.to_string(),
-                target_height: row.measured_height,
-                streaming: !row.done,
-            })
-            .collect::<Vec<_>>();
-        debug_assert_eq!(row_layout_inputs.len(), visible_conversation_count);
-        let previous_scroll_top = (!self.conversation_viewport.follow_latest())
-            .then(|| (-f32::from(self.conversation_scroll.offset().y)).max(0.0));
-        let row_layout = self.conversation_layout.resolve(
-            row_layout_inputs,
-            layout_width,
-            Instant::now(),
-            previous_scroll_top,
-        );
-        if let (Some(previous_scroll_top), Some(adjusted_scroll_top)) =
-            (previous_scroll_top, row_layout.paused_scroll_top)
-            && (previous_scroll_top - adjusted_scroll_top).abs() > 0.5
-        {
-            let mut offset = self.conversation_scroll.offset();
-            offset.y = px(-adjusted_scroll_top);
-            self.conversation_scroll.set_offset(offset);
-        }
-        if self.conversation_viewport.follow_latest() && visible_conversation_count > 0 {
-            self.conversation_scroll
-                .scroll_to_item(visible_conversation_count - 1, ScrollStrategy::Bottom);
-        }
-        if let Some(delay) = row_layout.next_refresh_after {
-            let deadline = Instant::now() + delay;
-            if self
-                .conversation_height_refresh_deadline
-                .is_none_or(|scheduled| scheduled > deadline)
-            {
-                self.conversation_height_refresh_deadline = Some(deadline);
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(delay).await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this.conversation_height_refresh_deadline == Some(deadline) {
-                            this.conversation_height_refresh_deadline = None;
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
-        }
-        let transcript_rows = Rc::new(
-            row_layout
-                .heights
-                .into_iter()
-                .map(|height| size(px(0.), px(height)))
-                .collect::<Vec<_>>(),
-        );
+        let transcript_rows = self.conversation_row_sizes.clone();
         let transcript_list = v_virtual_list(
             cx.entity(),
             "conversation-transcript",
@@ -2990,8 +3237,9 @@ impl Render for NativeShell {
                         let visual =
                             conversation_block_visual(block.kind, block.is_error, theme);
                         let row_height = this
-                            .conversation_layout
-                            .height_for(&block.cache_key)
+                            .conversation_render_heights
+                            .get(index)
+                            .copied()
                             .unwrap_or(block.measured_height);
                         let is_assistant = block.kind == ConversationBlockKind::Assistant;
                         let is_tool = block.kind == ConversationBlockKind::Tool;
@@ -4511,6 +4759,27 @@ mod tests {
         let fixed_composer_height = [".h(px(", "COMPOSER_HEIGHT"].concat();
         assert!(!source.contains(&fixed_row_height));
         assert!(!source.contains(&fixed_composer_height));
+    }
+
+    #[test]
+    fn conversation_list_sizes_persist_and_full_history_work_is_dirty_gated() {
+        let source = include_str!("native_shell.rs");
+        assert!(source.contains("conversation_row_sizes: Rc<Vec<gpui::Size<gpui::Pixels>>>"));
+        assert!(source.contains("let transcript_rows = self.conversation_row_sizes.clone()"));
+        assert!(source.contains("else if self.conversation_render_live_dirty"));
+        assert!(source.contains("self.conversation_render_rows.truncate(durable_count)"));
+        assert!(source.contains("Rc::make_mut(&mut self.conversation_row_sizes)"));
+        assert!(source.contains("CONVERSATION_RESIZE_DEBOUNCE"));
+        assert!(source.contains("Duration::from_millis(67)"));
+
+        let render = source
+            .split_once("impl Render for NativeShell")
+            .expect("native render implementation remains present")
+            .1;
+        let prepare_call = ["prepare_conversation_", "rows("].concat();
+        let legacy_rebuild_call = ["rebuild_conversation_", "render_rows("].concat();
+        assert_eq!(render.matches(&prepare_call).count(), 1);
+        assert_eq!(render.matches(&legacy_rebuild_call).count(), 0);
     }
 
     #[test]

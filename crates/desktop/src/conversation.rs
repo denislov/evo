@@ -572,6 +572,16 @@ impl ConversationRowRenderCache {
     pub fn finish_frame(&mut self) {
         let generation = self.generation;
         self.retain(|entry| entry.touched_generation == generation);
+        self.enforce_bounds();
+    }
+
+    /// Finish a partial row update without treating untouched transcript rows
+    /// as stale. Full replacement frames use `finish_frame` to sweep sessions.
+    pub fn finish_incremental(&mut self) {
+        self.enforce_bounds();
+    }
+
+    fn enforce_bounds(&mut self) {
         while self.entries.len() > self.max_entries || self.retained_bytes > self.max_retained_bytes
         {
             let Some(key) = self
@@ -811,10 +821,6 @@ impl ConversationRowLayoutState {
             paused_scroll_top,
             next_refresh_after,
         }
-    }
-
-    pub fn height_for(&self, key: &str) -> Option<f32> {
-        self.rows.get(key).map(|row| row.committed)
     }
 
     fn anchor_at(&self, scroll_top: f32) -> Option<(String, f32)> {
@@ -1552,6 +1558,26 @@ mod tests {
         assert!(!cache.entries.contains_key("old"));
         assert!(cache.entries.len() <= 2);
         assert!(cache.retained_bytes <= 128 * 1024);
+    }
+
+    #[test]
+    fn incremental_cache_finish_preserves_untouched_history_until_full_sweep() {
+        let mut cache = ConversationRowRenderCache::default();
+        cache.begin_frame();
+        cache.resolve(render_source("durable", 1, "history", true), 800);
+        cache.finish_frame();
+
+        cache.begin_frame();
+        cache.resolve(render_source("live", 2, "streaming", false), 800);
+        cache.finish_incremental();
+        assert!(cache.entries.contains_key("durable"));
+        assert!(cache.entries.contains_key("live"));
+
+        cache.begin_frame();
+        cache.resolve(render_source("replacement", 3, "new session", true), 800);
+        cache.finish_frame();
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.entries.contains_key("replacement"));
     }
 
     #[test]

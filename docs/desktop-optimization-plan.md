@@ -194,10 +194,10 @@ NativeShell
 
 #### DESK-010 持久化虚拟列表尺寸
 
-- [ ] 将 `Rc<Vec<Size<Pixels>>>` 从 render 局部变量移入持久 list model。
-- [ ] append 只增加一项，streaming 只更新一个 index。
-- [ ] 宽度 bucket 改变时批量 invalidate；resize 使用 50–80ms trailing debounce。
-- [ ] 不在每帧为 10,000 条消息重新构造、比较和展开尺寸数组。
+- [x] 将 `Rc<Vec<Size<Pixels>>>` 从 render 局部变量移入持久 list model。
+- [ ] append 只增加一项，streaming 只更新一个 index；当前已从完整 transcript 收敛到 bounded live tail，下一步继续按 sequence/业务 ID 精确更新。
+- [x] 宽度 bucket 改变时批量 invalidate；resize 使用 67ms trailing debounce。
+- [x] 不在每帧为 10,000 条消息重新构造、比较和展开尺寸数组；普通 render 复用持久 row/height/size。
 
 验收：固定可视区域下，一条 live row 更新不遍历全部历史消息。
 
@@ -348,7 +348,8 @@ desktop.input.latency
 | DESK-007 | 完成 | 文本保持 16ms 批次，行高约 15Hz；Following 底部锚定、Paused offset compensation 和 Unicode display width 已完成 |
 | DESK-008 | 完成 | typed delta 已贯穿 Projection→NativeShell；product event 只增量同步 dirty overlay，replace 路径保留全量重建 |
 | DESK-009 | 完成 | revision-aware bounded row cache 已接入 NativeShell；sanitized `Arc<str>`、稳定 Markdown state key 和 measured height 可复用 |
-| DESK-010～018 | 待开始 | 下一步持久化虚拟列表尺寸，消除每帧为完整 transcript 重建 row/size vector 的 O(N) 工作 |
+| DESK-010 | 进行中 | 持久 row/height/size、bounded live-tail 更新和 67ms resize debounce 已完成；待收敛为 sequence→单 index 精确更新 |
+| DESK-011～018 | 待开始 | DESK-010 完成后拆分 Conversation/Composer/Inspector entity，继续隔离重渲染范围 |
 
 ## 10. 完成定义
 
