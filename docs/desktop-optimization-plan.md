@@ -252,11 +252,11 @@ NativeShell
 
 #### DESK-015 Sessions 与 Inspector 重构
 
-- [ ] Sessions 展示语义名称、相对时间和运行状态，不重复显示 active ID 卡。
-- [ ] 自动增量刷新，增加搜索和最近排序。
-- [ ] Inspector 提供 Changes、Task、Usage、Runtime；默认 Changes/Task。
-- [ ] 零 diagnostics/recoveries 不占永久空间。
-- [ ] sidebar 支持持久化宽度、拖动调整、双击重置和窄窗口 drawer。
+- [x] Sessions 使用 Current task/Recent task 语义标签展示相对时间和运行状态，ID 降为辅助信息，不重复显示 active ID 卡。
+- [x] catalog 首次自动加载并每 15 秒增量刷新，增加搜索并保持 product catalog 的最近更新时间降序。
+- [x] Inspector 提供 Changes、Task、Usage、Runtime typed section；默认 Changes。
+- [x] diagnostics/recoveries 仅在 Runtime section 且存在内容时展示，不再以零计数占永久空间。
+- [x] sidebar 宽度写入兼容旧配置的 preferences，支持覆盖式拖动热区、双击重置和既有窄窗口 drawer。
 
 验收：主界面默认只展示完成当前编码任务所需的信息。
 
@@ -360,7 +360,8 @@ desktop.input.latency
 | DESK-012 | 完成 | 系统 UI 字体与局部 monospace 已分层；中性 surface、蓝色 focus、紫色 reasoning 及 warning/danger 语义已解耦，嵌套边框已减少 |
 | DESK-013 | 进行中 | Assistant/User 宽度、Reasoning/Tool 折叠、稳定 Copy/More 槽与 bounded live copy 已完成；待 duration 权威字段和 Copy code 接口 |
 | DESK-014 | 完成 | Idle/Running 均为单主操作；每 session draft/mode、pending/authorization/rejected 文案与 InputState IME 边界已落实 |
-| DESK-015～018 | 待开始 | 继续导航密度、响应式和 GUI 性能门禁重构 |
+| DESK-015 | 完成 | Sessions 搜索/相对时间/自动刷新与 Inspector 按需分区已完成；sidebar 宽度可持久化、拖动和双击复位，窄屏继续使用 drawer |
+| DESK-016～018 | 待开始 | 继续键盘可访问性、GUI 性能门禁和文档收口 |
 
 ## 10. 完成定义
 

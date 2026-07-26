@@ -10,6 +10,10 @@ use std::thread::{self, JoinHandle};
 use serde::{Deserialize, Serialize};
 
 use crate::file_review::DesktopExternalEditorConfig;
+use crate::shell::{
+    CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH, SESSION_PANEL_MAX_WIDTH,
+    SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_WIDTH,
+};
 
 const PREFERENCES_SCHEMA_VERSION: u16 = 1;
 const MAX_PREFERENCES_BYTES: u64 = 64 * 1024;
@@ -55,6 +59,10 @@ pub struct DesktopPreferences {
     pub window: WindowGeometry,
     pub sessions_panel_visible: bool,
     pub context_panel_visible: bool,
+    #[serde(default = "default_sessions_panel_width")]
+    pub sessions_panel_width: u32,
+    #[serde(default = "default_context_panel_width")]
+    pub context_panel_width: u32,
     pub reduced_motion: bool,
     pub ui_scale: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +76,8 @@ impl Default for DesktopPreferences {
             window: WindowGeometry::default(),
             sessions_panel_visible: true,
             context_panel_visible: true,
+            sessions_panel_width: SESSION_PANEL_WIDTH,
+            context_panel_width: CONTEXT_PANEL_WIDTH,
             reduced_motion: false,
             ui_scale: 1.0,
             external_editor: None,
@@ -79,6 +89,12 @@ impl DesktopPreferences {
     pub fn normalized(mut self) -> Self {
         self.schema_version = PREFERENCES_SCHEMA_VERSION;
         self.window.normalize();
+        self.sessions_panel_width = self
+            .sessions_panel_width
+            .clamp(SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_MAX_WIDTH);
+        self.context_panel_width = self
+            .context_panel_width
+            .clamp(CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_MAX_WIDTH);
         if !self.ui_scale.is_finite() {
             self.ui_scale = 1.0;
         }
@@ -92,6 +108,14 @@ impl DesktopPreferences {
         }
         self
     }
+}
+
+const fn default_sessions_panel_width() -> u32 {
+    SESSION_PANEL_WIDTH
+}
+
+const fn default_context_panel_width() -> u32 {
+    CONTEXT_PANEL_WIDTH
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,6 +504,8 @@ mod tests {
             },
             sessions_panel_visible: false,
             context_panel_visible: true,
+            sessions_panel_width: 1,
+            context_panel_width: u32::MAX,
             reduced_motion: true,
             ui_scale: 99.0,
             external_editor: None,
@@ -491,11 +517,30 @@ mod tests {
         assert_eq!(saved.window.y, 32_767);
         assert_eq!(saved.window.width, 640);
         assert_eq!(saved.window.height, 4_320);
+        assert_eq!(saved.sessions_panel_width, SESSION_PANEL_MIN_WIDTH);
+        assert_eq!(saved.context_panel_width, CONTEXT_PANEL_MAX_WIDTH);
         assert_eq!(saved.ui_scale, 2.0);
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.preferences, saved);
         assert_eq!(loaded.recovery, None);
+    }
+
+    #[test]
+    fn legacy_preferences_gain_default_panel_widths() {
+        let legacy = serde_json::json!({
+            "schema_version": PREFERENCES_SCHEMA_VERSION,
+            "window": {
+                "x": 0, "y": 0, "width": 1200, "height": 800, "maximized": false
+            },
+            "sessions_panel_visible": true,
+            "context_panel_visible": true,
+            "reduced_motion": false,
+            "ui_scale": 1.0
+        });
+        let preferences: DesktopPreferences = serde_json::from_value(legacy).unwrap();
+        assert_eq!(preferences.sessions_panel_width, SESSION_PANEL_WIDTH);
+        assert_eq!(preferences.context_panel_width, CONTEXT_PANEL_WIDTH);
     }
 
     #[test]

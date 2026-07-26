@@ -11,8 +11,8 @@ use gpui::{
 use gpui_component::{Disableable as _, button::Button};
 
 use super::{
-    DesktopCommandIntent, DesktopFileReviewState, DesktopRecoveryStatus, NativeShell, actions,
-    recovery_status_label, runtime_state_label, usage_cost_label,
+    DesktopCommandIntent, DesktopFileReviewState, DesktopRecoveryStatus, InspectorSection,
+    NativeShell, actions, recovery_status_label, runtime_state_label, usage_cost_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +21,7 @@ pub(super) enum InspectorPaneEvent {
     CopyReviewPath,
     CopyFileReview,
     OpenExternalEditor,
+    SelectSection(InspectorSection),
     Recovery {
         identity: DesktopRecoveryIdentity,
         action: DesktopRecoveryAction,
@@ -48,6 +49,7 @@ impl Render for InspectorPane {
                 .into_any_element();
         };
         let owner = owner.read(cx);
+        let panel_width = owner.preferences.context_panel_width;
         let theme = SemanticTheme::GEEK_DARK;
         let snapshot = owner.projection.snapshot();
         let project = owner.projection.project();
@@ -282,6 +284,7 @@ impl Render for InspectorPane {
             .unwrap_or_else(|| "—".into());
         let context_is_overlay = owner.narrow_context_open;
         let focused = owner.context_focus.is_focused(window);
+        let selected_section = owner.inspector_section;
         let thinking = owner
             .thinking_selection
             .label(project.settings.default_thinking_level.as_deref());
@@ -298,7 +301,7 @@ impl Render for InspectorPane {
                     .occlude()
             })
             .track_focus(&owner.context_focus)
-            .w(px(CONTEXT_PANEL_WIDTH as f32))
+            .w(px(panel_width as f32))
             .h_full()
             .flex()
             .flex_col()
@@ -323,6 +326,43 @@ impl Render for InspectorPane {
             )
             .child(
                 div()
+                    .px_2()
+                    .py_2()
+                    .flex()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(rgb(theme.border.value()))
+                    .child(inspector_section_button(
+                        "inspector-changes",
+                        "Changes",
+                        InspectorSection::Changes,
+                        selected_section,
+                        cx,
+                    ))
+                    .child(inspector_section_button(
+                        "inspector-task",
+                        "Task",
+                        InspectorSection::Task,
+                        selected_section,
+                        cx,
+                    ))
+                    .child(inspector_section_button(
+                        "inspector-usage",
+                        "Usage",
+                        InspectorSection::Usage,
+                        selected_section,
+                        cx,
+                    ))
+                    .child(inspector_section_button(
+                        "inspector-runtime",
+                        "Runtime",
+                        InspectorSection::Runtime,
+                        selected_section,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
                     .id("context-details")
                     .flex_1()
                     .min_h_0()
@@ -332,164 +372,185 @@ impl Render for InspectorPane {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(section("RUNTIME", theme))
-                    .child(format!(
-                        "state       {}",
-                        runtime_state_label(owner.projection.lifecycle(), composer_running)
-                    ))
-                    .child(format!(
-                        "stream      {}",
-                        truncate_label(&snapshot.cursor.stream_id, 18)
-                    ))
-                    .child(format!(
-                        "sequence    {}",
-                        snapshot.cursor.last_event_sequence
-                    ))
-                    .child(format!(
-                        "generation  {}",
-                        snapshot.cursor.capability_generation
-                    ))
-                    .child(format!("active op   {active_operation}"))
-                    .child(section("WORK", theme))
-                    .child(format!(
-                        "operations  {:>4}",
-                        snapshot.context.operations.len()
-                    ))
-                    .child(format!("changes     {change_count:>4}"))
-                    .child(format!(
-                        "delegations {:>4}",
-                        snapshot.context.delegations.len()
-                    ))
-                    .child(section("CHANGED FILES", theme))
-                    .children(changed_file_rows)
-                    .when(omitted_changed_files > 0, |panel| {
-                        panel.child(
-                            div()
-                                .text_color(rgb(theme.warning.value()))
-                                .child(format!("+ {omitted_changed_files} more change(s) omitted")),
-                        )
-                    })
-                    .child(section("FILE REVIEW", theme))
-                    .child(file_review_panel)
-                    .child(format!(
-                        "diagnostics {:>4}",
-                        owner.projection.diagnostics().len()
-                    ))
-                    .child(format!(
-                        "recoveries  {:>4}",
-                        owner.projection.recoveries().len()
-                    ))
-                    .child(section("USAGE", theme))
-                    .child(format!("input       {}", usage.input))
-                    .child(format!("output      {}", usage.output))
-                    .child(format!("cache read  {}", usage.cache_read))
-                    .child(format!("cache write {}", usage.cache_write))
-                    .child(format!(
-                        "tokens      {}",
-                        usage.input.saturating_add(usage.output)
-                    ))
-                    .child(format!(
-                        "context     {}",
-                        usage
-                            .context_window
-                            .map(|v| v.to_string())
-                            .unwrap_or_else(|| "—".into())
-                    ))
-                    .child(format!("cost        {}", usage_cost_label(usage.cost)))
-                    .child(section("LOCAL RESOURCES", theme))
-                    .child(format!(
-                        "model       {}",
-                        truncate_label(&project.selected_model_id, 28)
-                    ))
-                    .child(format!(
-                        "profile     {}",
-                        truncate_label(snapshot.session.default_agent_profile_id.as_str(), 28)
-                    ))
-                    .child(format!("thinking    {thinking}"))
-                    .child(format!("models      {}", project.models.len()))
-                    .child(format!("profiles    {}", project.profiles.len()))
-                    .child(format!(
-                        "skills      {}",
-                        project.resources.skill_names.len()
-                    ))
-                    .child(format!(
-                        "prompts     {}",
-                        project.resources.prompt_template_names.len()
-                    ))
-                    .child(format!(
-                        "context     {}",
-                        project.resources.context_files.len()
-                    ))
-                    .child(format!("config diag {}", project.diagnostics.len()))
-                    .when_some(latest_recovery, |panel, recovery| {
+                    .when(selected_section == InspectorSection::Changes, |panel| {
                         panel
-                            .child(colored_section("LATEST RECOVERY", theme.warning))
-                            .child(format!("status      {}", recovery.0))
-                            .child(format!("recovery    {}", recovery.1))
-                            .child(format!("operation   {}", recovery.2))
-                            .child(format!("attempts    {}", recovery.4))
-                            .child(format!("detail      {}", recovery.3))
-                            .when_some(recovery.5, |panel, identity| {
-                                let retry = identity.clone();
-                                let failed = identity.clone();
+                            .child(section("CHANGES", theme))
+                            .child(format!("changed files {change_count}"))
+                            .when(change_count == 0, |panel| {
                                 panel.child(
                                     div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_2()
-                                        .child(recovery_button(
-                                            "retry-recovery",
-                                            "Retry",
-                                            retry,
-                                            DesktopRecoveryAction::Retry,
-                                            recovery_pending,
-                                            cx,
-                                        ))
-                                        .child(recovery_button(
-                                            "fail-recovery",
-                                            "Mark failed",
-                                            failed,
-                                            DesktopRecoveryAction::MarkFailed,
-                                            recovery_pending,
-                                            cx,
-                                        ))
-                                        .child(recovery_button(
-                                            "abort-recovery",
-                                            "Abort",
-                                            identity,
-                                            DesktopRecoveryAction::Abort,
-                                            recovery_pending,
-                                            cx,
-                                        )),
+                                        .text_color(rgb(theme.muted_text.value()))
+                                        .child("No changed files in the current task."),
                                 )
                             })
+                            .children(changed_file_rows)
+                            .when(omitted_changed_files > 0, |panel| {
+                                panel.child(div().text_color(rgb(theme.warning.value())).child(
+                                    format!("+ {omitted_changed_files} more change(s) omitted"),
+                                ))
+                            })
+                            .child(section("REVIEW", theme))
+                            .child(file_review_panel)
                     })
-                    .when_some(latest_diagnostic, |panel, diagnostic| {
+                    .when(selected_section == InspectorSection::Task, |panel| {
                         panel
-                            .child(colored_section("LATEST DIAGNOSTIC", theme.warning))
-                            .child(format!("sequence    {}", diagnostic.0))
-                            .child(format!("operation   {}", diagnostic.1))
-                            .child(format!("detail      {}", diagnostic.2))
-                            .when(diagnostic.3, |panel| panel.child("detail      [truncated]"))
+                            .child(section("TASK", theme))
+                            .child(format!(
+                                "state       {}",
+                                runtime_state_label(owner.projection.lifecycle(), composer_running)
+                            ))
+                            .child(format!("active op   {active_operation}"))
+                            .child(format!(
+                                "operations  {:>4}",
+                                snapshot.context.operations.len()
+                            ))
+                            .child(format!(
+                                "delegations {:>4}",
+                                snapshot.context.delegations.len()
+                            ))
+                            .child(section("CONFIGURATION", theme))
+                            .child(format!(
+                                "model       {}",
+                                truncate_label(&project.selected_model_id, 28)
+                            ))
+                            .child(format!(
+                                "profile     {}",
+                                truncate_label(
+                                    snapshot.session.default_agent_profile_id.as_str(),
+                                    28
+                                )
+                            ))
+                            .child(format!("thinking    {thinking}"))
                     })
-                    .when_some(latest_config_diagnostic, |panel, diagnostic| {
+                    .when(selected_section == InspectorSection::Usage, |panel| {
                         panel
-                            .child(colored_section("LATEST CONFIG DIAGNOSTIC", theme.warning))
-                            .child(format!("code        {}", diagnostic.0))
-                            .child(format!("detail      {}", diagnostic.1))
+                            .child(section("USAGE", theme))
+                            .child(format!("input       {}", usage.input))
+                            .child(format!("output      {}", usage.output))
+                            .child(format!("cache read  {}", usage.cache_read))
+                            .child(format!("cache write {}", usage.cache_write))
+                            .child(format!(
+                                "tokens      {}",
+                                usage.input.saturating_add(usage.output)
+                            ))
+                            .child(format!(
+                                "context     {}",
+                                usage
+                                    .context_window
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "—".into())
+                            ))
+                            .child(format!("cost        {}", usage_cost_label(usage.cost)))
                     })
-                    .when_some(latest_issue, |panel, code| {
+                    .when(selected_section == InspectorSection::Runtime, |panel| {
                         panel
-                            .child(colored_section("LATEST ISSUE", theme.danger))
-                            .child(format!("code        {code}"))
-                    })
-                    .child(
-                        div()
-                            .mt_3()
-                            .text_sm()
-                            .text_color(rgb(theme.muted_text.value()))
-                            .child(truncate_label(&project.cwd.display().to_string(), 54)),
-                    ),
+                            .child(section("RUNTIME", theme))
+                            .child(format!(
+                                "state       {}",
+                                runtime_state_label(owner.projection.lifecycle(), composer_running)
+                            ))
+                            .child(format!(
+                                "stream      {}",
+                                truncate_label(&snapshot.cursor.stream_id, 18)
+                            ))
+                            .child(format!(
+                                "sequence    {}",
+                                snapshot.cursor.last_event_sequence
+                            ))
+                            .child(format!(
+                                "generation  {}",
+                                snapshot.cursor.capability_generation
+                            ))
+                            .child(section("LOCAL RESOURCES", theme))
+                            .child(format!("models      {}", project.models.len()))
+                            .child(format!("profiles    {}", project.profiles.len()))
+                            .child(format!(
+                                "skills      {}",
+                                project.resources.skill_names.len()
+                            ))
+                            .child(format!(
+                                "prompts     {}",
+                                project.resources.prompt_template_names.len()
+                            ))
+                            .child(format!(
+                                "context     {}",
+                                project.resources.context_files.len()
+                            ))
+                            .when_some(latest_recovery, |panel, recovery| {
+                                panel
+                                    .child(colored_section("LATEST RECOVERY", theme.warning))
+                                    .child(format!("status      {}", recovery.0))
+                                    .child(format!("recovery    {}", recovery.1))
+                                    .child(format!("operation   {}", recovery.2))
+                                    .child(format!("attempts    {}", recovery.4))
+                                    .child(format!("detail      {}", recovery.3))
+                                    .when_some(recovery.5, |panel, identity| {
+                                        let retry = identity.clone();
+                                        let failed = identity.clone();
+                                        panel.child(
+                                            div()
+                                                .flex()
+                                                .flex_wrap()
+                                                .gap_2()
+                                                .child(recovery_button(
+                                                    "retry-recovery",
+                                                    "Retry",
+                                                    retry,
+                                                    DesktopRecoveryAction::Retry,
+                                                    recovery_pending,
+                                                    cx,
+                                                ))
+                                                .child(recovery_button(
+                                                    "fail-recovery",
+                                                    "Mark failed",
+                                                    failed,
+                                                    DesktopRecoveryAction::MarkFailed,
+                                                    recovery_pending,
+                                                    cx,
+                                                ))
+                                                .child(recovery_button(
+                                                    "abort-recovery",
+                                                    "Abort",
+                                                    identity,
+                                                    DesktopRecoveryAction::Abort,
+                                                    recovery_pending,
+                                                    cx,
+                                                )),
+                                        )
+                                    })
+                            })
+                            .when_some(latest_diagnostic, |panel, diagnostic| {
+                                panel
+                                    .child(colored_section("LATEST DIAGNOSTIC", theme.warning))
+                                    .child(format!("sequence    {}", diagnostic.0))
+                                    .child(format!("operation   {}", diagnostic.1))
+                                    .child(format!("detail      {}", diagnostic.2))
+                                    .when(diagnostic.3, |panel| {
+                                        panel.child("detail      [truncated]")
+                                    })
+                            })
+                            .when_some(latest_config_diagnostic, |panel, diagnostic| {
+                                panel
+                                    .child(colored_section(
+                                        "LATEST CONFIG DIAGNOSTIC",
+                                        theme.warning,
+                                    ))
+                                    .child(format!("code        {}", diagnostic.0))
+                                    .child(format!("detail      {}", diagnostic.1))
+                            })
+                            .when_some(latest_issue, |panel, code| {
+                                panel
+                                    .child(colored_section("LATEST ISSUE", theme.danger))
+                                    .child(format!("code        {code}"))
+                            })
+                            .child(
+                                div()
+                                    .mt_3()
+                                    .text_sm()
+                                    .text_color(rgb(theme.muted_text.value()))
+                                    .child(truncate_label(&project.cwd.display().to_string(), 54)),
+                            )
+                    }),
             )
             .into_any_element()
     }
@@ -501,6 +562,23 @@ fn section(label: &'static str, theme: SemanticTheme) -> gpui::Div {
 
 fn colored_section(label: &'static str, color: SemanticColor) -> gpui::Div {
     div().mt_2().text_color(rgb(color.value())).child(label)
+}
+
+fn inspector_section_button(
+    id: &'static str,
+    label: &'static str,
+    section: InspectorSection,
+    selected: InspectorSection,
+    cx: &gpui::Context<InspectorPane>,
+) -> Button {
+    let active = section == selected;
+    Button::new(id)
+        .compact()
+        .label(format!("{} {label}", if active { "●" } else { "○" }))
+        .tooltip(format!("Show {label} details"))
+        .on_click(cx.listener(move |_, _, _, cx| {
+            cx.emit(InspectorPaneEvent::SelectSection(section));
+        }))
 }
 
 fn recovery_button(

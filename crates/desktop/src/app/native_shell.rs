@@ -17,13 +17,16 @@ use desktop::runtime::{
     DesktopRuntimeCommandHandle, DesktopRuntimeSelectionKind,
 };
 use desktop::shell::{
-    FocusState, FocusTarget, PanelVisibility, SemanticColor, SemanticStatus, SemanticTheme,
-    ShellLayout, UI_FONT_FAMILY, truncate_label,
+    CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH, FocusState, FocusTarget,
+    MIN_CONVERSATION_WIDTH, PanelVisibility, SESSION_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH,
+    SESSION_PANEL_WIDTH, SemanticColor, SemanticStatus, SemanticTheme, ShellLayout, UI_FONT_FAMILY,
+    truncate_label,
 };
 use gpui::{
     AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Render, ScrollStrategy, SharedString, Styled as _, Subscription, Window,
-    WindowBounds, div, prelude::*, px, rgb, size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Render,
+    ScrollStrategy, SharedString, Styled as _, Subscription, Window, WindowBounds, div, prelude::*,
+    px, rgb, size,
 };
 use gpui_component::{
     VirtualListScrollHandle,
@@ -54,6 +57,7 @@ const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250
 const MAX_EXPANDED_CONVERSATION_DETAILS: usize = 256;
 const COLLAPSED_CONVERSATION_DETAIL_HEIGHT: f32 = 36.;
 const MAX_COMPOSER_SESSION_STATES: usize = 256;
+const SESSION_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
@@ -312,6 +316,28 @@ pub(super) enum ComposerRunningMode {
     QueueNext,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum InspectorSection {
+    #[default]
+    Changes,
+    Task,
+    Usage,
+    Runtime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizablePanel {
+    Sessions,
+    Context,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PanelResizeState {
+    panel: ResizablePanel,
+    pointer_origin_x: f32,
+    width_origin: u32,
+}
+
 impl ComposerRunningMode {
     const fn submission_kind(self) -> ComposerSubmissionKind {
         match self {
@@ -444,10 +470,12 @@ pub(super) struct NativeShell {
     sessions_pane: gpui::Entity<SessionsPane>,
     composer_pane: gpui::Entity<ComposerPane>,
     inspector_pane: gpui::Entity<InspectorPane>,
+    inspector_section: InspectorSection,
     status_bar: gpui::Entity<StatusBar>,
     overlay_host: gpui::Entity<OverlayHost>,
     composer: ComposerState,
     composer_input: gpui::Entity<InputState>,
+    sessions_search_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
     composer_session_drafts: HashMap<String, String>,
     composer_running_modes: HashMap<String, ComposerRunningMode>,
@@ -468,6 +496,8 @@ pub(super) struct NativeShell {
     narrow_context_open: bool,
     session_catalog: Vec<desktop::runtime::DesktopSessionCatalogEntry>,
     omitted_sessions: usize,
+    session_catalog_refresh_deadline: Option<Instant>,
+    panel_resize: Option<PanelResizeState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -518,6 +548,8 @@ impl NativeShell {
                 .auto_grow(2, 8)
                 .placeholder("Describe the change you want to make…")
         });
+        let sessions_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
         let owner = cx.weak_entity();
         let conversation_pane = cx.new(|_| ConversationPane::new(owner.clone()));
         let conversation_header = cx.new(|_| ConversationHeader::new(owner.clone()));
@@ -558,6 +590,15 @@ impl NativeShell {
                     }
                     InputEvent::Blur => this.notify_composer_pane(cx),
                     InputEvent::PressEnter { secondary: false } => {}
+                },
+            ),
+            cx.subscribe_in(
+                &sessions_search_input,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.notify_sessions_pane(cx);
+                    }
                 },
             ),
             cx.subscribe_in(
@@ -643,6 +684,10 @@ impl NativeShell {
                     InspectorPaneEvent::Recovery { identity, action } => {
                         this.submit_recovery_action(identity.clone(), *action, cx);
                     }
+                    InspectorPaneEvent::SelectSection(section) => {
+                        this.inspector_section = *section;
+                        this.notify_inspector_pane(cx);
+                    }
                 },
             ),
             cx.subscribe_in(
@@ -698,6 +743,10 @@ impl NativeShell {
             let _ = runtime_shutdown.shutdown(&mut runtime_events).await;
         })
         .detach();
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |this, cx| this.request_session_catalog(cx));
+        })
+        .detach();
 
         Self {
             runtime: Some(runtime_commands),
@@ -730,10 +779,12 @@ impl NativeShell {
             sessions_pane,
             composer_pane,
             inspector_pane,
+            inspector_section: InspectorSection::default(),
             status_bar,
             overlay_host,
             composer: ComposerState::default(),
             composer_input,
+            sessions_search_input,
             composer_needs_sync: false,
             composer_session_drafts: HashMap::new(),
             composer_running_modes: HashMap::new(),
@@ -754,6 +805,8 @@ impl NativeShell {
             narrow_context_open: false,
             session_catalog: Vec::new(),
             omitted_sessions: 0,
+            session_catalog_refresh_deadline: None,
+            panel_resize: None,
             _subscriptions: subscriptions,
         }
     }
@@ -767,11 +820,111 @@ impl NativeShell {
 
     fn layout(&self, window: &Window) -> ShellLayout {
         let viewport = window.viewport_size();
-        ShellLayout::resolve(
+        self.resolve_layout(
             u32::from(viewport.width),
             u32::from(viewport.height),
             self.visibility(),
         )
+    }
+
+    fn resolve_layout(&self, width: u32, height: u32, visibility: PanelVisibility) -> ShellLayout {
+        ShellLayout::resolve_with_panel_widths(
+            width,
+            height,
+            visibility,
+            self.preferences.sessions_panel_width,
+            self.preferences.context_panel_width,
+        )
+    }
+
+    fn begin_panel_resize(
+        &mut self,
+        panel: ResizablePanel,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if event.click_count >= 2 {
+            self.panel_resize = None;
+            match panel {
+                ResizablePanel::Sessions => {
+                    self.preferences.sessions_panel_width = SESSION_PANEL_WIDTH;
+                    self.notify_sessions_pane(cx);
+                }
+                ResizablePanel::Context => {
+                    self.preferences.context_panel_width = CONTEXT_PANEL_WIDTH;
+                    self.notify_inspector_pane(cx);
+                }
+            }
+            self.schedule_preferences();
+            cx.notify();
+            return;
+        }
+
+        self.panel_resize = Some(PanelResizeState {
+            panel,
+            pointer_origin_x: f32::from(event.position.x),
+            width_origin: match panel {
+                ResizablePanel::Sessions => self.preferences.sessions_panel_width,
+                ResizablePanel::Context => self.preferences.context_panel_width,
+            },
+        });
+    }
+
+    fn update_panel_resize(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(resize) = self.panel_resize else {
+            return;
+        };
+        let delta = f32::from(event.position.x) - resize.pointer_origin_x;
+        let desired = match resize.panel {
+            ResizablePanel::Sessions => resize.width_origin as f32 + delta,
+            ResizablePanel::Context => resize.width_origin as f32 - delta,
+        };
+        let layout = self.layout(window);
+        let (minimum, configured_maximum, other_width) = match resize.panel {
+            ResizablePanel::Sessions => (
+                SESSION_PANEL_MIN_WIDTH,
+                SESSION_PANEL_MAX_WIDTH,
+                layout.context.map_or(0, |bounds| bounds.width),
+            ),
+            ResizablePanel::Context => (
+                CONTEXT_PANEL_MIN_WIDTH,
+                CONTEXT_PANEL_MAX_WIDTH,
+                layout.sessions.map_or(0, |bounds| bounds.width),
+            ),
+        };
+        let viewport_width = u32::from(window.viewport_size().width);
+        let maximum = configured_maximum.min(
+            viewport_width
+                .saturating_sub(MIN_CONVERSATION_WIDTH)
+                .saturating_sub(other_width)
+                .max(minimum),
+        );
+        let width = (desired.round() as i64).clamp(i64::from(minimum), i64::from(maximum)) as u32;
+
+        match resize.panel {
+            ResizablePanel::Sessions if self.preferences.sessions_panel_width != width => {
+                self.preferences.sessions_panel_width = width;
+                self.notify_sessions_pane(cx);
+                cx.notify();
+            }
+            ResizablePanel::Context if self.preferences.context_panel_width != width => {
+                self.preferences.context_panel_width = width;
+                self.notify_inspector_pane(cx);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_panel_resize(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        if self.panel_resize.take().is_some() {
+            self.schedule_preferences();
+        }
     }
 
     fn record_focus(&mut self, target: FocusTarget, window: &mut Window, cx: &mut Context<Self>) {
@@ -807,7 +960,7 @@ impl NativeShell {
         self.preferences.window.maximized = matches!(bounds, WindowBounds::Maximized(_));
 
         let viewport = window.viewport_size();
-        let forced_layout = ShellLayout::resolve(
+        let forced_layout = self.resolve_layout(
             u32::from(viewport.width),
             u32::from(viewport.height),
             PanelVisibility::default(),
@@ -924,6 +1077,7 @@ impl NativeShell {
                             )
                         });
                         sessions_pane_dirty = true;
+                        self.schedule_session_catalog_refresh(cx);
                     }
                     applied += 1;
                     continue;
@@ -1731,16 +1885,17 @@ impl NativeShell {
 
     fn toggle_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let viewport = window.viewport_size();
-        let dockable = ShellLayout::resolve(
-            u32::from(viewport.width),
-            u32::from(viewport.height),
-            PanelVisibility {
-                sessions: true,
-                context: self.preferences.context_panel_visible,
-            },
-        )
-        .sessions
-        .is_some();
+        let dockable = self
+            .resolve_layout(
+                u32::from(viewport.width),
+                u32::from(viewport.height),
+                PanelVisibility {
+                    sessions: true,
+                    context: self.preferences.context_panel_visible,
+                },
+            )
+            .sessions
+            .is_some();
         if !dockable {
             self.command_palette.close();
             self.narrow_sessions_open = !self.narrow_sessions_open;
@@ -1773,16 +1928,17 @@ impl NativeShell {
 
     fn toggle_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let viewport = window.viewport_size();
-        let dockable = ShellLayout::resolve(
-            u32::from(viewport.width),
-            u32::from(viewport.height),
-            PanelVisibility {
-                sessions: self.preferences.sessions_panel_visible,
-                context: true,
-            },
-        )
-        .context
-        .is_some();
+        let dockable = self
+            .resolve_layout(
+                u32::from(viewport.width),
+                u32::from(viewport.height),
+                PanelVisibility {
+                    sessions: self.preferences.sessions_panel_visible,
+                    context: true,
+                },
+            )
+            .context
+            .is_some();
         if !dockable {
             self.command_palette.close();
             self.narrow_sessions_open = false;
@@ -1899,9 +2055,37 @@ impl NativeShell {
         if let Err(message) = admission {
             self.command_ledger.complete(command_id, &intent);
             self.preference_notice = Some(message);
+            self.schedule_session_catalog_refresh(cx);
         }
         self.notify_sessions_pane(cx);
         cx.notify();
+    }
+
+    fn schedule_session_catalog_refresh(&mut self, cx: &mut Context<Self>) {
+        let deadline = Instant::now() + SESSION_CATALOG_REFRESH_INTERVAL;
+        if self
+            .session_catalog_refresh_deadline
+            .is_some_and(|scheduled| scheduled <= deadline)
+        {
+            return;
+        }
+        self.session_catalog_refresh_deadline = Some(deadline);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(SESSION_CATALOG_REFRESH_INTERVAL)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.session_catalog_refresh_deadline == Some(deadline) {
+                    this.session_catalog_refresh_deadline = None;
+                    if this.projection.snapshot().active_operation.is_none() {
+                        this.request_session_catalog(cx);
+                    } else {
+                        this.schedule_session_catalog_refresh(cx);
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn open_session(&mut self, session_id: String, cx: &mut Context<Self>) {
@@ -3801,9 +3985,55 @@ impl Render for NativeShell {
         self.refresh_conversation_rows_at_width(layout_width, cx);
         let authorization_present = !self.projection.snapshot().pending_authorizations.is_empty();
         self.reconcile_authorization_overlay(authorization_present, window, cx);
-        let sessions_panel = layout.sessions.map(|_| self.sessions_pane.clone());
+        let sessions_panel = layout.sessions.map(|bounds| {
+            div()
+                .relative()
+                .flex_none()
+                .w(px(bounds.width as f32))
+                .h_full()
+                .child(self.sessions_pane.clone())
+                .child(
+                    div()
+                        .id("sessions-resize-handle")
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .w(px(4.))
+                        .cursor_ew_resize()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event, _, cx| {
+                                this.begin_panel_resize(ResizablePanel::Sessions, event, cx);
+                            }),
+                        ),
+                )
+        });
 
-        let context_panel = layout.context.map(|_| self.inspector_pane.clone());
+        let context_panel = layout.context.map(|bounds| {
+            div()
+                .relative()
+                .flex_none()
+                .w(px(bounds.width as f32))
+                .h_full()
+                .child(self.inspector_pane.clone())
+                .child(
+                    div()
+                        .id("context-resize-handle")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .bottom_0()
+                        .w(px(4.))
+                        .cursor_ew_resize()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event, _, cx| {
+                                this.begin_panel_resize(ResizablePanel::Context, event, cx);
+                            }),
+                        ),
+                )
+        });
 
         let conversation = div()
             .id("conversation-panel")
@@ -3842,6 +4072,8 @@ impl Render for NativeShell {
             .on_action(cx.listener(Self::on_authorization_allow_once))
             .on_action(cx.listener(Self::on_authorization_allow_for_operation))
             .on_action(cx.listener(Self::on_trap_overlay_focus))
+            .on_mouse_move(cx.listener(Self::update_panel_resize))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::finish_panel_resize))
             .relative()
             .size_full()
             .flex()
@@ -4284,7 +4516,7 @@ mod tests {
         assert!(pane.contains(&sessions_panel_id));
         assert!(shell.contains("sessions_pane: gpui::Entity<SessionsPane>"));
         assert!(shell.contains("let sessions_pane = cx.new("));
-        assert!(shell.contains("layout.sessions.map(|_| self.sessions_pane.clone())"));
+        assert!(shell.contains(".child(self.sessions_pane.clone())"));
         assert!(pane.contains("impl EventEmitter<SessionsPaneEvent>"));
         assert!(pane.contains("WeakEntity<NativeShell>"));
         assert!(shell.contains("fn notify_sessions_pane("));
@@ -4332,7 +4564,7 @@ mod tests {
         assert!(!shell.contains(&context_panel_id));
         assert!(pane.contains(&context_panel_id));
         assert!(shell.contains("inspector_pane: gpui::Entity<InspectorPane>"));
-        assert!(shell.contains(".then(|| self.inspector_pane.clone())"));
+        assert!(shell.contains(".child(self.inspector_pane.clone())"));
         assert!(pane.contains("impl EventEmitter<InspectorPaneEvent>"));
         assert!(pane.contains("RequestFileReview(CodingAgentFileReviewRequest)"));
         assert!(pane.contains("identity: DesktopRecoveryIdentity"));
@@ -4354,6 +4586,59 @@ mod tests {
         streaming.diagnostics = true;
         assert!(inspector_projection_dirty(&streaming));
         assert!(inspector_projection_immediate_dirty(&streaming));
+    }
+
+    #[test]
+    fn sessions_navigation_is_searchable_recent_and_automatically_refreshed() {
+        let shell = include_str!("native_shell.rs");
+        let pane = include_str!("native_shell/sessions_pane.rs");
+        let search_placeholder = ["placeholder(\"Search ", "sessions…\")"].concat();
+        let refresh_interval = ["Duration::from_secs(", "15)"].concat();
+        let active_duplicate = ["current_session_", "label"].concat();
+
+        assert!(shell.contains(&search_placeholder));
+        assert!(shell.contains("schedule_session_catalog_refresh"));
+        assert!(shell.contains(&refresh_interval));
+        assert!(pane.contains("relative_session_time"));
+        assert!(pane.contains("Current task"));
+        assert!(pane.contains("Recent task"));
+        assert!(pane.contains("session_catalog.iter()"));
+        assert!(!pane.contains(&active_duplicate));
+    }
+
+    #[test]
+    fn inspector_defaults_to_task_relevant_sections_and_hides_empty_telemetry() {
+        let pane = include_str!("native_shell/inspector_pane.rs");
+        let permanent_diagnostics = ["diagnostics ", "{:>4}"].concat();
+        let permanent_recoveries = ["recoveries ", "{:>4}"].concat();
+
+        assert_eq!(InspectorSection::default(), InspectorSection::Changes);
+        for section in ["Changes", "Task", "Usage", "Runtime"] {
+            assert!(pane.contains(section));
+        }
+        assert!(pane.contains("InspectorPaneEvent::SelectSection(section)"));
+        assert!(pane.contains("when_some(latest_diagnostic"));
+        assert!(pane.contains("when_some(latest_recovery"));
+        assert!(!pane.contains(&permanent_diagnostics));
+        assert!(!pane.contains(&permanent_recoveries));
+    }
+
+    #[test]
+    fn sidebar_resize_handles_overlay_layout_and_persist_on_release() {
+        let shell = include_str!("native_shell.rs");
+        let preferences = include_str!("../preferences.rs");
+        let sessions_handle = ["sessions-resize-", "handle"].concat();
+        let context_handle = ["context-resize-", "handle"].concat();
+        let double_click = ["event.click_count ", ">= 2"].concat();
+
+        assert!(shell.contains(&sessions_handle));
+        assert!(shell.contains(&context_handle));
+        assert!(shell.contains(".absolute()"));
+        assert!(shell.contains(".cursor_ew_resize()"));
+        assert!(shell.contains(&double_click));
+        assert!(shell.contains("finish_panel_resize"));
+        assert!(preferences.contains("sessions_panel_width: u32"));
+        assert!(preferences.contains("context_panel_width: u32"));
     }
 
     #[test]

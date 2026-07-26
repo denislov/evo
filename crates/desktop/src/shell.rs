@@ -7,6 +7,10 @@ use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 pub const SESSION_PANEL_WIDTH: u32 = 240;
 pub const CONTEXT_PANEL_WIDTH: u32 = 320;
+pub const SESSION_PANEL_MIN_WIDTH: u32 = 200;
+pub const SESSION_PANEL_MAX_WIDTH: u32 = 420;
+pub const CONTEXT_PANEL_MIN_WIDTH: u32 = 280;
+pub const CONTEXT_PANEL_MAX_WIDTH: u32 = 520;
 pub const MIN_CONVERSATION_WIDTH: u32 = 520;
 pub const COMPOSER_HEIGHT: u32 = 112;
 pub const STATUS_HEIGHT: u32 = 30;
@@ -58,31 +62,39 @@ pub struct ShellLayout {
 }
 
 impl ShellLayout {
+    #[cfg(test)]
     pub fn resolve(width: u32, height: u32, requested: PanelVisibility) -> Self {
+        Self::resolve_with_panel_widths(
+            width,
+            height,
+            requested,
+            SESSION_PANEL_WIDTH,
+            CONTEXT_PANEL_WIDTH,
+        )
+    }
+
+    pub fn resolve_with_panel_widths(
+        width: u32,
+        height: u32,
+        requested: PanelVisibility,
+        sessions_width: u32,
+        context_width: u32,
+    ) -> Self {
+        let sessions_width = sessions_width.clamp(SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_MAX_WIDTH);
+        let context_width = context_width.clamp(CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_MAX_WIDTH);
         let body_height = height.saturating_sub(STATUS_HEIGHT);
         let composer_height = COMPOSER_HEIGHT.min(body_height);
         let conversation_height = body_height.saturating_sub(composer_height);
 
         let sessions_visible =
-            requested.sessions && width >= SESSION_PANEL_WIDTH + MIN_CONVERSATION_WIDTH;
-        let width_after_sessions = width.saturating_sub(if sessions_visible {
-            SESSION_PANEL_WIDTH
-        } else {
-            0
-        });
-        let context_visible = requested.context
-            && width_after_sessions >= CONTEXT_PANEL_WIDTH + MIN_CONVERSATION_WIDTH;
+            requested.sessions && width >= sessions_width + MIN_CONVERSATION_WIDTH;
+        let width_after_sessions =
+            width.saturating_sub(if sessions_visible { sessions_width } else { 0 });
+        let context_visible =
+            requested.context && width_after_sessions >= context_width + MIN_CONVERSATION_WIDTH;
 
-        let sessions_width = if sessions_visible {
-            SESSION_PANEL_WIDTH
-        } else {
-            0
-        };
-        let context_width = if context_visible {
-            CONTEXT_PANEL_WIDTH
-        } else {
-            0
-        };
+        let sessions_width = if sessions_visible { sessions_width } else { 0 };
+        let context_width = if context_visible { context_width } else { 0 };
         let conversation_width = width
             .saturating_sub(sessions_width)
             .saturating_sub(context_width);
@@ -405,6 +417,30 @@ mod tests {
         assert!(narrow.sessions.is_none());
         assert!(narrow.context.is_none());
         assert_eq!(narrow.conversation.width, 700);
+    }
+
+    #[test]
+    fn persisted_panel_widths_drive_layout_without_consuming_handle_space() {
+        let layout = ShellLayout::resolve_with_panel_widths(
+            1_400,
+            900,
+            PanelVisibility::default(),
+            300,
+            380,
+        );
+        assert_eq!(layout.sessions.unwrap().width, 300);
+        assert_eq!(layout.context.unwrap().width, 380);
+        assert_eq!(layout.conversation.width, 720);
+
+        let clamped = ShellLayout::resolve_with_panel_widths(
+            1_600,
+            900,
+            PanelVisibility::default(),
+            1,
+            u32::MAX,
+        );
+        assert_eq!(clamped.sessions.unwrap().width, SESSION_PANEL_MIN_WIDTH);
+        assert_eq!(clamped.context.unwrap().width, CONTEXT_PANEL_MAX_WIDTH);
     }
 
     #[test]
