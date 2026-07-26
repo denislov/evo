@@ -122,11 +122,11 @@ NativeShell
 
 #### DESK-003 统一布局尺寸来源
 
-- [ ] 消除 `ShellLayout::COMPOSER_HEIGHT` 与实际 auto-grow `88..236px` 的双重事实来源。
-- [ ] 将 sidebar、composer、status、content max width 等尺寸收进统一 design/layout tokens。
-- [ ] 窗口 resize 时只在宽度 bucket 改变后使消息高度缓存失效。
+- [x] 删除虚假的固定 `COMPOSER_HEIGHT`；`ShellLayout` 只描述稳定 workspace，Composer 的 `88..236px` auto-grow 由 GPUI 和共享 min/max token 管理。
+- [x] 将 sidebar、composer、status、user/assistant content max width 等尺寸收进统一 design/layout tokens。
+- [x] 窗口 resize 时只在宽度 bucket 改变后使消息高度缓存失效。
 
-验收：纯布局模型与 GPUI 实际布局使用相同 token；窄窗口临界点无反复闪烁。
+验收：纯布局模型与 GPUI 实际布局使用相同 token；760px sessions 和 1080px context 临界点的前后值同时通过纯模型与真实 GPUI bounds 回归，无双重 composer 高度来源。
 
 ### Phase 1：流式渲染与滚动
 
@@ -350,7 +350,7 @@ desktop.input.latency
 |---|---|---|
 | DESK-001 | 待开始 | 先完成最小性能 fixture，再扩展完整基准 |
 | DESK-002 | 完成 | 已移除动态面板边框，改用已有 header divider 和标题颜色；回归测试已通过 |
-| DESK-003 | 待开始 | 依赖布局 token 整理 |
+| DESK-003 | 完成 | ShellLayout 改为稳定 workspace 模型；sidebar/composer/status/content width 共享 token，响应式临界点与 width bucket 均有回归 |
 | DESK-004 | 进行中 | 最小双阶段路径已完成；后续抽取 StreamingText、revision 和后台 settling parse |
 | DESK-005 | 进行中 | Markdown 已使用稳定业务 ID；typed key 和 row element 迁移待完成 |
 | DESK-006 | 完成 | 基于真实 offset 的迟滞状态机、streaming unseen 计数和无布局占位的浮动 pill 已完成；GUI 像素门禁归入 DESK-017 |

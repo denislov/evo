@@ -1,12 +1,12 @@
 use desktop::conversation::ComposerAdmission;
-use desktop::shell::{SemanticTheme, truncate_label};
+use desktop::shell::{COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, SemanticTheme, truncate_label};
 use gpui::{
     EventEmitter, Focusable as _, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity,
     Window, div, prelude::*, px, rgb,
 };
 use gpui_component::{Disableable as _, button::Button, input::Input};
 
-use super::{COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, ComposerRunningMode, NativeShell};
+use super::{ComposerRunningMode, NativeShell};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ComposerPaneEvent {
@@ -30,7 +30,9 @@ impl EventEmitter<ComposerPaneEvent> for ComposerPane {}
 impl Render for ComposerPane {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let Some(owner) = self.owner.upgrade() else {
-            return div().min_h(px(COMPOSER_MIN_HEIGHT)).into_any_element();
+            return div()
+                .min_h(px(COMPOSER_MIN_HEIGHT as f32))
+                .into_any_element();
         };
         let (
             input,
@@ -82,8 +84,8 @@ impl Render for ComposerPane {
         div()
             .id("composer-panel")
             .debug_selector(|| "desktop-composer-panel".into())
-            .min_h(px(COMPOSER_MIN_HEIGHT))
-            .max_h(px(COMPOSER_MAX_HEIGHT))
+            .min_h(px(COMPOSER_MIN_HEIGHT as f32))
+            .max_h(px(COMPOSER_MAX_HEIGHT as f32))
             .flex_shrink_0()
             .px_4()
             .py_3()

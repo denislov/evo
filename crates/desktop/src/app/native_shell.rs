@@ -51,8 +51,6 @@ use crate::command_ledger::{DesktopCommandIntent, DesktopCommandLedger};
 
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const MAX_DIRTY_CONVERSATION_SEQUENCES: usize = 256;
-const COMPOSER_MIN_HEIGHT: f32 = 88.;
-const COMPOSER_MAX_HEIGHT: f32 = 236.;
 const CONVERSATION_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(67);
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_EXPANDED_CONVERSATION_DETAILS: usize = 256;
@@ -4111,7 +4109,7 @@ impl Render for NativeShell {
         let theme = SemanticTheme::GEEK_DARK;
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
-        let requested_layout_width = conversation_width_bucket(layout.conversation.width);
+        let requested_layout_width = conversation_width_bucket(layout.workspace.width);
         let (layout_width, width_refresh) =
             self.conversation_width_for_render(requested_layout_width);
         if let Some((requested, deadline)) = width_refresh {
@@ -4491,6 +4489,17 @@ mod tests {
         assert_eq!(f32::from(narrow[2].unwrap().size.width), 700.);
         assert_eq!(f32::from(narrow[4].unwrap().size.width), 700.);
 
+        for (window_width, expected_workspace_width) in
+            [(1_080., 520.), (1_079., 839.), (760., 520.), (759., 759.)]
+        {
+            cx.simulate_resize(size(px(window_width), px(900.)));
+            cx.run_until_parked();
+            let actual = cx
+                .debug_bounds("desktop-conversation-panel")
+                .expect("workspace remains visible at every responsive breakpoint");
+            assert_eq!(f32::from(actual.size.width), expected_workspace_width);
+        }
+
         let medium_layout = ShellLayout::resolve(1_000, 900, PanelVisibility::default());
         assert!(medium_layout.sessions.is_some());
         assert!(medium_layout.context.is_none());
@@ -4861,8 +4870,9 @@ mod tests {
         assert!(pane.contains("ConversationPaneEvent::ToggleDetails"));
         assert!(pane.contains("group_hover(hover_group"));
         assert!(pane.contains(".absolute()"));
-        assert!(pane.contains("card.w(relative(0.70)).max_w(px(920.))"));
-        assert!(pane.contains("card.max_w(px(960.))"));
+        assert!(pane.contains("card.w(relative(USER_MESSAGE_WIDTH_FRACTION))"));
+        assert!(pane.contains(".max_w(px(USER_MESSAGE_MAX_WIDTH as f32))"));
+        assert!(pane.contains("card.max_w(px(ASSISTANT_MESSAGE_MAX_WIDTH as f32))"));
     }
 
     #[test]

@@ -12,8 +12,12 @@ pub const SESSION_PANEL_MAX_WIDTH: u32 = 420;
 pub const CONTEXT_PANEL_MIN_WIDTH: u32 = 280;
 pub const CONTEXT_PANEL_MAX_WIDTH: u32 = 520;
 pub const MIN_CONVERSATION_WIDTH: u32 = 520;
-pub const COMPOSER_HEIGHT: u32 = 112;
+pub const COMPOSER_MIN_HEIGHT: u32 = 88;
+pub const COMPOSER_MAX_HEIGHT: u32 = 236;
 pub const STATUS_HEIGHT: u32 = 30;
+pub const USER_MESSAGE_MAX_WIDTH: u32 = 920;
+pub const ASSISTANT_MESSAGE_MAX_WIDTH: u32 = 960;
+pub const USER_MESSAGE_WIDTH_FRACTION: f32 = 0.70;
 pub const UI_FONT_FAMILY: &str = ".SystemUIFont";
 pub const MONOSPACE_FONT_FAMILY: &str = "monospace";
 
@@ -55,9 +59,10 @@ impl Default for PanelVisibility {
 pub struct ShellLayout {
     pub viewport: Rect,
     pub sessions: Option<Rect>,
-    pub conversation: Rect,
+    /// The complete center column. GPUI owns the dynamic transcript/composer
+    /// split inside this rectangle because the composer auto-grows.
+    pub workspace: Rect,
     pub context: Option<Rect>,
-    pub composer: Rect,
     pub status: Rect,
 }
 
@@ -83,8 +88,6 @@ impl ShellLayout {
         let sessions_width = sessions_width.clamp(SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_MAX_WIDTH);
         let context_width = context_width.clamp(CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_MAX_WIDTH);
         let body_height = height.saturating_sub(STATUS_HEIGHT);
-        let composer_height = COMPOSER_HEIGHT.min(body_height);
-        let conversation_height = body_height.saturating_sub(composer_height);
 
         let sessions_visible =
             requested.sessions && width >= sessions_width + MIN_CONVERSATION_WIDTH;
@@ -102,7 +105,7 @@ impl ShellLayout {
         Self {
             viewport: Rect::new(0, 0, width, height),
             sessions: sessions_visible.then(|| Rect::new(0, 0, sessions_width, body_height)),
-            conversation: Rect::new(sessions_width, 0, conversation_width, conversation_height),
+            workspace: Rect::new(sessions_width, 0, conversation_width, body_height),
             context: context_visible.then(|| {
                 Rect::new(
                     sessions_width + conversation_width,
@@ -111,12 +114,6 @@ impl ShellLayout {
                     body_height,
                 )
             }),
-            composer: Rect::new(
-                sessions_width,
-                conversation_height,
-                conversation_width,
-                composer_height,
-            ),
             status: Rect::new(0, body_height, width, height.saturating_sub(body_height)),
         }
     }
@@ -406,17 +403,17 @@ mod tests {
         let wide = ShellLayout::resolve(1_300, 900, PanelVisibility::default());
         assert!(wide.sessions.is_some());
         assert!(wide.context.is_some());
-        assert_eq!(wide.conversation.width, 740);
+        assert_eq!(wide.workspace.width, 740);
 
         let medium = ShellLayout::resolve(1_000, 900, PanelVisibility::default());
         assert!(medium.sessions.is_some());
         assert!(medium.context.is_none());
-        assert_eq!(medium.conversation.width, 760);
+        assert_eq!(medium.workspace.width, 760);
 
         let narrow = ShellLayout::resolve(700, 900, PanelVisibility::default());
         assert!(narrow.sessions.is_none());
         assert!(narrow.context.is_none());
-        assert_eq!(narrow.conversation.width, 700);
+        assert_eq!(narrow.workspace.width, 700);
     }
 
     #[test]
@@ -430,7 +427,7 @@ mod tests {
         );
         assert_eq!(layout.sessions.unwrap().width, 300);
         assert_eq!(layout.context.unwrap().width, 380);
-        assert_eq!(layout.conversation.width, 720);
+        assert_eq!(layout.workspace.width, 720);
 
         let clamped = ShellLayout::resolve_with_panel_widths(
             1_600,
@@ -444,14 +441,28 @@ mod tests {
     }
 
     #[test]
-    fn geometry_is_disjoint_and_bounded_for_tiny_windows() {
+    fn workspace_and_status_geometry_are_disjoint_for_tiny_windows() {
         let layout = ShellLayout::resolve(320, 100, PanelVisibility::default());
-        assert_eq!(layout.conversation.height, 0);
-        assert_eq!(layout.composer.height, 70);
+        assert_eq!(layout.workspace, Rect::new(0, 0, 320, 70));
         assert_eq!(layout.status.height, 30);
-        assert_eq!(layout.composer.y, 0);
         assert_eq!(layout.status.y, 70);
-        assert_eq!(layout.composer.width, 320);
+    }
+
+    #[test]
+    fn responsive_breakpoints_change_once_at_the_exact_width() {
+        let before_sessions = ShellLayout::resolve(759, 900, PanelVisibility::default());
+        let at_sessions = ShellLayout::resolve(760, 900, PanelVisibility::default());
+        assert!(before_sessions.sessions.is_none());
+        assert_eq!(before_sessions.workspace.width, 759);
+        assert_eq!(at_sessions.sessions.unwrap().width, SESSION_PANEL_WIDTH);
+        assert_eq!(at_sessions.workspace.width, MIN_CONVERSATION_WIDTH);
+
+        let before_context = ShellLayout::resolve(1_079, 900, PanelVisibility::default());
+        let at_context = ShellLayout::resolve(1_080, 900, PanelVisibility::default());
+        assert!(before_context.context.is_none());
+        assert_eq!(before_context.workspace.width, 839);
+        assert_eq!(at_context.context.unwrap().width, CONTEXT_PANEL_WIDTH);
+        assert_eq!(at_context.workspace.width, MIN_CONVERSATION_WIDTH);
     }
 
     #[test]
@@ -470,7 +481,7 @@ mod tests {
         let constrained = ShellLayout::resolve(800, 800, PanelVisibility::default());
         assert!(constrained.sessions.is_some());
         assert!(constrained.context.is_none());
-        assert!(constrained.conversation.width >= MIN_CONVERSATION_WIDTH);
+        assert!(constrained.workspace.width >= MIN_CONVERSATION_WIDTH);
     }
 
     #[test]

@@ -8,7 +8,10 @@ use super::{
     ConversationBlockKind, NativeShell, conversation_block_visual, conversation_text_element,
     conversation_text_render_mode,
 };
-use desktop::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme};
+use desktop::shell::{
+    ASSISTANT_MESSAGE_MAX_WIDTH, MONOSPACE_FONT_FAMILY, SemanticTheme, USER_MESSAGE_MAX_WIDTH,
+    USER_MESSAGE_WIDTH_FRACTION,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConversationPaneEvent {
@@ -145,9 +148,12 @@ impl Render for ConversationPane {
                                         .w_full()
                                         .h_full()
                                         .when(visual.align_right, |card| {
-                                            card.w(relative(0.70)).max_w(px(920.))
+                                            card.w(relative(USER_MESSAGE_WIDTH_FRACTION))
+                                                .max_w(px(USER_MESSAGE_MAX_WIDTH as f32))
                                         })
-                                        .when(!visual.align_right, |card| card.max_w(px(960.)))
+                                        .when(!visual.align_right, |card| {
+                                            card.max_w(px(ASSISTANT_MESSAGE_MAX_WIDTH as f32))
+                                        })
                                         .overflow_hidden()
                                         .rounded_lg()
                                         .border_l_2()
