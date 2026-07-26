@@ -1,8 +1,8 @@
 use desktop::conversation::ComposerAdmission;
 use desktop::shell::{COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, SemanticTheme, truncate_label};
 use gpui::{
-    EventEmitter, Focusable as _, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity,
-    Window, div, prelude::*, px, rgb,
+    EventEmitter, Focusable as _, IntoElement, ParentElement as _, Render, Role, Styled as _,
+    WeakEntity, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::{Disableable as _, button::Button, input::Input};
 
@@ -84,6 +84,11 @@ impl Render for ComposerPane {
 
         div()
             .id("composer-panel")
+            .role(Role::Form)
+            .aria_label("Message composer")
+            .aria_description(
+                state_notice.unwrap_or("Describe the coding change, then send the message."),
+            )
             .debug_selector(|| "desktop-composer-panel".into())
             .min_h(px(COMPOSER_MIN_HEIGHT as f32))
             .max_h(px(COMPOSER_MAX_HEIGHT as f32))

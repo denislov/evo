@@ -5,10 +5,10 @@ use desktop::shell::{
     CONTEXT_PANEL_WIDTH, MONOSPACE_FONT_FAMILY, SemanticColor, SemanticTheme, truncate_label,
 };
 use gpui::{
-    EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
-    prelude::*, px, rgb,
+    EventEmitter, IntoElement, ParentElement as _, Render, Role, Styled as _, WeakEntity, Window,
+    div, prelude::*, px, rgb,
 };
-use gpui_component::{Disableable as _, button::Button};
+use gpui_component::{Disableable as _, Selectable as _, button::Button};
 
 use super::{
     DesktopCommandIntent, DesktopFileReviewState, DesktopRecoveryStatus, InspectorSection,
@@ -285,15 +285,26 @@ impl Render for InspectorPane {
         let context_is_overlay = owner.narrow_context_open;
         let focused = owner.context_focus.is_focused(window) && owner.keyboard_focus_visible();
         let selected_section = owner.inspector_section;
+        let selected_section_label = match selected_section {
+            InspectorSection::Changes => "Changes",
+            InspectorSection::Task => "Task",
+            InspectorSection::Usage => "Usage",
+            InspectorSection::Runtime => "Runtime",
+        };
         let thinking = owner
             .thinking_selection
             .label(project.settings.default_thinking_level.as_deref());
 
         div()
             .id("context-panel")
+            .role(Role::Complementary)
+            .aria_label("Task context")
             .debug_selector(|| "desktop-context-panel".into())
             .when(context_is_overlay, |panel| {
                 panel
+                    .role(Role::Dialog)
+                    .aria_label("Task context dialog")
+                    .aria_description("Review task context. Escape closes this dialog.")
                     .key_context(actions::NARROW_CONTEXT_KEY_CONTEXT)
                     .absolute()
                     .top_0()
@@ -327,6 +338,9 @@ impl Render for InspectorPane {
             )
             .child(
                 div()
+                    .id("context-tabs")
+                    .role(Role::TabList)
+                    .aria_label("Context sections")
                     .px_2()
                     .py_2()
                     .flex()
@@ -365,6 +379,8 @@ impl Render for InspectorPane {
             .child(
                 div()
                     .id("context-details")
+                    .role(Role::TabPanel)
+                    .aria_label(format!("{selected_section_label} context details"))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -575,6 +591,7 @@ fn inspector_section_button(
     let active = section == selected;
     Button::new(id)
         .compact()
+        .selected(active)
         .label(format!("{} {label}", if active { "●" } else { "○" }))
         .tooltip(format!("Show {label} details"))
         .on_click(cx.listener(move |_, _, _, cx| {

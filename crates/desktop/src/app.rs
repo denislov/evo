@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use coding_agent::api::embedding::CodingAgentEmbeddingOptions;
 use gpui::{
-    App, Application, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _, Timer,
-    Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
+    App, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _, Window,
+    WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 use gpui_component::{Root, Theme, ThemeMode};
+use gpui_platform::application;
 
 use self::native_shell::{NativeShell, NativeShellInit};
 use crate::preferences::{
@@ -53,7 +54,7 @@ impl Render for StartupFailure {
 pub(crate) fn run(options: crate::DesktopApplicationOptions) {
     let crate::DesktopApplicationOptions { cwd, session_id } = options;
     let native_replay = native_perf::request();
-    Application::new().run(move |cx: &mut App| {
+    application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         crate::actions::bind_keys(cx);
         Theme::change(ThemeMode::Dark, None, cx);
@@ -86,7 +87,9 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                 match bootstrap.try_ready() {
                     Ok(Some(ready)) => break ready,
                     Ok(None) => {
-                        Timer::after(BOOTSTRAP_POLL_INTERVAL).await;
+                        cx.background_executor()
+                            .timer(BOOTSTRAP_POLL_INTERVAL)
+                            .await;
                     }
                     Err(error) => {
                         let _ = open_failure(startup_error_message(&error), cx);

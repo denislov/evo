@@ -1,7 +1,7 @@
 use desktop::shell::{MONOSPACE_FONT_FAMILY, SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
 use gpui::{
-    EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
-    prelude::*, px, rgb,
+    EventEmitter, IntoElement, ParentElement as _, Render, Role, Styled as _, WeakEntity, Window,
+    div, prelude::*, px, rgb,
 };
 use gpui_component::input::Input;
 use gpui_component::{Disableable as _, button::Button};
@@ -70,6 +70,15 @@ impl Render for SessionsPane {
         let omitted_sessions = owner.omitted_sessions;
         let focused = owner.sessions_focus.is_focused(window) && owner.keyboard_focus_visible();
         let now = OffsetDateTime::now_utc();
+        let visible_session_count = owner
+            .session_catalog
+            .iter()
+            .filter(|session| {
+                search.is_empty()
+                    || session.session_id.to_lowercase().contains(&search)
+                    || session.updated_at.to_lowercase().contains(&search)
+            })
+            .count();
         let session_rows = owner
             .session_catalog
             .iter()
@@ -95,8 +104,15 @@ impl Render for SessionsPane {
                 } else {
                     "idle"
                 };
+                let accessible_label =
+                    format!("{semantic_name}, {status}, updated {relative_time}");
                 div()
                     .id(("session-row", index))
+                    .role(Role::ListItem)
+                    .aria_label(accessible_label)
+                    .aria_selected(active)
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(visible_session_count)
                     .rounded_md()
                     .p_2()
                     .flex()
@@ -146,6 +162,8 @@ impl Render for SessionsPane {
 
         div()
             .id("sessions-panel")
+            .role(Role::Navigation)
+            .aria_label("Sessions")
             .debug_selector(|| "desktop-sessions-panel".into())
             .track_focus(&owner.sessions_focus)
             .w(px(panel_width as f32))
@@ -184,6 +202,8 @@ impl Render for SessionsPane {
             .child(
                 div()
                     .id("sessions-list")
+                    .role(Role::List)
+                    .aria_label("Recent coding sessions")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -191,7 +211,17 @@ impl Render for SessionsPane {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(div().child(Input::new(&search_input).appearance(false)))
+                    .child(
+                        div()
+                            .id("sessions-search")
+                            .role(Role::Search)
+                            .aria_label("Search sessions")
+                            .child(
+                                Input::new(&search_input)
+                                    .role(Role::SearchInput)
+                                    .appearance(false),
+                            ),
+                    )
                     .child(
                         Button::new("refresh-session-catalog")
                             .compact()

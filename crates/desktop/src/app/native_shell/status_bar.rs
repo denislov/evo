@@ -1,7 +1,7 @@
 use desktop::shell::{MONOSPACE_FONT_FAMILY, STATUS_HEIGHT, SemanticTheme, truncate_label};
 use gpui::{
-    EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
-    prelude::*, px, rgb,
+    EventEmitter, IntoElement, ParentElement as _, Render, Role, Styled as _, WeakEntity, Window,
+    div, prelude::*, px, rgb,
 };
 use gpui_component::{Disableable as _, button::Button};
 
@@ -63,6 +63,9 @@ impl Render for StatusBar {
 
         div()
             .id("status-panel")
+            .role(Role::Status)
+            .aria_label(format!("Desktop status: {}", status.label()))
+            .when_some(notice.clone(), |bar, notice| bar.aria_description(notice))
             .debug_selector(|| "desktop-status-panel".into())
             .track_focus(&owner.status_focus)
             .h(px(STATUS_HEIGHT as f32))

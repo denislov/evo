@@ -270,7 +270,8 @@ Reasoning duration 兼容契约：历史 transcript、没有独立 Thinking 生�
 - [x] Conversation 支持 Up/Down 有界选择消息、Ctrl/Cmd+C 复制和 Space 展开/收起详情。
 - [x] Overlay 通过 `FocusState::restore_after_overlay` 关闭后恢复原 focus owner；owner 在响应式布局中消失时安全回退 Composer。
 - [x] root capture 输入模态，鼠标 focus 与 keyboard focus-visible 分离且不改变区域几何。
-- [ ] 对比度、reduced motion、文本 label/tooltip 与 32x32 primary control hit target 已有真实 headless bounds 门禁；screen-reader accessibility tree 等待 GPUI 提供对应语义接口后收口。
+- [x] 对比度、reduced motion、文本 label/tooltip 与 32x32 primary control hit target 均有真实 headless bounds 门禁。
+- [x] 锁定具备 AccessKit 支持的 GPUI/gpui-component 版本组合；Application、Navigation、Main、Complementary、Status、Log/List/ListItem、Form、TabList/TabPanel、Dialog/AlertDialog 及控件角色均写入真实 accessibility node，并补齐 label/description、selected、position/set-size 和 active-descendant。真实 `accesskit::Node` 元数据测试、语义映射契约测试以及既有键盘/overlay focus 测试共同门禁。
 
 验收：仅键盘可完成新建 session、发送、切换区域、复制消息、审查文件和授权决策。
 
@@ -345,7 +346,8 @@ desktop.input.latency
 | 高度缓存失真 | width bucket + revision；超出误差时使用真实测量回写 |
 | Scroll offset compensation 符号/边界错误 | 纯状态机测试覆盖 append、grow、evict、resize、session switch |
 | 拆分 Entity 破坏 focus/overlay | 先抽纯 view model，再逐区域迁移；保留 root typed actions |
-| 依赖库 Markdown 行为限制 | live path 不依赖其 200ms debounce；最终 Markdown 可继续复用现有组件 |
+| GPUI 与组件版本漂移导致类型分叉或 accessibility 回退 | manifest 固定 gpui-component revision，提交 `Cargo.lock` 固定 GPUI/component 完整 commit，并用 dependency boundary 测试校验单一依赖来源与锁定值 |
+| 依赖库 Markdown 行为限制 | live path 只渲染纯文本；settling/final 以稳定 revision key 做一次整段解析，直接复用组件的首帧稳定高度路径，并由 code-copy headless 测试及三档 production golden 门禁 |
 
 每个阶段必须保持可回退：runtime 协议和产品事件不变，新的 view model、stream renderer 和视觉组件均在 desktop adapter 内演进。
 
@@ -356,7 +358,7 @@ desktop.input.latency
 | DESK-001 | 进行中 | release replay/streaming fixture、可比较日志、主要 CPU tracing、uncached GPUI headless CPU frame、native GPU/present P95/P99、input change→render 与 50 样本 InputState dispatch→post-render 上界已完成；待包含显示扫描的 click-to-photon input 和 Markdown parser hook |
 | DESK-002 | 完成 | 已移除动态面板边框，改用已有 header divider 和标题颜色；回归测试已通过 |
 | DESK-003 | 完成 | ShellLayout 改为稳定 workspace 模型；sidebar/composer/status/content width 共享 token，响应式临界点与 width bucket 均有回归 |
-| DESK-004 | 完成 | StreamingText 三态 revision 协议、16ms 合批、100ms settling、stale rejection、keyed 空状态预热、后台正文 parse 与单次请求计数均已完成 |
+| DESK-004 | 完成 | StreamingText 三态 revision 协议、16ms 合批、100ms settling、stale rejection、live 纯文本与 settling/final 稳定 key 单次整段 Markdown parse 均已完成；已移除升级后多余的二次预热定时器与重绘 |
 | DESK-005 | 完成 | typed ConversationItemKey 已统一 cache/Markdown/row element/hover/layout/selection 身份，并覆盖 session 与 durable/live 隔离 |
 | DESK-006 | 完成 | 基于真实 offset 的迟滞状态机、streaming unseen 计数和无布局占位的浮动 pill 已完成；GUI 像素门禁归入 DESK-017 |
 | DESK-007 | 完成 | 文本保持 16ms 批次，行高约 15Hz；Following 底部锚定、Paused offset compensation 和 Unicode display width 已完成 |
@@ -368,7 +370,7 @@ desktop.input.latency
 | DESK-013 | 完成 | Assistant/User 宽度、Reasoning/Tool 折叠、稳定 Copy/More 槽、bounded live copy、Markdown Copy code、持久化 Tool duration 与独立可回放的 Reasoning 分段 duration 均已完成 |
 | DESK-014 | 完成 | Idle/Running 均为单主操作；每 session draft/mode、pending/authorization/rejected 文案与 InputState IME 边界已落实 |
 | DESK-015 | 完成 | Sessions 搜索/相对时间/自动刷新与 Inspector 按需分区已完成；sidebar 宽度可持久化、拖动和双击复位，窄屏继续使用 drawer |
-| DESK-016 | 进行中 | 区域/消息键盘导航、overlay focus restore、focus-visible 与 32x32 primary hit-target 门禁已完成；待 GPUI accessibility tree 收口 |
+| DESK-016 | 完成 | 区域/消息键盘导航、overlay focus restore、focus-visible、32x32 primary hit-target 与 AccessKit accessibility tree 已完成；真实 node 元数据、语义映射、modal focus 及依赖锁定均有自动门禁 |
 | DESK-017 | 进行中 | release scale/content/streaming/allocation/Linux hydration+window RSS、10k NativeShell headless frame、production native GPU/present P95/P99 与 InputState dispatch→post-render P95/P99 门禁已完成；待外部 click-to-photon input 和跨平台窗口 memory 曲线 |
 | DESK-018 | 完成 | Focus bounds、session key、scroll anchor、Streaming→Final、四条关键流程 smoke 与 production wide/medium/narrow screenshot golden 均已覆盖 |
 

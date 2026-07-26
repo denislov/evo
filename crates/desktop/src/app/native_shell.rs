@@ -24,7 +24,7 @@ use desktop::shell::{
 };
 use gpui::{
     ClipboardItem, Context, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, ScrollStrategy,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, Role, ScrollStrategy,
     Styled as _, Subscription, Window, WindowBounds, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
@@ -590,13 +590,17 @@ impl NativeShell {
                     InputEvent::Focus => {
                         this.record_focus(FocusTarget::Composer, window, cx);
                     }
-                    InputEvent::PressEnter { secondary: true } => {
+                    InputEvent::PressEnter {
+                        secondary: true, ..
+                    } => {
                         if !this.root_action_blocked_by_overlay(window, cx) {
                             this.submit_primary_composer(cx);
                         }
                     }
                     InputEvent::Blur => this.notify_composer_pane(cx),
-                    InputEvent::PressEnter { secondary: false } => {}
+                    InputEvent::PressEnter {
+                        secondary: false, ..
+                    } => {}
                 },
             ),
             cx.subscribe_in(
@@ -731,22 +735,17 @@ impl NativeShell {
             cx.observe_window_bounds(window, Self::window_bounds_changed),
         ];
 
-        composer_input.focus_handle(cx).focus(window);
+        composer_input.focus_handle(cx).focus(window, cx);
         cx.spawn(async move |this, cx| {
             let runtime_shutdown = runtime_shutdown;
             while let Some(updates) = runtime_events.next_update_batch().await {
                 let Some(this) = this.upgrade() else {
                     break;
                 };
-                if this
-                    .update(cx, |this, cx| {
-                        this.runtime_updates.extend(updates);
-                        this.poll_runtime(cx)
-                    })
-                    .is_err()
-                {
-                    break;
-                }
+                this.update(cx, |this, cx| {
+                    this.runtime_updates.extend(updates);
+                    this.poll_runtime(cx)
+                });
             }
             let _ = runtime_shutdown.shutdown(&mut runtime_events).await;
         })
@@ -1020,7 +1019,7 @@ impl NativeShell {
         let previous_focus = self.focus.active();
         self.focus.reconcile_layout(layout);
         if self.focus.active() != previous_focus {
-            self.composer_input.focus_handle(cx).focus(window);
+            self.composer_input.focus_handle(cx).focus(window, cx);
         }
         self.schedule_preferences();
         self.notify_inspector_pane(cx);
@@ -1947,7 +1946,7 @@ impl NativeShell {
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
         if self.focus.active() == FocusTarget::Composer {
-            self.composer_input.focus_handle(cx).focus(window);
+            self.composer_input.focus_handle(cx).focus(window, cx);
         }
         self.schedule_preferences();
         self.notify_inspector_pane(cx);
@@ -1989,7 +1988,7 @@ impl NativeShell {
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
         if self.focus.active() == FocusTarget::Composer {
-            self.composer_input.focus_handle(cx).focus(window);
+            self.composer_input.focus_handle(cx).focus(window, cx);
         }
         self.schedule_preferences();
         cx.notify();
@@ -2898,10 +2897,10 @@ impl NativeShell {
         }
         self.active_overlay = Some(overlay);
         match overlay {
-            DesktopOverlayKind::Authorization => self.authorization_focus.focus(window),
-            DesktopOverlayKind::CommandPalette => self.command_palette_focus.focus(window),
-            DesktopOverlayKind::NarrowSessions => self.narrow_sessions_focus.focus(window),
-            DesktopOverlayKind::NarrowContext => self.context_focus.focus(window),
+            DesktopOverlayKind::Authorization => self.authorization_focus.focus(window, cx),
+            DesktopOverlayKind::CommandPalette => self.command_palette_focus.focus(window, cx),
+            DesktopOverlayKind::NarrowSessions => self.narrow_sessions_focus.focus(window, cx),
+            DesktopOverlayKind::NarrowContext => self.context_focus.focus(window, cx),
         }
         self.notify_overlay_host(cx);
         cx.notify();
@@ -3013,7 +3012,7 @@ impl NativeShell {
 
     fn reconcile_conversation_scroll(&mut self, cx: &mut Context<Self>) {
         let offset_y = f32::from(self.conversation_scroll.offset().y);
-        let max_offset_y = f32::from(self.conversation_scroll.max_offset().height);
+        let max_offset_y = f32::from(self.conversation_scroll.max_offset().y);
         let distance_to_bottom = conversation_distance_to_bottom(offset_y, max_offset_y);
         if self
             .conversation_viewport
@@ -3144,7 +3143,7 @@ impl NativeShell {
     ) {
         if !self.projection.snapshot().pending_authorizations.is_empty() {
             self.preference_notice = Some("Resolve authorization before opening commands.".into());
-            self.authorization_focus.focus(window);
+            self.authorization_focus.focus(window, cx);
             self.notify_status_bar(cx);
             cx.notify();
             return;
@@ -3223,7 +3222,7 @@ impl NativeShell {
             Some(DesktopOverlayKind::Authorization) => {
                 self.preference_notice =
                     Some("Authorization requires Deny, Allow once, or Allow for operation.".into());
-                self.authorization_focus.focus(window);
+                self.authorization_focus.focus(window, cx);
                 cx.notify();
             }
             Some(DesktopOverlayKind::CommandPalette) => {
@@ -4095,21 +4094,23 @@ impl NativeShell {
 
     fn focus_active_target(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.focus.active() {
-            FocusTarget::Sessions => self.sessions_focus.focus(window),
-            FocusTarget::Conversation => self.conversation_focus.focus(window),
-            FocusTarget::Composer => self.composer_input.focus_handle(cx).focus(window),
-            FocusTarget::Context => self.context_focus.focus(window),
-            FocusTarget::Status => self.status_focus.focus(window),
+            FocusTarget::Sessions => self.sessions_focus.focus(window, cx),
+            FocusTarget::Conversation => self.conversation_focus.focus(window, cx),
+            FocusTarget::Composer => self.composer_input.focus_handle(cx).focus(window, cx),
+            FocusTarget::Context => self.context_focus.focus(window, cx),
+            FocusTarget::Status => self.status_focus.focus(window, cx),
             FocusTarget::Overlay => match self.active_overlay {
-                Some(DesktopOverlayKind::Authorization) => self.authorization_focus.focus(window),
+                Some(DesktopOverlayKind::Authorization) => {
+                    self.authorization_focus.focus(window, cx)
+                }
                 Some(DesktopOverlayKind::CommandPalette) => {
-                    self.command_palette_focus.focus(window);
+                    self.command_palette_focus.focus(window, cx);
                 }
                 Some(DesktopOverlayKind::NarrowSessions) => {
-                    self.narrow_sessions_focus.focus(window);
+                    self.narrow_sessions_focus.focus(window, cx);
                 }
-                Some(DesktopOverlayKind::NarrowContext) => self.context_focus.focus(window),
-                None => self.composer_input.focus_handle(cx).focus(window),
+                Some(DesktopOverlayKind::NarrowContext) => self.context_focus.focus(window, cx),
+                None => self.composer_input.focus_handle(cx).focus(window, cx),
             },
         }
     }
@@ -4230,6 +4231,11 @@ impl Render for NativeShell {
 
         let conversation = div()
             .id("conversation-panel")
+            .role(Role::Main)
+            .aria_label("Conversation workspace")
+            .aria_description(
+                "Conversation history and message composer. Use Up and Down to select messages.",
+            )
             .debug_selector(|| "desktop-conversation-panel".into())
             .key_context(actions::CONVERSATION_KEY_CONTEXT)
             .track_focus(&self.conversation_focus)
@@ -4248,6 +4254,9 @@ impl Render for NativeShell {
         let overlay_host = self.overlay_host.clone();
 
         div()
+            .id("desktop-application")
+            .role(Role::Application)
+            .aria_label("Evo native coding agent")
             .key_context(actions::ROOT_KEY_CONTEXT)
             .on_action(cx.listener(Self::on_open_command_palette))
             .on_action(cx.listener(Self::on_open_file_surface))
@@ -4771,14 +4780,7 @@ mod tests {
         );
         cx.run_until_parked();
         cx.refresh()
-            .expect("Markdown prewarm redraws the test window");
-        cx.run_until_parked();
-        std::thread::sleep(
-            streaming_text::MARKDOWN_BACKGROUND_WAIT + std::time::Duration::from_millis(50),
-        );
-        cx.run_until_parked();
-        cx.refresh()
-            .expect("Markdown background completion redraws the test window");
+            .expect("final Markdown renders in the first refreshed frame");
         cx.run_until_parked();
 
         let bounds = cx
@@ -5198,6 +5200,79 @@ mod tests {
         assert!(shell.contains(&pointer_capture));
         assert!(shell.contains(&keyboard_capture));
         assert!(shell.contains("keyboard_focus_visible"));
+    }
+
+    #[test]
+    fn gpui_accessibility_metadata_writes_real_accesskit_nodes() {
+        let element = div()
+            .id("accessibility-contract-probe")
+            .role(Role::ListItem)
+            .aria_label("Assistant message, streaming")
+            .aria_description("Conversation item")
+            .aria_selected(true)
+            .aria_position_in_set(2)
+            .aria_size_of_set(4);
+
+        assert_eq!(gpui::Element::a11y_role(&element), Some(Role::ListItem));
+        let mut node = gpui::accesskit::Node::new(Role::ListItem);
+        gpui::Element::write_a11y_info(&element, &mut node);
+        assert_eq!(node.label(), Some("Assistant message, streaming"));
+        assert_eq!(node.description(), Some("Conversation item"));
+        assert_eq!(node.is_selected(), Some(true));
+        assert_eq!(node.position_in_set(), Some(2));
+        assert_eq!(node.size_of_set(), Some(4));
+    }
+
+    #[test]
+    fn desktop_accessibility_contract_covers_regions_items_and_modal_focus() {
+        let shell = include_str!("native_shell.rs");
+        let sessions = include_str!("native_shell/sessions_pane.rs");
+        let conversation = include_str!("native_shell/conversation_pane.rs");
+        let composer = include_str!("native_shell/composer_pane.rs");
+        let inspector = include_str!("native_shell/inspector_pane.rs");
+        let status = include_str!("native_shell/status_bar.rs");
+        let overlays = include_str!("native_shell/overlay_host.rs");
+
+        assert!(shell.contains(".role(Role::Application)"));
+        assert!(shell.contains(".role(Role::Main)"));
+        assert!(sessions.contains(".role(Role::Navigation)"));
+        assert!(sessions.contains(".role(Role::SearchInput)"));
+        assert!(sessions.contains(".role(Role::ListItem)"));
+        assert!(conversation.contains(".role(Role::Log)"));
+        assert!(conversation.contains(".role(Role::ListItem)"));
+        assert!(conversation.contains("row.aria_active_descendant()"));
+        assert!(composer.contains(".role(Role::Form)"));
+        assert!(inspector.contains(".role(Role::Complementary)"));
+        assert!(inspector.contains(".role(Role::TabList)"));
+        assert!(inspector.contains(".role(Role::TabPanel)"));
+        assert!(status.contains(".role(Role::Status)"));
+        assert!(overlays.contains(".role(Role::Dialog)"));
+        assert!(overlays.contains(".role(Role::AlertDialog)"));
+
+        // Every modal role is attached to the same element that owns focus,
+        // so assistive technology receives focus inside the active dialog.
+        assert!(overlays.contains(
+            "overlay_surface(\"command-palette-overlay\", &owner.command_palette_focus)"
+        ));
+        assert!(
+            overlays
+                .contains("overlay_surface(\"authorization-overlay\", &owner.authorization_focus)")
+        );
+        assert!(inspector.contains(".track_focus(&owner.context_focus)"));
+    }
+
+    #[test]
+    fn accessibility_dependencies_are_reproducibly_locked() {
+        let manifest = include_str!("../../Cargo.toml");
+        let lock = include_str!("../../../../Cargo.lock");
+        assert!(manifest.contains("rev = \"bc174a7ec4534b2a4174fddde314b38d30d69093\""));
+        assert!(manifest.contains("https://github.com/zed-industries/zed.git"));
+        assert!(lock.contains(
+            "git+https://github.com/zed-industries/zed.git#30730a305ae235f3be44643d5895e142048ef701"
+        ));
+        assert!(lock.contains(
+            "git+https://github.com/longbridge/gpui-component.git?rev=bc174a7ec4534b2a4174fddde314b38d30d69093#bc174a7ec4534b2a4174fddde314b38d30d69093"
+        ));
     }
 
     #[test]

@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-gpui-component = { version = "=0.5.1", default-features = false }
+gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "bc174a7ec4534b2a4174fddde314b38d30d69093", default-features = false }
 coding-agent = { path = "../coding-agent" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -18,16 +18,19 @@ unicode-width = "0.2"
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui = { git = "https://github.com/zed-industries/zed.git", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", default-features = false, features = ["font-kit", "wayland", "x11"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui = { version = "=0.2.2", default-features = false, features = ["font-kit"] }
+gpui = { git = "https://github.com/zed-industries/zed.git", default-features = false, features = ["font-kit"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", default-features = false, features = ["font-kit"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+gpui = { git = "https://github.com/zed-industries/zed.git", default-features = false, features = ["windows-manifest"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", default-features = false }
 
 [dev-dependencies]
-gpui = { version = "=0.2.2", default-features = false, features = ["test-support"] }
+gpui = { git = "https://github.com/zed-industries/zed.git", default-features = false, features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "test-util", "time"] }
 toml = "0.8"

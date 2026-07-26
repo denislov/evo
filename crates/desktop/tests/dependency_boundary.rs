@@ -41,8 +41,12 @@ fn unstable_ui_dependencies_are_exactly_pinned() {
         .as_table()
         .expect("dependencies table");
     assert_eq!(
-        dependencies["gpui-component"]["version"].as_str(),
-        Some("=0.5.1")
+        dependencies["gpui-component"]["rev"].as_str(),
+        Some("bc174a7ec4534b2a4174fddde314b38d30d69093")
+    );
+    assert_eq!(
+        dependencies["gpui-component"]["git"].as_str(),
+        Some("https://github.com/longbridge/gpui-component.git")
     );
 
     let targets = manifest["target"].as_table().expect("target table");
@@ -52,11 +56,27 @@ fn unstable_ui_dependencies_are_exactly_pinned() {
         "cfg(target_os = \"windows\")",
     ] {
         assert_eq!(
-            targets[target]["dependencies"]["gpui"]["version"].as_str(),
-            Some("=0.2.2"),
-            "GPUI must be exact-pinned for {target}"
+            targets[target]["dependencies"]["gpui"]["git"].as_str(),
+            Some("https://github.com/zed-industries/zed.git"),
+            "GPUI must use the AccessKit-capable upstream for {target}"
+        );
+        assert!(
+            targets[target]["dependencies"]
+                .get("gpui_platform")
+                .is_some()
         );
     }
+
+    let lock_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("Cargo.lock");
+    let lock = fs::read_to_string(lock_path).expect("workspace lockfile should be readable");
+    assert!(lock.contains(
+        "git+https://github.com/zed-industries/zed.git#30730a305ae235f3be44643d5895e142048ef701"
+    ));
+    assert!(lock.contains(
+        "git+https://github.com/longbridge/gpui-component.git?rev=bc174a7ec4534b2a4174fddde314b38d30d69093#bc174a7ec4534b2a4174fddde314b38d30d69093"
+    ));
 }
 
 #[test]
@@ -143,7 +163,7 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
     assert!(shell.contains("fn on_escape_hierarchy("));
     assert!(shell.contains("fn root_action_blocked_by_overlay("));
     assert!(shell.contains("fn reconcile_authorization_overlay("));
-    assert!(shell.contains("InputEvent::PressEnter { secondary: true }"));
+    assert!(shell.contains("secondary: true"));
     assert!(shell.contains("fn submit_primary_composer("));
     assert!(shell.contains(".key_context(actions::ROOT_KEY_CONTEXT)"));
     assert!(native_ui.contains(".key_context(actions::PALETTE_KEY_CONTEXT)"));
@@ -173,12 +193,12 @@ fn desktop_bootstrap_and_native_shell_have_distinct_module_owners() {
         .expect("desktop native shell owner should be readable");
 
     assert!(bootstrap.contains("mod native_shell;"));
-    assert!(bootstrap.contains("Application::new().run"));
+    assert!(bootstrap.contains("application().run"));
     assert!(bootstrap.contains("DesktopRuntimeBridge::spawn"));
     assert!(!bootstrap.contains("impl Render for NativeShell"));
     assert!(shell.contains("impl Render for NativeShell"));
     assert!(shell.contains("fn submit_composer"));
-    assert!(!shell.contains("Application::new().run"));
+    assert!(!shell.contains("application().run"));
     assert!(!shell.contains("DesktopRuntimeBridge::spawn"));
 }
 

@@ -970,7 +970,12 @@ impl DesktopRuntimeEventStream {
         updates.push(first);
         // This future is polled by GPUI's executor in production, so it must
         // not assume that a Tokio reactor is entered on the UI thread.
-        let deadline = gpui::Timer::after(STREAMING_DELIVERY_COALESCE_WINDOW);
+        // Use the scheduler timer future directly. BackgroundExecutor::timer
+        // wraps it in a single-consumption Task, which is not safe for the
+        // manual executor-neutral polling contract exercised below.
+        let deadline = gpui_platform::background_executor()
+            .scheduler_executor()
+            .timer(STREAMING_DELIVERY_COALESCE_WINDOW);
         tokio::pin!(deadline);
         while updates.len() < MAX_STREAMING_DELIVERIES_PER_BATCH {
             tokio::select! {

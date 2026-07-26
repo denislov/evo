@@ -3,10 +3,10 @@ use coding_agent::api::authorization::{
 };
 use desktop::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme, truncate_label};
 use gpui::{
-    EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
-    prelude::*, px, rgb, rgba,
+    EventEmitter, IntoElement, ParentElement as _, Render, Role, Styled as _, WeakEntity, Window,
+    div, prelude::*, px, rgb, rgba,
 };
-use gpui_component::{Disableable as _, button::Button};
+use gpui_component::{Disableable as _, Selectable as _, button::Button};
 
 use super::{DesktopCommandIntent, DesktopPaletteCommand, NativeShell, PALETTE_ENTRIES, actions};
 
@@ -93,6 +93,13 @@ impl Render for OverlayHost {
                     |shortcut| format!("{}    {shortcut}", entry.label),
                 );
                 div()
+                    .id(("palette-option", index))
+                    .role(Role::ListItem)
+                    .aria_label(entry.semantic_label)
+                    .aria_selected(selected)
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(PALETTE_ENTRIES.len())
+                    .when(selected, |row| row.aria_active_descendant())
                     .font_family(MONOSPACE_FONT_FAMILY)
                     .rounded_md()
                     .border_l_2()
@@ -103,6 +110,7 @@ impl Render for OverlayHost {
                     }))
                     .child(
                         Button::new(("palette-command", index))
+                            .selected(selected)
                             .label(label)
                             .tooltip(entry.semantic_label)
                             .on_click(cx.listener(move |_, _, _, cx| {
@@ -114,6 +122,11 @@ impl Render for OverlayHost {
         let max_height = px((f32::from(window.viewport_size().height) * 0.8).max(320.));
         let command_palette_overlay = owner.command_palette.is_open().then(|| {
             overlay_surface("command-palette-overlay", &owner.command_palette_focus)
+                .role(Role::Dialog)
+                .aria_label("Command palette")
+                .aria_description(
+                    "Use Up or Down to select a command, Enter to run it, and Escape to close.",
+                )
                 .key_context(actions::PALETTE_KEY_CONTEXT)
                 .child(
                     div()
@@ -141,7 +154,13 @@ impl Render for OverlayHost {
                                 .text_color(rgb(theme.muted_text.value()))
                                 .child("Up/Down or Tab selects · Enter runs · Esc closes"),
                         )
-                        .children(palette_rows),
+                        .child(
+                            div()
+                                .id("command-palette-options")
+                                .role(Role::List)
+                                .aria_label("Available commands")
+                                .children(palette_rows),
+                        ),
                 )
         });
         let omitted_sessions = owner.omitted_sessions;
@@ -150,6 +169,11 @@ impl Render for OverlayHost {
             .then(|| owner.inspector_pane.clone());
         let narrow_sessions_overlay = owner.narrow_sessions_open.then(|| {
             overlay_surface("narrow-sessions-overlay", &owner.narrow_sessions_focus)
+                .role(Role::Dialog)
+                .aria_label("Sessions")
+                .aria_description(
+                    "Create, refresh, or open a coding session. Escape closes this dialog.",
+                )
                 .key_context(actions::NARROW_SESSIONS_KEY_CONTEXT)
                 .child(
                     div()
@@ -244,9 +268,13 @@ impl Render for OverlayHost {
                     let allow_once = identity.clone();
                     let allow_operation = identity.clone();
                     overlay_surface("authorization-overlay", &owner.authorization_focus)
+                        .role(Role::AlertDialog)
+                        .aria_label("Authorization required")
+                        .aria_description(request.preview.summary.clone())
                         .key_context(actions::AUTHORIZATION_KEY_CONTEXT)
                         .child(
                             div()
+                                .id("authorization-dialog")
                                 .w_full()
                                 .max_w(px(720.))
                                 .max_h(max_height)

@@ -128,7 +128,7 @@ capture_layout() {
         exit 1
     fi
 
-    # Let the production Markdown view finish its initial asynchronous parse.
+    # Let the initial native frame settle before focusing the capture window.
     sleep 1
     wmctrl -ia "${current_window_id}"
     sleep 0.2

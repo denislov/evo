@@ -1,6 +1,6 @@
 use gpui::{
-    ElementId, EventEmitter, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    WeakEntity, Window, div, prelude::*, px, relative, rgb,
+    ElementId, EventEmitter, IntoElement, ParentElement as _, Render, Role, SharedString,
+    Styled as _, WeakEntity, Window, div, prelude::*, px, relative, rgb,
 };
 use gpui_component::{button::Button, v_virtual_list};
 
@@ -37,7 +37,11 @@ impl EventEmitter<ConversationPaneEvent> for ConversationPane {}
 impl Render for ConversationPane {
     fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let Some(owner) = self.owner.upgrade() else {
-            return div().flex_1();
+            return div()
+                .id("conversation-log")
+                .role(Role::Log)
+                .aria_label("Conversation messages")
+                .flex_1();
         };
         let (
             transcript_rows,
@@ -73,7 +77,7 @@ impl Render for ConversationPane {
                 };
                 visible_range
                     .filter_map(|index| {
-                        let (block, row_height, selected, detail_expanded) = {
+                        let (block, row_height, selected, detail_expanded, row_count) = {
                             let owner = owner.read(cx);
                             let block = owner.conversation_render_rows.get(index)?.clone();
                             let height = owner
@@ -86,7 +90,8 @@ impl Render for ConversationPane {
                             let detail_expanded = owner
                                 .conversation_expanded_details
                                 .contains(block.item_key.row_id());
-                            (block, height, selected, detail_expanded)
+                            let row_count = owner.conversation_render_rows.len();
+                            (block, height, selected, detail_expanded, row_count)
                         };
                         let block_id = block.item_key.row_id().to_owned();
                         let copy_block_id = block_id.clone();
@@ -132,12 +137,22 @@ impl Render for ConversationPane {
                         } else {
                             None
                         };
+                        let accessible_label = terminal_label.map_or_else(
+                            || block.title.to_string(),
+                            |state| format!("{}, {state}", block.title),
+                        );
                         Some(
                             div()
                                 .id((
                                     ElementId::from("conversation-block"),
                                     SharedString::new(block.item_key.stable_id_arc()),
                                 ))
+                                .role(Role::ListItem)
+                                .aria_label(accessible_label)
+                                .aria_selected(selected)
+                                .aria_position_in_set(index + 1)
+                                .aria_size_of_set(row_count)
+                                .when(selected, |row| row.aria_active_descendant())
                                 .h(px(row_height))
                                 .px_4()
                                 .py_1()
@@ -491,6 +506,14 @@ impl Render for ConversationPane {
             format!("↓ {unseen_updates} new")
         };
         div()
+            .id("conversation-log")
+            .role(Role::Log)
+            .aria_label("Conversation messages")
+            .aria_description(if follow_latest {
+                "Following the latest conversation message."
+            } else {
+                "Conversation history paused away from the latest message."
+            })
             .relative()
             .flex_1()
             .min_h_0()
