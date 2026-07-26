@@ -22,8 +22,8 @@ use desktop::runtime::{
     DesktopRuntimeCommandHandle, DesktopRuntimeSelectionKind,
 };
 use desktop::shell::{
-    CONTEXT_PANEL_WIDTH, FocusState, FocusTarget, PanelVisibility, SESSION_PANEL_WIDTH,
-    STATUS_HEIGHT, SemanticColor, SemanticStatus, SemanticTheme, ShellLayout, truncate_label,
+    CONTEXT_PANEL_WIDTH, FocusState, FocusTarget, PanelVisibility, STATUS_HEIGHT, SemanticColor,
+    SemanticStatus, SemanticTheme, ShellLayout, truncate_label,
 };
 use gpui::{
     AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
@@ -300,6 +300,7 @@ pub(super) struct NativeShell {
     conversation_height_refresh_deadline: Option<Instant>,
     conversation_height_refresh_full: bool,
     conversation_pane: gpui::Entity<ConversationPane>,
+    sessions_pane: gpui::Entity<SessionsPane>,
     composer: ComposerState,
     composer_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
@@ -371,7 +372,8 @@ impl NativeShell {
                 .placeholder("Describe the change you want to make…")
         });
         let owner = cx.weak_entity();
-        let conversation_pane = cx.new(|_| ConversationPane::new(owner));
+        let conversation_pane = cx.new(|_| ConversationPane::new(owner.clone()));
+        let sessions_pane = cx.new(|_| SessionsPane::new(owner));
 
         let subscriptions = vec![
             cx.on_focus(&sessions_focus, window, |this, window, cx| {
@@ -417,6 +419,17 @@ impl NativeShell {
                             this.conversation_viewport.select_live(block_id.clone());
                         }
                         pane.update(cx, |_, cx| cx.notify());
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &sessions_pane,
+                window,
+                |this, _, event: &SessionsPaneEvent, _, cx| match event {
+                    SessionsPaneEvent::Create => this.create_session(cx),
+                    SessionsPaneEvent::Refresh => this.request_session_catalog(cx),
+                    SessionsPaneEvent::Open(session_id) => {
+                        this.open_session(session_id.clone(), cx);
                     }
                 },
             ),
@@ -468,6 +481,7 @@ impl NativeShell {
             conversation_height_refresh_deadline: None,
             conversation_height_refresh_full: false,
             conversation_pane,
+            sessions_pane,
             composer: ComposerState::default(),
             composer_input,
             composer_needs_sync: false,
@@ -510,8 +524,12 @@ impl NativeShell {
 
     fn record_focus(&mut self, target: FocusTarget, window: &mut Window, cx: &mut Context<Self>) {
         let layout = self.layout(window);
+        let previous = self.focus.active();
         if self.focus.request(target, layout) {
             cx.notify();
+        }
+        if previous == FocusTarget::Sessions || target == FocusTarget::Sessions {
+            self.notify_sessions_pane(cx);
         }
     }
 
@@ -561,6 +579,7 @@ impl NativeShell {
             return false;
         }
         let mut applied = 0;
+        let mut sessions_pane_dirty = false;
         while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
             let Some(update) = self.runtime_updates.pop_front() else {
                 break;
@@ -620,6 +639,7 @@ impl NativeShell {
                                 self.session_catalog.len()
                             )
                         });
+                        sessions_pane_dirty = true;
                     }
                     applied += 1;
                     continue;
@@ -741,6 +761,7 @@ impl NativeShell {
                                 code,
                             ),
                         );
+                        sessions_pane_dirty = true;
                     }
                 }
                 desktop::runtime::DesktopRuntimeUpdate::ControlAccepted {
@@ -917,6 +938,7 @@ impl NativeShell {
                     .is_some() =>
                 {
                     self.preference_notice = Some(safe_runtime_rejection_notice(*command, code));
+                    sessions_pane_dirty = true;
                 }
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
                     command_id,
@@ -964,6 +986,7 @@ impl NativeShell {
                     error,
                     ..
                 } => {
+                    sessions_pane_dirty = true;
                     self.command_ledger
                         .complete(*command_id, &DesktopCommandIntent::Prompt);
                     self.command_ledger.complete_where(|intent| {
@@ -991,6 +1014,7 @@ impl NativeShell {
                     }
                 }
                 desktop::runtime::DesktopRuntimeUpdate::RuntimeFailed { error } => {
+                    sessions_pane_dirty = true;
                     self.command_ledger.clear();
                     self.reject_pending_composer(format!(
                         "desktop runtime failed ({})",
@@ -998,16 +1022,22 @@ impl NativeShell {
                     ));
                 }
                 desktop::runtime::DesktopRuntimeUpdate::Stopped => {
+                    sessions_pane_dirty = true;
                     self.command_ledger.clear();
                     self.reject_pending_composer("desktop runtime stopped".into());
                 }
                 _ => {}
             }
+            let had_active_operation = self.projection.snapshot().active_operation.is_some();
             let outcome = self.projection.apply(update);
+            if had_active_operation != self.projection.snapshot().active_operation.is_some() {
+                sessions_pane_dirty = true;
+            }
             let conversation_dirty = outcome
                 .delta()
                 .is_some_and(|delta| delta.conversation || delta.tools);
             if outcome.is_replaced() {
+                sessions_pane_dirty = true;
                 self.conversation_render_full_dirty = true;
                 self.conversation_render_live_dirty = true;
                 self.conversation_render_dirty_sequences.clear();
@@ -1048,6 +1078,7 @@ impl NativeShell {
             if let Some((command_id, intent)) = session_completion
                 && self.command_ledger.complete(command_id, &intent)
             {
+                sessions_pane_dirty = true;
                 self.preference_notice = Some(if outcome.is_replaced() {
                     match intent {
                         DesktopCommandIntent::CreateSession => "Created a new session.".into(),
@@ -1193,10 +1224,17 @@ impl NativeShell {
         if applied > 0 {
             cx.notify();
         }
+        if sessions_pane_dirty {
+            self.notify_sessions_pane(cx);
+        }
         !matches!(
             self.projection.lifecycle(),
             DesktopProjectionLifecycle::Stopped
         )
+    }
+
+    fn notify_sessions_pane(&self, cx: &mut Context<Self>) {
+        self.sessions_pane.update(cx, |_, cx| cx.notify());
     }
 
     fn schedule_preferences(&mut self) {
@@ -1376,6 +1414,7 @@ impl NativeShell {
                 self.preference_notice = Some(message);
             }
         }
+        self.notify_sessions_pane(cx);
         cx.notify();
     }
 
@@ -1403,6 +1442,7 @@ impl NativeShell {
             self.command_ledger.complete(command_id, &intent);
             self.preference_notice = Some(message);
         }
+        self.notify_sessions_pane(cx);
         cx.notify();
     }
 
@@ -1453,6 +1493,7 @@ impl NativeShell {
                 self.preference_notice = Some(message);
             }
         }
+        self.notify_sessions_pane(cx);
         cx.notify();
     }
 
@@ -3182,7 +3223,6 @@ impl Render for NativeShell {
         self.reconcile_authorization_overlay(authorization_request.is_some(), window, cx);
         let snapshot = self.projection.snapshot();
         let project = self.projection.project();
-        let session_id = truncate_label(&snapshot.session.session_id, 24);
         let cwd = truncate_label(&project.cwd.display().to_string(), 54);
         let operation_count = snapshot.context.operations.len();
         let change_count = snapshot.context.changes.len();
@@ -3496,34 +3536,6 @@ impl Render for NativeShell {
         let transcript_list = self.conversation_pane.clone();
 
         let active_session_id = snapshot.session.session_id.clone();
-        let session_rows = self
-            .session_catalog
-            .iter()
-            .enumerate()
-            .map(|(index, session)| {
-                let target = session.session_id.clone();
-                let active = target == active_session_id;
-                let label = format!(
-                    "{} {}",
-                    if active { "●" } else { "○" },
-                    truncate_label(&target, 24)
-                );
-                Button::new(("open-session", index))
-                    .compact()
-                    .label(label)
-                    .tooltip(if active {
-                        "Active coding-agent session"
-                    } else {
-                        "Open this coding-agent session"
-                    })
-                    .disabled(
-                        active || composer_running || awaiting_prompt_start || session_pending,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_session(target.clone(), cx);
-                    }))
-            })
-            .collect::<Vec<_>>();
         let narrow_session_rows = self
             .session_catalog
             .iter()
@@ -3551,84 +3563,7 @@ impl Render for NativeShell {
                     }))
             })
             .collect::<Vec<_>>();
-        let sessions_panel = layout.sessions.map(|_| {
-            div()
-                .id("sessions-panel")
-                .track_focus(&self.sessions_focus)
-                .w(px(SESSION_PANEL_WIDTH as f32))
-                .h_full()
-                .flex()
-                .flex_col()
-                .border_r_1()
-                .border_color(rgb(theme.border.value()))
-                .bg(rgb(theme.surface.value()))
-                .when(self.sessions_focus.is_focused(window), |panel| {
-                    panel.border_color(rgb(theme.focus_ring.value()))
-                })
-                .child(
-                    div()
-                        .h_12()
-                        .px_4()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .border_b_1()
-                        .border_color(rgb(theme.border.value()))
-                        .child("SESSIONS")
-                        .child(
-                            Button::new("create-session")
-                                .compact()
-                                .label("New")
-                                .tooltip("Create a new session · Ctrl/Cmd+N")
-                                .disabled(
-                                    composer_running || awaiting_prompt_start || session_pending,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.create_session(cx);
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .rounded_md()
-                                .p_3()
-                                .bg(rgb(theme.elevated.value()))
-                                .child(session_id),
-                        )
-                        .child(
-                            Button::new("refresh-session-catalog")
-                                .compact()
-                                .label(if session_catalog_pending {
-                                    "Loading sessions…"
-                                } else {
-                                    "Refresh sessions"
-                                })
-                                .tooltip("Load the bounded project session catalog")
-                                .disabled(session_catalog_pending || composer_running)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.request_session_catalog(cx);
-                                })),
-                        )
-                        .children(session_rows)
-                        .when(self.omitted_sessions > 0, |panel| {
-                            panel.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(theme.warning.value()))
-                                    .child(format!(
-                                        "+ {} older session(s) omitted",
-                                        self.omitted_sessions
-                                    )),
-                            )
-                        }),
-                )
-        });
+        let sessions_panel = layout.sessions.map(|_| self.sessions_pane.clone());
 
         let context_is_overlay = self.narrow_context_open;
         let context_panel = (layout.context.is_some() || context_is_overlay).then(|| {
@@ -4856,6 +4791,24 @@ mod tests {
     }
 
     #[test]
+    fn sessions_rendering_is_owned_by_a_non_streaming_child_entity() {
+        let shell = include_str!("native_shell.rs");
+        let pane = include_str!("native_shell/sessions_pane.rs");
+        let sessions_panel_id = [".id(\"sessions-", "panel\")"].concat();
+
+        assert!(!shell.contains(&sessions_panel_id));
+        assert!(pane.contains(&sessions_panel_id));
+        assert!(shell.contains("sessions_pane: gpui::Entity<SessionsPane>"));
+        assert!(shell.contains("let sessions_pane = cx.new("));
+        assert!(shell.contains("layout.sessions.map(|_| self.sessions_pane.clone())"));
+        assert!(pane.contains("impl EventEmitter<SessionsPaneEvent>"));
+        assert!(pane.contains("WeakEntity<NativeShell>"));
+        assert!(shell.contains("fn notify_sessions_pane("));
+        assert!(!pane.contains("conversation_render_rows"));
+        assert!(!pane.contains("conversation_render_dirty_sequences"));
+    }
+
+    #[test]
     fn indexed_row_update_accepts_non_clone_history_and_changes_one_slot() {
         #[derive(Debug, PartialEq, Eq)]
         struct NonClone(usize);
@@ -4887,5 +4840,7 @@ mod tests {
     }
 }
 mod conversation_pane;
+mod sessions_pane;
 
 use conversation_pane::{ConversationPane, ConversationPaneEvent};
+use sessions_pane::{SessionsPane, SessionsPaneEvent};
