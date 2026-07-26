@@ -7,6 +7,7 @@
 use gpui::{App, KeyBinding, actions};
 
 pub(crate) const ROOT_KEY_CONTEXT: &str = "PiDesktop";
+pub(crate) const CONVERSATION_KEY_CONTEXT: &str = "PiDesktopConversation";
 pub(crate) const PALETTE_KEY_CONTEXT: &str = "PiDesktopPalette";
 pub(crate) const AUTHORIZATION_KEY_CONTEXT: &str = "PiDesktopAuthorization";
 pub(crate) const NARROW_SESSIONS_KEY_CONTEXT: &str = "PiDesktopNarrowSessions";
@@ -26,6 +27,10 @@ actions!(
         ToggleContextPanel,
         FocusNextRegion,
         FocusPreviousRegion,
+        SelectPreviousConversation,
+        SelectNextConversation,
+        CopySelectedConversation,
+        ToggleSelectedConversationDetails,
         PalettePrevious,
         PaletteNext,
         PaletteConfirm,
@@ -320,10 +325,10 @@ const ROOT_BINDINGS: &[BindingSpec] = &[
     binding("end", ROOT_KEY_CONTEXT),
     binding("ctrl-\\", ROOT_KEY_CONTEXT),
     binding("cmd-\\", ROOT_KEY_CONTEXT),
-    binding("tab", ROOT_KEY_CONTEXT),
-    binding("shift-tab", ROOT_KEY_CONTEXT),
     binding("ctrl-tab", ROOT_KEY_CONTEXT),
     binding("ctrl-shift-tab", ROOT_KEY_CONTEXT),
+    binding("cmd-tab", ROOT_KEY_CONTEXT),
+    binding("cmd-shift-tab", ROOT_KEY_CONTEXT),
 ];
 
 #[cfg(test)]
@@ -349,13 +354,38 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", FollowLatestOutput, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("ctrl-\\", ToggleContextPanel, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("cmd-\\", ToggleContextPanel, Some(ROOT_KEY_CONTEXT)),
-        KeyBinding::new("tab", FocusNextRegion, Some(ROOT_KEY_CONTEXT)),
-        KeyBinding::new("shift-tab", FocusPreviousRegion, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("ctrl-tab", FocusNextRegion, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new(
             "ctrl-shift-tab",
             FocusPreviousRegion,
             Some(ROOT_KEY_CONTEXT),
+        ),
+        KeyBinding::new("cmd-tab", FocusNextRegion, Some(ROOT_KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-tab", FocusPreviousRegion, Some(ROOT_KEY_CONTEXT)),
+        KeyBinding::new(
+            "up",
+            SelectPreviousConversation,
+            Some(CONVERSATION_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "down",
+            SelectNextConversation,
+            Some(CONVERSATION_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "ctrl-c",
+            CopySelectedConversation,
+            Some(CONVERSATION_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-c",
+            CopySelectedConversation,
+            Some(CONVERSATION_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "space",
+            ToggleSelectedConversationDetails,
+            Some(CONVERSATION_KEY_CONTEXT),
         ),
         KeyBinding::new("up", PalettePrevious, Some(PALETTE_KEY_CONTEXT)),
         KeyBinding::new("shift-tab", PalettePrevious, Some(PALETTE_KEY_CONTEXT)),
@@ -451,5 +481,11 @@ mod tests {
             assert!(bindings.contains(format!("ctrl-{key}").as_str()));
             assert!(bindings.contains(format!("cmd-{key}").as_str()));
         }
+        assert!(bindings.contains("ctrl-tab"));
+        assert!(bindings.contains("ctrl-shift-tab"));
+        assert!(bindings.contains("cmd-tab"));
+        assert!(bindings.contains("cmd-shift-tab"));
+        assert!(!bindings.contains("tab"));
+        assert!(!bindings.contains("shift-tab"));
     }
 }

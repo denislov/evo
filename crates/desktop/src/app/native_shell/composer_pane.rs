@@ -40,6 +40,7 @@ impl Render for ComposerPane {
             authorization_pending,
             running_mode,
             rejection,
+            keyboard_focus_visible,
         ) = {
             let owner = owner.read(cx);
             (
@@ -58,10 +59,11 @@ impl Render for ComposerPane {
                     .is_empty(),
                 owner.active_composer_running_mode(),
                 owner.composer.rejection().map(str::to_owned),
+                owner.keyboard_focus_visible(),
             )
         };
         let composer_disabled = composer_pending || awaiting_prompt_start;
-        let composer_focused = input.focus_handle(cx).is_focused(window);
+        let composer_focused = input.focus_handle(cx).is_focused(window) && keyboard_focus_visible;
         let theme = SemanticTheme::GEEK_DARK;
         let running_action_label = match running_mode {
             ComposerRunningMode::SteerNow => "Steer now",

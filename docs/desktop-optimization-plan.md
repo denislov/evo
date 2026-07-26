@@ -262,11 +262,11 @@ NativeShell
 
 #### DESK-016 键盘、焦点和可访问性
 
-- [ ] `Ctrl/Cmd+Tab` 切换区域，plain Tab 交给 Composer/标准控件导航。
-- [ ] Conversation 支持上下选择消息和键盘消息操作。
-- [ ] Overlay 关闭后恢复原 focus owner。
-- [ ] 鼠标 focus 与 keyboard focus-visible 分离。
-- [ ] 检查对比度、hit target、reduced motion 和 screen-reader label。
+- [x] `Ctrl/Cmd+Tab` 切换区域，root 不再绑定 plain Tab/Shift+Tab，交给 Composer/标准控件导航。
+- [x] Conversation 支持 Up/Down 有界选择消息、Ctrl/Cmd+C 复制和 Space 展开/收起详情。
+- [x] Overlay 通过 `FocusState::restore_after_overlay` 关闭后恢复原 focus owner；owner 在响应式布局中消失时安全回退 Composer。
+- [x] root capture 输入模态，鼠标 focus 与 keyboard focus-visible 分离且不改变区域几何。
+- [ ] 对比度已有自动化门禁，reduced motion 与文本 label/tooltip 已覆盖；统一 hit target 和 screen-reader accessibility tree 等待 GPUI 提供对应语义接口后收口。
 
 验收：仅键盘可完成新建 session、发送、切换区域、复制消息、审查文件和授权决策。
 
@@ -361,7 +361,8 @@ desktop.input.latency
 | DESK-013 | 进行中 | Assistant/User 宽度、Reasoning/Tool 折叠、稳定 Copy/More 槽与 bounded live copy 已完成；待 duration 权威字段和 Copy code 接口 |
 | DESK-014 | 完成 | Idle/Running 均为单主操作；每 session draft/mode、pending/authorization/rejected 文案与 InputState IME 边界已落实 |
 | DESK-015 | 完成 | Sessions 搜索/相对时间/自动刷新与 Inspector 按需分区已完成；sidebar 宽度可持久化、拖动和双击复位，窄屏继续使用 drawer |
-| DESK-016～018 | 待开始 | 继续键盘可访问性、GUI 性能门禁和文档收口 |
+| DESK-016 | 进行中 | 区域/消息键盘导航、overlay focus restore 和 focus-visible 已完成；待 GPUI accessibility tree 与统一 hit target 收口 |
+| DESK-017～018 | 待开始 | 继续 GUI 性能门禁和文档收口 |
 
 ## 10. 完成定义
 

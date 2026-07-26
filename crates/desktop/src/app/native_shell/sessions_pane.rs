@@ -68,7 +68,7 @@ impl Render for SessionsPane {
         let search_input = owner.sessions_search_input.clone();
         let search = search_input.read(cx).value().trim().to_lowercase();
         let omitted_sessions = owner.omitted_sessions;
-        let focused = owner.sessions_focus.is_focused(window);
+        let focused = owner.sessions_focus.is_focused(window) && owner.keyboard_focus_visible();
         let now = OffsetDateTime::now_utc();
         let session_rows = owner
             .session_catalog

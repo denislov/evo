@@ -51,7 +51,7 @@ impl Render for ConversationHeader {
             .conversation_viewport
             .selected_block_id()
             .is_some_and(|id| owner.projection.conversation().block(id).is_some());
-        let focused = owner.conversation_focus.is_focused(window);
+        let focused = owner.conversation_focus.is_focused(window) && owner.keyboard_focus_visible();
         let focus_accent = conversation_focus_accent(focused, theme);
 
         div()

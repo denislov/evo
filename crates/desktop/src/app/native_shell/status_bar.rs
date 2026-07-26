@@ -59,7 +59,7 @@ impl Render for StatusBar {
             .label(project.settings.default_thinking_level.as_deref());
         let status_thinking = truncate_label(&thinking, 12);
         let notice = owner.preference_notice.clone();
-        let focused = owner.status_focus.is_focused(window);
+        let focused = owner.status_focus.is_focused(window) && owner.keyboard_focus_visible();
 
         div()
             .id("status-panel")
@@ -129,7 +129,7 @@ impl Render for StatusBar {
                     } else {
                         "motion static"
                     })
-                    .child("commands Ctrl/Cmd+K · focus Ctrl+Tab")
+                    .child("commands Ctrl/Cmd+K · focus Ctrl/Cmd+Tab · messages ↑/↓")
                     .when_some(notice, |bar, notice| {
                         bar.child(
                             div()

@@ -24,9 +24,9 @@ use desktop::shell::{
 };
 use gpui::{
     AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Render,
-    ScrollStrategy, SharedString, Styled as _, Subscription, Window, WindowBounds, div, prelude::*,
-    px, rgb, size,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Render, ScrollStrategy, SharedString, Styled as _, Subscription, Window, WindowBounds, div,
+    prelude::*, px, rgb, size,
 };
 use gpui_component::{
     VirtualListScrollHandle,
@@ -41,10 +41,11 @@ use std::time::{Duration, Instant};
 
 use crate::actions::{
     self, AbortActiveOperation, AuthorizationAllowForOperation, AuthorizationAllowOnce,
-    AuthorizationDeny, DesktopCommandPalette, DesktopPaletteCommand, EscapeHierarchy,
-    FocusComposer, FocusNextRegion, FocusPreviousRegion, FollowLatestOutput, NewSession,
-    OpenCommandPalette, OpenFileSurface, PALETTE_ENTRIES, PaletteConfirm, PaletteNext,
-    PalettePrevious, SubmitComposer, ToggleContextPanel, TrapOverlayFocus,
+    AuthorizationDeny, CopySelectedConversation, DesktopCommandPalette, DesktopPaletteCommand,
+    EscapeHierarchy, FocusComposer, FocusNextRegion, FocusPreviousRegion, FollowLatestOutput,
+    NewSession, OpenCommandPalette, OpenFileSurface, PALETTE_ENTRIES, PaletteConfirm, PaletteNext,
+    PalettePrevious, SelectNextConversation, SelectPreviousConversation, SubmitComposer,
+    ToggleContextPanel, ToggleSelectedConversationDetails, TrapOverlayFocus,
 };
 use crate::command_ledger::{DesktopCommandIntent, DesktopCommandLedger};
 
@@ -338,6 +339,13 @@ struct PanelResizeState {
     width_origin: u32,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum FocusInputModality {
+    Keyboard,
+    #[default]
+    Pointer,
+}
+
 impl ComposerRunningMode {
     const fn submission_kind(self) -> ComposerSubmissionKind {
         match self {
@@ -498,6 +506,7 @@ pub(super) struct NativeShell {
     omitted_sessions: usize,
     session_catalog_refresh_deadline: Option<Instant>,
     panel_resize: Option<PanelResizeState>,
+    focus_input_modality: FocusInputModality,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -606,6 +615,7 @@ impl NativeShell {
                 window,
                 |this, pane, event: &ConversationPaneEvent, window, cx| match event {
                     ConversationPaneEvent::Select { block_id, durable } => {
+                        this.record_focus(FocusTarget::Conversation, window, cx);
                         if *durable {
                             this.conversation_viewport
                                 .select(block_id.clone(), this.projection.conversation());
@@ -807,6 +817,7 @@ impl NativeShell {
             omitted_sessions: 0,
             session_catalog_refresh_deadline: None,
             panel_resize: None,
+            focus_input_modality: FocusInputModality::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -925,6 +936,31 @@ impl NativeShell {
         if self.panel_resize.take().is_some() {
             self.schedule_preferences();
         }
+    }
+
+    fn set_focus_input_modality(&mut self, modality: FocusInputModality, cx: &mut Context<Self>) {
+        if self.focus_input_modality == modality {
+            return;
+        }
+        self.focus_input_modality = modality;
+        self.notify_sessions_pane(cx);
+        self.notify_conversation_header(cx);
+        self.notify_composer_pane(cx);
+        self.notify_inspector_pane(cx);
+        self.notify_status_bar(cx);
+        cx.notify();
+    }
+
+    fn note_pointer_input(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_focus_input_modality(FocusInputModality::Pointer, cx);
+    }
+
+    fn note_keyboard_input(&mut self, _: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_focus_input_modality(FocusInputModality::Keyboard, cx);
+    }
+
+    pub(super) fn keyboard_focus_visible(&self) -> bool {
+        self.focus_input_modality == FocusInputModality::Keyboard
     }
 
     fn record_focus(&mut self, target: FocusTarget, window: &mut Window, cx: &mut Context<Self>) {
@@ -2639,6 +2675,72 @@ impl NativeShell {
         }
     }
 
+    fn select_adjacent_conversation(&mut self, reverse: bool, cx: &mut Context<Self>) {
+        let row_count = self.conversation_render_rows.len();
+        if row_count == 0 {
+            self.preference_notice = Some("The conversation is empty.".into());
+            self.notify_status_bar(cx);
+            return;
+        }
+        let current = self.conversation_viewport.selected_block_id();
+        let current_index = current.and_then(|selected| {
+            self.conversation_render_rows
+                .iter()
+                .position(|row| row.row_id.as_ref() == selected)
+        });
+        let next_index = adjacent_conversation_index(row_count, current_index, reverse)
+            .expect("non-empty conversation has an adjacent selection");
+        let row = &self.conversation_render_rows[next_index];
+        if row.durable {
+            self.conversation_viewport
+                .select(row.row_id.to_string(), self.projection.conversation());
+        } else {
+            self.conversation_viewport
+                .select_live(row.row_id.to_string());
+        }
+        self.conversation_scroll.scroll_to_item(
+            next_index,
+            if reverse {
+                ScrollStrategy::Top
+            } else {
+                ScrollStrategy::Bottom
+            },
+        );
+        self.conversation_pane.update(cx, |_, cx| cx.notify());
+        self.notify_conversation_header(cx);
+    }
+
+    fn copy_keyboard_selected_conversation(&mut self, cx: &mut Context<Self>) {
+        let Some(block_id) = self
+            .conversation_viewport
+            .selected_block_id()
+            .map(str::to_owned)
+        else {
+            self.preference_notice = Some("Select a conversation message before copying.".into());
+            self.notify_status_bar(cx);
+            return;
+        };
+        self.copy_conversation_row(&block_id, cx);
+    }
+
+    fn toggle_keyboard_selected_conversation_details(&mut self, cx: &mut Context<Self>) {
+        let Some(block_id) = self
+            .conversation_viewport
+            .selected_block_id()
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let has_details = self
+            .conversation_render_rows
+            .iter()
+            .find(|row| row.row_id.as_ref() == block_id)
+            .is_some_and(|row| !row.detail.is_empty());
+        if has_details {
+            self.toggle_conversation_details(&block_id, cx);
+        }
+    }
+
     fn request_file_review(
         &mut self,
         request: CodingAgentFileReviewRequest,
@@ -3190,6 +3292,50 @@ impl NativeShell {
             return;
         }
         self.cycle_focus(true, window, cx);
+    }
+
+    fn on_select_previous_conversation(
+        &mut self,
+        _: &SelectPreviousConversation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.root_action_blocked_by_overlay(window, cx) {
+            self.select_adjacent_conversation(true, cx);
+        }
+    }
+
+    fn on_select_next_conversation(
+        &mut self,
+        _: &SelectNextConversation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.root_action_blocked_by_overlay(window, cx) {
+            self.select_adjacent_conversation(false, cx);
+        }
+    }
+
+    fn on_copy_selected_conversation(
+        &mut self,
+        _: &CopySelectedConversation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.root_action_blocked_by_overlay(window, cx) {
+            self.copy_keyboard_selected_conversation(cx);
+        }
+    }
+
+    fn on_toggle_selected_conversation_details(
+        &mut self,
+        _: &ToggleSelectedConversationDetails,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.root_action_blocked_by_overlay(window, cx) {
+            self.toggle_keyboard_selected_conversation_details(cx);
+        }
     }
 
     fn on_palette_previous(&mut self, _: &PalettePrevious, _: &mut Window, cx: &mut Context<Self>) {
@@ -4037,6 +4183,7 @@ impl Render for NativeShell {
 
         let conversation = div()
             .id("conversation-panel")
+            .key_context(actions::CONVERSATION_KEY_CONTEXT)
             .track_focus(&self.conversation_focus)
             .flex_1()
             .min_w_0()
@@ -4065,6 +4212,10 @@ impl Render for NativeShell {
             .on_action(cx.listener(Self::on_toggle_context_panel))
             .on_action(cx.listener(Self::on_focus_next_region))
             .on_action(cx.listener(Self::on_focus_previous_region))
+            .on_action(cx.listener(Self::on_select_previous_conversation))
+            .on_action(cx.listener(Self::on_select_next_conversation))
+            .on_action(cx.listener(Self::on_copy_selected_conversation))
+            .on_action(cx.listener(Self::on_toggle_selected_conversation_details))
             .on_action(cx.listener(Self::on_palette_previous))
             .on_action(cx.listener(Self::on_palette_next))
             .on_action(cx.listener(Self::on_palette_confirm))
@@ -4072,6 +4223,8 @@ impl Render for NativeShell {
             .on_action(cx.listener(Self::on_authorization_allow_once))
             .on_action(cx.listener(Self::on_authorization_allow_for_operation))
             .on_action(cx.listener(Self::on_trap_overlay_focus))
+            .capture_any_mouse_down(cx.listener(Self::note_pointer_input))
+            .capture_key_down(cx.listener(Self::note_keyboard_input))
             .on_mouse_move(cx.listener(Self::update_panel_resize))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::finish_panel_resize))
             .relative()
@@ -4105,6 +4258,22 @@ fn focus_target_label(target: FocusTarget) -> &'static str {
         FocusTarget::Status => "Status",
         FocusTarget::Overlay => "Overlay",
     }
+}
+
+fn adjacent_conversation_index(
+    row_count: usize,
+    current_index: Option<usize>,
+    reverse: bool,
+) -> Option<usize> {
+    let last_index = row_count.checked_sub(1)?;
+    Some(
+        match (current_index.filter(|index| *index < row_count), reverse) {
+            (Some(index), true) => index.saturating_sub(1),
+            (Some(index), false) => index.saturating_add(1).min(last_index),
+            (None, true) => last_index,
+            (None, false) => 0,
+        },
+    )
 }
 
 fn runtime_state_label(
@@ -4347,6 +4516,32 @@ mod tests {
         assert_eq!(conversation_distance_to_bottom(-640.0, 640.0), 0.0);
         assert_eq!(conversation_distance_to_bottom(-641.0, 640.0), 0.0);
         assert_eq!(conversation_distance_to_bottom(4.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn keyboard_conversation_selection_is_bounded_and_predictable() {
+        assert_eq!(adjacent_conversation_index(0, None, false), None);
+        assert_eq!(adjacent_conversation_index(4, None, false), Some(0));
+        assert_eq!(adjacent_conversation_index(4, None, true), Some(3));
+        assert_eq!(adjacent_conversation_index(4, Some(2), false), Some(3));
+        assert_eq!(adjacent_conversation_index(4, Some(3), false), Some(3));
+        assert_eq!(adjacent_conversation_index(4, Some(1), true), Some(0));
+        assert_eq!(adjacent_conversation_index(4, Some(0), true), Some(0));
+        assert_eq!(adjacent_conversation_index(4, Some(99), false), Some(0));
+    }
+
+    #[test]
+    fn focus_ring_visibility_tracks_keyboard_instead_of_pointer_input() {
+        assert!(!matches!(
+            FocusInputModality::default(),
+            FocusInputModality::Keyboard
+        ));
+        let shell = include_str!("native_shell.rs");
+        let pointer_capture = ["capture_any_mouse_", "down"].concat();
+        let keyboard_capture = ["capture_key_", "down"].concat();
+        assert!(shell.contains(&pointer_capture));
+        assert!(shell.contains(&keyboard_capture));
+        assert!(shell.contains("keyboard_focus_visible"));
     }
 
     #[test]

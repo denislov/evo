@@ -283,7 +283,7 @@ impl Render for InspectorPane {
             .map(|id| truncate_label(id, 24))
             .unwrap_or_else(|| "—".into());
         let context_is_overlay = owner.narrow_context_open;
-        let focused = owner.context_focus.is_focused(window);
+        let focused = owner.context_focus.is_focused(window) && owner.keyboard_focus_visible();
         let selected_section = owner.inspector_section;
         let thinking = owner
             .thinking_selection
