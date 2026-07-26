@@ -2148,6 +2148,8 @@ mod tests {
         const SAMPLE_COUNT: usize = 500;
         const VISIBLE_BLOCKS: usize = 30;
         const FRAME_BUDGET_MICROS: u128 = 16_700;
+        const HYDRATION_ALLOCATION_BUDGET: u64 = 40_064;
+        const HYDRATION_ALLOCATED_BYTE_BUDGET: u64 = 8 * 1024 * 1024;
 
         let payload = format!(
             "# streamed message\n\n{}\n\n```text\n{}\n```",
@@ -2168,9 +2170,12 @@ mod tests {
             .sum::<usize>();
         assert!(fixture_bytes >= 10 * 1024 * 1024);
 
+        let allocations_before = crate::allocation_probe::snapshot();
         let hydration_started = std::time::Instant::now();
         let projection = ConversationProjection::hydrate(transcript(items));
         let hydration_micros = hydration_started.elapsed().as_micros();
+        let hydration_allocations =
+            crate::allocation_probe::snapshot().delta_since(allocations_before);
         assert_eq!(projection.blocks().len(), MAX_TRANSCRIPT_BLOCKS);
 
         let mut viewport = ConversationViewport::new(VISIBLE_BLOCKS);
@@ -2206,7 +2211,11 @@ mod tests {
         let input_p95_micros = percentile_95(&mut input_samples).div_ceil(1_000);
         println!(
             "desktop_perf\tfixture_bytes={fixture_bytes}\thydration_us={hydration_micros}\t\
-             scroll_render_p95_us={scroll_p95_micros}\tinput_p95_us={input_p95_micros}"
+             hydration_allocations={}\thydration_allocated_bytes={}\tretained_bytes={}\t\
+             scroll_render_p95_us={scroll_p95_micros}\tinput_p95_us={input_p95_micros}",
+            hydration_allocations.count(),
+            hydration_allocations.bytes(),
+            projection.retained_bytes()
         );
         assert!(
             scroll_p95_micros <= FRAME_BUDGET_MICROS,
@@ -2216,6 +2225,16 @@ mod tests {
         assert!(
             input_p95_micros <= FRAME_BUDGET_MICROS,
             "composer input P95 exceeded one frame: {input_p95_micros} us"
+        );
+        assert!(
+            hydration_allocations.count() <= HYDRATION_ALLOCATION_BUDGET,
+            "10k transcript hydration allocation count exceeded the linear budget: {}",
+            hydration_allocations.count()
+        );
+        assert!(
+            hydration_allocations.bytes() <= HYDRATION_ALLOCATED_BYTE_BUDGET,
+            "10 MiB transcript hydration copied too much retained content: {} bytes",
+            hydration_allocations.bytes()
         );
     }
 
@@ -2229,15 +2248,28 @@ mod tests {
             let items = (0..block_count)
                 .map(user)
                 .collect::<Vec<CodingAgentSessionTranscriptItem>>();
+            let allocations_before = crate::allocation_probe::snapshot();
             let started = std::time::Instant::now();
             let projection = ConversationProjection::hydrate(transcript(items));
             let hydration_micros = started.elapsed().as_micros();
+            let hydration_allocations =
+                crate::allocation_probe::snapshot().delta_since(allocations_before);
             println!(
                 "desktop_perf\tscale_blocks={block_count}\thydration_us={hydration_micros}\t\
-                 retained_bytes={}",
+                 hydration_allocations={}\thydration_allocated_bytes={}\tretained_bytes={}",
+                hydration_allocations.count(),
+                hydration_allocations.bytes(),
                 projection.retained_bytes()
             );
             assert_eq!(projection.blocks().len(), block_count);
+            assert!(
+                hydration_allocations.count() <= block_count as u64 * 4 + 64,
+                "{block_count}-block hydration allocation count exceeded the linear budget"
+            );
+            assert!(
+                hydration_allocations.bytes() <= block_count as u64 * 512 + 4_096,
+                "{block_count}-block hydration allocated-byte count exceeded the linear budget"
+            );
         }
 
         let table_row = format!(

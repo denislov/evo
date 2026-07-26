@@ -276,7 +276,7 @@ NativeShell
 
 - [x] release gate 覆盖 1/100/1,000/10,000 条消息和 10/50/200 次增量 row revision。
 - [x] release gate 覆盖 256KB Markdown、512KB Reasoning、1MB Bash output、表格、代码块、CJK 和 Emoji。
-- [ ] 输出 frame、input、parse、layout、allocation 和 memory 曲线。
+- [ ] release hydration 已输出 allocation count/cumulative bytes/retained bytes 线性曲线并设置回归预算；真实 GPUI frame/paint、端到端 input 和进程 memory 曲线仍待 instrumented window harness。
 - [x] `scripts/desktop-perf-gate.sh` 提供串行、可重复的本地 release benchmark，并断言 frame preparation、Composer edit 和 final parse 预算；基线记录在 `docs/desktop-performance-baseline.md`。
 
 #### DESK-018 组件、截图和端到端回归
@@ -364,7 +364,7 @@ desktop.input.latency
 | DESK-014 | 完成 | Idle/Running 均为单主操作；每 session draft/mode、pending/authorization/rejected 文案与 InputState IME 边界已落实 |
 | DESK-015 | 完成 | Sessions 搜索/相对时间/自动刷新与 Inspector 按需分区已完成；sidebar 宽度可持久化、拖动和双击复位，窄屏继续使用 drawer |
 | DESK-016 | 进行中 | 区域/消息键盘导航、overlay focus restore、focus-visible 与 32x32 primary hit-target 门禁已完成；待 GPUI accessibility tree 收口 |
-| DESK-017 | 进行中 | release scale/content/streaming matrix 与本地门禁已完成；待真实 GPUI frame/paint/input/allocation/memory 曲线 |
+| DESK-017 | 进行中 | release scale/content/streaming/allocation matrix 与本地门禁已完成；待真实 GPUI frame/paint/input 和进程 memory 曲线 |
 | DESK-018 | 进行中 | Focus bounds、session key、scroll anchor、Streaming→Final 与四条关键流程 smoke 已覆盖；待 screenshot golden 基础设施 |
 
 ## 10. 完成定义
