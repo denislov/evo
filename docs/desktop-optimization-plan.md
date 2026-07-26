@@ -212,8 +212,8 @@ NativeShell
 - [x] Conversation Header/TitleBar 已迁入独立 `ConversationHeader` Entity；Sessions/Context/Reload/Copy/Abort 通过 typed child event 回传，固定 divider focus indicator 不改变布局尺寸。
 - [x] Command Palette、窄屏 Sessions/Context、Authorization 已统一迁入独立 `OverlayHost` Entity；focus trap 与 authorization command ledger 仍由 `NativeShell` 持有。
 - [x] token 更新只 notify Conversation/live row；正文、空状态、滚动区和 follow-latest 均由 `ConversationPane` 持有，streaming-only delta 不再 notify `NativeShell` root。
-- [ ] usage、telemetry 等低优先级信息最多 2–4Hz 更新。
-- [ ] 保持现有 typed command ledger、authorization 和 recovery 安全边界。
+- [x] usage、telemetry 等低优先级信息使用 250ms 合并窗口，最多 4Hz 更新；交互相关的 operations、changes、diagnostics、recovery 仍立即刷新。
+- [x] 保持现有 typed command ledger、authorization 和 recovery 安全边界；子 Entity 只发 typed event，命令登记、身份校验和 focus trap 继续由 `NativeShell` 持有。
 
 验收：streaming token 不触发 Sessions、Inspector、File Review、Palette 的重新 render。
 
@@ -356,7 +356,7 @@ desktop.input.latency
 | DESK-008 | 完成 | typed delta 已贯穿 Projection→NativeShell；product event 只增量同步 dirty overlay，replace 路径保留全量重建 |
 | DESK-009 | 完成 | revision-aware bounded row cache 已接入 NativeShell；sanitized `Arc<str>`、稳定 Markdown state key 和 measured height 可复用 |
 | DESK-010 | 完成 | 持久 row/height/size、sequence→单 index 更新、bounded 结构回退、15Hz 单行补刷和 67ms resize debounce 已完成 |
-| DESK-011 | 进行中 | 所有计划区域 Entity 已拆分，token 流已隔离到 Conversation 子树；继续完成低频 telemetry 刷新和安全/焦点回归门禁 |
+| DESK-011 | 完成 | 所有计划区域 Entity 已拆分；token 流隔离到 Conversation 子树，usage-only telemetry 限制为 4Hz，typed command/authorization/recovery 边界测试通过 |
 | DESK-012～018 | 待开始 | DESK-011 完成后进入字体、颜色、消息组件和 Composer 视觉/交互重构 |
 
 ## 10. 完成定义

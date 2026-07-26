@@ -35,7 +35,7 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::actions::{
     self, AbortActiveOperation, AuthorizationAllowForOperation, AuthorizationAllowOnce,
@@ -51,6 +51,7 @@ const MAX_DIRTY_CONVERSATION_SEQUENCES: usize = 256;
 const COMPOSER_MIN_HEIGHT: f32 = 88.;
 const COMPOSER_MAX_HEIGHT: f32 = 236.;
 const CONVERSATION_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(67);
+const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
@@ -93,8 +94,26 @@ fn minimum_duration(
     }
 }
 
+#[cfg(test)]
 fn inspector_projection_dirty(delta: &desktop::projection::DesktopProjectionDelta) -> bool {
-    delta.context != desktop::projection::ContextDirtyFlags::default()
+    inspector_projection_immediate_dirty(delta)
+        || delta
+            .context
+            .contains(desktop::projection::ContextDirtyFlags::USAGE)
+}
+
+fn inspector_projection_immediate_dirty(
+    delta: &desktop::projection::DesktopProjectionDelta,
+) -> bool {
+    delta
+        .context
+        .contains(desktop::projection::ContextDirtyFlags::OPERATIONS)
+        || delta
+            .context
+            .contains(desktop::projection::ContextDirtyFlags::DELEGATIONS)
+        || delta
+            .context
+            .contains(desktop::projection::ContextDirtyFlags::CHANGES)
         || delta.diagnostics
         || delta.recoveries
         || delta.session
@@ -104,7 +123,23 @@ fn inspector_projection_dirty(delta: &desktop::projection::DesktopProjectionDelt
 }
 
 fn status_projection_dirty(delta: &desktop::projection::DesktopProjectionDelta) -> bool {
-    inspector_projection_dirty(delta) || delta.authorizations || delta.terminal
+    delta
+        .context
+        .contains(desktop::projection::ContextDirtyFlags::OPERATIONS)
+        || delta.authorizations
+        || delta.terminal
+        || delta.recoveries
+        || delta.session
+        || delta.profiles
+        || delta.capabilities
+        || delta.lifecycle
+}
+
+fn inspector_telemetry_refresh_delay(last_refresh: Option<Instant>, now: Instant) -> Duration {
+    last_refresh.map_or(Duration::ZERO, |last_refresh| {
+        INSPECTOR_TELEMETRY_REFRESH_INTERVAL
+            .saturating_sub(now.saturating_duration_since(last_refresh))
+    })
 }
 
 fn conversation_header_projection_dirty(
@@ -329,6 +364,8 @@ pub(super) struct NativeShell {
     conversation_width_pending: Option<(u32, Instant)>,
     conversation_height_refresh_deadline: Option<Instant>,
     conversation_height_refresh_full: bool,
+    inspector_telemetry_last_refresh: Option<Instant>,
+    inspector_telemetry_refresh_deadline: Option<Instant>,
     conversation_pane: gpui::Entity<ConversationPane>,
     conversation_header: gpui::Entity<ConversationHeader>,
     sessions_pane: gpui::Entity<SessionsPane>,
@@ -601,6 +638,8 @@ impl NativeShell {
             conversation_width_pending: None,
             conversation_height_refresh_deadline: None,
             conversation_height_refresh_full: false,
+            inspector_telemetry_last_refresh: None,
+            inspector_telemetry_refresh_deadline: None,
             conversation_pane,
             conversation_header,
             sessions_pane,
@@ -722,6 +761,7 @@ impl NativeShell {
         let mut sessions_pane_dirty = false;
         let mut composer_pane_dirty = false;
         let mut inspector_pane_dirty = false;
+        let mut inspector_telemetry_dirty = false;
         let mut status_bar_dirty = false;
         let mut conversation_header_dirty = false;
         let mut overlay_host_dirty = false;
@@ -1200,8 +1240,18 @@ impl NativeShell {
             let conversation_dirty = outcome
                 .delta()
                 .is_some_and(|delta| delta.conversation || delta.tools);
-            if outcome.is_replaced() || outcome.delta().is_some_and(inspector_projection_dirty) {
+            if outcome.is_replaced()
+                || outcome
+                    .delta()
+                    .is_some_and(inspector_projection_immediate_dirty)
+            {
                 inspector_pane_dirty = true;
+            } else if outcome.delta().is_some_and(|delta| {
+                delta
+                    .context
+                    .contains(desktop::projection::ContextDirtyFlags::USAGE)
+            }) {
+                inspector_telemetry_dirty = true;
             }
             if outcome.is_replaced() || outcome.delta().is_some_and(status_projection_dirty) {
                 status_bar_dirty = true;
@@ -1425,6 +1475,8 @@ impl NativeShell {
         }
         if inspector_pane_dirty {
             self.notify_inspector_pane(cx);
+        } else if inspector_telemetry_dirty {
+            self.schedule_inspector_telemetry_refresh(cx);
         }
         if status_bar_dirty {
             self.notify_status_bar(cx);
@@ -1460,9 +1512,42 @@ impl NativeShell {
         self.composer_pane.update(cx, |_, cx| cx.notify());
     }
 
-    fn notify_inspector_pane(&self, cx: &mut Context<Self>) {
+    fn notify_inspector_pane(&mut self, cx: &mut Context<Self>) {
+        self.inspector_telemetry_last_refresh = Some(Instant::now());
+        self.inspector_telemetry_refresh_deadline = None;
         self.inspector_pane.update(cx, |_, cx| cx.notify());
         self.notify_status_bar(cx);
+    }
+
+    fn schedule_inspector_telemetry_refresh(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let delay = inspector_telemetry_refresh_delay(self.inspector_telemetry_last_refresh, now);
+        if delay.is_zero() {
+            self.inspector_telemetry_last_refresh = Some(now);
+            self.inspector_telemetry_refresh_deadline = None;
+            self.inspector_pane.update(cx, |_, cx| cx.notify());
+            return;
+        }
+
+        let deadline = now + delay;
+        if self
+            .inspector_telemetry_refresh_deadline
+            .is_some_and(|scheduled| scheduled <= deadline)
+        {
+            return;
+        }
+        self.inspector_telemetry_refresh_deadline = Some(deadline);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.inspector_telemetry_refresh_deadline == Some(deadline) {
+                    this.inspector_telemetry_refresh_deadline = None;
+                    this.inspector_telemetry_last_refresh = Some(Instant::now());
+                    this.inspector_pane.update(cx, |_, cx| cx.notify());
+                }
+            });
+        })
+        .detach();
     }
 
     fn notify_status_bar(&self, cx: &mut Context<Self>) {
@@ -3977,6 +4062,37 @@ mod tests {
 
         streaming.diagnostics = true;
         assert!(inspector_projection_dirty(&streaming));
+        assert!(inspector_projection_immediate_dirty(&streaming));
+    }
+
+    #[test]
+    fn usage_only_projection_delta_is_throttled_for_inspector() {
+        let usage = desktop::projection::DesktopProjectionDelta {
+            context: desktop::projection::ContextDirtyFlags::USAGE,
+            ..Default::default()
+        };
+        assert!(inspector_projection_dirty(&usage));
+        assert!(!inspector_projection_immediate_dirty(&usage));
+        assert!(!status_projection_dirty(&usage));
+
+        let start = Instant::now();
+        assert_eq!(
+            inspector_telemetry_refresh_delay(None, start),
+            Duration::ZERO
+        );
+        assert_eq!(
+            inspector_telemetry_refresh_delay(Some(start), start + Duration::from_millis(50)),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            inspector_telemetry_refresh_delay(Some(start), start + Duration::from_millis(250)),
+            Duration::ZERO
+        );
+
+        let shell = include_str!("native_shell.rs");
+        assert!(shell.contains("const INSPECTOR_TELEMETRY_REFRESH_INTERVAL"));
+        assert!(shell.contains("Duration::from_millis(250)"));
+        assert!(shell.contains("schedule_inspector_telemetry_refresh(cx)"));
     }
 
     #[test]
