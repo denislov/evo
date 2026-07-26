@@ -12,9 +12,7 @@ use desktop::conversation::{
 };
 #[cfg(test)]
 use desktop::conversation::{TRANSCRIPT_ROW_MAX_HEIGHT, conversation_block_height};
-use desktop::file_review::{
-    DesktopFileReviewDocument, DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES,
-};
+use desktop::file_review::DesktopFileReviewDocument;
 use desktop::preferences::{DesktopPreferences, PreferenceWriter};
 use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
 use desktop::runtime::{
@@ -22,8 +20,8 @@ use desktop::runtime::{
     DesktopRuntimeCommandHandle, DesktopRuntimeSelectionKind,
 };
 use desktop::shell::{
-    CONTEXT_PANEL_WIDTH, FocusState, FocusTarget, PanelVisibility, STATUS_HEIGHT, SemanticColor,
-    SemanticStatus, SemanticTheme, ShellLayout, truncate_label,
+    FocusState, FocusTarget, PanelVisibility, STATUS_HEIGHT, SemanticColor, SemanticStatus,
+    SemanticTheme, ShellLayout, truncate_label,
 };
 use gpui::{
     AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
@@ -96,6 +94,16 @@ fn minimum_duration(
         (Some(current), None) => Some(current),
         (None, next) => next,
     }
+}
+
+fn inspector_projection_dirty(delta: &desktop::projection::DesktopProjectionDelta) -> bool {
+    delta.context != desktop::projection::ContextDirtyFlags::default()
+        || delta.diagnostics
+        || delta.recoveries
+        || delta.session
+        || delta.profiles
+        || delta.capabilities
+        || delta.lifecycle
 }
 
 fn upsert_indexed_item<T>(
@@ -302,6 +310,7 @@ pub(super) struct NativeShell {
     conversation_pane: gpui::Entity<ConversationPane>,
     sessions_pane: gpui::Entity<SessionsPane>,
     composer_pane: gpui::Entity<ComposerPane>,
+    inspector_pane: gpui::Entity<InspectorPane>,
     composer: ComposerState,
     composer_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
@@ -375,7 +384,8 @@ impl NativeShell {
         let owner = cx.weak_entity();
         let conversation_pane = cx.new(|_| ConversationPane::new(owner.clone()));
         let sessions_pane = cx.new(|_| SessionsPane::new(owner.clone()));
-        let composer_pane = cx.new(|_| ComposerPane::new(owner));
+        let composer_pane = cx.new(|_| ComposerPane::new(owner.clone()));
+        let inspector_pane = cx.new(|_| InspectorPane::new(owner));
 
         let subscriptions = vec![
             cx.on_focus(&sessions_focus, window, |this, window, cx| {
@@ -449,6 +459,23 @@ impl NativeShell {
                     }
                 },
             ),
+            cx.subscribe_in(
+                &inspector_pane,
+                window,
+                |this, _, event: &InspectorPaneEvent, _, cx| match event {
+                    InspectorPaneEvent::RequestFileReview(request) => {
+                        this.request_file_review(request.clone(), cx);
+                    }
+                    InspectorPaneEvent::CopyReviewPath => this.copy_review_path(cx),
+                    InspectorPaneEvent::CopyFileReview => this.copy_file_review(cx),
+                    InspectorPaneEvent::OpenExternalEditor => {
+                        this.open_review_in_external_editor(cx);
+                    }
+                    InspectorPaneEvent::Recovery { identity, action } => {
+                        this.submit_recovery_action(identity.clone(), *action, cx);
+                    }
+                },
+            ),
             cx.observe_window_bounds(window, Self::window_bounds_changed),
         ];
 
@@ -499,6 +526,7 @@ impl NativeShell {
             conversation_pane,
             sessions_pane,
             composer_pane,
+            inspector_pane,
             composer: ComposerState::default(),
             composer_input,
             composer_needs_sync: false,
@@ -551,6 +579,9 @@ impl NativeShell {
         if previous == FocusTarget::Composer || target == FocusTarget::Composer {
             self.notify_composer_pane(cx);
         }
+        if previous == FocusTarget::Context || target == FocusTarget::Context {
+            self.notify_inspector_pane(cx);
+        }
     }
 
     fn window_bounds_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -591,6 +622,7 @@ impl NativeShell {
             self.composer_input.focus_handle(cx).focus(window);
         }
         self.schedule_preferences();
+        self.notify_inspector_pane(cx);
         cx.notify();
     }
 
@@ -601,6 +633,7 @@ impl NativeShell {
         let mut applied = 0;
         let mut sessions_pane_dirty = false;
         let mut composer_pane_dirty = false;
+        let mut inspector_pane_dirty = false;
         while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
             let Some(update) = self.runtime_updates.pop_front() else {
                 break;
@@ -619,6 +652,7 @@ impl NativeShell {
                             DesktopFileReviewDocument::from_product(review),
                         );
                         self.preference_notice = Some("Changed-file review loaded.".into());
+                        inspector_pane_dirty = true;
                     }
                     applied += 1;
                     continue;
@@ -637,6 +671,7 @@ impl NativeShell {
                             "Opened {} in the configured editor.",
                             truncate_label(&project_relative_path, 48)
                         ));
+                        inspector_pane_dirty = true;
                     }
                     applied += 1;
                     continue;
@@ -944,6 +979,7 @@ impl NativeShell {
                     .is_some() =>
                 {
                     self.preference_notice = Some(safe_runtime_rejection_notice(*command, code));
+                    inspector_pane_dirty = true;
                 }
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
                     command_id,
@@ -982,6 +1018,7 @@ impl NativeShell {
                             "File review unavailable ({}).",
                             truncate_label(code, 32)
                         ));
+                        inspector_pane_dirty = true;
                     }
                 }
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
@@ -1001,6 +1038,7 @@ impl NativeShell {
                         "External editor unavailable ({}).",
                         truncate_label(code, 32)
                     ));
+                    inspector_pane_dirty = true;
                 }
                 desktop::runtime::DesktopRuntimeUpdate::PromptFinished {
                     command_id,
@@ -1058,6 +1096,9 @@ impl NativeShell {
             let conversation_dirty = outcome
                 .delta()
                 .is_some_and(|delta| delta.conversation || delta.tools);
+            if outcome.is_replaced() || outcome.delta().is_some_and(inspector_projection_dirty) {
+                inspector_pane_dirty = true;
+            }
             if outcome.is_replaced() {
                 sessions_pane_dirty = true;
                 self.conversation_render_full_dirty = true;
@@ -1238,6 +1279,7 @@ impl NativeShell {
             self.request_resync_if_needed();
             if composer_pane_state_before != self.composer_pane_state() {
                 composer_pane_dirty = true;
+                inspector_pane_dirty = true;
             }
             applied += 1;
         }
@@ -1254,6 +1296,9 @@ impl NativeShell {
         }
         if composer_pane_dirty {
             self.notify_composer_pane(cx);
+        }
+        if inspector_pane_dirty {
+            self.notify_inspector_pane(cx);
         }
         !matches!(
             self.projection.lifecycle(),
@@ -1276,6 +1321,10 @@ impl NativeShell {
 
     fn notify_composer_pane(&self, cx: &mut Context<Self>) {
         self.composer_pane.update(cx, |_, cx| cx.notify());
+    }
+
+    fn notify_inspector_pane(&self, cx: &mut Context<Self>) {
+        self.inspector_pane.update(cx, |_, cx| cx.notify());
     }
 
     fn schedule_preferences(&mut self) {
@@ -1337,6 +1386,7 @@ impl NativeShell {
             } else {
                 self.dismiss_overlay(window, cx);
             }
+            self.notify_inspector_pane(cx);
             return;
         }
         self.preferences.sessions_panel_visible = !self.preferences.sessions_panel_visible;
@@ -1346,6 +1396,7 @@ impl NativeShell {
             self.composer_input.focus_handle(cx).focus(window);
         }
         self.schedule_preferences();
+        self.notify_inspector_pane(cx);
         cx.notify();
     }
 
@@ -1592,6 +1643,7 @@ impl NativeShell {
             let _ = self.composer.rejected(command_id, message);
         }
         self.notify_composer_pane(cx);
+        self.notify_inspector_pane(cx);
         cx.notify();
     }
 
@@ -1659,6 +1711,7 @@ impl NativeShell {
             let _ = self.composer.rejected(command_id, message);
         }
         self.notify_composer_pane(cx);
+        self.notify_inspector_pane(cx);
         cx.notify();
     }
 
@@ -1797,6 +1850,7 @@ impl NativeShell {
                 self.preference_notice = Some(message);
             }
         }
+        self.notify_inspector_pane(cx);
         cx.notify();
     }
 
@@ -2013,6 +2067,7 @@ impl NativeShell {
                 self.preference_notice = Some(message);
             }
         }
+        self.notify_inspector_pane(cx);
         cx.notify();
     }
 
@@ -2100,6 +2155,7 @@ impl NativeShell {
                 self.preference_notice = Some(message);
             }
         }
+        self.notify_inspector_pane(cx);
         cx.notify();
     }
 
@@ -3268,10 +3324,6 @@ impl Render for NativeShell {
         self.reconcile_authorization_overlay(authorization_request.is_some(), window, cx);
         let snapshot = self.projection.snapshot();
         let project = self.projection.project();
-        let cwd = truncate_label(&project.cwd.display().to_string(), 54);
-        let operation_count = snapshot.context.operations.len();
-        let change_count = snapshot.context.changes.len();
-        let delegation_count = snapshot.context.delegations.len();
         let event_count = self.projection.recent_events().len();
         let message_count = self.projection.messages().len();
         let tool_count = self.projection.tools().len();
@@ -3293,9 +3345,6 @@ impl Render for NativeShell {
         let selection_pending = self
             .command_ledger
             .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)));
-        let recovery_pending = self
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Recovery { .. }));
         let session_pending = self.command_ledger.contains_where(|intent| {
             matches!(
                 intent,
@@ -3305,213 +3354,16 @@ impl Render for NativeShell {
         let session_catalog_pending = self
             .command_ledger
             .contains(&DesktopCommandIntent::ListSessions);
-        let file_review_pending = self
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::FileReview { .. }));
-        let external_editor_pending = self
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::ExternalEditor { .. }));
         let reload_disabled =
             composer_running || awaiting_prompt_start || reload_pending || selection_pending;
         let selector_disabled =
             composer_running || awaiting_prompt_start || reload_pending || selection_pending;
-        let changed_file_rows = snapshot
-            .context
-            .changes
-            .iter()
-            .take(MAX_VISIBLE_FILE_CHANGES)
-            .enumerate()
-            .map(|(index, change)| {
-                let request = CodingAgentFileReviewRequest::from(change);
-                let label = format!(
-                    "{}  {}",
-                    truncate_label(&change.mutation_kind, 10),
-                    truncate_label(&change.path, 38)
-                );
-                div().child(
-                    Button::new(("changed-file-review", index))
-                        .compact()
-                        .label(label)
-                        .tooltip("Load this product-authorized changed-file review")
-                        .disabled(composer_running || awaiting_prompt_start || file_review_pending)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.request_file_review(request.clone(), cx);
-                        })),
-                )
-            })
-            .collect::<Vec<_>>();
-        let omitted_changed_files = change_count.saturating_sub(changed_file_rows.len());
-        let file_review_panel = match &self.file_review {
-            DesktopFileReviewState::Empty => div()
-                .text_sm()
-                .text_color(rgb(theme.muted_text.value()))
-                .child("Select a changed file to load a product-authorized preview."),
-            DesktopFileReviewState::Loading(request) => div()
-                .text_sm()
-                .text_color(rgb(theme.warning.value()))
-                .child(format!(
-                    "Loading {}…",
-                    truncate_label(&request.change.path, 44)
-                )),
-            DesktopFileReviewState::Failed { request, code } => {
-                let retry = request.clone();
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .text_sm()
-                    .text_color(rgb(theme.danger.value()))
-                    .child(format!(
-                        "{} unavailable ({})",
-                        truncate_label(&request.change.path, 36),
-                        truncate_label(code, 28)
-                    ))
-                    .child(
-                        Button::new("retry-file-review")
-                            .compact()
-                            .label("Retry review")
-                            .tooltip("Retry the current changed-file review")
-                            .disabled(
-                                composer_running || awaiting_prompt_start || file_review_pending,
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.request_file_review(retry.clone(), cx);
-                            })),
-                    )
-            }
-            DesktopFileReviewState::Ready(document) => {
-                let rows = document
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .map(|(index, row)| {
-                        let color = match row.kind {
-                            DesktopReviewLineKind::Added => theme.success,
-                            DesktopReviewLineKind::Removed => theme.danger,
-                            DesktopReviewLineKind::FileHeader
-                            | DesktopReviewLineKind::HunkHeader => theme.accent,
-                            DesktopReviewLineKind::Fold => theme.warning,
-                            DesktopReviewLineKind::Context => theme.muted_text,
-                        };
-                        let marker = match row.kind {
-                            DesktopReviewLineKind::Added => "+",
-                            DesktopReviewLineKind::Removed => "-",
-                            DesktopReviewLineKind::Fold => "…",
-                            DesktopReviewLineKind::FileHeader
-                            | DesktopReviewLineKind::HunkHeader
-                            | DesktopReviewLineKind::Context => " ",
-                        };
-                        div()
-                            .id(("file-review-line", index))
-                            .flex()
-                            .gap_2()
-                            .text_sm()
-                            .text_color(rgb(color.value()))
-                            .child(marker)
-                            .child(row.text.clone())
-                    })
-                    .collect::<Vec<_>>();
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .text_sm()
-                    .child(
-                        div()
-                            .text_color(rgb(theme.text.value()))
-                            .child(document.display_path.clone()),
-                    )
-                    .child(format!(
-                        "{} · {} bytes · {} lines · {}",
-                        document.mutation_kind,
-                        document.total_bytes,
-                        document.total_lines,
-                        if document.using_diff {
-                            "unified diff"
-                        } else {
-                            "file preview"
-                        }
-                    ))
-                    .when(
-                        document.source_truncated || document.rows_truncated,
-                        |panel| {
-                            panel.child(
-                                div()
-                                    .text_color(rgb(theme.warning.value()))
-                                    .child("Preview bounded at desktop safety limits."),
-                            )
-                        },
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(
-                                Button::new("copy-review-path")
-                                    .compact()
-                                    .label("Copy path")
-                                    .tooltip("Copy the reviewed project-relative path")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.copy_review_path(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("copy-file-review")
-                                    .compact()
-                                    .label("Copy review")
-                                    .tooltip("Copy the bounded read-only file review")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.copy_file_review(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("open-external-editor")
-                                    .compact()
-                                    .label("Open editor")
-                                    .tooltip(
-                                        "Revalidate and open this file in the configured editor",
-                                    )
-                                    .disabled(
-                                        self.preferences.external_editor.is_none()
-                                            || external_editor_pending
-                                            || composer_running
-                                            || awaiting_prompt_start,
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.open_review_in_external_editor(cx);
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt_1()
-                            .pl_2()
-                            .border_l_1()
-                            .border_color(rgb(theme.border.value()))
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .children(rows),
-                    )
-            }
-        };
         let conversation_focused = self.conversation_focus.is_focused(window);
         let conversation_focus_accent = conversation_focus_accent(conversation_focused, theme);
         let committed_selection = self
             .conversation_viewport
             .selected_block_id()
             .is_some_and(|id| self.projection.conversation().block(id).is_some());
-        let runtime_state = runtime_state_label(self.projection.lifecycle(), composer_running);
-        let stream_id = truncate_label(&snapshot.cursor.stream_id, 18);
-        let active_operation = snapshot
-            .active_operation
-            .as_deref()
-            .map(|operation_id| truncate_label(operation_id, 24))
-            .unwrap_or_else(|| "—".into());
-        let selected_model = truncate_label(&project.selected_model_id, 28);
-        let selected_profile =
-            truncate_label(snapshot.session.default_agent_profile_id.as_str(), 28);
         let status_model = truncate_label(&project.selected_model_id, 14);
         let status_profile = truncate_label(snapshot.session.default_agent_profile_id.as_str(), 12);
         let thinking_label = self
@@ -3526,53 +3378,6 @@ impl Render for NativeShell {
             .count()
             > 1;
         let profile_cycle_available = project.profiles.len() > 1;
-        let usage = &snapshot.context.usage;
-        let usage_cost = usage_cost_label(usage.cost);
-        let context_window = usage
-            .context_window
-            .map(|tokens| tokens.to_string())
-            .unwrap_or_else(|| "—".into());
-        let latest_recovery = self.projection.recoveries().front().map(|recovery| {
-            (
-                recovery_status_label(recovery.status),
-                truncate_label(&recovery.recovery_id, 22),
-                truncate_label(&recovery.operation_id, 22),
-                truncate_label(&recovery.reason, 120),
-                recovery.attempt_count,
-                recovery.identity.clone().filter(|_| {
-                    recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative
-                }),
-            )
-        });
-        let latest_diagnostic = self.projection.diagnostics().back().map(|diagnostic| {
-            (
-                diagnostic.sequence,
-                diagnostic
-                    .operation_id
-                    .as_deref()
-                    .map(|operation_id| truncate_label(operation_id, 22))
-                    .unwrap_or_else(|| "global".into()),
-                truncate_label(&diagnostic.message, 120),
-                diagnostic.truncated,
-            )
-        });
-        let latest_config_diagnostic = project.diagnostics.last().map(|diagnostic| {
-            (
-                truncate_label(&diagnostic.code, 28),
-                truncate_label(&diagnostic.summary, 120),
-            )
-        });
-        let latest_issue = self
-            .projection
-            .issues()
-            .back()
-            .map(|issue| truncate_label(&issue.code, 28));
-        let skill_count = project.resources.skill_names.len();
-        let prompt_template_count = project.resources.prompt_template_names.len();
-        let context_file_count = project.resources.context_files.len();
-        let profile_count = project.profiles.len();
-        let model_count = project.models.len();
-        let config_diagnostic_count = project.diagnostics.len();
         let transcript_list = self.conversation_pane.clone();
 
         let active_session_id = snapshot.session.session_id.clone();
@@ -3605,252 +3410,8 @@ impl Render for NativeShell {
             .collect::<Vec<_>>();
         let sessions_panel = layout.sessions.map(|_| self.sessions_pane.clone());
 
-        let context_is_overlay = self.narrow_context_open;
-        let context_panel = (layout.context.is_some() || context_is_overlay).then(|| {
-            div()
-                .id("context-panel")
-                .when(context_is_overlay, |panel| {
-                    panel
-                        .key_context(actions::NARROW_CONTEXT_KEY_CONTEXT)
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .bottom_0()
-                        .occlude()
-                })
-                .track_focus(&self.context_focus)
-                .w(px(CONTEXT_PANEL_WIDTH as f32))
-                .h_full()
-                .flex()
-                .flex_col()
-                .border_l_1()
-                .border_color(rgb(theme.border.value()))
-                .bg(rgb(theme.surface.value()))
-                .when(self.context_focus.is_focused(window), |panel| {
-                    panel.border_color(rgb(theme.focus_ring.value()))
-                })
-                .child(
-                    div()
-                        .h_12()
-                        .px_4()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .border_b_1()
-                        .border_color(rgb(theme.border.value()))
-                        .child("CONTEXT")
-                        .child("Tab focus"),
-                )
-                .child(
-                    div()
-                        .id("context-details")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(div().text_color(rgb(theme.accent.value())).child("RUNTIME"))
-                        .child(format!("state       {runtime_state}"))
-                        .child(format!("stream      {stream_id}"))
-                        .child(format!(
-                            "sequence    {}",
-                            snapshot.cursor.last_event_sequence
-                        ))
-                        .child(format!(
-                            "generation  {}",
-                            snapshot.cursor.capability_generation
-                        ))
-                        .child(format!("active op   {active_operation}"))
-                        .child(
-                            div()
-                                .mt_2()
-                                .text_color(rgb(theme.accent.value()))
-                                .child("WORK"),
-                        )
-                        .child(format!("operations  {operation_count:>4}"))
-                        .child(format!("changes     {change_count:>4}"))
-                        .child(format!("delegations {delegation_count:>4}"))
-                        .child(
-                            div()
-                                .mt_2()
-                                .text_color(rgb(theme.accent.value()))
-                                .child("CHANGED FILES"),
-                        )
-                        .children(changed_file_rows)
-                        .when(omitted_changed_files > 0, |panel| {
-                            panel.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(theme.warning.value()))
-                                    .child(format!(
-                                        "+ {omitted_changed_files} more change(s) omitted at the desktop file-count limit"
-                                    )),
-                            )
-                        })
-                        .child(
-                            div()
-                                .mt_2()
-                                .text_color(rgb(theme.accent.value()))
-                                .child("FILE REVIEW"),
-                        )
-                        .child(file_review_panel)
-                        .child(format!(
-                            "diagnostics {diagnostic_count:>4}",
-                            diagnostic_count = self.projection.diagnostics().len()
-                        ))
-                        .child(format!(
-                            "recoveries  {recovery_count:>4}",
-                            recovery_count = self.projection.recoveries().len()
-                        ))
-                        .child(
-                            div()
-                                .mt_2()
-                                .text_color(rgb(theme.accent.value()))
-                                .child("USAGE"),
-                        )
-                        .child(format!("input       {}", usage.input))
-                        .child(format!("output      {}", usage.output))
-                        .child(format!("cache read  {}", usage.cache_read))
-                        .child(format!("cache write {}", usage.cache_write))
-                        .child(format!(
-                            "tokens      {}",
-                            usage.input.saturating_add(usage.output)
-                        ))
-                        .child(format!("context     {context_window}"))
-                        .child(format!("cost        {usage_cost}"))
-                        .child(
-                            div()
-                                .mt_2()
-                                .text_color(rgb(theme.accent.value()))
-                                .child("LOCAL RESOURCES"),
-                        )
-                        .child(format!("model       {selected_model}"))
-                        .child(format!("profile     {selected_profile}"))
-                        .child(format!("thinking    {thinking_label}"))
-                        .child(format!("models      {model_count}"))
-                        .child(format!("profiles    {profile_count}"))
-                        .child(format!("skills      {skill_count}"))
-                        .child(format!("prompts     {prompt_template_count}"))
-                        .child(format!("context     {context_file_count}"))
-                        .child(format!("config diag {config_diagnostic_count}"))
-                        .when_some(latest_recovery, |panel, recovery| {
-                            panel
-                                .child(
-                                    div()
-                                        .mt_2()
-                                        .text_color(rgb(theme.warning.value()))
-                                        .child("LATEST RECOVERY"),
-                                )
-                                .child(format!("status      {}", recovery.0))
-                                .child(format!("recovery    {}", recovery.1))
-                                .child(format!("operation   {}", recovery.2))
-                                .child(format!("attempts    {}", recovery.4))
-                                .child(format!("detail      {}", recovery.3))
-                                .when_some(recovery.5, |panel, identity| {
-                                    let retry_identity = identity.clone();
-                                    let failed_identity = identity.clone();
-                                    panel.child(
-                                        div()
-                                            .mt_2()
-                                            .flex()
-                                            .flex_wrap()
-                                            .gap_2()
-                                            .child(
-                                                Button::new("retry-recovery")
-                                                    .compact()
-                                                    .label("Retry")
-                                                    .tooltip("Retry this authoritative recovery")
-                                                    .disabled(recovery_pending)
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.submit_recovery_action(
-                                                                retry_identity.clone(),
-                                                                DesktopRecoveryAction::Retry,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("fail-recovery")
-                                                    .compact()
-                                                    .label("Mark failed")
-                                                    .tooltip("Resolve this recovery as failed")
-                                                    .disabled(recovery_pending)
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.submit_recovery_action(
-                                                                failed_identity.clone(),
-                                                                DesktopRecoveryAction::MarkFailed,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("abort-recovery")
-                                                    .compact()
-                                                    .label("Abort")
-                                                    .tooltip("Resolve this recovery as aborted")
-                                                    .disabled(recovery_pending)
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.submit_recovery_action(
-                                                                identity.clone(),
-                                                                DesktopRecoveryAction::Abort,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            ),
-                                    )
-                                })
-                        })
-                        .when_some(latest_diagnostic, |panel, diagnostic| {
-                            panel
-                                .child(
-                                    div()
-                                        .mt_2()
-                                        .text_color(rgb(theme.warning.value()))
-                                        .child("LATEST DIAGNOSTIC"),
-                                )
-                                .child(format!("sequence    {}", diagnostic.0))
-                                .child(format!("operation   {}", diagnostic.1))
-                                .child(format!("detail      {}", diagnostic.2))
-                                .when(diagnostic.3, |panel| panel.child("detail      [truncated]"))
-                        })
-                        .when_some(latest_config_diagnostic, |panel, diagnostic| {
-                            panel
-                                .child(
-                                    div()
-                                        .mt_2()
-                                        .text_color(rgb(theme.warning.value()))
-                                        .child("LATEST CONFIG DIAGNOSTIC"),
-                                )
-                                .child(format!("code        {}", diagnostic.0))
-                                .child(format!("detail      {}", diagnostic.1))
-                        })
-                        .when_some(latest_issue, |panel, issue_code| {
-                            panel
-                                .child(
-                                    div()
-                                        .mt_2()
-                                        .text_color(rgb(theme.danger.value()))
-                                        .child("LATEST ISSUE"),
-                                )
-                                .child(format!("code        {issue_code}"))
-                        })
-                        .child(
-                            div()
-                                .mt_3()
-                                .text_sm()
-                                .text_color(rgb(theme.muted_text.value()))
-                                .child(cwd),
-                        ),
-                )
-        });
+        let context_panel = (layout.context.is_some() || self.narrow_context_open)
+            .then(|| self.inspector_pane.clone());
 
         let conversation = div()
             .id("conversation-panel")
@@ -4769,6 +4330,38 @@ mod tests {
     }
 
     #[test]
+    fn inspector_rendering_is_owned_by_a_non_streaming_child_entity() {
+        let shell = include_str!("native_shell.rs");
+        let pane = include_str!("native_shell/inspector_pane.rs");
+        let context_panel_id = [".id(\"context-", "panel\")"].concat();
+
+        assert!(!shell.contains(&context_panel_id));
+        assert!(pane.contains(&context_panel_id));
+        assert!(shell.contains("inspector_pane: gpui::Entity<InspectorPane>"));
+        assert!(shell.contains(".then(|| self.inspector_pane.clone())"));
+        assert!(pane.contains("impl EventEmitter<InspectorPaneEvent>"));
+        assert!(pane.contains("RequestFileReview(CodingAgentFileReviewRequest)"));
+        assert!(pane.contains("identity: DesktopRecoveryIdentity"));
+        assert!(shell.contains("this.submit_recovery_action(identity.clone(), *action, cx)"));
+        assert!(shell.contains("fn notify_inspector_pane("));
+        assert!(!pane.contains("conversation_render_dirty_sequences"));
+    }
+
+    #[test]
+    fn streaming_only_projection_delta_does_not_dirty_inspector() {
+        let mut streaming = desktop::projection::DesktopProjectionDelta {
+            cursor: true,
+            conversation: true,
+            tools: true,
+            ..Default::default()
+        };
+        assert!(!inspector_projection_dirty(&streaming));
+
+        streaming.diagnostics = true;
+        assert!(inspector_projection_dirty(&streaming));
+    }
+
+    #[test]
     fn indexed_row_update_accepts_non_clone_history_and_changes_one_slot() {
         #[derive(Debug, PartialEq, Eq)]
         struct NonClone(usize);
@@ -4801,8 +4394,10 @@ mod tests {
 }
 mod composer_pane;
 mod conversation_pane;
+mod inspector_pane;
 mod sessions_pane;
 
 use composer_pane::{ComposerPane, ComposerPaneEvent};
 use conversation_pane::{ConversationPane, ConversationPaneEvent};
+use inspector_pane::{InspectorPane, InspectorPaneEvent};
 use sessions_pane::{SessionsPane, SessionsPaneEvent};
