@@ -22,9 +22,9 @@ use desktop::shell::{
     STATUS_HEIGHT, SemanticColor, SemanticStatus, SemanticTheme, ShellLayout, truncate_label,
 };
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Focusable as _, IntoElement, ParentElement as _, Render,
-    ScrollStrategy, Styled as _, Subscription, Window, WindowBounds, div, prelude::*, px, relative,
-    rgb, rgba, size,
+    AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
+    ParentElement as _, Render, ScrollStrategy, Styled as _, Subscription, Window, WindowBounds,
+    div, prelude::*, px, relative, rgb, rgba, size,
 };
 use gpui_component::{
     Disableable as _, VirtualListScrollHandle,
@@ -60,6 +60,39 @@ struct ConversationBlockVisual {
 
 fn conversation_focus_accent(focused: bool, theme: SemanticTheme) -> SemanticColor {
     if focused { theme.accent } else { theme.border }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversationTextRenderMode {
+    StreamingPlainText,
+    FinalMarkdown,
+}
+
+fn conversation_text_render_mode(done: bool) -> ConversationTextRenderMode {
+    if done {
+        ConversationTextRenderMode::FinalMarkdown
+    } else {
+        ConversationTextRenderMode::StreamingPlainText
+    }
+}
+
+fn conversation_text_element(
+    id: ElementId,
+    text: String,
+    mode: ConversationTextRenderMode,
+    window: &mut Window,
+    cx: &mut Context<NativeShell>,
+) -> AnyElement {
+    match mode {
+        ConversationTextRenderMode::StreamingPlainText => div()
+            .w_full()
+            .whitespace_normal()
+            .child(text)
+            .into_any_element(),
+        ConversationTextRenderMode::FinalMarkdown => {
+            TextView::markdown(id, text, window, cx).into_any_element()
+        }
+    }
 }
 
 fn conversation_block_visual(
@@ -2946,15 +2979,35 @@ impl Render for NativeShell {
                         let selected = this.conversation_viewport.selected_block_id()
                             == Some(block.id.as_str());
                         let block_id = block.id.clone();
+                        let session_id = &this.projection.conversation().session_id;
+                        let markdown_id = ElementId::Name(
+                            format!("transcript-markdown:{session_id}:{}", block.id).into(),
+                        );
+                        let detail_markdown_id = ElementId::Name(
+                            format!("transcript-detail-markdown:{session_id}:{}", block.id).into(),
+                        );
                         let durable = block.durable;
-                        let markdown = bounded_markdown_preview(&block.text);
-                        let text = markdown.text;
-                        let detail_markdown = bounded_markdown_preview(&block.detail);
-                        let detail_text = detail_markdown.text;
-                        let preview_truncated =
-                            block.truncated || markdown.truncated || detail_markdown.truncated;
-                        let media_neutralized =
-                            markdown.media_neutralized || detail_markdown.media_neutralized;
+                        let text_render_mode = conversation_text_render_mode(block.done);
+                        let (text, detail_text, preview_truncated, media_neutralized) =
+                            if text_render_mode == ConversationTextRenderMode::FinalMarkdown {
+                                let markdown = bounded_markdown_preview(&block.text);
+                                let detail_markdown = bounded_markdown_preview(&block.detail);
+                                (
+                                    markdown.text,
+                                    detail_markdown.text,
+                                    block.truncated
+                                        || markdown.truncated
+                                        || detail_markdown.truncated,
+                                    markdown.media_neutralized || detail_markdown.media_neutralized,
+                                )
+                            } else {
+                                (
+                                    block.text.clone(),
+                                    block.detail.clone(),
+                                    block.truncated,
+                                    false,
+                                )
+                            };
                         let theme = SemanticTheme::GEEK_DARK;
                         let visual =
                             conversation_block_visual(block.kind, block.is_error, theme);
@@ -3090,18 +3143,20 @@ impl Render for NativeShell {
                                                             ))
                                                             .child("◇ REASONING"),
                                                     )
-                                                    .child(TextView::markdown(
-                                                        ("transcript-detail-markdown", index),
+                                                    .child(conversation_text_element(
+                                                        detail_markdown_id.clone(),
                                                         detail_text.clone(),
+                                                        text_render_mode,
                                                         window,
                                                         cx,
                                                     )),
                                             )
                                         })
                                         .when(!text.is_empty(), |card| {
-                                            card.child(TextView::markdown(
-                                                ("transcript-markdown", index),
+                                            card.child(conversation_text_element(
+                                                markdown_id,
                                                 text,
+                                                text_render_mode,
                                                 window,
                                                 cx,
                                             ))
@@ -3120,9 +3175,10 @@ impl Render for NativeShell {
                                                         detail.font_family("monospace").text_xs()
                                                     })
                                                     .text_color(rgb(theme.muted_text.value()))
-                                                    .child(TextView::markdown(
-                                                        ("transcript-detail-markdown", index),
+                                                    .child(conversation_text_element(
+                                                        detail_markdown_id,
                                                         detail_text,
+                                                        text_render_mode,
                                                         window,
                                                         cx,
                                                     )),
@@ -4432,6 +4488,24 @@ mod tests {
 
         assert!(conversation_source.contains("conversation_focus_accent.value()"));
         assert!(!conversation_source.contains("panel.border_1()"));
+    }
+
+    #[test]
+    fn conversation_streaming_text_avoids_debounced_markdown_until_final() {
+        assert_eq!(
+            conversation_text_render_mode(false),
+            ConversationTextRenderMode::StreamingPlainText
+        );
+        assert_eq!(
+            conversation_text_render_mode(true),
+            ConversationTextRenderMode::FinalMarkdown
+        );
+
+        let source = include_str!("native_shell.rs");
+        assert!(source.contains("transcript-markdown:{session_id}:{}"));
+        assert!(source.contains("transcript-detail-markdown:{session_id}:{}"));
+        assert!(!source.contains("(\"transcript-markdown\", index)"));
+        assert!(!source.contains("(\"transcript-detail-markdown\", index)"));
     }
 
     #[test]

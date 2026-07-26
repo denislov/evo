@@ -132,6 +132,7 @@ NativeShell
 
 #### DESK-004 引入 StreamingText 双阶段渲染
 
+- [x] 最小路径：未完成内容绕过带 200ms 防抖的 Markdown，以轻量可换行文本呈现；完成态再进入最终 Markdown。
 - [ ] 新增轻量 `StreamingText` 组件。
 - [ ] streaming 阶段按 16–33ms 合并 append-only fragment，以 plain/rich-inline text 呈现。
 - [ ] 80–120ms 无新内容时允许后台生成阶段性 Markdown。
@@ -143,6 +144,7 @@ NativeShell
 
 #### DESK-005 使用稳定 ConversationItemKey
 
+- [x] Markdown keyed state 从列表 index 改为现有稳定 block/message/tool ID。
 - [ ] 为 durable、submitted、message、tool 和 diagnostic 定义稳定 typed key。
 - [ ] `TextView::markdown`、row element 和 selection 使用稳定 key，不使用 index。
 - [ ] session 切换和 transcript 头部淘汰后不复用错误的 TextView state。
@@ -338,10 +340,10 @@ desktop.input.latency
 | 任务 | 状态 | 备注 |
 |---|---|---|
 | DESK-001 | 待开始 | 先完成最小性能 fixture，再扩展完整基准 |
-| DESK-002 | 进行中 | 已定位 focused 分支动态 `border_1()` 根因 |
+| DESK-002 | 完成 | 已移除动态面板边框，改用已有 header divider 和标题颜色；回归测试已通过 |
 | DESK-003 | 待开始 | 依赖布局 token 整理 |
-| DESK-004 | 待开始 | DESK-002 完成后立即推进最小双阶段渲染 |
-| DESK-005 | 待开始 | 可与 DESK-004 同一 PR 完成基础部分 |
+| DESK-004 | 进行中 | 最小双阶段路径已完成；后续抽取 StreamingText、revision 和后台 settling parse |
+| DESK-005 | 进行中 | Markdown 已使用稳定业务 ID；typed key 和 row element 迁移待完成 |
 | DESK-006～018 | 待开始 | 按依赖顺序推进 |
 
 ## 10. 完成定义
