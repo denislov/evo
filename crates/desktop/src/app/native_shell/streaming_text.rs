@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use desktop::conversation::StreamingTextPhase;
 use gpui::{
-    AnyElement, ElementId, IntoElement as _, ParentElement as _, SharedString, Styled as _, Window,
-    div,
+    AnyElement, ClipboardItem, ElementId, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, SharedString, Styled as _, Window, div,
 };
-use gpui_component::text::TextView;
+use gpui_component::{button::Button, text::TextView};
 
 /// Lightweight conversation text renderer driven by the row's revision phase.
 pub(super) struct StreamingText {
@@ -28,7 +28,19 @@ impl StreamingText {
                 .child(text)
                 .into_any_element(),
             StreamingTextPhase::SettlingMarkdown | StreamingTextPhase::FinalMarkdown => {
-                TextView::markdown(self.id, text, window, cx).into_any_element()
+                TextView::markdown(self.id, text, window, cx)
+                    .code_block_actions(|code_block, _, _| {
+                        let code = code_block.code().to_string();
+                        Button::new("copy-markdown-code")
+                            .debug_selector(|| "desktop-copy-markdown-code".into())
+                            .compact()
+                            .label("Copy code")
+                            .tooltip("Copy this code block")
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                            })
+                    })
+                    .into_any_element()
             }
         }
     }

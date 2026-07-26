@@ -4549,6 +4549,41 @@ mod tests {
     }
 
     #[gpui::test]
+    fn native_shell_markdown_code_action_copies_exact_block(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let mut snapshot = visual_test_snapshot();
+        snapshot.transcript.items.push(
+            coding_agent::api::view::CodingAgentSessionTranscriptItem::Assistant {
+                id: "message-with-code".into(),
+                text: "Before\n\n```rust\nfn main() { println!(\"exact\"); }\n```\n\nAfter".into(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: true,
+            },
+        );
+        let projection = DesktopProjection::new(snapshot)
+            .expect("code-copy visual fixture is a valid product projection");
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection,
+        );
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("desktop-copy-markdown-code")
+            .expect("final Markdown code block exposes a copy action");
+        assert!(f32::from(bounds.size.height) >= 32.);
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("fn main() { println!(\"exact\"); }".into())
+        );
+    }
+
+    #[gpui::test]
     fn native_shell_command_palette_smoke_uses_overlay_focus_and_restores_it(
         cx: &mut TestAppContext,
     ) {
