@@ -145,11 +145,11 @@ NativeShell
 #### DESK-005 使用稳定 ConversationItemKey
 
 - [x] Markdown keyed state 从列表 index 改为现有稳定 block/message/tool ID。
-- [ ] 为 durable、submitted、message、tool 和 diagnostic 定义稳定 typed key。
-- [ ] `TextView::markdown`、row element 和 selection 使用稳定 key，不使用 index。
+- [x] `ConversationItemKey` 以 session + typed item kind + row ID 区分 durable（含 diagnostic）、submitted、live message 和 live tool。
+- [x] `TextView::markdown`、row element、hover group、layout cache 和 selection 均从 typed key 派生稳定身份，不使用列表 index。
 - [x] cache key 纳入 session ID；session 切换和 transcript 头部淘汰后不复用错误的 TextView state。
 
-验收：切换 session、前部 eviction 和 live→durable reconciliation 后内容与 selection 身份正确。
+验收：切换 session、前部 eviction 和 live→durable reconciliation 后内容与 selection 身份正确；同 row ID 的跨 session、durable/live 身份隔离均有自动化断言。
 
 #### DESK-006 重写 follow-latest 状态机
 
@@ -352,7 +352,7 @@ desktop.input.latency
 | DESK-002 | 完成 | 已移除动态面板边框，改用已有 header divider 和标题颜色；回归测试已通过 |
 | DESK-003 | 完成 | ShellLayout 改为稳定 workspace 模型；sidebar/composer/status/content width 共享 token，响应式临界点与 width bucket 均有回归 |
 | DESK-004 | 进行中 | 最小双阶段路径已完成；后续抽取 StreamingText、revision 和后台 settling parse |
-| DESK-005 | 进行中 | Markdown 已使用稳定业务 ID；typed key 和 row element 迁移待完成 |
+| DESK-005 | 完成 | typed ConversationItemKey 已统一 cache/Markdown/row element/hover/layout/selection 身份，并覆盖 session 与 durable/live 隔离 |
 | DESK-006 | 完成 | 基于真实 offset 的迟滞状态机、streaming unseen 计数和无布局占位的浮动 pill 已完成；GUI 像素门禁归入 DESK-017 |
 | DESK-007 | 完成 | 文本保持 16ms 批次，行高约 15Hz；Following 底部锚定、Paused offset compensation 和 Unicode display width 已完成 |
 | DESK-008 | 完成 | typed delta 已贯穿 Projection→NativeShell；product event 只增量同步 dirty overlay，replace 路径保留全量重建 |

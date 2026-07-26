@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use coding_agent::api::view::{CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot};
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::shell::USER_MESSAGE_WIDTH_PERCENT;
+
 pub const MAX_TRANSCRIPT_BLOCKS: usize = 10_000;
 pub const MAX_TRANSCRIPT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_BLOCK_TEXT_BYTES: usize = 1024 * 1024;
@@ -303,7 +305,7 @@ pub fn conversation_block_height(
     panel_width: u32,
 ) -> f32 {
     let effective_width = if kind == ConversationBlockKind::User {
-        panel_width.saturating_mul(70) / 100
+        panel_width.saturating_mul(USER_MESSAGE_WIDTH_PERCENT) / 100
     } else {
         panel_width
     };
@@ -334,7 +336,7 @@ pub fn conversation_block_height(
         .min(TRANSCRIPT_ROW_MAX_HEIGHT)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConversationBlockKind {
     User,
     Assistant,
@@ -356,6 +358,74 @@ impl ConversationBlockKind {
             Self::BranchSummary => "branch",
             Self::Diagnostic => "diagnostic",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConversationItemKind {
+    Durable(ConversationBlockKind),
+    Submitted,
+    LiveMessage,
+    LiveTool,
+}
+
+impl ConversationItemKind {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Durable(kind) => kind.key(),
+            Self::Submitted => "submitted",
+            Self::LiveMessage => "live-message",
+            Self::LiveTool => "live-tool",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConversationItemKey {
+    session_id: Arc<str>,
+    kind: ConversationItemKind,
+    row_id: Arc<str>,
+    stable_id: Arc<str>,
+}
+
+impl ConversationItemKey {
+    pub fn new(session_id: &str, kind: ConversationItemKind, row_id: &str) -> Self {
+        Self {
+            session_id: Arc::from(session_id),
+            kind,
+            row_id: Arc::from(row_id),
+            stable_id: Arc::from(format!(
+                "{}:{session_id}:{}:{}:{row_id}",
+                session_id.len(),
+                kind.key(),
+                row_id.len()
+            )),
+        }
+    }
+
+    pub fn row_id(&self) -> &str {
+        &self.row_id
+    }
+
+    pub fn stable_id(&self) -> &str {
+        &self.stable_id
+    }
+
+    pub fn stable_id_arc(&self) -> Arc<str> {
+        Arc::clone(&self.stable_id)
+    }
+
+    fn markdown_state_key(&self, detail: bool) -> Arc<str> {
+        let namespace = if detail {
+            "transcript-detail-markdown"
+        } else {
+            "transcript-markdown"
+        };
+        Arc::from(format!("{namespace}:{}", self.stable_id))
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.session_id.len() + self.row_id.len() + self.stable_id.len()
     }
 }
 
@@ -401,8 +471,7 @@ pub fn conversation_copy_text(text: &str, detail: &str) -> String {
 
 #[derive(Debug)]
 pub struct ConversationRowRenderSource<'a> {
-    pub cache_key: &'a str,
-    pub row_id: &'a str,
+    pub item_key: ConversationItemKey,
     pub source_revision: u64,
     pub title: Cow<'a, str>,
     pub text: &'a str,
@@ -421,8 +490,7 @@ pub struct ConversationRowRenderSource<'a> {
 /// source revision changes. Width changes only invalidate the measured height.
 #[derive(Debug, Clone)]
 pub struct ConversationRowRenderData {
-    pub cache_key: Arc<str>,
-    pub row_id: Arc<str>,
+    pub item_key: ConversationItemKey,
     pub source_revision: u64,
     pub sanitized_revision: u64,
     pub title: Arc<str>,
@@ -443,9 +511,8 @@ pub struct ConversationRowRenderData {
 
 impl ConversationRowRenderData {
     fn retained_bytes(&self) -> usize {
-        // `cache_key` is also owned by the HashMap, so account for both copies.
-        self.cache_key.len() * 2
-            + self.row_id.len()
+        // `item_key` is also owned by the HashMap, so account for both copies.
+        self.item_key.retained_bytes() * 2
             + self.title.len()
             + self.text.len()
             + self.detail.len()
@@ -464,7 +531,7 @@ struct ConversationRowRenderCacheEntry {
 /// Revision-aware, memory-bounded cache for transcript row presentation.
 #[derive(Debug)]
 pub struct ConversationRowRenderCache {
-    entries: HashMap<String, ConversationRowRenderCacheEntry>,
+    entries: HashMap<ConversationItemKey, ConversationRowRenderCacheEntry>,
     retained_bytes: usize,
     generation: u64,
     max_entries: usize,
@@ -497,7 +564,7 @@ impl ConversationRowRenderCache {
         source: ConversationRowRenderSource<'_>,
         width_bucket: u32,
     ) -> ConversationRowRenderData {
-        if let Some(entry) = self.entries.get_mut(source.cache_key)
+        if let Some(entry) = self.entries.get_mut(&source.item_key)
             && entry.data.source_revision == source.source_revision
             && entry.data.sanitized_revision == source.source_revision
         {
@@ -535,16 +602,10 @@ impl ConversationRowRenderCache {
                 false,
             )
         };
-        let cache_key = Arc::<str>::from(source.cache_key);
-        let row_id = Arc::<str>::from(source.row_id);
         let data = ConversationRowRenderData {
-            markdown_state_key: Arc::from(format!("transcript-markdown:{}", source.cache_key)),
-            detail_markdown_state_key: Arc::from(format!(
-                "transcript-detail-markdown:{}",
-                source.cache_key
-            )),
-            cache_key,
-            row_id,
+            markdown_state_key: source.item_key.markdown_state_key(false),
+            detail_markdown_state_key: source.item_key.markdown_state_key(true),
+            item_key: source.item_key.clone(),
             source_revision: source.source_revision,
             sanitized_revision: source.source_revision,
             title: Arc::from(source.title.as_ref()),
@@ -566,7 +627,7 @@ impl ConversationRowRenderCache {
             retained_bytes,
             touched_generation: self.generation,
         };
-        if let Some(previous) = self.entries.insert(source.cache_key.to_owned(), entry) {
+        if let Some(previous) = self.entries.insert(source.item_key, entry) {
             self.retained_bytes = self.retained_bytes.saturating_sub(previous.retained_bytes);
         }
         self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
@@ -610,7 +671,7 @@ impl ConversationRowRenderCache {
         });
     }
 
-    fn remove(&mut self, key: &str) {
+    fn remove(&mut self, key: &ConversationItemKey) {
         if let Some(entry) = self.entries.remove(key) {
             self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
         }
@@ -1525,8 +1586,11 @@ mod tests {
         done: bool,
     ) -> ConversationRowRenderSource<'a> {
         ConversationRowRenderSource {
-            cache_key: key,
-            row_id: key,
+            item_key: ConversationItemKey::new(
+                "test-session",
+                ConversationItemKind::Durable(ConversationBlockKind::Assistant),
+                key,
+            ),
             source_revision: revision,
             title: Cow::Borrowed("Assistant"),
             text,
@@ -1538,6 +1602,10 @@ mod tests {
             truncated: false,
             durable: true,
         }
+    }
+
+    fn cache_contains_row(cache: &ConversationRowRenderCache, row_id: &str) -> bool {
+        cache.entries.keys().any(|key| key.row_id() == row_id)
     }
 
     #[test]
@@ -1616,8 +1684,11 @@ mod tests {
         cache.begin_frame();
         let first = cache.resolve(
             ConversationRowRenderSource {
-                cache_key: "session-a:user:0",
-                row_id: "user:0",
+                item_key: ConversationItemKey::new(
+                    "session-a",
+                    ConversationItemKind::Durable(ConversationBlockKind::User),
+                    "user:0",
+                ),
                 source_revision: 7,
                 title: Cow::Borrowed("You"),
                 text: "session A content",
@@ -1636,8 +1707,11 @@ mod tests {
         cache.begin_frame();
         let second = cache.resolve(
             ConversationRowRenderSource {
-                cache_key: "session-b:user:0",
-                row_id: "user:0",
+                item_key: ConversationItemKey::new(
+                    "session-b",
+                    ConversationItemKind::Durable(ConversationBlockKind::User),
+                    "user:0",
+                ),
                 source_revision: 7,
                 title: Cow::Borrowed("You"),
                 text: "session B content",
@@ -1653,13 +1727,65 @@ mod tests {
         );
         cache.finish_frame();
 
-        assert_eq!(first.row_id.as_ref(), second.row_id.as_ref());
+        assert_eq!(first.item_key.row_id(), second.item_key.row_id());
         assert_eq!(first.source_revision, second.source_revision);
-        assert_ne!(first.cache_key, second.cache_key);
+        assert_ne!(first.item_key, second.item_key);
         assert_eq!(first.text.as_ref(), "session A content");
         assert_eq!(second.text.as_ref(), "session B content");
         assert_eq!(cache.entries.len(), 1);
-        assert!(cache.entries.contains_key("session-b:user:0"));
+        assert!(cache.entries.contains_key(&second.item_key));
+    }
+
+    #[test]
+    fn typed_item_key_scopes_session_kind_and_render_state() {
+        let durable = ConversationItemKey::new(
+            "session-a",
+            ConversationItemKind::Durable(ConversationBlockKind::Assistant),
+            "assistant:1",
+        );
+        let live = ConversationItemKey::new(
+            "session-a",
+            ConversationItemKind::LiveMessage,
+            "assistant:1",
+        );
+        let other_session = ConversationItemKey::new(
+            "session-b",
+            ConversationItemKind::Durable(ConversationBlockKind::Assistant),
+            "assistant:1",
+        );
+
+        assert_ne!(durable, live);
+        assert_ne!(durable, other_session);
+        assert_eq!(durable.row_id(), "assistant:1");
+        assert!(
+            durable
+                .stable_id()
+                .contains("session-a:assistant:11:assistant:1")
+        );
+        assert!(
+            durable
+                .markdown_state_key(false)
+                .ends_with(durable.stable_id())
+        );
+        assert!(
+            durable
+                .markdown_state_key(true)
+                .ends_with(durable.stable_id())
+        );
+        assert_ne!(
+            ConversationItemKey::new(
+                "a:b",
+                ConversationItemKind::Durable(ConversationBlockKind::User),
+                "c",
+            )
+            .stable_id(),
+            ConversationItemKey::new(
+                "a",
+                ConversationItemKind::Durable(ConversationBlockKind::User),
+                "b:c",
+            )
+            .stable_id()
+        );
     }
 
     #[test]
@@ -1668,8 +1794,11 @@ mod tests {
         cache.begin_frame();
         let streaming = cache.resolve(
             ConversationRowRenderSource {
-                cache_key: "session-a:assistant:1",
-                row_id: "assistant:1",
+                item_key: ConversationItemKey::new(
+                    "session-a",
+                    ConversationItemKind::LiveMessage,
+                    "assistant:1",
+                ),
                 source_revision: 1,
                 title: Cow::Borrowed("Assistant"),
                 text: "**partial",
@@ -1689,8 +1818,11 @@ mod tests {
         cache.begin_frame();
         let final_row = cache.resolve(
             ConversationRowRenderSource {
-                cache_key: "session-a:assistant:1",
-                row_id: "assistant:1",
+                item_key: ConversationItemKey::new(
+                    "session-a",
+                    ConversationItemKind::LiveMessage,
+                    "assistant:1",
+                ),
                 source_revision: 2,
                 title: Cow::Borrowed("Assistant"),
                 text: "**final**",
@@ -1710,8 +1842,11 @@ mod tests {
 
         let frozen = cache.resolve(
             ConversationRowRenderSource {
-                cache_key: "session-a:assistant:1",
-                row_id: "assistant:1",
+                item_key: ConversationItemKey::new(
+                    "session-a",
+                    ConversationItemKind::LiveMessage,
+                    "assistant:1",
+                ),
                 source_revision: 2,
                 title: Cow::Borrowed("Assistant"),
                 text: "ignored identical revision payload",
@@ -1736,7 +1871,7 @@ mod tests {
         cache.begin_frame();
         cache.resolve(render_source("old", 1, "old", false), 800);
         cache.finish_frame();
-        assert!(cache.entries.contains_key("old"));
+        assert!(cache_contains_row(&cache, "old"));
 
         cache.begin_frame();
         for key in ["new-a", "new-b", "new-c"] {
@@ -1744,7 +1879,7 @@ mod tests {
         }
         cache.finish_frame();
 
-        assert!(!cache.entries.contains_key("old"));
+        assert!(!cache_contains_row(&cache, "old"));
         assert!(cache.entries.len() <= 2);
         assert!(cache.retained_bytes <= 128 * 1024);
     }
@@ -1759,14 +1894,14 @@ mod tests {
         cache.begin_frame();
         cache.resolve(render_source("live", 2, "streaming", false), 800);
         cache.finish_incremental();
-        assert!(cache.entries.contains_key("durable"));
-        assert!(cache.entries.contains_key("live"));
+        assert!(cache_contains_row(&cache, "durable"));
+        assert!(cache_contains_row(&cache, "live"));
 
         cache.begin_frame();
         cache.resolve(render_source("replacement", 3, "new session", true), 800);
         cache.finish_frame();
         assert_eq!(cache.entries.len(), 1);
-        assert!(cache.entries.contains_key("replacement"));
+        assert!(cache_contains_row(&cache, "replacement"));
     }
 
     #[test]
@@ -2009,8 +2144,11 @@ mod tests {
                 let started = std::time::Instant::now();
                 let row = cache.resolve(
                     ConversationRowRenderSource {
-                        cache_key: "live:assistant:performance",
-                        row_id: "live:assistant:performance",
+                        item_key: ConversationItemKey::new(
+                            "performance-session",
+                            ConversationItemKind::LiveMessage,
+                            "live:assistant:performance",
+                        ),
                         source_revision: revision as u64,
                         title: Cow::Borrowed("Assistant"),
                         text: &streaming_text,

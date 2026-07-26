@@ -10,7 +10,7 @@ use super::{
 };
 use desktop::shell::{
     ASSISTANT_MESSAGE_MAX_WIDTH, MONOSPACE_FONT_FAMILY, SemanticTheme, USER_MESSAGE_MAX_WIDTH,
-    USER_MESSAGE_WIDTH_FRACTION,
+    USER_MESSAGE_WIDTH_PERCENT,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,18 +82,21 @@ impl Render for ConversationPane {
                                 .copied()
                                 .unwrap_or(block.measured_height);
                             let selected = owner.conversation_viewport.selected_block_id()
-                                == Some(block.row_id.as_ref());
+                                == Some(block.item_key.row_id());
                             let detail_expanded = owner
                                 .conversation_expanded_details
-                                .contains(block.row_id.as_ref());
+                                .contains(block.item_key.row_id());
                             (block, height, selected, detail_expanded)
                         };
-                        let block_id = block.row_id.to_string();
+                        let block_id = block.item_key.row_id().to_owned();
                         let copy_block_id = block_id.clone();
                         let toggle_block_id = block_id.clone();
                         let reasoning_toggle_block_id = block_id.clone();
                         let tool_toggle_block_id = block_id.clone();
-                        let hover_group = SharedString::new(format!("conversation-card-{index}"));
+                        let hover_group = SharedString::new(format!(
+                            "conversation-card:{}",
+                            block.item_key.stable_id()
+                        ));
                         let durable = block.durable;
                         let markdown_id = ElementId::Name(SharedString::new(
                             block.markdown_state_key.clone(),
@@ -128,7 +131,10 @@ impl Render for ConversationPane {
                         };
                         Some(
                             div()
-                                .id(("conversation-block", index))
+                                .id((
+                                    ElementId::from("conversation-block"),
+                                    SharedString::new(block.item_key.stable_id_arc()),
+                                ))
                                 .h(px(row_height))
                                 .px_4()
                                 .py_1()
@@ -148,7 +154,9 @@ impl Render for ConversationPane {
                                         .w_full()
                                         .h_full()
                                         .when(visual.align_right, |card| {
-                                            card.w(relative(USER_MESSAGE_WIDTH_FRACTION))
+                                            card.w(relative(
+                                                USER_MESSAGE_WIDTH_PERCENT as f32 / 100.,
+                                            ))
                                                 .max_w(px(USER_MESSAGE_MAX_WIDTH as f32))
                                         })
                                         .when(!visual.align_right, |card| {

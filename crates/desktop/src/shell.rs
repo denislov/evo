@@ -17,7 +17,7 @@ pub const COMPOSER_MAX_HEIGHT: u32 = 236;
 pub const STATUS_HEIGHT: u32 = 30;
 pub const USER_MESSAGE_MAX_WIDTH: u32 = 920;
 pub const ASSISTANT_MESSAGE_MAX_WIDTH: u32 = 960;
-pub const USER_MESSAGE_WIDTH_FRACTION: f32 = 0.70;
+pub const USER_MESSAGE_WIDTH_PERCENT: u32 = 70;
 pub const UI_FONT_FAMILY: &str = ".SystemUIFont";
 pub const MONOSPACE_FONT_FAMILY: &str = "monospace";
 

@@ -4,10 +4,10 @@ use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
 use desktop::conversation::{
     ComposerAdmission, ComposerState, ComposerSubmissionKind, ConversationBlockKind,
-    ConversationRowLayoutInput, ConversationRowLayoutState, ConversationRowRenderCache,
-    ConversationRowRenderData, ConversationRowRenderSource, ConversationViewport,
-    TRANSCRIPT_ROW_MAX_HEIGHT, conversation_block_height, conversation_copy_text,
-    conversation_width_bucket,
+    ConversationItemKey, ConversationItemKind, ConversationRowLayoutInput,
+    ConversationRowLayoutState, ConversationRowRenderCache, ConversationRowRenderData,
+    ConversationRowRenderSource, ConversationViewport, TRANSCRIPT_ROW_MAX_HEIGHT,
+    conversation_block_height, conversation_copy_text, conversation_width_bucket,
 };
 use desktop::file_review::DesktopFileReviewDocument;
 use desktop::preferences::{DesktopPreferences, PreferenceWriter};
@@ -173,7 +173,7 @@ fn conversation_row_target_height(
     expanded_details: &HashSet<String>,
     panel_width: u32,
 ) -> f32 {
-    if expanded_details.contains(row.row_id.as_ref()) {
+    if expanded_details.contains(row.item_key.row_id()) {
         return row.measured_height;
     }
     let collapsed = match row.kind {
@@ -2646,7 +2646,7 @@ impl NativeShell {
             .or_else(|| {
                 self.conversation_render_rows
                     .iter()
-                    .find(|row| row.row_id.as_ref() == block_id)
+                    .find(|row| row.item_key.row_id() == block_id)
                     .map(|row| conversation_copy_text(&row.text, &row.detail))
             });
         let Some(text) = text else {
@@ -2684,17 +2684,19 @@ impl NativeShell {
         let current_index = current.and_then(|selected| {
             self.conversation_render_rows
                 .iter()
-                .position(|row| row.row_id.as_ref() == selected)
+                .position(|row| row.item_key.row_id() == selected)
         });
         let next_index = adjacent_conversation_index(row_count, current_index, reverse)
             .expect("non-empty conversation has an adjacent selection");
         let row = &self.conversation_render_rows[next_index];
         if row.durable {
-            self.conversation_viewport
-                .select(row.row_id.to_string(), self.projection.conversation());
+            self.conversation_viewport.select(
+                row.item_key.row_id().to_owned(),
+                self.projection.conversation(),
+            );
         } else {
             self.conversation_viewport
-                .select_live(row.row_id.to_string());
+                .select_live(row.item_key.row_id().to_owned());
         }
         self.conversation_scroll.scroll_to_item(
             next_index,
@@ -2732,7 +2734,7 @@ impl NativeShell {
         let has_details = self
             .conversation_render_rows
             .iter()
-            .find(|row| row.row_id.as_ref() == block_id)
+            .find(|row| row.item_key.row_id() == block_id)
             .is_some_and(|row| !row.detail.is_empty());
         if has_details {
             self.toggle_conversation_details(&block_id, cx);
@@ -3434,11 +3436,13 @@ impl NativeShell {
             let promote_detail = block.kind != ConversationBlockKind::Assistant
                 && block.text.is_empty()
                 && !block.detail.is_empty();
-            let cache_key = format!("{session_id}:{}", block.id);
             rows.push(self.conversation_render_cache.resolve(
                 ConversationRowRenderSource {
-                    cache_key: &cache_key,
-                    row_id: &block.id,
+                    item_key: ConversationItemKey::new(
+                        session_id,
+                        ConversationItemKind::Durable(block.kind),
+                        &block.id,
+                    ),
                     source_revision: block.source_revision,
                     title: Cow::Borrowed(&block.title),
                     text: if promote_detail {
@@ -3460,11 +3464,13 @@ impl NativeShell {
 
         if let Some(submitted) = self.composer.submitted() {
             let row_id = submitted.block_id();
-            let cache_key = format!("{session_id}:{row_id}");
             rows.push(self.conversation_render_cache.resolve(
                 ConversationRowRenderSource {
-                    cache_key: &cache_key,
-                    row_id: &row_id,
+                    item_key: ConversationItemKey::new(
+                        session_id,
+                        ConversationItemKind::Submitted,
+                        &row_id,
+                    ),
                     source_revision: submitted.command_id,
                     title: Cow::Borrowed("You · submitted"),
                     text: &submitted.payload,
@@ -3482,11 +3488,13 @@ impl NativeShell {
 
         for message in self.projection.messages() {
             let row_id = message_conversation_block_id(message);
-            let cache_key = format!("{session_id}:{row_id}");
             rows.push(self.conversation_render_cache.resolve(
                 ConversationRowRenderSource {
-                    cache_key: &cache_key,
-                    row_id: &row_id,
+                    item_key: ConversationItemKey::new(
+                        session_id,
+                        ConversationItemKind::LiveMessage,
+                        &row_id,
+                    ),
                     source_revision: message.updated_sequence,
                     title: Cow::Borrowed("Assistant · live"),
                     text: &message.text,
@@ -3507,11 +3515,13 @@ impl NativeShell {
 
         for tool in self.projection.tools() {
             let row_id = tool_conversation_block_id(tool);
-            let cache_key = format!("{session_id}:{row_id}");
             rows.push(self.conversation_render_cache.resolve(
                 ConversationRowRenderSource {
-                    cache_key: &cache_key,
-                    row_id: &row_id,
+                    item_key: ConversationItemKey::new(
+                        session_id,
+                        ConversationItemKind::LiveTool,
+                        &row_id,
+                    ),
                     source_revision: tool.updated_sequence,
                     title: Cow::Owned(format!("Tool · {}", tool.name)),
                     text: &tool.detail,
@@ -3552,12 +3562,14 @@ impl NativeShell {
 
         if let Some(submitted) = self.composer.submitted() {
             let row_id = submitted.block_id();
-            let cache_key = format!("{session_id}:{row_id}");
             self.conversation_render_rows
                 .push(self.conversation_render_cache.resolve(
                     ConversationRowRenderSource {
-                        cache_key: &cache_key,
-                        row_id: &row_id,
+                        item_key: ConversationItemKey::new(
+                            &session_id,
+                            ConversationItemKind::Submitted,
+                            &row_id,
+                        ),
                         source_revision: submitted.command_id,
                         title: Cow::Borrowed("You · submitted"),
                         text: &submitted.payload,
@@ -3575,12 +3587,14 @@ impl NativeShell {
 
         for message in self.projection.messages() {
             let row_id = message_conversation_block_id(message);
-            let cache_key = format!("{session_id}:{row_id}");
             self.conversation_render_rows
                 .push(self.conversation_render_cache.resolve(
                     ConversationRowRenderSource {
-                        cache_key: &cache_key,
-                        row_id: &row_id,
+                        item_key: ConversationItemKey::new(
+                            &session_id,
+                            ConversationItemKind::LiveMessage,
+                            &row_id,
+                        ),
                         source_revision: message.updated_sequence,
                         title: Cow::Borrowed("Assistant · live"),
                         text: &message.text,
@@ -3601,12 +3615,14 @@ impl NativeShell {
 
         for tool in self.projection.tools() {
             let row_id = tool_conversation_block_id(tool);
-            let cache_key = format!("{session_id}:{row_id}");
             self.conversation_render_rows
                 .push(self.conversation_render_cache.resolve(
                     ConversationRowRenderSource {
-                        cache_key: &cache_key,
-                        row_id: &row_id,
+                        item_key: ConversationItemKey::new(
+                            &session_id,
+                            ConversationItemKind::LiveTool,
+                            &row_id,
+                        ),
                         source_revision: tool.updated_sequence,
                         title: Cow::Owned(format!("Tool · {}", tool.name)),
                         text: &tool.detail,
@@ -3659,11 +3675,13 @@ impl NativeShell {
                 .find(|(_, message)| message.updated_sequence == sequence)
             {
                 let row_id = message_conversation_block_id(message);
-                let cache_key = format!("{session_id}:{row_id}");
                 let row = self.conversation_render_cache.resolve(
                     ConversationRowRenderSource {
-                        cache_key: &cache_key,
-                        row_id: &row_id,
+                        item_key: ConversationItemKey::new(
+                            &session_id,
+                            ConversationItemKind::LiveMessage,
+                            &row_id,
+                        ),
                         source_revision: message.updated_sequence,
                         title: Cow::Borrowed("Assistant · live"),
                         text: &message.text,
@@ -3699,11 +3717,13 @@ impl NativeShell {
                 .find(|(_, tool)| tool.updated_sequence == sequence)
             {
                 let row_id = tool_conversation_block_id(tool);
-                let cache_key = format!("{session_id}:{row_id}");
                 let row = self.conversation_render_cache.resolve(
                     ConversationRowRenderSource {
-                        cache_key: &cache_key,
-                        row_id: &row_id,
+                        item_key: ConversationItemKey::new(
+                            &session_id,
+                            ConversationItemKind::LiveTool,
+                            &row_id,
+                        ),
                         source_revision: tool.updated_sequence,
                         title: Cow::Owned(format!("Tool · {}", tool.name)),
                         text: &tool.detail,
@@ -3751,7 +3771,7 @@ impl NativeShell {
     ) -> Option<std::time::Duration> {
         let layout = self.conversation_live_layout.resolve_one(
             ConversationRowLayoutInput {
-                key: row.cache_key.to_string(),
+                key: row.item_key.stable_id().to_owned(),
                 target_height: conversation_row_target_height(
                     &row,
                     &self.conversation_expanded_details,
@@ -3764,7 +3784,7 @@ impl NativeShell {
         );
         let existing_index = self.conversation_render_rows[durable_count..]
             .iter()
-            .position(|candidate| candidate.cache_key == row.cache_key)
+            .position(|candidate| candidate.item_key == row.item_key)
             .map(|index| durable_count + index);
         let row_index = upsert_indexed_item(
             &mut self.conversation_render_rows,
@@ -3799,7 +3819,7 @@ impl NativeShell {
             let Some(row) = self.conversation_render_rows.get(index) else {
                 return false;
             };
-            if row.row_id.as_ref() != submitted.block_id()
+            if row.item_key.row_id() != submitted.block_id()
                 || row.source_revision != submitted.command_id
             {
                 return false;
@@ -3810,7 +3830,7 @@ impl NativeShell {
             let Some(row) = self.conversation_render_rows.get(index) else {
                 return false;
             };
-            if row.row_id.as_ref() != message_conversation_block_id(message)
+            if row.item_key.row_id() != message_conversation_block_id(message)
                 || row.source_revision != message.updated_sequence
             {
                 return false;
@@ -3821,7 +3841,7 @@ impl NativeShell {
             let Some(row) = self.conversation_render_rows.get(index) else {
                 return false;
             };
-            if row.row_id.as_ref() != tool_conversation_block_id(tool)
+            if row.item_key.row_id() != tool_conversation_block_id(tool)
                 || row.source_revision != tool.updated_sequence
             {
                 return false;
@@ -3876,7 +3896,7 @@ impl NativeShell {
                 .conversation_render_rows
                 .iter()
                 .map(|row| ConversationRowLayoutInput {
-                    key: row.cache_key.to_string(),
+                    key: row.item_key.stable_id().to_owned(),
                     target_height: conversation_row_target_height(
                         row,
                         &self.conversation_expanded_details,
@@ -3906,7 +3926,7 @@ impl NativeShell {
             let live_inputs = self.conversation_render_rows[durable_count..]
                 .iter()
                 .map(|row| ConversationRowLayoutInput {
-                    key: row.cache_key.to_string(),
+                    key: row.item_key.stable_id().to_owned(),
                     target_height: conversation_row_target_height(
                         row,
                         &self.conversation_expanded_details,
@@ -3936,7 +3956,7 @@ impl NativeShell {
                     let live_inputs = self.conversation_render_rows[durable_count..]
                         .iter()
                         .map(|row| ConversationRowLayoutInput {
-                            key: row.cache_key.to_string(),
+                            key: row.item_key.stable_id().to_owned(),
                             target_height: conversation_row_target_height(
                                 row,
                                 &self.conversation_expanded_details,
@@ -4843,8 +4863,11 @@ mod tests {
         cache.begin_frame();
         let assistant = cache.resolve(
             ConversationRowRenderSource {
-                cache_key: "assistant:reasoning",
-                row_id: "assistant:reasoning",
+                item_key: ConversationItemKey::new(
+                    "reasoning-test-session",
+                    ConversationItemKind::Durable(ConversationBlockKind::Assistant),
+                    "assistant:reasoning",
+                ),
                 source_revision: 1,
                 title: Cow::Borrowed("Assistant"),
                 text: "Final answer",
@@ -4859,7 +4882,7 @@ mod tests {
             900,
         );
         let collapsed = conversation_row_target_height(&assistant, &HashSet::new(), 900);
-        let expanded_ids = HashSet::from([assistant.row_id.to_string()]);
+        let expanded_ids = HashSet::from([assistant.item_key.row_id().to_owned()]);
         let expanded = conversation_row_target_height(&assistant, &expanded_ids, 900);
         assert!(collapsed < expanded);
         assert_eq!(expanded, assistant.measured_height);
@@ -4870,7 +4893,7 @@ mod tests {
         assert!(pane.contains("ConversationPaneEvent::ToggleDetails"));
         assert!(pane.contains("group_hover(hover_group"));
         assert!(pane.contains(".absolute()"));
-        assert!(pane.contains("card.w(relative(USER_MESSAGE_WIDTH_FRACTION))"));
+        assert!(pane.contains("USER_MESSAGE_WIDTH_PERCENT as f32 / 100."));
         assert!(pane.contains(".max_w(px(USER_MESSAGE_MAX_WIDTH as f32))"));
         assert!(pane.contains("card.max_w(px(ASSISTANT_MESSAGE_MAX_WIDTH as f32))"));
     }
@@ -4975,6 +4998,9 @@ mod tests {
         let source = include_str!("native_shell.rs");
         assert!(source.contains("block.markdown_state_key.clone()"));
         assert!(source.contains("block.detail_markdown_state_key.clone()"));
+        let pane = include_str!("native_shell/conversation_pane.rs");
+        assert!(pane.contains("block.item_key.stable_id_arc()"));
+        assert!(!pane.contains(".id((\"conversation-block\", index))"));
         assert!(!source.contains("(\"transcript-markdown\", index)"));
         assert!(!source.contains("(\"transcript-detail-markdown\", index)"));
         let legacy_per_render_sanitizer =
