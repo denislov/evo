@@ -242,11 +242,11 @@ NativeShell
 
 #### DESK-014 重构 Composer 操作模型
 
-- [ ] Idle 使用单一 Send 主按钮。
-- [ ] Running 使用 `Steer now` / `Queue next` 模式选择和单一主按钮。
-- [ ] 每个 session 保存模式和草稿。
-- [ ] 明确 pending、authorization 和 rejected 状态文案。
-- [ ] 正确处理 IME composition。
+- [x] Idle 使用单一 Send 主按钮。
+- [x] Running 使用 `Steer now` / `Queue next` 模式选择和单一主按钮；键盘主提交也服从当前 session 的模式。
+- [x] 每个 session 保存模式和草稿，切换 session 时精确保存并恢复，缓存数量保持有界。
+- [x] 明确 waiting-for-start、submitting、authorization-required 和 rejected 状态文案，authorization 状态变化会定向 notify Composer。
+- [x] 继续由 GPUI InputState 管理 IME marked text；desktop 仅消费组件提交事件和显式 Ctrl/Cmd+Enter，不在 Change 事件中触发提交。
 
 验收：用户无需理解内部 command 类型即可预测发送结果。
 
@@ -359,7 +359,8 @@ desktop.input.latency
 | DESK-011 | 完成 | 所有计划区域 Entity 已拆分；token 流隔离到 Conversation 子树，usage-only telemetry 限制为 4Hz，typed command/authorization/recovery 边界测试通过 |
 | DESK-012 | 完成 | 系统 UI 字体与局部 monospace 已分层；中性 surface、蓝色 focus、紫色 reasoning 及 warning/danger 语义已解耦，嵌套边框已减少 |
 | DESK-013 | 进行中 | Assistant/User 宽度、Reasoning/Tool 折叠、稳定 Copy/More 槽与 bounded live copy 已完成；待 duration 权威字段和 Copy code 接口 |
-| DESK-014～018 | 待开始 | 继续 Composer、导航密度、响应式和 GUI 性能门禁重构 |
+| DESK-014 | 完成 | Idle/Running 均为单主操作；每 session draft/mode、pending/authorization/rejected 文案与 InputState IME 边界已落实 |
+| DESK-015～018 | 待开始 | 继续导航密度、响应式和 GUI 性能门禁重构 |
 
 ## 10. 完成定义
 

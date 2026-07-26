@@ -31,7 +31,7 @@ use gpui_component::{
     text::TextView,
 };
 use std::borrow::Cow;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,6 +53,7 @@ const CONVERSATION_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::f
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_EXPANDED_CONVERSATION_DETAILS: usize = 256;
 const COLLAPSED_CONVERSATION_DETAIL_HEIGHT: f32 = 36.;
+const MAX_COMPOSER_SESSION_STATES: usize = 256;
 
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
@@ -304,6 +305,54 @@ enum DesktopThinkingSelection {
     XHigh,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum ComposerRunningMode {
+    #[default]
+    SteerNow,
+    QueueNext,
+}
+
+impl ComposerRunningMode {
+    const fn submission_kind(self) -> ComposerSubmissionKind {
+        match self {
+            Self::SteerNow => ComposerSubmissionKind::Steer,
+            Self::QueueNext => ComposerSubmissionKind::FollowUp,
+        }
+    }
+}
+
+fn composer_running_mode_for(
+    modes: &HashMap<String, ComposerRunningMode>,
+    session_id: &str,
+) -> ComposerRunningMode {
+    modes.get(session_id).copied().unwrap_or_default()
+}
+
+fn reconcile_composer_session_state(
+    composer: &mut ComposerState,
+    drafts: &mut HashMap<String, String>,
+    previous_session_id: &str,
+    current_session_id: &str,
+) -> bool {
+    if current_session_id == previous_session_id {
+        return false;
+    }
+    if composer.draft().is_empty() {
+        drafts.remove(previous_session_id);
+    } else {
+        if drafts.len() >= MAX_COMPOSER_SESSION_STATES
+            && !drafts.contains_key(previous_session_id)
+            && let Some(stale) = drafts.keys().next().cloned()
+        {
+            drafts.remove(&stale);
+        }
+        drafts.insert(previous_session_id.to_owned(), composer.draft().to_owned());
+    }
+    let draft = drafts.remove(current_session_id).unwrap_or_default();
+    composer.edit(draft);
+    true
+}
+
 impl DesktopThinkingSelection {
     const fn next(self) -> Self {
         match self {
@@ -400,6 +449,8 @@ pub(super) struct NativeShell {
     composer: ComposerState,
     composer_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
+    composer_session_drafts: HashMap<String, String>,
+    composer_running_modes: HashMap<String, ComposerRunningMode>,
     command_ledger: DesktopCommandLedger,
     focus: FocusState,
     sessions_focus: FocusHandle,
@@ -566,11 +617,14 @@ impl NativeShell {
                 window,
                 |this, _, event: &ComposerPaneEvent, _, cx| match event {
                     ComposerPaneEvent::Submit => this.submit_composer(cx),
-                    ComposerPaneEvent::Steer => {
-                        this.submit_active_control(ComposerSubmissionKind::Steer, cx);
+                    ComposerPaneEvent::SubmitRunning => {
+                        this.submit_active_control(
+                            this.active_composer_running_mode().submission_kind(),
+                            cx,
+                        );
                     }
-                    ComposerPaneEvent::FollowUp => {
-                        this.submit_active_control(ComposerSubmissionKind::FollowUp, cx);
+                    ComposerPaneEvent::SetRunningMode(mode) => {
+                        this.set_active_composer_running_mode(*mode, cx);
                     }
                 },
             ),
@@ -681,6 +735,8 @@ impl NativeShell {
             composer: ComposerState::default(),
             composer_input,
             composer_needs_sync: false,
+            composer_session_drafts: HashMap::new(),
+            composer_running_modes: HashMap::new(),
             command_ledger,
             focus: FocusState::default(),
             sessions_focus,
@@ -1261,9 +1317,16 @@ impl NativeShell {
                 _ => {}
             }
             let had_active_operation = self.projection.snapshot().active_operation.is_some();
+            let previous_session_id = self.projection.snapshot().session.session_id.clone();
             let outcome = self.projection.apply(update);
+            if outcome.is_replaced() {
+                self.reconcile_composer_session(&previous_session_id);
+            }
             if root_projection_dirty(outcome.is_replaced(), outcome.delta()) {
                 root_dirty = true;
+            }
+            if outcome.is_replaced() || outcome.delta().is_some_and(|delta| delta.authorizations) {
+                composer_pane_dirty = true;
             }
             if had_active_operation != self.projection.snapshot().active_operation.is_some() {
                 sessions_pane_dirty = true;
@@ -1537,6 +1600,41 @@ impl NativeShell {
             self.composer.submitted().is_some(),
             self.composer.rejection().is_some(),
         )
+    }
+
+    fn active_composer_running_mode(&self) -> ComposerRunningMode {
+        composer_running_mode_for(
+            &self.composer_running_modes,
+            self.projection.snapshot().session.session_id.as_str(),
+        )
+    }
+
+    fn set_active_composer_running_mode(
+        &mut self,
+        mode: ComposerRunningMode,
+        cx: &mut Context<Self>,
+    ) {
+        let session_id = self.projection.snapshot().session.session_id.clone();
+        if self.composer_running_modes.len() >= MAX_COMPOSER_SESSION_STATES
+            && !self.composer_running_modes.contains_key(&session_id)
+            && let Some(stale) = self.composer_running_modes.keys().next().cloned()
+        {
+            self.composer_running_modes.remove(&stale);
+        }
+        self.composer_running_modes.insert(session_id, mode);
+        self.notify_composer_pane(cx);
+    }
+
+    fn reconcile_composer_session(&mut self, previous_session_id: &str) {
+        let current_session_id = self.projection.snapshot().session.session_id.clone();
+        if reconcile_composer_session_state(
+            &mut self.composer,
+            &mut self.composer_session_drafts,
+            previous_session_id,
+            &current_session_id,
+        ) {
+            self.composer_needs_sync = true;
+        }
     }
 
     fn notify_composer_pane(&self, cx: &mut Context<Self>) {
@@ -1921,7 +2019,7 @@ impl NativeShell {
 
     fn submit_primary_composer(&mut self, cx: &mut Context<Self>) {
         if self.projection.snapshot().active_operation.is_some() {
-            self.submit_active_control(ComposerSubmissionKind::Steer, cx);
+            self.submit_active_control(self.active_composer_running_mode().submission_kind(), cx);
         } else {
             self.submit_composer(cx);
         }
@@ -3899,6 +3997,48 @@ mod tests {
     }
 
     #[test]
+    fn composer_mode_and_draft_are_scoped_to_the_active_session() {
+        let mut modes = HashMap::new();
+        assert_eq!(
+            composer_running_mode_for(&modes, "session-a"),
+            ComposerRunningMode::SteerNow
+        );
+        modes.insert("session-a".into(), ComposerRunningMode::QueueNext);
+        assert_eq!(
+            composer_running_mode_for(&modes, "session-a").submission_kind(),
+            ComposerSubmissionKind::FollowUp
+        );
+        assert_eq!(
+            composer_running_mode_for(&modes, "session-b").submission_kind(),
+            ComposerSubmissionKind::Steer
+        );
+
+        let mut composer = ComposerState::default();
+        let mut drafts = HashMap::from([("session-b".to_owned(), "draft b".to_owned())]);
+        composer.edit("draft a");
+        assert!(reconcile_composer_session_state(
+            &mut composer,
+            &mut drafts,
+            "session-a",
+            "session-b"
+        ));
+        assert_eq!(composer.draft(), "draft b");
+        assert!(reconcile_composer_session_state(
+            &mut composer,
+            &mut drafts,
+            "session-b",
+            "session-a"
+        ));
+        assert_eq!(composer.draft(), "draft a");
+        assert!(!reconcile_composer_session_state(
+            &mut composer,
+            &mut drafts,
+            "session-a",
+            "session-a"
+        ));
+    }
+
+    #[test]
     fn conversation_rows_adapt_to_kind_content_and_reasoning() {
         let diagnostic = conversation_block_height(
             ConversationBlockKind::Diagnostic,
@@ -4167,10 +4307,19 @@ mod tests {
         assert!(pane.contains(&input_constructor));
         assert!(shell.contains("InputEvent::Change =>"));
         assert!(shell.contains("this.notify_composer_pane(cx)"));
-        assert!(shell.contains("ComposerPaneEvent::Steer"));
+        assert!(shell.contains("ComposerPaneEvent::SubmitRunning"));
         assert!(shell.contains("ComposerSubmissionKind::Steer"));
-        assert!(shell.contains("ComposerPaneEvent::FollowUp"));
+        assert!(shell.contains("ComposerPaneEvent::SetRunningMode"));
         assert!(shell.contains("ComposerSubmissionKind::FollowUp"));
+        assert!(pane.contains("composer-mode-steer"));
+        assert!(pane.contains("composer-mode-follow-up"));
+        assert!(pane.contains("submit-running-composer"));
+        let legacy_steer_button = ["Button::new(\"steer-", "operation\")"].concat();
+        let legacy_follow_up_button = ["Button::new(\"follow-up-", "operation\")"].concat();
+        assert!(!pane.contains(&legacy_steer_button));
+        assert!(!pane.contains(&legacy_follow_up_button));
+        assert!(shell.contains("composer_session_drafts: HashMap<String, String>"));
+        assert!(shell.contains("composer_running_modes: HashMap<String, ComposerRunningMode>"));
         assert!(!pane.contains("conversation_render_dirty_sequences"));
     }
 
