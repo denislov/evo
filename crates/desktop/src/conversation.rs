@@ -742,6 +742,12 @@ pub struct ConversationRowLayoutResolution {
     pub next_refresh_after: Option<Duration>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationRowLayoutSingleResolution {
+    pub height: f32,
+    pub next_refresh_after: Option<Duration>,
+}
+
 #[derive(Debug, Clone)]
 struct ConversationRowHeight {
     committed: f32,
@@ -754,9 +760,64 @@ struct ConversationRowHeight {
 pub struct ConversationRowLayoutState {
     rows: HashMap<String, ConversationRowHeight>,
     order: Vec<String>,
+    #[cfg(test)]
+    full_input_visits: usize,
+    #[cfg(test)]
+    single_row_updates: usize,
 }
 
 impl ConversationRowLayoutState {
+    pub fn resolve_one(
+        &mut self,
+        input: ConversationRowLayoutInput,
+        width_bucket: u32,
+        now: Instant,
+    ) -> ConversationRowLayoutSingleResolution {
+        #[cfg(test)]
+        {
+            self.single_row_updates = self.single_row_updates.saturating_add(1);
+        }
+        let target_height = sanitize_row_height(input.target_height);
+        let is_new = !self.rows.contains_key(&input.key);
+        let row = self
+            .rows
+            .entry(input.key.clone())
+            .or_insert(ConversationRowHeight {
+                committed: target_height,
+                width_bucket,
+                streaming: input.streaming,
+                last_commit_at: now,
+            });
+        let width_changed = row.width_bucket != width_bucket;
+        let streaming_changed = row.streaming != input.streaming;
+        let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
+        let mut next_refresh_after = None;
+        if target_changed {
+            let elapsed = now
+                .checked_duration_since(row.last_commit_at)
+                .unwrap_or_default();
+            if width_changed
+                || streaming_changed
+                || !input.streaming
+                || elapsed >= STREAMING_ROW_HEIGHT_INTERVAL
+            {
+                row.committed = target_height;
+                row.last_commit_at = now;
+            } else {
+                next_refresh_after = Some(STREAMING_ROW_HEIGHT_INTERVAL.saturating_sub(elapsed));
+            }
+        }
+        row.width_bucket = width_bucket;
+        row.streaming = input.streaming;
+        if is_new {
+            self.order.push(input.key);
+        }
+        ConversationRowLayoutSingleResolution {
+            height: row.committed,
+            next_refresh_after,
+        }
+    }
+
     pub fn resolve(
         &mut self,
         inputs: Vec<ConversationRowLayoutInput>,
@@ -764,6 +825,10 @@ impl ConversationRowLayoutState {
         now: Instant,
         paused_scroll_top: Option<f32>,
     ) -> ConversationRowLayoutResolution {
+        #[cfg(test)]
+        {
+            self.full_input_visits = self.full_input_visits.saturating_add(inputs.len());
+        }
         let anchor = paused_scroll_top.and_then(|scroll_top| self.anchor_at(scroll_top));
         let mut previous_rows = std::mem::take(&mut self.rows);
         let mut next_rows = HashMap::with_capacity(inputs.len());
@@ -1932,6 +1997,59 @@ mod tests {
         assert!(viewport.reconcile_scroll_distance(31.9));
         assert!(viewport.follow_latest());
         assert!(!viewport.reconcile_scroll_distance(0.0));
+    }
+
+    #[test]
+    fn single_row_layout_update_does_not_revisit_ten_thousand_history_rows() {
+        let now = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let inputs = (0..MAX_TRANSCRIPT_BLOCKS)
+            .map(|index| row_layout(&format!("row-{index}"), 100.0, false))
+            .collect();
+        let initial = layout.resolve(inputs, 960, now, None);
+        assert_eq!(initial.heights.len(), MAX_TRANSCRIPT_BLOCKS);
+        assert_eq!(layout.full_input_visits, MAX_TRANSCRIPT_BLOCKS);
+
+        let update = layout.resolve_one(
+            row_layout("row-9999", 144.0, false),
+            960,
+            now + Duration::from_millis(1),
+        );
+        assert_eq!(update.height, 144.0);
+        assert_eq!(layout.full_input_visits, MAX_TRANSCRIPT_BLOCKS);
+        assert_eq!(layout.single_row_updates, 1);
+        assert_eq!(layout.rows.len(), MAX_TRANSCRIPT_BLOCKS);
+    }
+
+    #[test]
+    fn single_streaming_row_update_keeps_fifteen_hz_throttle_and_final_settle() {
+        let now = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        layout.resolve(vec![row_layout("live", 100.0, true)], 960, now, None);
+
+        let throttled = layout.resolve_one(
+            row_layout("live", 140.0, true),
+            960,
+            now + Duration::from_millis(1),
+        );
+        assert_eq!(throttled.height, 100.0);
+        assert!(throttled.next_refresh_after.is_some());
+
+        let committed = layout.resolve_one(
+            row_layout("live", 140.0, true),
+            960,
+            now + STREAMING_ROW_HEIGHT_INTERVAL,
+        );
+        assert_eq!(committed.height, 140.0);
+        assert_eq!(committed.next_refresh_after, None);
+
+        let settled = layout.resolve_one(
+            row_layout("live", 160.0, false),
+            960,
+            now + STREAMING_ROW_HEIGHT_INTERVAL + Duration::from_millis(1),
+        );
+        assert_eq!(settled.height, 160.0);
+        assert_eq!(settled.next_refresh_after, None);
     }
 
     #[test]

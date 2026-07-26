@@ -53,6 +53,7 @@ use crate::actions::{
 use crate::command_ledger::{DesktopCommandIntent, DesktopCommandLedger};
 
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
+const MAX_DIRTY_CONVERSATION_SEQUENCES: usize = 256;
 const COMPOSER_MIN_HEIGHT: f32 = 88.;
 const COMPOSER_MAX_HEIGHT: f32 = 236.;
 const CONVERSATION_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(67);
@@ -85,6 +86,38 @@ fn conversation_text_render_mode(done: bool) -> ConversationTextRenderMode {
 
 fn conversation_distance_to_bottom(offset_y: f32, max_offset_y: f32) -> f32 {
     (max_offset_y.max(0.0) + offset_y.min(0.0)).max(0.0)
+}
+
+fn minimum_duration(
+    current: Option<std::time::Duration>,
+    next: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(current.min(next)),
+        (Some(current), None) => Some(current),
+        (None, next) => next,
+    }
+}
+
+fn upsert_indexed_item<T>(
+    items: &mut Vec<T>,
+    existing_index: Option<usize>,
+    mut desired_index: usize,
+    item: T,
+) -> usize {
+    if let Some(existing_index) = existing_index {
+        if existing_index == desired_index {
+            items[existing_index] = item;
+            return existing_index;
+        }
+        items.remove(existing_index);
+        if existing_index < desired_index {
+            desired_index = desired_index.saturating_sub(1);
+        }
+    }
+    desired_index = desired_index.min(items.len());
+    items.insert(desired_index, item);
+    desired_index
 }
 
 fn message_conversation_block_id(message: &desktop::projection::DesktopMessageOverlay) -> String {
@@ -261,6 +294,8 @@ pub(super) struct NativeShell {
     conversation_row_sizes: Rc<Vec<gpui::Size<gpui::Pixels>>>,
     conversation_render_full_dirty: bool,
     conversation_render_live_dirty: bool,
+    conversation_render_dirty_sequences: VecDeque<u64>,
+    conversation_render_sequence_overflow: bool,
     conversation_render_width_bucket: Option<u32>,
     conversation_width_pending: Option<(u32, Instant)>,
     conversation_height_refresh_deadline: Option<Instant>,
@@ -409,6 +444,8 @@ impl NativeShell {
             conversation_row_sizes: Rc::new(Vec::new()),
             conversation_render_full_dirty: true,
             conversation_render_live_dirty: true,
+            conversation_render_dirty_sequences: VecDeque::new(),
+            conversation_render_sequence_overflow: false,
             conversation_render_width_bucket: None,
             conversation_width_pending: None,
             conversation_height_refresh_deadline: None,
@@ -955,8 +992,21 @@ impl NativeShell {
             if outcome.is_replaced() {
                 self.conversation_render_full_dirty = true;
                 self.conversation_render_live_dirty = true;
+                self.conversation_render_dirty_sequences.clear();
+                self.conversation_render_sequence_overflow = false;
             } else if conversation_dirty {
                 self.conversation_render_live_dirty = true;
+                if self.conversation_render_sequence_overflow {
+                    // A bounded tail reconcile is already required.
+                } else if self.conversation_render_dirty_sequences.len()
+                    == MAX_DIRTY_CONVERSATION_SEQUENCES
+                {
+                    self.conversation_render_dirty_sequences.clear();
+                    self.conversation_render_sequence_overflow = true;
+                } else {
+                    self.conversation_render_dirty_sequences
+                        .push_back(self.projection.cursor().last_event_sequence);
+                }
             }
             let file_changes_dirty = outcome.delta().is_some_and(|delta| {
                 delta
@@ -2544,6 +2594,8 @@ impl NativeShell {
         self.conversation_render_cache.finish_frame();
         debug_assert_eq!(rows.len(), expected_count);
         self.conversation_render_rows = rows;
+        self.conversation_render_dirty_sequences.clear();
+        self.conversation_render_sequence_overflow = false;
     }
 
     fn rebuild_live_conversation_render_rows(&mut self, panel_width: u32) {
@@ -2640,6 +2692,203 @@ impl NativeShell {
                 ));
         }
         self.conversation_render_cache.finish_incremental();
+        self.conversation_render_dirty_sequences.clear();
+        self.conversation_render_sequence_overflow = false;
+    }
+
+    fn update_conversation_rows_by_sequence(
+        &mut self,
+        panel_width: u32,
+    ) -> Result<Option<std::time::Duration>, ()> {
+        if self.conversation_render_sequence_overflow
+            || self.conversation_render_dirty_sequences.is_empty()
+        {
+            return Err(());
+        }
+
+        let durable_count = self.projection.conversation().blocks().len();
+        let submitted_count = usize::from(self.composer.submitted().is_some());
+        let session_id = self.projection.conversation().session_id.clone();
+        let sequences = std::mem::take(&mut self.conversation_render_dirty_sequences);
+        let now = Instant::now();
+        let mut next_refresh_after = None;
+        self.conversation_render_cache.begin_frame();
+
+        for sequence in sequences {
+            if let Some((position, message)) = self
+                .projection
+                .messages()
+                .iter()
+                .enumerate()
+                .find(|(_, message)| message.updated_sequence == sequence)
+            {
+                let row_id = message_conversation_block_id(message);
+                let cache_key = format!("{session_id}:{row_id}");
+                let row = self.conversation_render_cache.resolve(
+                    ConversationRowRenderSource {
+                        cache_key: &cache_key,
+                        row_id: &row_id,
+                        source_revision: message.updated_sequence,
+                        title: Cow::Borrowed("Assistant · live"),
+                        text: &message.text,
+                        detail: &message.thinking,
+                        kind: ConversationBlockKind::Assistant,
+                        done: matches!(
+                            message.status,
+                            desktop::projection::DesktopMessageStatus::Completed
+                        ),
+                        is_error: false,
+                        image_count: 0,
+                        truncated: message.truncated,
+                        durable: false,
+                    },
+                    panel_width,
+                );
+                let desired_index = durable_count + submitted_count + position;
+                let refresh = self.upsert_conversation_render_row(
+                    durable_count,
+                    desired_index,
+                    row,
+                    panel_width,
+                    now,
+                );
+                next_refresh_after = minimum_duration(next_refresh_after, refresh);
+            }
+
+            if let Some((position, tool)) = self
+                .projection
+                .tools()
+                .iter()
+                .enumerate()
+                .find(|(_, tool)| tool.updated_sequence == sequence)
+            {
+                let row_id = tool_conversation_block_id(tool);
+                let cache_key = format!("{session_id}:{row_id}");
+                let row = self.conversation_render_cache.resolve(
+                    ConversationRowRenderSource {
+                        cache_key: &cache_key,
+                        row_id: &row_id,
+                        source_revision: tool.updated_sequence,
+                        title: Cow::Owned(format!("Tool · {} · live", tool.name)),
+                        text: &tool.detail,
+                        detail: &tool.arguments,
+                        kind: ConversationBlockKind::Tool,
+                        done: !matches!(
+                            tool.status,
+                            desktop::projection::DesktopToolStatus::Running
+                        ),
+                        is_error: matches!(
+                            tool.status,
+                            desktop::projection::DesktopToolStatus::Failed
+                        ),
+                        image_count: 0,
+                        truncated: tool.truncated,
+                        durable: false,
+                    },
+                    panel_width,
+                );
+                let desired_index =
+                    durable_count + submitted_count + self.projection.messages().len() + position;
+                let refresh = self.upsert_conversation_render_row(
+                    durable_count,
+                    desired_index,
+                    row,
+                    panel_width,
+                    now,
+                );
+                next_refresh_after = minimum_duration(next_refresh_after, refresh);
+            }
+        }
+        self.conversation_render_cache.finish_incremental();
+        self.live_conversation_rows_match_projection()
+            .then_some(next_refresh_after)
+            .ok_or(())
+    }
+
+    fn upsert_conversation_render_row(
+        &mut self,
+        durable_count: usize,
+        desired_index: usize,
+        row: ConversationRowRenderData,
+        panel_width: u32,
+        now: Instant,
+    ) -> Option<std::time::Duration> {
+        let layout = self.conversation_live_layout.resolve_one(
+            ConversationRowLayoutInput {
+                key: row.cache_key.to_string(),
+                target_height: row.measured_height,
+                streaming: !row.done,
+            },
+            panel_width,
+            now,
+        );
+        let existing_index = self.conversation_render_rows[durable_count..]
+            .iter()
+            .position(|candidate| candidate.cache_key == row.cache_key)
+            .map(|index| durable_count + index);
+        let row_index = upsert_indexed_item(
+            &mut self.conversation_render_rows,
+            existing_index,
+            desired_index,
+            row,
+        );
+        let height_index = upsert_indexed_item(
+            &mut self.conversation_render_heights,
+            existing_index,
+            desired_index,
+            layout.height,
+        );
+        let size_index = upsert_indexed_item(
+            Rc::make_mut(&mut self.conversation_row_sizes),
+            existing_index,
+            desired_index,
+            size(px(0.), px(layout.height)),
+        );
+        debug_assert_eq!(row_index, height_index);
+        debug_assert_eq!(row_index, size_index);
+        layout.next_refresh_after
+    }
+
+    fn live_conversation_rows_match_projection(&self) -> bool {
+        let durable_count = self.projection.conversation().blocks().len();
+        if self.conversation_render_rows.len() != self.visible_conversation_count() {
+            return false;
+        }
+        let mut index = durable_count;
+        if let Some(submitted) = self.composer.submitted() {
+            let Some(row) = self.conversation_render_rows.get(index) else {
+                return false;
+            };
+            if row.row_id.as_ref() != submitted.block_id()
+                || row.source_revision != submitted.command_id
+            {
+                return false;
+            }
+            index += 1;
+        }
+        for message in self.projection.messages() {
+            let Some(row) = self.conversation_render_rows.get(index) else {
+                return false;
+            };
+            if row.row_id.as_ref() != message_conversation_block_id(message)
+                || row.source_revision != message.updated_sequence
+            {
+                return false;
+            }
+            index += 1;
+        }
+        for tool in self.projection.tools() {
+            let Some(row) = self.conversation_render_rows.get(index) else {
+                return false;
+            };
+            if row.row_id.as_ref() != tool_conversation_block_id(tool)
+                || row.source_revision != tool.updated_sequence
+            {
+                return false;
+            }
+            index += 1;
+        }
+        index == self.conversation_render_rows.len()
     }
 
     fn conversation_width_for_render(&mut self, requested: u32) -> (u32, Option<(u32, Instant)>) {
@@ -2729,33 +2978,41 @@ impl NativeShell {
             self.conversation_render_live_dirty = false;
         } else if self.conversation_render_live_dirty {
             let durable_count = self.projection.conversation().blocks().len();
-            self.rebuild_live_conversation_render_rows(layout_width);
-            let live_inputs = self.conversation_render_rows[durable_count..]
-                .iter()
-                .map(|row| ConversationRowLayoutInput {
-                    key: row.cache_key.to_string(),
-                    target_height: row.measured_height,
-                    streaming: !row.done,
-                })
-                .collect();
-            let live_layout = self.conversation_live_layout.resolve(
-                live_inputs,
-                layout_width,
-                Instant::now(),
-                None,
-            );
-            next_refresh_after = live_layout.next_refresh_after;
-            self.conversation_render_heights.truncate(durable_count);
-            self.conversation_render_heights
-                .extend(live_layout.heights.iter().copied());
-            let sizes = Rc::make_mut(&mut self.conversation_row_sizes);
-            sizes.truncate(durable_count);
-            sizes.extend(
-                live_layout
-                    .heights
-                    .into_iter()
-                    .map(|height| size(px(0.), px(height))),
-            );
+            match self.update_conversation_rows_by_sequence(layout_width) {
+                Ok(refresh) => {
+                    next_refresh_after = refresh;
+                    self.conversation_render_sequence_overflow = false;
+                }
+                Err(()) => {
+                    self.rebuild_live_conversation_render_rows(layout_width);
+                    let live_inputs = self.conversation_render_rows[durable_count..]
+                        .iter()
+                        .map(|row| ConversationRowLayoutInput {
+                            key: row.cache_key.to_string(),
+                            target_height: row.measured_height,
+                            streaming: !row.done,
+                        })
+                        .collect();
+                    let live_layout = self.conversation_live_layout.resolve(
+                        live_inputs,
+                        layout_width,
+                        Instant::now(),
+                        None,
+                    );
+                    next_refresh_after = live_layout.next_refresh_after;
+                    self.conversation_render_heights.truncate(durable_count);
+                    self.conversation_render_heights
+                        .extend(live_layout.heights.iter().copied());
+                    let sizes = Rc::make_mut(&mut self.conversation_row_sizes);
+                    sizes.truncate(durable_count);
+                    sizes.extend(
+                        live_layout
+                            .heights
+                            .into_iter()
+                            .map(|height| size(px(0.), px(height))),
+                    );
+                }
+            }
             self.conversation_render_live_dirty = false;
         }
         debug_assert_eq!(
@@ -4771,6 +5028,9 @@ mod tests {
         assert!(source.contains("Rc::make_mut(&mut self.conversation_row_sizes)"));
         assert!(source.contains("CONVERSATION_RESIZE_DEBOUNCE"));
         assert!(source.contains("Duration::from_millis(67)"));
+        assert!(source.contains("update_conversation_rows_by_sequence(layout_width)"));
+        assert!(source.contains("message.updated_sequence == sequence"));
+        assert!(source.contains("tool.updated_sequence == sequence"));
 
         let render = source
             .split_once("impl Render for NativeShell")
@@ -4780,6 +5040,27 @@ mod tests {
         let legacy_rebuild_call = ["rebuild_conversation_", "render_rows("].concat();
         assert_eq!(render.matches(&prepare_call).count(), 1);
         assert_eq!(render.matches(&legacy_rebuild_call).count(), 0);
+    }
+
+    #[test]
+    fn indexed_row_update_accepts_non_clone_history_and_changes_one_slot() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct NonClone(usize);
+
+        let mut rows = (0..=10_000).map(NonClone).collect::<Vec<_>>();
+        let capacity = rows.capacity();
+        let index = upsert_indexed_item(&mut rows, Some(10_000), 10_000, NonClone(42));
+        assert_eq!(index, 10_000);
+        assert_eq!(rows.len(), 10_001);
+        assert_eq!(rows[0], NonClone(0));
+        assert_eq!(rows[9_999], NonClone(9_999));
+        assert_eq!(rows[10_000], NonClone(42));
+        assert_eq!(rows.capacity(), capacity);
+
+        let append_index = rows.len();
+        let appended = upsert_indexed_item(&mut rows, None, append_index, NonClone(43));
+        assert_eq!(appended, 10_001);
+        assert_eq!(rows[10_001], NonClone(43));
     }
 
     #[test]
