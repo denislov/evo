@@ -1,0 +1,29 @@
+[package]
+name = "ai"
+version.workspace = true
+edition = "2024"
+
+[features]
+default = []
+test-support = []
+
+[[example]]
+name = "faux_stream"
+required-features = ["test-support"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+futures = "0.3"
+async-stream = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+tokio-util = "0.7"
+ring = "0.17"
+base64 = "0.22"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "test-util"] }
+tempfile = "3"

@@ -1,0 +1,40 @@
+[package]
+name = "coding-agent"
+version.workspace = true
+edition = "2024"
+
+[features]
+default = []
+test-support = ["agent-core/test-support", "ai/test-support"]
+
+[dependencies]
+base64 = "0.22"
+cap-std = "4.0.2"
+dirs = "6"
+futures = "0.3"
+globset = "0.4"
+ignore = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+libc = "0.2"
+notify = "7"
+agent-core = { path = "../agent-core" }
+ai = { path = "../ai" }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "time", "io-util", "io-std", "sync", "signal", "test-util"] }
+tokio-util = "0.7"
+toml = "0.8"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+async-stream = "0.3"
+agent-core = { path = "../agent-core", features = ["test-support"] }
+ai = { path = "../ai", features = ["test-support"] }
+tempfile = "3"
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = { version = "2.0.0", default-features = false }

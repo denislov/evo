@@ -1,0 +1,2 @@
+data: {"candidates":[{"content":{"parts":[{"text":"thinking","thought":true},{"functionCall":{"name":"read","args":{"path":"Cargo.toml"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"totalTokenCount":14}}
+

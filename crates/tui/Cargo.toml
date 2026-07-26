@@ -1,0 +1,33 @@
+[package]
+name = "tui"
+version.workspace = true
+edition = "2024"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+base64 = "0.22"
+bitflags = "2"
+crossterm = "0.28"
+pulldown-cmark = "0.12"
+thiserror = "2"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+
+[[test]]
+name = "api_contract"
+required-features = ["test-support"]
+
+[[test]]
+name = "components"
+required-features = ["test-support"]
+
+[[test]]
+name = "render"
+required-features = ["test-support"]
+
+[[test]]
+name = "terminal"
+required-features = ["test-support"]

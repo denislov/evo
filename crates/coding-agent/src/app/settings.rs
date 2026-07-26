@@ -1,0 +1,551 @@
+use std::fmt;
+use std::path::PathBuf;
+
+use crate::app::embedding::CodingAgentThinkingLevel;
+use crate::app::operation_factory::CodingAgentOperationFactory;
+use crate::config::settings::{
+    PartialCompaction, PartialSettings, PartialTerminal, Settings, TuiMode,
+    try_merge_and_save_settings,
+};
+use crate::config::{SettingsScope, resolve_paths};
+use crate::runtime::facade::{
+    CodingAgentErrorCategory, CodingAgentErrorContext, CodingAgentPublicError,
+};
+
+const MAX_THEME_NAME_CHARS: usize = 128;
+const MAX_HTTP_IDLE_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CodingAgentQueueMode {
+    #[default]
+    OneAtATime,
+    All,
+}
+
+impl CodingAgentQueueMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OneAtATime => "one-at-a-time",
+            Self::All => "all",
+        }
+    }
+}
+
+impl fmt::Display for CodingAgentQueueMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for CodingAgentQueueMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "one-at-a-time" => Ok(Self::OneAtATime),
+            "all" => Ok(Self::All),
+            other => Err(format!("unknown queue mode: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CodingAgentDoubleEscapeAction {
+    #[default]
+    Tree,
+    Fork,
+    None,
+}
+
+impl CodingAgentDoubleEscapeAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tree => "tree",
+            Self::Fork => "fork",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CodingAgentPresentationMode {
+    #[default]
+    Inline,
+    Fullscreen,
+}
+
+impl std::str::FromStr for CodingAgentPresentationMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "inline" => Ok(Self::Inline),
+            "fullscreen" => Ok(Self::Fullscreen),
+            other => Err(format!("unknown terminal mode: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CodingAgentTreeFilterMode {
+    #[default]
+    Default,
+    NoTools,
+    UserOnly,
+    LabeledOnly,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodingAgentRuntimeSettingsSnapshot {
+    pub auto_compaction: bool,
+    pub steering_mode: CodingAgentQueueMode,
+    pub follow_up_mode: CodingAgentQueueMode,
+    pub auto_resize_images: bool,
+    pub block_images: bool,
+    pub enable_skill_commands: bool,
+    pub default_thinking_level: Option<CodingAgentThinkingLevel>,
+    pub http_idle_timeout_ms: u64,
+}
+
+impl Default for CodingAgentRuntimeSettingsSnapshot {
+    fn default() -> Self {
+        Self {
+            auto_compaction: true,
+            steering_mode: CodingAgentQueueMode::OneAtATime,
+            follow_up_mode: CodingAgentQueueMode::OneAtATime,
+            auto_resize_images: true,
+            block_images: false,
+            enable_skill_commands: true,
+            default_thinking_level: None,
+            http_idle_timeout_ms: 300_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodingAgentPresentationSettingsSnapshot {
+    pub theme: Option<String>,
+    pub mode: CodingAgentPresentationMode,
+    pub show_images: bool,
+    pub show_progress: bool,
+    pub clear_on_shrink: bool,
+    pub hide_thinking_block: bool,
+    pub quiet_startup: bool,
+    pub double_escape_action: CodingAgentDoubleEscapeAction,
+    pub tree_filter_mode: CodingAgentTreeFilterMode,
+    pub image_width_cells: u32,
+}
+
+impl Default for CodingAgentPresentationSettingsSnapshot {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            mode: CodingAgentPresentationMode::Inline,
+            show_images: true,
+            show_progress: false,
+            clear_on_shrink: false,
+            hide_thinking_block: false,
+            quiet_startup: false,
+            double_escape_action: CodingAgentDoubleEscapeAction::Tree,
+            tree_filter_mode: CodingAgentTreeFilterMode::Default,
+            image_width_cells: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodingAgentSettingsSnapshot {
+    pub runtime: CodingAgentRuntimeSettingsSnapshot,
+    pub presentation: CodingAgentPresentationSettingsSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodingAgentSettingsCommand {
+    SetTheme(String),
+    SetAutoCompaction(bool),
+    SetSteeringMode(CodingAgentQueueMode),
+    SetFollowUpMode(CodingAgentQueueMode),
+    SetProgressVisibility(bool),
+    SetImageAutoResize(bool),
+    SetImageBlocking(bool),
+    SetSkillCommands(bool),
+    SetThinkingVisibility(bool),
+    SetQuietStartup(bool),
+    SetClearOnShrink(bool),
+    SetDoubleEscapeAction(CodingAgentDoubleEscapeAction),
+    SetDefaultThinkingLevel(CodingAgentThinkingLevel),
+    SetHttpIdleTimeoutMs(u64),
+}
+
+impl CodingAgentSettingsCommand {
+    pub fn set_theme(theme: impl Into<String>) -> Self {
+        Self::SetTheme(theme.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodingAgentSettingsMutationOutcome {
+    pub snapshot: CodingAgentSettingsSnapshot,
+}
+
+#[derive(Clone)]
+pub struct CodingAgentSettingsController {
+    cwd: PathBuf,
+    settings: Settings,
+}
+
+impl fmt::Debug for CodingAgentSettingsController {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CodingAgentSettingsController")
+            .field("snapshot", &self.snapshot())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CodingAgentSettingsController {
+    pub(crate) fn from_internal(cwd: impl Into<PathBuf>, settings: Settings) -> Self {
+        Self {
+            cwd: cwd.into(),
+            settings,
+        }
+    }
+
+    pub fn snapshot(&self) -> CodingAgentSettingsSnapshot {
+        snapshot_from_settings(&self.settings)
+    }
+
+    pub fn apply(
+        &mut self,
+        command: CodingAgentSettingsCommand,
+        operation_factory: &mut CodingAgentOperationFactory,
+    ) -> Result<CodingAgentSettingsMutationOutcome, CodingAgentPublicError> {
+        let mut next = self.settings.clone();
+        let delta = apply_command(&mut next, command)?;
+        try_merge_and_save_settings(&resolve_paths(&self.cwd), SettingsScope::Global, &delta)
+            .map_err(|_| settings_persistence_error())?;
+
+        self.settings = next;
+        operation_factory.replace_settings(self.settings.clone());
+        Ok(CodingAgentSettingsMutationOutcome {
+            snapshot: self.snapshot(),
+        })
+    }
+}
+
+fn snapshot_from_settings(settings: &Settings) -> CodingAgentSettingsSnapshot {
+    CodingAgentSettingsSnapshot {
+        runtime: CodingAgentRuntimeSettingsSnapshot {
+            auto_compaction: settings.compaction.enabled,
+            steering_mode: queue_mode(&settings.steering_mode),
+            follow_up_mode: queue_mode(&settings.follow_up_mode),
+            auto_resize_images: settings.terminal.auto_resize_images,
+            block_images: settings.terminal.block_images,
+            enable_skill_commands: settings.enable_skill_commands,
+            default_thinking_level: settings
+                .default_thinking_level
+                .as_deref()
+                .and_then(|value| value.parse().ok()),
+            http_idle_timeout_ms: settings.http_idle_timeout_ms.min(MAX_HTTP_IDLE_TIMEOUT_MS),
+        },
+        presentation: CodingAgentPresentationSettingsSnapshot {
+            theme: settings
+                .theme
+                .as_deref()
+                .map(|theme| theme.chars().take(MAX_THEME_NAME_CHARS).collect()),
+            mode: match settings.terminal.mode {
+                TuiMode::Inline => CodingAgentPresentationMode::Inline,
+                TuiMode::Fullscreen => CodingAgentPresentationMode::Fullscreen,
+            },
+            show_images: settings.terminal.show_images,
+            show_progress: settings.terminal.show_progress,
+            clear_on_shrink: settings.terminal.clear_on_shrink,
+            hide_thinking_block: settings.hide_thinking_block,
+            quiet_startup: settings.quiet_startup,
+            double_escape_action: double_escape_action(&settings.double_escape_action),
+            tree_filter_mode: tree_filter_mode(&settings.tree_filter_mode),
+            image_width_cells: settings.terminal.image_width_cells,
+        },
+    }
+}
+
+fn apply_command(
+    settings: &mut Settings,
+    command: CodingAgentSettingsCommand,
+) -> Result<PartialSettings, CodingAgentPublicError> {
+    let mut delta = PartialSettings::default();
+    match command {
+        CodingAgentSettingsCommand::SetTheme(theme) => {
+            validate_theme(&theme)?;
+            settings.theme = Some(theme.clone());
+            delta.theme = Some(theme);
+        }
+        CodingAgentSettingsCommand::SetAutoCompaction(enabled) => {
+            settings.compaction.enabled = enabled;
+            delta
+                .compaction
+                .get_or_insert_with(PartialCompaction::default)
+                .enabled = Some(enabled);
+        }
+        CodingAgentSettingsCommand::SetSteeringMode(mode) => {
+            settings.steering_mode = mode.as_str().into();
+            delta.steering_mode = Some(mode.as_str().into());
+        }
+        CodingAgentSettingsCommand::SetFollowUpMode(mode) => {
+            settings.follow_up_mode = mode.as_str().into();
+            delta.follow_up_mode = Some(mode.as_str().into());
+        }
+        CodingAgentSettingsCommand::SetProgressVisibility(visible) => {
+            settings.terminal.show_progress = visible;
+            delta
+                .terminal
+                .get_or_insert_with(PartialTerminal::default)
+                .show_progress = Some(visible);
+        }
+        CodingAgentSettingsCommand::SetImageAutoResize(enabled) => {
+            settings.terminal.auto_resize_images = enabled;
+            delta
+                .terminal
+                .get_or_insert_with(PartialTerminal::default)
+                .auto_resize_images = Some(enabled);
+        }
+        CodingAgentSettingsCommand::SetImageBlocking(enabled) => {
+            settings.terminal.block_images = enabled;
+            delta
+                .terminal
+                .get_or_insert_with(PartialTerminal::default)
+                .block_images = Some(enabled);
+        }
+        CodingAgentSettingsCommand::SetSkillCommands(enabled) => {
+            settings.enable_skill_commands = enabled;
+            delta.enable_skill_commands = Some(enabled);
+        }
+        CodingAgentSettingsCommand::SetThinkingVisibility(visible) => {
+            settings.hide_thinking_block = !visible;
+            delta.hide_thinking_block = Some(!visible);
+        }
+        CodingAgentSettingsCommand::SetQuietStartup(quiet) => {
+            settings.quiet_startup = quiet;
+            delta.quiet_startup = Some(quiet);
+        }
+        CodingAgentSettingsCommand::SetClearOnShrink(enabled) => {
+            settings.terminal.clear_on_shrink = enabled;
+            delta
+                .terminal
+                .get_or_insert_with(PartialTerminal::default)
+                .clear_on_shrink = Some(enabled);
+        }
+        CodingAgentSettingsCommand::SetDoubleEscapeAction(action) => {
+            settings.double_escape_action = action.as_str().into();
+            delta.double_escape_action = Some(action.as_str().into());
+        }
+        CodingAgentSettingsCommand::SetDefaultThinkingLevel(level) => {
+            let level = level.to_string();
+            settings.default_thinking_level = Some(level.clone());
+            delta.default_thinking_level = Some(level);
+        }
+        CodingAgentSettingsCommand::SetHttpIdleTimeoutMs(timeout_ms) => {
+            if timeout_ms > MAX_HTTP_IDLE_TIMEOUT_MS {
+                return Err(invalid_settings_command(
+                    "HTTP idle timeout exceeds the supported limit",
+                ));
+            }
+            settings.http_idle_timeout_ms = timeout_ms;
+            delta.http_idle_timeout_ms = Some(timeout_ms);
+        }
+    }
+    Ok(delta)
+}
+
+fn queue_mode(value: &str) -> CodingAgentQueueMode {
+    match value {
+        "all" => CodingAgentQueueMode::All,
+        _ => CodingAgentQueueMode::OneAtATime,
+    }
+}
+
+fn double_escape_action(value: &str) -> CodingAgentDoubleEscapeAction {
+    match value {
+        "fork" => CodingAgentDoubleEscapeAction::Fork,
+        "none" => CodingAgentDoubleEscapeAction::None,
+        _ => CodingAgentDoubleEscapeAction::Tree,
+    }
+}
+
+fn tree_filter_mode(value: &str) -> CodingAgentTreeFilterMode {
+    match value {
+        "no-tools" => CodingAgentTreeFilterMode::NoTools,
+        "user-only" => CodingAgentTreeFilterMode::UserOnly,
+        "labeled-only" => CodingAgentTreeFilterMode::LabeledOnly,
+        "all" => CodingAgentTreeFilterMode::All,
+        _ => CodingAgentTreeFilterMode::Default,
+    }
+}
+
+fn validate_theme(theme: &str) -> Result<(), CodingAgentPublicError> {
+    if theme.is_empty()
+        || theme.chars().count() > MAX_THEME_NAME_CHARS
+        || theme.chars().any(char::is_control)
+    {
+        return Err(invalid_settings_command(
+            "theme name is empty, too long, or contains control characters",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_settings_command(summary: &str) -> CodingAgentPublicError {
+    CodingAgentPublicError {
+        category: CodingAgentErrorCategory::Input,
+        code: "invalid_settings_command".into(),
+        retryable: false,
+        summary: summary.into(),
+        context: CodingAgentErrorContext::None,
+    }
+}
+
+fn settings_persistence_error() -> CodingAgentPublicError {
+    CodingAgentPublicError {
+        category: CodingAgentErrorCategory::Persistence,
+        code: "settings_persistence".into(),
+        retryable: true,
+        summary: "failed to update product settings".into(),
+        context: CodingAgentErrorContext::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_core::api::agent::AgentResources;
+
+    use super::*;
+    use crate::app::bootstrap::SessionRunOptions;
+    use crate::runtime::facade::ProfileId;
+
+    fn operation_factory(settings: Settings) -> CodingAgentOperationFactory {
+        CodingAgentOperationFactory::from_runtime_parts(
+            ai::api::model::lookup_model("claude-haiku-4-5").expect("built-in test model"),
+            None,
+            Vec::new(),
+            None,
+            Some(1),
+            Vec::new(),
+            false,
+            None,
+            Some(SessionRunOptions::disabled(PathBuf::from("."))),
+            Some(CodingAgentThinkingLevel::Off),
+            None,
+            AgentResources::default(),
+            Some(settings),
+            None,
+            ProfileId::from("default"),
+        )
+    }
+
+    #[test]
+    fn apply_persists_and_updates_runtime_factory() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        env.set_evo_dir(temp.path());
+        let settings = PartialSettings::default().resolve();
+        let mut controller = CodingAgentSettingsController::from_internal(".", settings.clone());
+        let mut factory = operation_factory(settings);
+
+        let outcome = controller
+            .apply(
+                CodingAgentSettingsCommand::SetAutoCompaction(false),
+                &mut factory,
+            )
+            .unwrap();
+
+        assert!(!outcome.snapshot.runtime.auto_compaction);
+        assert!(
+            std::fs::read_to_string(temp.path().join("settings.toml"))
+                .unwrap()
+                .contains("enabled = false")
+        );
+        assert_eq!(
+            factory
+                .settings_for_tests()
+                .map(|settings| settings.compaction.enabled),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn failed_persistence_does_not_commit_settings_or_factory() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let blocked = temp.path().join("blocked");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        env.set_evo_dir(&blocked);
+        let settings = PartialSettings::default().resolve();
+        let mut controller = CodingAgentSettingsController::from_internal(".", settings.clone());
+        let mut factory = operation_factory(settings);
+
+        let error = controller
+            .apply(
+                CodingAgentSettingsCommand::SetAutoCompaction(false),
+                &mut factory,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "settings_persistence");
+        assert!(controller.snapshot().runtime.auto_compaction);
+        assert_eq!(
+            factory
+                .settings_for_tests()
+                .map(|settings| settings.compaction.enabled),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn snapshot_bounds_theme_and_normalizes_untrusted_modes() {
+        let mut settings = PartialSettings::default().resolve();
+        settings.theme = Some("x".repeat(MAX_THEME_NAME_CHARS + 50));
+        settings.steering_mode = "unexpected".into();
+        settings.double_escape_action = "unexpected".into();
+        settings.http_idle_timeout_ms = u64::MAX;
+
+        let snapshot = CodingAgentSettingsController::from_internal(".", settings).snapshot();
+
+        assert_eq!(
+            snapshot.presentation.theme.unwrap().chars().count(),
+            MAX_THEME_NAME_CHARS
+        );
+        assert_eq!(
+            snapshot.runtime.steering_mode,
+            CodingAgentQueueMode::OneAtATime
+        );
+        assert_eq!(
+            snapshot.presentation.double_escape_action,
+            CodingAgentDoubleEscapeAction::Tree
+        );
+        assert_eq!(
+            snapshot.runtime.http_idle_timeout_ms,
+            MAX_HTTP_IDLE_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn invalid_commands_are_rejected_before_persistence() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        env.set_evo_dir(temp.path());
+        let settings = PartialSettings::default().resolve();
+        let mut controller = CodingAgentSettingsController::from_internal(".", settings.clone());
+        let mut factory = operation_factory(settings);
+
+        let error = controller
+            .apply(
+                CodingAgentSettingsCommand::set_theme("x".repeat(MAX_THEME_NAME_CHARS + 1)),
+                &mut factory,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "invalid_settings_command");
+        assert!(!temp.path().join("settings.toml").exists());
+    }
+}

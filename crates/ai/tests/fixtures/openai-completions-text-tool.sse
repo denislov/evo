@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl_1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"Use "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"src/lib.rs\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}
+
+data: [DONE]

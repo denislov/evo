@@ -1,0 +1,17 @@
+pub(crate) mod application;
+pub(crate) mod auth;
+pub(crate) mod bootstrap;
+pub(crate) mod embedding;
+pub(crate) mod error;
+pub(crate) mod interactive;
+pub(crate) mod invocation;
+pub(crate) mod model_selection;
+pub(crate) mod operation_factory;
+pub(crate) mod profile_catalog;
+pub(crate) mod prompt_execution;
+pub(crate) mod prompt_input;
+pub(crate) mod prompt_runtime;
+pub(crate) mod session;
+pub(crate) mod settings;
+pub(crate) mod startup;
+pub(crate) mod theme;

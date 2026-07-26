@@ -1,0 +1,1215 @@
+use std::collections::HashSet;
+use std::io::{self, Write};
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::agent::provider::stream_model_with_provider_streamer;
+use crate::agent::queue::drain_queue;
+use crate::agent::turn::options::stream_options_for_turn;
+use crate::agent::turn::tools::{
+    ToolCallExecution, ToolCallRequest, append_tool_result_messages, extract_tool_calls,
+    should_use_sequential_tools,
+};
+use crate::agent::types::{
+    AgentEvent, AgentMessage, AgentTool, AgentToolOutput, AgentToolResult, ProviderRequestSnapshot,
+    ToolExecutionContext, ToolUpdateCallback,
+};
+use crate::compaction::estimate::estimate_context_tokens;
+use crate::compaction::prepare::{prepare_compaction, should_compact};
+use crate::compaction::summarize::summarize_with_provider_streamer;
+use crate::context::conversion::{assemble_context, convert_to_context, default_convert_to_llm};
+use crate::hooks::{
+    AfterToolCallContext, AfterToolCallHook, BeforeProviderRequestContext, BeforeToolCallContext,
+    PrepareNextTurnContext, ShouldStopAfterTurnContext,
+};
+use ai::api::conversation::{AssistantMessage, ContentBlock, StopReason, Usage};
+use ai::api::stream::AssistantMessageEvent;
+use ai::api::stream::json::parse_terminal_json;
+use futures::channel::mpsc;
+use futures::{FutureExt, StreamExt};
+use tokio_util::sync::CancellationToken;
+
+use super::context::{AgentTurnContext, PendingToolCall, RuntimeCompactionState};
+
+const MAX_TOOL_CALLS_PER_TURN: usize = 64;
+const MAX_CONCURRENT_TOOL_CALLS: usize = 8;
+const TOOL_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const MAX_TOOL_UPDATES_PER_CALL: usize = 64;
+const MAX_TOOL_UPDATE_BYTES_PER_CALL: usize = 256 * 1024;
+const MAX_TOOL_RESULT_BYTES_PER_CALL: usize = 512 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolExecutionLimit {
+    CallsPerTurn,
+    Deadline,
+    Progress,
+    Result,
+}
+
+impl ToolExecutionLimit {
+    fn message(self) -> &'static str {
+        match self {
+            Self::CallsPerTurn => "tool-call count exceeds the per-turn limit",
+            Self::Deadline => "tool execution deadline exceeded",
+            Self::Progress => "tool progress exceeds the retention limit",
+            Self::Result => "tool result exceeds the retention limit",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum AgentTurnError {
+    Invariant(String),
+    Compaction(String),
+    ToolLimit(ToolExecutionLimit),
+}
+
+impl std::fmt::Display for AgentTurnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invariant(msg) | Self::Compaction(msg) => write!(f, "{msg}"),
+            Self::ToolLimit(limit) => write!(f, "{}", limit.message()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentTurnDecision {
+    Next,
+    Continue,
+    ContinueProvider,
+    Tools,
+    Done,
+    Error,
+    Aborted,
+}
+
+pub(crate) fn start_turn(ctx: &mut AgentTurnContext) -> Result<AgentTurnDecision, AgentTurnError> {
+    if ctx.cancel_token.is_cancelled() {
+        ctx.should_finish = true;
+        ctx.emit(AgentEvent::AgentError {
+            error: "aborted".into(),
+        });
+        return Ok(AgentTurnDecision::Aborted);
+    }
+
+    ctx.turn = ctx
+        .turn
+        .checked_add(1)
+        .ok_or_else(|| AgentTurnError::Invariant("agent turn counter overflowed".into()))?;
+    if let Some(max_turns) = ctx.config.max_turns
+        && ctx.turn > max_turns
+    {
+        ctx.max_turns_exceeded = Some(max_turns);
+        ctx.should_finish = true;
+        ctx.emit(AgentEvent::AgentError {
+            error: format!("max turns ({}) exceeded", max_turns),
+        });
+        return Ok(AgentTurnDecision::Error);
+    }
+
+    ctx.emit(AgentEvent::TurnStart { turn: ctx.turn });
+    Ok(AgentTurnDecision::Next)
+}
+
+pub(crate) fn drain_queued_input(ctx: &mut AgentTurnContext) {
+    ctx.sync_live_queues();
+    let steered = drain_queue(&mut ctx.steering_queue, ctx.config.steering_mode);
+    ctx.messages.extend(steered);
+    ctx.has_more_queued_input = !ctx.steering_queue.is_empty() || !ctx.follow_up_queue.is_empty();
+}
+
+pub(crate) async fn prepare_provider_request(
+    ctx: &mut AgentTurnContext,
+) -> Result<AgentTurnDecision, AgentTurnError> {
+    let transformed_messages = if let Some(hook) = ctx.config.hooks.transform_context.clone() {
+        let cancellation_token = ctx.cancel_token.clone();
+        match tokio::select! {
+            _ = cancellation_token.clone().cancelled_owned() => return aborted(ctx),
+            result = hook(ctx.messages.clone()) => result,
+        } {
+            Ok(messages) => Some(messages),
+            Err(error) => {
+                ctx.emit(AgentEvent::AgentError {
+                    error: error.clone(),
+                });
+                return Ok(AgentTurnDecision::Error);
+            }
+        }
+    } else {
+        None
+    };
+
+    let llm_messages_override = if let Some(hook) = ctx.config.hooks.convert_to_llm.clone() {
+        let messages = transformed_messages
+            .clone()
+            .unwrap_or_else(|| ctx.messages.clone());
+        let cancellation_token = ctx.cancel_token.clone();
+        match tokio::select! {
+            _ = cancellation_token.clone().cancelled_owned() => return aborted(ctx),
+            result = hook(messages, ctx.config.resources.clone()) => result,
+        } {
+            Ok(llm_messages) => Some(llm_messages),
+            Err(error) => {
+                ctx.emit(AgentEvent::AgentError {
+                    error: error.clone(),
+                });
+                return Ok(AgentTurnDecision::Error);
+            }
+        }
+    } else {
+        None
+    };
+
+    let messages_for_context = transformed_messages.as_ref().unwrap_or(&ctx.messages);
+    let context = if let Some(llm_messages) = llm_messages_override {
+        assemble_context(
+            &ctx.config.system_prompt,
+            messages_for_context,
+            llm_messages,
+            &ctx.tools,
+            &ctx.config.resources,
+        )
+    } else if transformed_messages.is_some() {
+        let llm_messages = default_convert_to_llm(messages_for_context, &ctx.config.resources);
+        assemble_context(
+            &ctx.config.system_prompt,
+            messages_for_context,
+            llm_messages,
+            &ctx.tools,
+            &ctx.config.resources,
+        )
+    } else {
+        convert_to_context(
+            &ctx.config.system_prompt,
+            &ctx.messages,
+            &ctx.tools,
+            &ctx.config.resources,
+        )
+    };
+
+    let mut stream_options = stream_options_for_turn(
+        &ctx.config.model,
+        ctx.config.stream_options.clone().unwrap_or_default(),
+        ctx.config.thinking_level,
+    );
+    stream_options.cancel = Some(ctx.cancel_token.clone());
+
+    let mut request = ProviderRequestSnapshot {
+        model: ctx.config.model.clone(),
+        context,
+        stream_options,
+    };
+
+    if let Some(override_request) = ctx.take_provider_request_override() {
+        request.context = override_request.context;
+        if let Some(override_options) = override_request.stream_options {
+            request.stream_options = override_options;
+        }
+        request.stream_options.cancel = Some(ctx.cancel_token.clone());
+    }
+
+    ctx.provider_request = Some(request);
+
+    Ok(AgentTurnDecision::Next)
+}
+
+pub(crate) async fn apply_before_provider_request_hook(
+    ctx: &mut AgentTurnContext,
+) -> Result<AgentTurnDecision, AgentTurnError> {
+    let mut request = match ctx.provider_request.clone() {
+        Some(request) => request,
+        None => {
+            let error = "provider request is not prepared".to_string();
+            ctx.emit(AgentEvent::AgentError {
+                error: error.clone(),
+            });
+            return Ok(AgentTurnDecision::Error);
+        }
+    };
+
+    if let Some(hook) = ctx.config.hooks.before_provider_request.clone() {
+        let cancellation_token = ctx.cancel_token.clone();
+        match tokio::select! {
+            _ = cancellation_token.clone().cancelled_owned() => return aborted(ctx),
+            result = hook(BeforeProviderRequestContext::from(request.clone())) => result,
+        } {
+            Ok(Some(update)) => {
+                if let Some(updated_context) = update.context {
+                    request.context = updated_context;
+                }
+                if let Some(updated_options) = update.stream_options {
+                    request.stream_options = updated_options;
+                }
+                request.stream_options.cancel = Some(ctx.cancel_token.clone());
+            }
+            Ok(None) => {}
+            Err(error) => {
+                ctx.emit(AgentEvent::AgentError {
+                    error: error.clone(),
+                });
+                return Ok(AgentTurnDecision::Error);
+            }
+        }
+    }
+
+    ctx.provider_request = Some(request.clone());
+    ctx.emit(AgentEvent::BeforeProviderRequest { request });
+    Ok(AgentTurnDecision::Next)
+}
+
+pub(crate) async fn maybe_compact_runtime_context(
+    ctx: &mut AgentTurnContext,
+) -> Result<(), AgentTurnError> {
+    let Some(config) = ctx.config.compaction.clone() else {
+        return Ok(());
+    };
+
+    let usage_estimate = estimate_context_tokens(&ctx.messages);
+    let tokens_before = usage_estimate.tokens;
+    if !should_compact(
+        tokens_before,
+        ctx.config.model.context_window,
+        &config.settings,
+    ) {
+        return Ok(());
+    }
+
+    let (mut to_summarize, mut keep) = prepare_compaction(&ctx.messages, &config.settings);
+    if to_summarize.is_empty() {
+        (to_summarize, keep) =
+            split_for_compaction_after_usage_anchor(&ctx.messages, usage_estimate.last_usage_index);
+    }
+    if to_summarize.is_empty() {
+        return Ok(());
+    }
+
+    let summary = summarize_with_provider_streamer(
+        &ctx.config.model,
+        &to_summarize,
+        config.custom_instructions.as_deref(),
+        ctx.config.stream_options.clone(),
+        Some(ctx.cancel_token.clone()),
+        ctx.config.provider_streamer.clone(),
+    )
+    .await
+    .map_err(|err| AgentTurnError::Compaction(err.to_string()))?;
+
+    let first_kept_message_id = keep.first().map(message_id).unwrap_or("none").to_string();
+    for message in &mut keep {
+        clear_assistant_usage(message);
+    }
+
+    let mut compacted = Vec::with_capacity(1 + keep.len());
+    compacted.push(AgentMessage::CompactionSummary {
+        message_id: unique_message_id(&ctx.messages, format!("compaction_{}", tokens_before)),
+        summary: summary.clone(),
+        tokens_before,
+    });
+    compacted.extend(keep);
+    ctx.messages = compacted;
+
+    ctx.runtime_compaction = RuntimeCompactionState {
+        summary: Some(summary.clone()),
+        first_kept_message_id: Some(first_kept_message_id.clone()),
+        tokens_before: Some(tokens_before),
+    };
+    ctx.emit(AgentEvent::SessionCompacted {
+        summary,
+        first_kept_message_id,
+        tokens_before,
+        details: None,
+    });
+
+    Ok(())
+}
+
+pub(crate) async fn stream_provider(
+    ctx: &mut AgentTurnContext,
+) -> Result<AgentTurnDecision, AgentTurnError> {
+    let request = ctx
+        .provider_request
+        .clone()
+        .ok_or_else(|| AgentTurnError::Invariant("provider request is not prepared".into()))?;
+    let mut llm_stream = stream_model_with_provider_streamer(
+        &request.model,
+        request.context,
+        Some(request.stream_options),
+        ctx.config.provider_streamer.clone(),
+    );
+    let mut assistant_message = None;
+    let mut stream_error = None;
+
+    let cancellation_token = ctx.cancel_token.clone();
+    while let Some(event) = tokio::select! {
+        _ = cancellation_token.clone().cancelled_owned() => return aborted(ctx),
+        event = llm_stream.next().fuse() => event,
+    } {
+        let is_terminal = matches!(
+            event,
+            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+        );
+        if let AssistantMessageEvent::Done { message, .. } = &event {
+            assistant_message = Some(message.clone());
+        }
+        if let AssistantMessageEvent::Error { message, .. } = &event {
+            stream_error = Some(
+                message
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "LLM error".into()),
+            );
+        }
+        ctx.emit(AgentEvent::LlmEvent(event));
+        if is_terminal {
+            break;
+        }
+    }
+
+    if let Some(message) = assistant_message {
+        ctx.assistant_message = Some(message);
+        return Ok(AgentTurnDecision::Next);
+    }
+
+    let error = stream_error.unwrap_or_else(|| "LLM stream ended without Done event".into());
+    ctx.emit(AgentEvent::AgentError { error });
+    Ok(AgentTurnDecision::Error)
+}
+
+pub(crate) fn decide_after_assistant(
+    ctx: &mut AgentTurnContext,
+) -> Result<AgentTurnDecision, AgentTurnError> {
+    let mut assistant = ctx
+        .assistant_message
+        .clone()
+        .ok_or_else(|| AgentTurnError::Invariant("assistant message is not available".into()))?;
+
+    if assistant.stop_reason == StopReason::ToolUse
+        && normalize_terminal_tool_arguments(&mut assistant).is_err()
+    {
+        ctx.should_finish = true;
+        ctx.emit(AgentEvent::AgentError {
+            error: "invalid terminal tool arguments".into(),
+        });
+        return Ok(AgentTurnDecision::Error);
+    }
+    if assistant.stop_reason == StopReason::ToolUse
+        && let Err(error) = validate_terminal_tool_call_identity(&assistant, &ctx.messages)
+    {
+        ctx.should_finish = true;
+        ctx.emit(AgentEvent::AgentError {
+            error: error.into(),
+        });
+        return Ok(AgentTurnDecision::Error);
+    }
+    ctx.assistant_message = Some(assistant.clone());
+
+    let assistant_id = unique_message_id(
+        &ctx.messages,
+        assistant
+            .response_id
+            .clone()
+            .unwrap_or_else(|| format!("assistant_{}", ctx.turn)),
+    );
+    ctx.messages.push(AgentMessage::Assistant {
+        message_id: assistant_id,
+        message: assistant.clone(),
+    });
+
+    match assistant.stop_reason {
+        StopReason::Stop | StopReason::Length => Ok(AgentTurnDecision::Continue),
+        StopReason::Error => {
+            let error = assistant
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "LLM error".into());
+            ctx.should_finish = true;
+            ctx.emit(AgentEvent::AgentError { error });
+            Ok(AgentTurnDecision::Error)
+        }
+        StopReason::Aborted => {
+            ctx.should_finish = true;
+            ctx.emit(AgentEvent::AgentError {
+                error: "aborted".into(),
+            });
+            Ok(AgentTurnDecision::Aborted)
+        }
+        StopReason::ToolUse => {
+            let tool_calls = extract_tool_calls(&assistant);
+            if tool_calls.is_empty() {
+                ctx.should_finish = true;
+                ctx.emit(AgentEvent::AgentError {
+                    error: "tool-use response contained no tool calls".into(),
+                });
+                return Ok(AgentTurnDecision::Error);
+            }
+            ctx.pending_tool_calls = tool_calls
+                .into_iter()
+                .map(|call| PendingToolCall {
+                    index: call.index,
+                    id: call.tool_call_id,
+                    name: call.tool_name,
+                    arguments: call.arguments,
+                })
+                .collect();
+            Ok(AgentTurnDecision::Tools)
+        }
+    }
+}
+
+/// Convert a provider's exact accumulated terminal argument bytes into the
+/// executable JSON value. Streaming previews may retain incomplete text, but
+/// terminal tool calls must parse without repair, auto-closing, or trailing
+/// data before they enter committed history or the execution pipeline.
+fn normalize_terminal_tool_arguments(assistant: &mut AssistantMessage) -> Result<(), ()> {
+    for block in &mut assistant.content {
+        let ContentBlock::ToolCall { arguments, .. } = block else {
+            continue;
+        };
+        let serde_json::Value::String(raw) = arguments else {
+            continue;
+        };
+        *arguments = parse_terminal_json(raw).map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+fn validate_terminal_tool_call_identity(
+    assistant: &AssistantMessage,
+    messages: &[AgentMessage],
+) -> Result<(), &'static str> {
+    let mut used = messages
+        .iter()
+        .map(AgentMessage::message_id)
+        .collect::<HashSet<_>>();
+    for message in messages {
+        if let AgentMessage::Assistant { message, .. } = message {
+            for block in &message.content {
+                if let ContentBlock::ToolCall { id, .. } = block {
+                    used.insert(id);
+                }
+            }
+        }
+    }
+
+    for block in &assistant.content {
+        let ContentBlock::ToolCall { id, name, .. } = block else {
+            continue;
+        };
+        if id.trim().is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
+            return Err("invalid terminal tool-call identity");
+        }
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err("invalid terminal tool-call name");
+        }
+        if !used.insert(id) {
+            return Err("duplicate or reused terminal tool-call identity");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn maybe_prepare_next_turn(
+    ctx: &mut AgentTurnContext,
+) -> Result<AgentTurnDecision, AgentTurnError> {
+    let assistant = ctx
+        .assistant_message
+        .clone()
+        .ok_or_else(|| AgentTurnError::Invariant("assistant message is not available".into()))?;
+    ctx.sync_live_queues();
+
+    match assistant.stop_reason {
+        StopReason::Stop | StopReason::Length => {
+            let Some(should_stop) = should_stop_after_turn(ctx, &assistant).await? else {
+                return Ok(AgentTurnDecision::Error);
+            };
+            if should_stop {
+                ctx.should_finish = true;
+                ctx.has_more_queued_input = false;
+                ctx.emit(AgentEvent::AgentDone { message: assistant });
+                return Ok(AgentTurnDecision::Done);
+            }
+
+            if let Some(action) = prepare_next_turn_or_error(ctx).await? {
+                return Ok(action);
+            }
+
+            let has_more = !ctx.follow_up_queue.is_empty() || !ctx.steering_queue.is_empty();
+            ctx.has_more_queued_input = has_more;
+            if has_more {
+                let follow_ups = drain_queue(&mut ctx.follow_up_queue, ctx.config.follow_up_mode);
+                ctx.messages.extend(follow_ups);
+                ctx.should_finish = false;
+                Ok(AgentTurnDecision::Continue)
+            } else {
+                ctx.should_finish = true;
+                ctx.emit(AgentEvent::AgentDone { message: assistant });
+                Ok(AgentTurnDecision::Done)
+            }
+        }
+        StopReason::ToolUse => {
+            let Some(should_stop) = should_stop_after_turn(ctx, &assistant).await? else {
+                return Ok(AgentTurnDecision::Error);
+            };
+            if should_stop {
+                ctx.should_finish = true;
+                ctx.has_more_queued_input = false;
+                ctx.emit(AgentEvent::AgentDone { message: assistant });
+                return Ok(AgentTurnDecision::Done);
+            }
+
+            if ctx.tool_results_all_terminate {
+                ctx.should_finish = true;
+                ctx.has_more_queued_input = false;
+                ctx.emit(AgentEvent::AgentDone { message: assistant });
+                return Ok(AgentTurnDecision::Done);
+            }
+
+            if let Some(action) = prepare_next_turn_or_error(ctx).await? {
+                return Ok(action);
+            }
+
+            ctx.should_finish = false;
+            ctx.has_more_queued_input =
+                !ctx.follow_up_queue.is_empty() || !ctx.steering_queue.is_empty();
+            Ok(AgentTurnDecision::Continue)
+        }
+        StopReason::Error => {
+            ctx.should_finish = true;
+            Ok(AgentTurnDecision::Error)
+        }
+        StopReason::Aborted => {
+            ctx.should_finish = true;
+            Ok(AgentTurnDecision::Aborted)
+        }
+    }
+}
+
+pub(crate) async fn execute_tools(
+    ctx: &mut AgentTurnContext,
+) -> Result<AgentTurnDecision, AgentTurnError> {
+    ctx.tool_results_all_terminate = false;
+    let pending = std::mem::take(&mut ctx.pending_tool_calls);
+    if pending.is_empty() {
+        return Ok(AgentTurnDecision::ContinueProvider);
+    }
+    if pending.len() > MAX_TOOL_CALLS_PER_TURN {
+        ctx.should_finish = true;
+        return Err(AgentTurnError::ToolLimit(ToolExecutionLimit::CallsPerTurn));
+    }
+
+    let requests: Vec<_> = pending
+        .iter()
+        .map(|call| ToolCallRequest {
+            index: call.index,
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        })
+        .collect();
+    let use_sequential =
+        should_use_sequential_tools(ctx.config.tool_execution, &requests, &ctx.tools);
+    let hook_assistant = if ctx.config.hooks.before_tool_call.is_some()
+        || ctx.config.hooks.after_tool_call.is_some()
+    {
+        ctx.assistant_message.clone().map(Arc::new)
+    } else {
+        None
+    };
+    let hook_messages = if hook_assistant.is_some() {
+        Some(Arc::<[AgentMessage]>::from(ctx.messages.clone()))
+    } else {
+        None
+    };
+
+    let executions = if use_sequential {
+        let mut executions = Vec::with_capacity(pending.len());
+        for call in pending {
+            let tool = find_tool(&ctx.tools, &call.name);
+            let blocked = match invalid_tool_call_result(tool.as_ref(), &call) {
+                Some(result) => Some(result),
+                None => {
+                    before_tool_result(ctx, &call, hook_assistant.clone(), hook_messages.clone())
+                        .await
+                }
+            };
+            let result = match blocked {
+                Some(result) => result,
+                None => {
+                    ctx.emit(AgentEvent::ToolCallStart {
+                        tool_call_id: call.id.clone(),
+                        tool_name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    });
+                    let result = execute_tool_with_updates(ctx, &call, tool).await;
+                    after_tool_result(
+                        ctx,
+                        &call,
+                        result,
+                        hook_assistant.clone(),
+                        hook_messages.clone(),
+                    )
+                    .await
+                }
+            };
+            let result = retain_bounded_tool_result(result);
+
+            ctx.emit(AgentEvent::ToolCallEnd {
+                tool_call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                result: result.clone(),
+            });
+            executions.push(ToolCallExecution {
+                index: call.index,
+                tool_call_id: call.id,
+                tool_name: call.name,
+                result,
+            });
+        }
+        executions
+    } else {
+        let after_hook = ctx.config.hooks.after_tool_call.clone();
+        let mut prepared = Vec::with_capacity(pending.len());
+        for call in pending {
+            let tool = find_tool(&ctx.tools, &call.name);
+            let blocked = match invalid_tool_call_result(tool.as_ref(), &call) {
+                Some(result) => Some(result),
+                None => {
+                    before_tool_result(ctx, &call, hook_assistant.clone(), hook_messages.clone())
+                        .await
+                }
+            };
+            prepared.push((call, tool, blocked));
+        }
+        for (call, _, blocked) in &prepared {
+            if blocked.is_none() {
+                ctx.emit(AgentEvent::ToolCallStart {
+                    tool_call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                });
+            }
+        }
+
+        collect_parallel_tool_executions(ctx, prepared, after_hook, hook_assistant, hook_messages)
+            .await
+    };
+
+    let all_terminate = !executions.is_empty()
+        && executions
+            .iter()
+            .all(|execution| execution.result.terminate);
+    ctx.tool_results
+        .extend(executions.iter().map(|execution| execution.result.clone()));
+    append_tool_result_messages(&mut ctx.messages, &executions);
+
+    ctx.tool_results_all_terminate = all_terminate;
+
+    Ok(AgentTurnDecision::Continue)
+}
+
+async fn collect_parallel_tool_executions(
+    ctx: &mut AgentTurnContext,
+    prepared: Vec<(PendingToolCall, Option<AgentTool>, Option<AgentToolResult>)>,
+    after_hook: Option<AfterToolCallHook>,
+    assistant_message: Option<Arc<AssistantMessage>>,
+    messages: Option<Arc<[AgentMessage]>>,
+) -> Vec<ToolCallExecution> {
+    let tool_execution_scope = ctx.config.tool_execution_scope.clone();
+    let turn = ctx.turn;
+    let cancel_token = ctx.cancel_token.clone();
+    let mut executions_stream = futures::stream::iter(prepared)
+        .map(move |(call, tool, blocked)| {
+            let after_hook = after_hook.clone();
+            let assistant_message = assistant_message.clone();
+            let messages = messages.clone();
+            let tool_execution_scope = tool_execution_scope.clone();
+            let cancel_token = cancel_token.clone();
+            async move {
+                let result = match blocked {
+                    Some(result) => result,
+                    None => {
+                        let execution_cancel = cancel_token.child_token();
+                        let execution_context = ToolExecutionContext::new(
+                            tool_execution_scope,
+                            turn,
+                            call.id.clone(),
+                            call.name.clone(),
+                            execution_cancel,
+                        );
+                        let result =
+                            execute_tool(tool, execution_context, call.arguments.clone()).await;
+                        apply_after_tool_hook(
+                            after_hook,
+                            assistant_message,
+                            messages,
+                            &call,
+                            result,
+                            cancel_token.clone(),
+                        )
+                        .await
+                    }
+                };
+                ToolCallExecution {
+                    index: call.index,
+                    tool_call_id: call.id,
+                    tool_name: call.name,
+                    result: retain_bounded_tool_result(result),
+                }
+            }
+        })
+        .buffer_unordered(MAX_CONCURRENT_TOOL_CALLS);
+
+    let mut executions = Vec::new();
+    while let Some(execution) = executions_stream.next().await {
+        ctx.emit(AgentEvent::ToolCallEnd {
+            tool_call_id: execution.tool_call_id.clone(),
+            tool_name: execution.tool_name.clone(),
+            result: execution.result.clone(),
+        });
+        executions.push(execution);
+    }
+    executions.sort_by_key(|execution| execution.index);
+    executions
+}
+
+async fn before_tool_result(
+    ctx: &AgentTurnContext,
+    call: &PendingToolCall,
+    assistant_message: Option<Arc<AssistantMessage>>,
+    messages: Option<Arc<[AgentMessage]>>,
+) -> Option<AgentToolResult> {
+    let hook = ctx.config.hooks.before_tool_call.clone()?;
+    let assistant_message = assistant_message?;
+    let messages = messages?;
+    let hook_context = BeforeToolCallContext {
+        execution_context: ToolExecutionContext::new(
+            ctx.config.tool_execution_scope.clone(),
+            ctx.turn,
+            call.id.clone(),
+            call.name.clone(),
+            ctx.cancel_token.clone(),
+        ),
+        assistant_message,
+        tool_call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        arguments: call.arguments.clone(),
+        messages,
+    };
+
+    let cancellation_token = ctx.cancel_token.clone();
+    tokio::select! {
+        _ = cancellation_token.clone().cancelled_owned() => Some(AgentToolResult::error("aborted")),
+        result = hook(hook_context) => match result {
+            Ok(Some(result)) if result.block => Some(AgentToolResult::error(
+                result.reason.unwrap_or_else(|| "blocked".into()),
+            )),
+            Err(error) => Some(AgentToolResult::error(error)),
+            _ => None,
+        },
+    }
+}
+
+async fn after_tool_result(
+    ctx: &AgentTurnContext,
+    call: &PendingToolCall,
+    result: AgentToolResult,
+    assistant_message: Option<Arc<AssistantMessage>>,
+    messages: Option<Arc<[AgentMessage]>>,
+) -> AgentToolResult {
+    apply_after_tool_hook(
+        ctx.config.hooks.after_tool_call.clone(),
+        assistant_message,
+        messages,
+        call,
+        result,
+        ctx.cancel_token.clone(),
+    )
+    .await
+}
+
+async fn apply_after_tool_hook(
+    hook: Option<AfterToolCallHook>,
+    assistant_message: Option<Arc<AssistantMessage>>,
+    messages: Option<Arc<[AgentMessage]>>,
+    call: &PendingToolCall,
+    mut result: AgentToolResult,
+    cancellation: CancellationToken,
+) -> AgentToolResult {
+    let Some(hook) = hook else {
+        return result;
+    };
+    let Some(assistant_message) = assistant_message else {
+        return result;
+    };
+    let Some(messages) = messages else {
+        return result;
+    };
+    let hook_context = AfterToolCallContext {
+        assistant_message,
+        tool_call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        arguments: call.arguments.clone(),
+        result: result.clone(),
+        messages,
+    };
+
+    match tokio::select! {
+        _ = cancellation.clone().cancelled_owned() => return AgentToolResult::error("aborted"),
+        result = hook(hook_context) => result,
+    } {
+        Ok(Some(after)) => {
+            if let Some(content) = after.content {
+                result.content = content;
+            }
+            if let Some(is_error) = after.is_error {
+                result.is_error = is_error;
+            }
+            if let Some(terminate) = after.terminate {
+                result.terminate = terminate;
+            }
+            result
+        }
+        Err(error) => AgentToolResult::error(error),
+        _ => result,
+    }
+}
+
+fn find_tool(tools: &[AgentTool], name: &str) -> Option<AgentTool> {
+    tools.iter().find(|tool| tool.name == name).cloned()
+}
+
+fn invalid_tool_call_result(
+    tool: Option<&AgentTool>,
+    call: &PendingToolCall,
+) -> Option<AgentToolResult> {
+    let Some(tool) = tool else {
+        return Some(AgentToolResult::error(format!(
+            "unknown tool: {}",
+            call.name
+        )));
+    };
+    tool.validate_arguments(&call.arguments)
+        .err()
+        .map(|error| AgentToolResult::error(error.to_string()))
+}
+
+async fn execute_tool_with_updates(
+    ctx: &mut AgentTurnContext,
+    call: &PendingToolCall,
+    tool: Option<AgentTool>,
+) -> AgentToolResult {
+    let (update_tx, mut update_rx) = mpsc::unbounded::<AgentToolOutput>();
+    let progress_budget = Arc::new(std::sync::Mutex::new(ToolProgressBudget::default()));
+    let callback_budget = Arc::clone(&progress_budget);
+    let update_callback: ToolUpdateCallback = Arc::new(move |update| {
+        let Some(bytes) = serialized_tool_output_bytes(&update) else {
+            callback_budget.lock().unwrap().exceeded = true;
+            return;
+        };
+        let mut budget = callback_budget.lock().unwrap();
+        let next_events = budget.events.saturating_add(1);
+        let next_bytes = budget.bytes.saturating_add(bytes);
+        if next_events > MAX_TOOL_UPDATES_PER_CALL || next_bytes > MAX_TOOL_UPDATE_BYTES_PER_CALL {
+            budget.exceeded = true;
+            return;
+        }
+        budget.events = next_events;
+        budget.bytes = next_bytes;
+        let _ = update_tx.unbounded_send(update);
+    });
+    let execution_cancel = ctx.cancel_token.child_token();
+    let tool_cancel = execution_cancel.clone();
+    let mut execute_future = Box::pin({
+        let arguments = call.arguments.clone();
+        let tool_name = call.name.clone();
+        let execution_context = ToolExecutionContext::new(
+            ctx.config.tool_execution_scope.clone(),
+            ctx.turn,
+            call.id.clone(),
+            call.name.clone(),
+            tool_cancel,
+        );
+        async move {
+            match tool {
+                Some(tool) => {
+                    match (tool.execute)(execution_context, arguments, Some(update_callback)).await
+                    {
+                        Ok(output) => AgentToolResult::from_output(output),
+                        Err(error) => AgentToolResult::error(error),
+                    }
+                }
+                None => AgentToolResult::error(format!("unknown tool: {}", tool_name)),
+            }
+        }
+    })
+    .fuse();
+    let mut deadline = Box::pin(tokio::time::sleep(TOOL_EXECUTION_TIMEOUT).fuse());
+    let mut update_open = true;
+    let cancellation_token = ctx.cancel_token.clone();
+    let result = loop {
+        if !update_open {
+            break tokio::select! {
+                _ = cancellation_token.clone().cancelled_owned() => {
+                    AgentToolResult::error("aborted")
+                }
+                _ = &mut deadline => {
+                    execution_cancel.cancel();
+                    AgentToolResult::error(ToolExecutionLimit::Deadline.message())
+                }
+                result = execute_future => result,
+            };
+        }
+        tokio::select! {
+            _ = cancellation_token.clone().cancelled_owned() => {
+                break AgentToolResult::error("aborted");
+            }
+            _ = &mut deadline => {
+                execution_cancel.cancel();
+                break AgentToolResult::error(ToolExecutionLimit::Deadline.message());
+            }
+            maybe_update = update_rx.next().fuse() => {
+                if let Some(update) = maybe_update {
+                    ctx.emit(AgentEvent::ToolCallUpdate {
+                        tool_call_id: call.id.clone(),
+                        tool_name: call.name.clone(),
+                        update,
+                    });
+                } else {
+                    update_open = false;
+                }
+            }
+            completed = &mut execute_future => {
+                break completed;
+            }
+        }
+    };
+    while let Some(Some(update)) = update_rx.next().now_or_never() {
+        ctx.emit(AgentEvent::ToolCallUpdate {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            update,
+        });
+    }
+    if progress_budget.lock().unwrap().exceeded {
+        AgentToolResult::error(ToolExecutionLimit::Progress.message())
+    } else {
+        result
+    }
+}
+
+async fn execute_tool(
+    tool: Option<AgentTool>,
+    execution_context: ToolExecutionContext,
+    arguments: serde_json::Value,
+) -> AgentToolResult {
+    let tool_name = execution_context.tool_name().to_owned();
+    let cancellation = execution_context.cancel_token().clone();
+    match tool {
+        Some(tool) => {
+            match tokio::select! {
+                _ = cancellation.clone().cancelled_owned() => Err("aborted".to_owned()),
+                _ = tokio::time::sleep(TOOL_EXECUTION_TIMEOUT) => {
+                    cancellation.cancel();
+                    Err(ToolExecutionLimit::Deadline.message().to_owned())
+                }
+                result = (tool.execute)(execution_context, arguments, None) => result,
+            } {
+                Ok(output) => AgentToolResult::from_output(output),
+                Err(error) => AgentToolResult::error(error),
+            }
+        }
+        None => AgentToolResult::error(format!("unknown tool: {}", tool_name)),
+    }
+}
+
+#[derive(Default)]
+struct ToolProgressBudget {
+    events: usize,
+    bytes: usize,
+    exceeded: bool,
+}
+
+fn retain_bounded_tool_result(result: AgentToolResult) -> AgentToolResult {
+    if serialized_tool_result_bytes(&result)
+        .is_some_and(|bytes| bytes <= MAX_TOOL_RESULT_BYTES_PER_CALL)
+    {
+        result
+    } else {
+        AgentToolResult::error(ToolExecutionLimit::Result.message())
+    }
+}
+
+fn serialized_tool_output_bytes(output: &AgentToolOutput) -> Option<usize> {
+    let mut writer = ByteCounter::default();
+    serde_json::to_writer(&mut writer, &output.content).ok()?;
+    serde_json::to_writer(&mut writer, &output.details).ok()?;
+    Some(writer.bytes)
+}
+
+fn serialized_tool_result_bytes(result: &AgentToolResult) -> Option<usize> {
+    let mut writer = ByteCounter::default();
+    serde_json::to_writer(&mut writer, &result.content).ok()?;
+    serde_json::to_writer(&mut writer, &result.details).ok()?;
+    Some(writer.bytes)
+}
+
+#[derive(Default)]
+struct ByteCounter {
+    bytes: usize,
+}
+
+impl Write for ByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(buffer.len())
+            .ok_or_else(|| io::Error::other("serialized tool output size overflow"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn aborted(ctx: &mut AgentTurnContext) -> Result<AgentTurnDecision, AgentTurnError> {
+    ctx.should_finish = true;
+    ctx.emit(AgentEvent::AgentError {
+        error: "aborted".into(),
+    });
+    Ok(AgentTurnDecision::Aborted)
+}
+
+fn unique_message_id(messages: &[AgentMessage], preferred: String) -> String {
+    let used = messages
+        .iter()
+        .map(AgentMessage::message_id)
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    unique_id(&used, preferred)
+}
+
+fn unique_id(used: &HashSet<String>, preferred: String) -> String {
+    if !used.contains(&preferred) {
+        return preferred;
+    }
+    let mut suffix = 1u64;
+    loop {
+        let candidate = format!("{preferred}_{suffix}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+async fn should_stop_after_turn(
+    ctx: &mut AgentTurnContext,
+    assistant: &AssistantMessage,
+) -> Result<Option<bool>, AgentTurnError> {
+    let Some(hook) = ctx.config.hooks.should_stop_after_turn.clone() else {
+        return Ok(Some(false));
+    };
+
+    match hook(ShouldStopAfterTurnContext {
+        messages: ctx.messages.clone(),
+        assistant_message: assistant.clone(),
+    })
+    .await
+    {
+        Ok(should_stop) => Ok(Some(should_stop)),
+        Err(error) => {
+            ctx.should_finish = true;
+            ctx.emit(AgentEvent::AgentError {
+                error: error.clone(),
+            });
+            Ok(None)
+        }
+    }
+}
+
+async fn prepare_next_turn_or_error(
+    ctx: &mut AgentTurnContext,
+) -> Result<Option<AgentTurnDecision>, AgentTurnError> {
+    let Some(hook) = ctx.config.hooks.prepare_next_turn.clone() else {
+        return Ok(None);
+    };
+
+    let update = match hook(PrepareNextTurnContext {
+        messages: ctx.messages.clone(),
+        turn: ctx.turn,
+    })
+    .await
+    {
+        Ok(update) => update,
+        Err(error) => {
+            ctx.should_finish = true;
+            ctx.emit(AgentEvent::AgentError {
+                error: error.clone(),
+            });
+            return Ok(Some(AgentTurnDecision::Error));
+        }
+    };
+
+    let Some(update) = update else {
+        return Ok(None);
+    };
+
+    if let Some(messages) = update.messages {
+        ctx.messages = messages;
+    }
+    if let Some(model) = update.model {
+        ctx.config.model = model;
+    }
+    if let Some(thinking_level) = update.thinking_level {
+        ctx.config.thinking_level = thinking_level;
+    }
+    if let Some(stream_options) = update.stream_options {
+        ctx.config.stream_options = Some(stream_options);
+    }
+    Ok(None)
+}
+
+fn message_id(message: &AgentMessage) -> &str {
+    match message {
+        AgentMessage::UserText { message_id, .. }
+        | AgentMessage::Assistant { message_id, .. }
+        | AgentMessage::ToolResult { message_id, .. }
+        | AgentMessage::SystemPrompt { message_id, .. }
+        | AgentMessage::CompactionSummary { message_id, .. }
+        | AgentMessage::BashExecution { message_id, .. }
+        | AgentMessage::Custom { message_id, .. }
+        | AgentMessage::BranchSummary { message_id, .. } => message_id,
+    }
+}
+
+fn clear_assistant_usage(message: &mut AgentMessage) {
+    if let AgentMessage::Assistant { message, .. } = message {
+        message.usage = Usage::default();
+    }
+}
+
+fn split_for_compaction_after_usage_anchor(
+    messages: &[AgentMessage],
+    anchor_index: Option<usize>,
+) -> (Vec<AgentMessage>, Vec<AgentMessage>) {
+    let Some(anchor_index) = anchor_index else {
+        return (vec![], messages.to_vec());
+    };
+    if messages.is_empty() {
+        return (vec![], vec![]);
+    }
+
+    let mut split = anchor_index.saturating_add(1).min(messages.len());
+    while split < messages.len() && matches!(messages[split], AgentMessage::ToolResult { .. }) {
+        split += 1;
+    }
+
+    (messages[..split].to_vec(), messages[split..].to_vec())
+}

@@ -1,0 +1,7 @@
+data: {"id":"mistral-stream-1","model":"mistral-small-latest","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}],"usage":null}
+
+data: {"id":"mistral-stream-1","model":"mistral-small-latest","choices":[{"index":0,"delta":{"content":[{"type":"text","text":" world"},{"type":"thinking","thinking":[{"type":"text","text":"consider"}]}],"tool_calls":[{"index":0,"id":"tool123456","type":"function","function":{"name":"read","arguments":"{\"path\":\""}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"mistral-stream-1","model":"mistral-small-latest","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"file\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+
+data: [DONE]

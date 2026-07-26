@@ -1,0 +1,315 @@
+[
+  {
+    "stream_id": "test-stream",
+    "sequence": 1,
+    "event": {
+      "family": "workflow",
+      "payload": {
+        "kind": "prompt_started",
+        "operation_id": "operation-1",
+        "turn_id": "turn-1"
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 2,
+    "event": {
+      "family": "message",
+      "payload": {
+        "kind": "started",
+        "operation_id": "operation-1",
+        "turn_id": "turn-1",
+        "message_id": "message-1"
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 3,
+    "event": {
+      "family": "message",
+      "payload": {
+        "kind": "delta",
+        "operation_id": "operation-1",
+        "turn_id": "turn-1",
+        "message_id": "message-1",
+        "text": "hello "
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 4,
+    "event": {
+      "family": "message",
+      "payload": {
+        "kind": "thinking_delta",
+        "operation_id": "operation-1",
+        "turn_id": "turn-1",
+        "message_id": "message-1",
+        "text": "inspect state"
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 5,
+    "event": {
+      "family": "tool",
+      "payload": {
+        "kind": "started",
+        "operation_id": "operation-1",
+        "turn_id": "turn-1",
+        "tool_call_id": "tool-1",
+        "name": "read",
+        "arguments_json": "{\"path\":\"src/lib.rs\"}"
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 6,
+    "event": {
+      "family": "tool",
+      "payload": {
+        "kind": "updated",
+        "operation_id": "operation-1",
+        "turn_id": "turn-1",
+        "tool_call_id": "tool-1",
+        "name": "read",
+        "message": "reading"
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 7,
+    "event": {
+      "family": "tool",
+      "payload": {
+        "kind": "completed",
+        "operation_id": "operation-1",
+        "turn_id": "turn-1",
+        "tool_call_id": "tool-1",
+        "name": "read",
+        "summary": "read complete"
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 8,
+    "event": {
+      "family": "delegation",
+      "payload": {
+        "kind": "requested",
+        "context": {
+          "operation_id": "operation-1",
+          "turn_id": "turn-1",
+          "tool_call_id": "delegate-1",
+          "requesting_profile_id": "default",
+          "target_kind": "agent",
+          "target_id": "reviewer",
+          "task": "Review the change"
+        }
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 9,
+    "event": {
+      "family": "delegation",
+      "payload": {
+        "kind": "started",
+        "context": {
+          "operation_id": "operation-1",
+          "turn_id": "turn-1",
+          "tool_call_id": "delegate-1",
+          "requesting_profile_id": "default",
+          "target_kind": "agent",
+          "target_id": "reviewer",
+          "task": "Review the change"
+        },
+        "child_operation_id": "child-1"
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 10,
+    "event": {
+      "family": "delegation",
+      "payload": {
+        "kind": "completed",
+        "context": {
+          "operation_id": "operation-1",
+          "turn_id": "turn-1",
+          "tool_call_id": "delegate-1",
+          "requesting_profile_id": "default",
+          "target_kind": "agent",
+          "target_id": "reviewer",
+          "task": "Review the change"
+        },
+        "child_operation_id": "child-1",
+        "final_text": "Looks good"
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 11,
+    "event": {
+      "family": "message",
+      "payload": {
+        "kind": "completed",
+        "operation_id": "operation-1",
+        "turn_id": "turn-1",
+        "message_id": "message-1",
+        "final_text": "hello world",
+        "usage": {
+          "input": 12,
+          "output": 4,
+          "cache_read": 2,
+          "cache_write": 1,
+          "total_tokens": 19,
+          "input_cost": 0.01,
+          "output_cost": 0.02,
+          "cache_read_cost": 0.001,
+          "cache_write_cost": 0.002
+        }
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 12,
+    "event": {
+      "family": "profile",
+      "payload": {
+        "kind": "default_changed",
+        "profile_id": "reviewer"
+      }
+    },
+    "operation_id": null,
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 13,
+    "event": {
+      "family": "workflow",
+      "payload": {
+        "kind": "prompt_completed",
+        "operation_id": "operation-1",
+        "turn_id": "turn-1"
+      }
+    },
+    "operation_id": "operation-1",
+    "session_id": "session-1",
+    "terminal_status": "completed",
+    "terminal_operation": {
+      "kind": "prompt",
+      "status": "completed"
+    },
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "terminal"
+  }
+]

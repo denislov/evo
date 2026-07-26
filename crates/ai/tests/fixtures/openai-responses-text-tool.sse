@@ -1,0 +1,27 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_1"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","part":{"type":"output_text","text":"","annotations":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"hello"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","role":"assistant"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"func_1","type":"function_call","name":"read","call_id":"call_resp_1"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"{\"path\":\"Cargo.toml\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"func_1","type":"function_call","name":"read","call_id":"call_resp_1","arguments":"{\"path\":\"Cargo.toml\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}}
+
