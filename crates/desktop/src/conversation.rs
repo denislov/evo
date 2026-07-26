@@ -3,10 +3,13 @@
 //! These reducers remain independent of GPUI. The renderer may virtualize the
 //! resulting blocks without owning product transcript truth.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use coding_agent::api::view::{CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot};
+use unicode_width::UnicodeWidthStr as _;
 
 pub const MAX_TRANSCRIPT_BLOCKS: usize = 10_000;
 pub const MAX_TRANSCRIPT_BYTES: usize = 32 * 1024 * 1024;
@@ -29,6 +32,9 @@ pub const FOLLOW_LATEST_PAUSE_THRESHOLD_PX: f32 = 48.0;
 pub const FOLLOW_LATEST_RESUME_THRESHOLD_PX: f32 = 32.0;
 pub const STREAMING_ROW_HEIGHT_INTERVAL: Duration = Duration::from_millis(67);
 pub const CONVERSATION_WIDTH_BUCKET_PX: u32 = 24;
+pub const MAX_ROW_RENDER_CACHE_ENTRIES: usize = MAX_TRANSCRIPT_BLOCKS + 256;
+pub const MAX_ROW_RENDER_CACHE_BYTES: usize = 40 * 1024 * 1024;
+pub const TRANSCRIPT_ROW_MAX_HEIGHT: f32 = 680.0;
 
 const TRUNCATED_LINE_NOTICE: &str = "\n\n> … line truncated by desktop preview bounds …\n";
 const TRUNCATED_CODE_NOTICE: &str = "\n… code block truncated by desktop preview bounds …\n";
@@ -276,6 +282,58 @@ fn truncate_str(text: &str, max_bytes: usize) -> (&str, bool) {
     (&text[..boundary], true)
 }
 
+fn estimated_text_rows(text: &str, columns: usize, limit: usize) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut rows = 0usize;
+    for line in text.lines().take(limit) {
+        rows = rows.saturating_add(line.width().max(1).div_ceil(columns));
+        if rows >= limit {
+            return limit;
+        }
+    }
+    rows.max(1).min(limit)
+}
+
+pub fn conversation_block_height(
+    kind: ConversationBlockKind,
+    text: &str,
+    detail: &str,
+    panel_width: u32,
+) -> f32 {
+    let effective_width = if kind == ConversationBlockKind::User {
+        panel_width.saturating_mul(82) / 100
+    } else {
+        panel_width
+    };
+    let columns = (effective_width.saturating_sub(128) as usize / 8).max(24);
+    let main_rows = estimated_text_rows(text, columns, 22);
+    let detail_rows = estimated_text_rows(detail, columns.saturating_sub(4).max(20), 14);
+    let chrome = match kind {
+        ConversationBlockKind::Diagnostic => 58.0,
+        ConversationBlockKind::User => 66.0,
+        _ => 72.0,
+    };
+    let main_height = main_rows.max(1) as f32 * 22.0;
+    let detail_height = if detail_rows == 0 {
+        0.0
+    } else if kind == ConversationBlockKind::Assistant {
+        42.0 + detail_rows as f32 * 19.0
+    } else {
+        24.0 + detail_rows as f32 * 19.0
+    };
+    let minimum = match kind {
+        ConversationBlockKind::Diagnostic => 86.0,
+        ConversationBlockKind::User => 94.0,
+        ConversationBlockKind::Tool => 106.0,
+        _ => 110.0,
+    };
+    (chrome + main_height + detail_height)
+        .max(minimum)
+        .min(TRANSCRIPT_ROW_MAX_HEIGHT)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationBlockKind {
     User,
@@ -304,6 +362,8 @@ impl ConversationBlockKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationBlock {
     pub id: String,
+    /// Stable content revision computed once while hydrating product state.
+    pub source_revision: u64,
     pub kind: ConversationBlockKind,
     pub title: String,
     pub text: String,
@@ -328,6 +388,227 @@ impl ConversationBlock {
 
     fn retained_bytes(&self) -> usize {
         self.id.len() + self.title.len() + self.text.len() + self.detail.len()
+    }
+
+    fn refresh_source_revision(&mut self) {
+        self.source_revision = conversation_block_revision(self);
+    }
+}
+
+#[derive(Debug)]
+pub struct ConversationRowRenderSource<'a> {
+    pub cache_key: &'a str,
+    pub row_id: &'a str,
+    pub source_revision: u64,
+    pub title: Cow<'a, str>,
+    pub text: &'a str,
+    pub detail: &'a str,
+    pub kind: ConversationBlockKind,
+    pub done: bool,
+    pub is_error: bool,
+    pub image_count: usize,
+    pub truncated: bool,
+    pub durable: bool,
+}
+
+/// Cheaply cloned render input for a conversation row.
+///
+/// Completed Markdown and its stable GPUI state keys remain frozen until the
+/// source revision changes. Width changes only invalidate the measured height.
+#[derive(Debug, Clone)]
+pub struct ConversationRowRenderData {
+    pub cache_key: Arc<str>,
+    pub row_id: Arc<str>,
+    pub source_revision: u64,
+    pub sanitized_revision: u64,
+    pub title: Arc<str>,
+    pub text: Arc<str>,
+    pub detail: Arc<str>,
+    pub markdown_state_key: Arc<str>,
+    pub detail_markdown_state_key: Arc<str>,
+    pub kind: ConversationBlockKind,
+    pub done: bool,
+    pub is_error: bool,
+    pub image_count: usize,
+    pub preview_truncated: bool,
+    pub media_neutralized: bool,
+    pub durable: bool,
+    pub width_bucket: u32,
+    pub measured_height: f32,
+}
+
+impl ConversationRowRenderData {
+    fn retained_bytes(&self) -> usize {
+        // `cache_key` is also owned by the HashMap, so account for both copies.
+        self.cache_key.len() * 2
+            + self.row_id.len()
+            + self.title.len()
+            + self.text.len()
+            + self.detail.len()
+            + self.markdown_state_key.len()
+            + self.detail_markdown_state_key.len()
+    }
+}
+
+#[derive(Debug)]
+struct ConversationRowRenderCacheEntry {
+    data: ConversationRowRenderData,
+    retained_bytes: usize,
+    touched_generation: u64,
+}
+
+/// Revision-aware, memory-bounded cache for transcript row presentation.
+#[derive(Debug)]
+pub struct ConversationRowRenderCache {
+    entries: HashMap<String, ConversationRowRenderCacheEntry>,
+    retained_bytes: usize,
+    generation: u64,
+    max_entries: usize,
+    max_retained_bytes: usize,
+    #[cfg(test)]
+    sanitization_count: usize,
+}
+
+impl Default for ConversationRowRenderCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            retained_bytes: 0,
+            generation: 0,
+            max_entries: MAX_ROW_RENDER_CACHE_ENTRIES,
+            max_retained_bytes: MAX_ROW_RENDER_CACHE_BYTES,
+            #[cfg(test)]
+            sanitization_count: 0,
+        }
+    }
+}
+
+impl ConversationRowRenderCache {
+    pub fn begin_frame(&mut self) {
+        self.generation = self.generation.wrapping_add(1).max(1);
+    }
+
+    pub fn resolve(
+        &mut self,
+        source: ConversationRowRenderSource<'_>,
+        width_bucket: u32,
+    ) -> ConversationRowRenderData {
+        if let Some(entry) = self.entries.get_mut(source.cache_key)
+            && entry.data.source_revision == source.source_revision
+            && entry.data.sanitized_revision == source.source_revision
+        {
+            entry.touched_generation = self.generation;
+            if entry.data.width_bucket != width_bucket {
+                entry.data.width_bucket = width_bucket;
+                entry.data.measured_height = conversation_block_height(
+                    entry.data.kind,
+                    &entry.data.text,
+                    &entry.data.detail,
+                    width_bucket,
+                );
+            }
+            return entry.data.clone();
+        }
+
+        let (text, detail, preview_truncated, media_neutralized) = if source.done {
+            #[cfg(test)]
+            {
+                self.sanitization_count = self.sanitization_count.saturating_add(1);
+            }
+            let text = bounded_markdown_preview(source.text);
+            let detail = bounded_markdown_preview(source.detail);
+            (
+                Arc::<str>::from(text.text),
+                Arc::<str>::from(detail.text),
+                source.truncated || text.truncated || detail.truncated,
+                text.media_neutralized || detail.media_neutralized,
+            )
+        } else {
+            (
+                Arc::<str>::from(source.text),
+                Arc::<str>::from(source.detail),
+                source.truncated,
+                false,
+            )
+        };
+        let cache_key = Arc::<str>::from(source.cache_key);
+        let row_id = Arc::<str>::from(source.row_id);
+        let data = ConversationRowRenderData {
+            markdown_state_key: Arc::from(format!("transcript-markdown:{}", source.cache_key)),
+            detail_markdown_state_key: Arc::from(format!(
+                "transcript-detail-markdown:{}",
+                source.cache_key
+            )),
+            cache_key,
+            row_id,
+            source_revision: source.source_revision,
+            sanitized_revision: source.source_revision,
+            title: Arc::from(source.title.as_ref()),
+            measured_height: conversation_block_height(source.kind, &text, &detail, width_bucket),
+            text,
+            detail,
+            kind: source.kind,
+            done: source.done,
+            is_error: source.is_error,
+            image_count: source.image_count,
+            preview_truncated,
+            media_neutralized,
+            durable: source.durable,
+            width_bucket,
+        };
+        let retained_bytes = data.retained_bytes();
+        let entry = ConversationRowRenderCacheEntry {
+            data: data.clone(),
+            retained_bytes,
+            touched_generation: self.generation,
+        };
+        if let Some(previous) = self.entries.insert(source.cache_key.to_owned(), entry) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(previous.retained_bytes);
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        data
+    }
+
+    pub fn finish_frame(&mut self) {
+        let generation = self.generation;
+        self.retain(|entry| entry.touched_generation == generation);
+        while self.entries.len() > self.max_entries || self.retained_bytes > self.max_retained_bytes
+        {
+            let Some(key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.touched_generation)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.remove(&key);
+        }
+    }
+
+    fn retain(&mut self, mut predicate: impl FnMut(&ConversationRowRenderCacheEntry) -> bool) {
+        self.entries.retain(|_, entry| {
+            let keep = predicate(entry);
+            if !keep {
+                self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
+            }
+            keep
+        });
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
+        }
+    }
+
+    #[cfg(test)]
+    fn with_limits(max_entries: usize, max_retained_bytes: usize) -> Self {
+        Self {
+            max_entries,
+            max_retained_bytes,
+            ..Self::default()
+        }
     }
 }
 
@@ -385,6 +666,7 @@ impl ConversationProjection {
                 let before = previous.retained_bytes();
                 previous.title = next_diagnostic_title(&previous.title);
                 previous.truncated |= block.truncated;
+                previous.refresh_source_revision();
                 Some((before, previous.retained_bytes()))
             });
             if let Some((before, after)) = merged_bytes {
@@ -1049,8 +1331,9 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
     } else {
         format!("{}:{source_id}", kind.key())
     };
-    ConversationBlock {
+    let mut block = ConversationBlock {
         id,
+        source_revision: 0,
         kind,
         title,
         text,
@@ -1059,7 +1342,38 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
         is_error,
         image_count,
         truncated,
+    };
+    block.refresh_source_revision();
+    block
+}
+
+fn conversation_block_revision(block: &ConversationBlock) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn update(mut hash: u64, bytes: &[u8]) -> u64 {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
     }
+
+    let mut hash = FNV_OFFSET;
+    for value in [
+        block.id.as_bytes(),
+        block.kind.key().as_bytes(),
+        block.title.as_bytes(),
+        block.text.as_bytes(),
+        block.detail.as_bytes(),
+    ] {
+        hash = update(hash, &(value.len() as u64).to_le_bytes());
+        hash = update(hash, value);
+    }
+    hash = update(hash, &[u8::from(block.done)]);
+    hash = update(hash, &[u8::from(block.is_error)]);
+    hash = update(hash, &(block.image_count as u64).to_le_bytes());
+    update(hash, &[u8::from(block.truncated)])
 }
 
 fn summary_block(
@@ -1127,6 +1441,126 @@ mod tests {
             target_height,
             streaming,
         }
+    }
+
+    fn render_source<'a>(
+        key: &'a str,
+        revision: u64,
+        text: &'a str,
+        done: bool,
+    ) -> ConversationRowRenderSource<'a> {
+        ConversationRowRenderSource {
+            cache_key: key,
+            row_id: key,
+            source_revision: revision,
+            title: Cow::Borrowed("Assistant"),
+            text,
+            detail: "",
+            kind: ConversationBlockKind::Assistant,
+            done,
+            is_error: false,
+            image_count: 0,
+            truncated: false,
+            durable: true,
+        }
+    }
+
+    #[test]
+    fn completed_row_cache_sanitizes_once_and_freezes_revision_state() {
+        let mut cache = ConversationRowRenderCache::default();
+        let large = format!(
+            "# Answer\n\n![remote](https://invalid/image)\n\n{}",
+            "x".repeat(64_000)
+        );
+        cache.begin_frame();
+        let first = cache.resolve(render_source("session:assistant:1", 7, &large, true), 960);
+        let second = cache.resolve(
+            render_source(
+                "session:assistant:1",
+                7,
+                "ignored without a new revision",
+                true,
+            ),
+            960,
+        );
+        cache.finish_frame();
+
+        assert_eq!(cache.sanitization_count, 1);
+        assert_eq!(first.sanitized_revision, 7);
+        assert!(Arc::ptr_eq(&first.text, &second.text));
+        assert!(Arc::ptr_eq(
+            &first.markdown_state_key,
+            &second.markdown_state_key
+        ));
+        assert_eq!(first.text, second.text);
+        assert!(first.media_neutralized);
+    }
+
+    #[test]
+    fn width_change_remeasures_without_resanitizing_or_cloning_text() {
+        let mut cache = ConversationRowRenderCache::default();
+        let text = "wide conversation content ".repeat(200);
+        cache.begin_frame();
+        let wide = cache.resolve(render_source("session:assistant:2", 1, &text, true), 1_200);
+        let narrow = cache.resolve(render_source("session:assistant:2", 1, &text, true), 480);
+        cache.finish_frame();
+
+        assert_eq!(cache.sanitization_count, 1);
+        assert!(Arc::ptr_eq(&wide.text, &narrow.text));
+        assert_ne!(wide.width_bucket, narrow.width_bucket);
+        assert!(narrow.measured_height >= wide.measured_height);
+    }
+
+    #[test]
+    fn streaming_row_cache_reuses_arc_until_source_revision_changes() {
+        let mut cache = ConversationRowRenderCache::default();
+        cache.begin_frame();
+        let first = cache.resolve(
+            render_source("session:assistant:3", 1, "partial", false),
+            800,
+        );
+        let same = cache.resolve(
+            render_source("session:assistant:3", 1, "partial", false),
+            800,
+        );
+        let updated = cache.resolve(
+            render_source("session:assistant:3", 2, "partial update", false),
+            800,
+        );
+        cache.finish_frame();
+
+        assert_eq!(cache.sanitization_count, 0);
+        assert!(Arc::ptr_eq(&first.text, &same.text));
+        assert!(!Arc::ptr_eq(&same.text, &updated.text));
+        assert_eq!(&*updated.text, "partial update");
+    }
+
+    #[test]
+    fn row_render_cache_drops_stale_entries_and_enforces_bounds() {
+        let mut cache = ConversationRowRenderCache::with_limits(2, 128 * 1024);
+        cache.begin_frame();
+        cache.resolve(render_source("old", 1, "old", false), 800);
+        cache.finish_frame();
+        assert!(cache.entries.contains_key("old"));
+
+        cache.begin_frame();
+        for key in ["new-a", "new-b", "new-c"] {
+            cache.resolve(render_source(key, 1, &"x".repeat(8_000), false), 800);
+        }
+        cache.finish_frame();
+
+        assert!(!cache.entries.contains_key("old"));
+        assert!(cache.entries.len() <= 2);
+        assert!(cache.retained_bytes <= 128 * 1024);
+    }
+
+    #[test]
+    fn conversation_row_estimates_use_display_width_for_unicode() {
+        assert_eq!(estimated_text_rows("abcdefghij", 10, 20), 1);
+        assert_eq!(estimated_text_rows("界界界界界", 10, 20), 1);
+        assert_eq!(estimated_text_rows("界界界界界界", 10, 20), 2);
+        assert_eq!(estimated_text_rows("🙂🙂🙂🙂🙂", 10, 20), 1);
+        assert_eq!(estimated_text_rows("e\u{301}e\u{301}e\u{301}", 3, 20), 1);
     }
 
     #[test]

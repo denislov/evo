@@ -185,12 +185,12 @@ NativeShell
 
 #### DESK-009 ConversationRowRenderCache
 
-- [ ] 每条 row 保存 source revision、sanitized revision、`Arc<str>`、Markdown state、width bucket 和 measured height。
-- [ ] `bounded_markdown_preview` 每个 revision 最多执行一次。
-- [ ] 完成消息的 sanitized text、parse tree 和高度保持冻结。
-- [ ] 缓存受 transcript 数量和字节上限约束。
+- [x] 每条 row 保存 source revision、sanitized revision、`Arc<str>`、稳定 Markdown state key、width bucket 和 measured height。
+- [x] `bounded_markdown_preview` 对每个 text/detail 字段、每个 revision 最多执行一次；width bucket 改变只重新估高。
+- [x] 完成消息的 sanitized text、GPUI keyed parse state 和高度保持冻结，revision 改变才失效。
+- [x] 缓存同时受 transcript 数量（10,256 entries）和保留字节（40 MiB）上限约束，并在 session/row 消失后回收 stale entry。
 
-验收：普通 render 不 clone 大字符串，不重新安全清洗未改变的消息。
+验收：普通 render 只 clone `Arc`，不 clone 大字符串，不重新安全清洗未改变的消息；缓存命中、revision 冻结、width-only remeasure、streaming 更新和数量/字节淘汰均有自动化测试。
 
 #### DESK-010 持久化虚拟列表尺寸
 
@@ -347,7 +347,8 @@ desktop.input.latency
 | DESK-006 | 完成 | 基于真实 offset 的迟滞状态机、streaming unseen 计数和无布局占位的浮动 pill 已完成；GUI 像素门禁归入 DESK-017 |
 | DESK-007 | 完成 | 文本保持 16ms 批次，行高约 15Hz；Following 底部锚定、Paused offset compensation 和 Unicode display width 已完成 |
 | DESK-008 | 完成 | typed delta 已贯穿 Projection→NativeShell；product event 只增量同步 dirty overlay，replace 路径保留全量重建 |
-| DESK-009～018 | 待开始 | 下一步建立 ConversationRowRenderCache，缓存 sanitized text、revision、Markdown state 和 measured height |
+| DESK-009 | 完成 | revision-aware bounded row cache 已接入 NativeShell；sanitized `Arc<str>`、稳定 Markdown state key 和 measured height 可复用 |
+| DESK-010～018 | 待开始 | 下一步持久化虚拟列表尺寸，消除每帧为完整 transcript 重建 row/size vector 的 O(N) 工作 |
 
 ## 10. 完成定义
 

@@ -6,9 +6,12 @@ use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
 use desktop::conversation::{
     ComposerAdmission, ComposerState, ComposerSubmissionKind, ConversationBlockKind,
-    ConversationRowLayoutInput, ConversationRowLayoutState, ConversationViewport,
-    bounded_markdown_preview, conversation_width_bucket,
+    ConversationRowLayoutInput, ConversationRowLayoutState, ConversationRowRenderCache,
+    ConversationRowRenderData, ConversationRowRenderSource, ConversationViewport,
+    conversation_width_bucket,
 };
+#[cfg(test)]
+use desktop::conversation::{TRANSCRIPT_ROW_MAX_HEIGHT, conversation_block_height};
 use desktop::file_review::{
     DesktopFileReviewDocument, DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES,
 };
@@ -24,8 +27,8 @@ use desktop::shell::{
 };
 use gpui::{
     AnyElement, ClipboardItem, Context, ElementId, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Render, ScrollStrategy, Styled as _, Subscription, Window, WindowBounds,
-    div, prelude::*, px, relative, rgb, rgba, size,
+    ParentElement as _, Render, ScrollStrategy, SharedString, Styled as _, Subscription, Window,
+    WindowBounds, div, prelude::*, px, relative, rgb, rgba, size,
 };
 use gpui_component::{
     Disableable as _, VirtualListScrollHandle,
@@ -34,10 +37,11 @@ use gpui_component::{
     text::TextView,
     v_virtual_list,
 };
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
-use unicode_width::UnicodeWidthStr as _;
 
 use crate::actions::{
     self, AbortActiveOperation, AuthorizationAllowForOperation, AuthorizationAllowOnce,
@@ -51,7 +55,6 @@ use crate::command_ledger::{DesktopCommandIntent, DesktopCommandLedger};
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const COMPOSER_MIN_HEIGHT: f32 = 88.;
 const COMPOSER_MAX_HEIGHT: f32 = 236.;
-const TRANSCRIPT_ROW_MAX_HEIGHT: f32 = 680.;
 
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
@@ -96,11 +99,12 @@ fn tool_conversation_block_id(tool: &desktop::projection::DesktopToolOverlay) ->
 
 fn conversation_text_element(
     id: ElementId,
-    text: String,
+    text: Arc<str>,
     mode: ConversationTextRenderMode,
     window: &mut Window,
     cx: &mut Context<NativeShell>,
 ) -> AnyElement {
+    let text = SharedString::new(text);
     match mode {
         ConversationTextRenderMode::StreamingPlainText => div()
             .w_full()
@@ -168,58 +172,6 @@ fn conversation_block_visual(
     }
 }
 
-fn estimated_text_rows(text: &str, columns: usize, limit: usize) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-    let mut rows = 0usize;
-    for line in text.lines().take(limit) {
-        rows = rows.saturating_add(line.width().max(1).div_ceil(columns));
-        if rows >= limit {
-            return limit;
-        }
-    }
-    rows.max(1).min(limit)
-}
-
-fn conversation_block_height(
-    kind: ConversationBlockKind,
-    text: &str,
-    detail: &str,
-    panel_width: u32,
-) -> f32 {
-    let effective_width = if kind == ConversationBlockKind::User {
-        panel_width.saturating_mul(82) / 100
-    } else {
-        panel_width
-    };
-    let columns = (effective_width.saturating_sub(128) as usize / 8).max(24);
-    let main_rows = estimated_text_rows(text, columns, 22);
-    let detail_rows = estimated_text_rows(detail, columns.saturating_sub(4).max(20), 14);
-    let chrome = match kind {
-        ConversationBlockKind::Diagnostic => 58.,
-        ConversationBlockKind::User => 66.,
-        _ => 72.,
-    };
-    let main_height = main_rows.max(1) as f32 * 22.;
-    let detail_height = if detail_rows == 0 {
-        0.
-    } else if kind == ConversationBlockKind::Assistant {
-        42. + detail_rows as f32 * 19.
-    } else {
-        24. + detail_rows as f32 * 19.
-    };
-    let minimum = match kind {
-        ConversationBlockKind::Diagnostic => 86.,
-        ConversationBlockKind::User => 94.,
-        ConversationBlockKind::Tool => 106.,
-        _ => 110.,
-    };
-    (chrome + main_height + detail_height)
-        .max(minimum)
-        .min(TRANSCRIPT_ROW_MAX_HEIGHT)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DesktopThinkingSelection {
     Default,
@@ -271,19 +223,6 @@ impl DesktopThinkingSelection {
     }
 }
 
-struct VisibleConversationBlock {
-    id: String,
-    kind: ConversationBlockKind,
-    title: String,
-    text: String,
-    detail: String,
-    done: bool,
-    is_error: bool,
-    image_count: usize,
-    truncated: bool,
-    durable: bool,
-}
-
 #[derive(Default)]
 enum DesktopFileReviewState {
     #[default]
@@ -314,6 +253,8 @@ pub(super) struct NativeShell {
     conversation_viewport: ConversationViewport,
     conversation_scroll: VirtualListScrollHandle,
     conversation_layout: ConversationRowLayoutState,
+    conversation_render_cache: ConversationRowRenderCache,
+    conversation_render_rows: Vec<ConversationRowRenderData>,
     conversation_height_refresh_deadline: Option<Instant>,
     composer: ComposerState,
     composer_input: gpui::Entity<InputState>,
@@ -452,6 +393,8 @@ impl NativeShell {
             conversation_viewport: ConversationViewport::new(8),
             conversation_scroll: VirtualListScrollHandle::new(),
             conversation_layout: ConversationRowLayoutState::default(),
+            conversation_render_cache: ConversationRowRenderCache::default(),
+            conversation_render_rows: Vec::new(),
             conversation_height_refresh_deadline: None,
             composer: ComposerState::default(),
             composer_input,
@@ -2467,151 +2410,116 @@ impl NativeShell {
         self.focus_active_target(window, cx);
     }
 
-    fn visible_conversation_row_layout(
-        &self,
-        index: usize,
-        panel_width: u32,
-    ) -> Option<ConversationRowLayoutInput> {
-        let durable_count = self.projection.conversation().blocks().len();
-        if let Some(block) = self.projection.conversation().blocks().get(index) {
-            return Some(ConversationRowLayoutInput {
-                key: block.id.clone(),
-                target_height: conversation_block_height(
-                    block.kind,
-                    &block.text,
-                    &block.detail,
-                    panel_width,
-                ),
-                streaming: !block.done,
-            });
-        }
-        let overlay_index = index.saturating_sub(durable_count);
-        let overlay_index = if let Some(submitted) = self.composer.submitted() {
-            if overlay_index == 0 {
-                return Some(ConversationRowLayoutInput {
-                    key: submitted.block_id(),
-                    target_height: conversation_block_height(
-                        ConversationBlockKind::User,
-                        &submitted.payload,
-                        "",
-                        panel_width,
-                    ),
-                    streaming: true,
-                });
-            }
-            overlay_index - 1
-        } else {
-            overlay_index
-        };
-        if let Some(message) = self.projection.messages().get(overlay_index) {
-            return Some(ConversationRowLayoutInput {
-                key: message_conversation_block_id(message),
-                target_height: conversation_block_height(
-                    ConversationBlockKind::Assistant,
-                    &message.text,
-                    &message.thinking,
-                    panel_width,
-                ),
-                streaming: matches!(
-                    message.status,
-                    desktop::projection::DesktopMessageStatus::Streaming
-                ),
-            });
-        }
-        let tool_index = overlay_index.checked_sub(self.projection.messages().len())?;
-        self.projection
-            .tools()
-            .get(tool_index)
-            .map(|tool| ConversationRowLayoutInput {
-                key: tool_conversation_block_id(tool),
-                target_height: conversation_block_height(
-                    ConversationBlockKind::Tool,
-                    &tool.detail,
-                    &tool.arguments,
-                    panel_width,
-                ),
-                streaming: matches!(tool.status, desktop::projection::DesktopToolStatus::Running),
-            })
-    }
+    fn rebuild_conversation_render_rows(&mut self, panel_width: u32) {
+        let conversation = self.projection.conversation();
+        let session_id = conversation.session_id.as_str();
+        let expected_count = conversation.blocks().len()
+            + usize::from(self.composer.submitted().is_some())
+            + self.projection.messages().len()
+            + self.projection.tools().len();
+        let mut rows = Vec::with_capacity(expected_count);
+        self.conversation_render_cache.begin_frame();
 
-    fn visible_conversation_block(&self, index: usize) -> Option<VisibleConversationBlock> {
-        let durable_count = self.projection.conversation().blocks().len();
-        if let Some(block) = self.projection.conversation().blocks().get(index) {
+        for block in conversation.blocks() {
             let promote_detail = block.kind != ConversationBlockKind::Assistant
                 && block.text.is_empty()
                 && !block.detail.is_empty();
-            return Some(VisibleConversationBlock {
-                id: block.id.clone(),
-                kind: block.kind,
-                title: block.title.clone(),
-                text: if promote_detail {
-                    block.detail.clone()
-                } else {
-                    block.text.clone()
+            let cache_key = format!("{session_id}:{}", block.id);
+            rows.push(self.conversation_render_cache.resolve(
+                ConversationRowRenderSource {
+                    cache_key: &cache_key,
+                    row_id: &block.id,
+                    source_revision: block.source_revision,
+                    title: Cow::Borrowed(&block.title),
+                    text: if promote_detail {
+                        &block.detail
+                    } else {
+                        &block.text
+                    },
+                    detail: if promote_detail { "" } else { &block.detail },
+                    kind: block.kind,
+                    done: block.done,
+                    is_error: block.is_error,
+                    image_count: block.image_count,
+                    truncated: block.truncated,
+                    durable: true,
                 },
-                detail: if promote_detail {
-                    String::new()
-                } else {
-                    block.detail.clone()
-                },
-                done: block.done,
-                is_error: block.is_error,
-                image_count: block.image_count,
-                truncated: block.truncated,
-                durable: true,
-            });
+                panel_width,
+            ));
         }
-        let overlay_index = index.checked_sub(durable_count)?;
-        let overlay_index = if let Some(submitted) = self.composer.submitted() {
-            if overlay_index == 0 {
-                return Some(VisibleConversationBlock {
-                    id: submitted.block_id(),
+
+        if let Some(submitted) = self.composer.submitted() {
+            let row_id = submitted.block_id();
+            let cache_key = format!("{session_id}:{row_id}");
+            rows.push(self.conversation_render_cache.resolve(
+                ConversationRowRenderSource {
+                    cache_key: &cache_key,
+                    row_id: &row_id,
+                    source_revision: submitted.command_id,
+                    title: Cow::Borrowed("You · submitted"),
+                    text: &submitted.payload,
+                    detail: "",
                     kind: ConversationBlockKind::User,
-                    title: "You · submitted".into(),
-                    text: submitted.payload.clone(),
-                    detail: String::new(),
                     done: false,
                     is_error: false,
                     image_count: 0,
                     truncated: false,
                     durable: false,
-                });
-            }
-            overlay_index - 1
-        } else {
-            overlay_index
-        };
-        if let Some(message) = self.projection.messages().get(overlay_index) {
-            return Some(VisibleConversationBlock {
-                id: message_conversation_block_id(message),
-                kind: ConversationBlockKind::Assistant,
-                title: "Assistant · live".into(),
-                text: message.text.clone(),
-                detail: message.thinking.clone(),
-                done: matches!(
-                    message.status,
-                    desktop::projection::DesktopMessageStatus::Completed
-                ),
-                is_error: false,
-                image_count: 0,
-                truncated: message.truncated,
-                durable: false,
-            });
+                },
+                panel_width,
+            ));
         }
-        let tool_index = overlay_index.checked_sub(self.projection.messages().len())?;
-        let tool = self.projection.tools().get(tool_index)?;
-        Some(VisibleConversationBlock {
-            id: tool_conversation_block_id(tool),
-            kind: ConversationBlockKind::Tool,
-            title: format!("Tool · {} · live", tool.name),
-            text: tool.detail.clone(),
-            detail: tool.arguments.clone(),
-            done: !matches!(tool.status, desktop::projection::DesktopToolStatus::Running),
-            is_error: matches!(tool.status, desktop::projection::DesktopToolStatus::Failed),
-            image_count: 0,
-            truncated: tool.truncated,
-            durable: false,
-        })
+
+        for message in self.projection.messages() {
+            let row_id = message_conversation_block_id(message);
+            let cache_key = format!("{session_id}:{row_id}");
+            rows.push(self.conversation_render_cache.resolve(
+                ConversationRowRenderSource {
+                    cache_key: &cache_key,
+                    row_id: &row_id,
+                    source_revision: message.updated_sequence,
+                    title: Cow::Borrowed("Assistant · live"),
+                    text: &message.text,
+                    detail: &message.thinking,
+                    kind: ConversationBlockKind::Assistant,
+                    done: matches!(
+                        message.status,
+                        desktop::projection::DesktopMessageStatus::Completed
+                    ),
+                    is_error: false,
+                    image_count: 0,
+                    truncated: message.truncated,
+                    durable: false,
+                },
+                panel_width,
+            ));
+        }
+
+        for tool in self.projection.tools() {
+            let row_id = tool_conversation_block_id(tool);
+            let cache_key = format!("{session_id}:{row_id}");
+            rows.push(self.conversation_render_cache.resolve(
+                ConversationRowRenderSource {
+                    cache_key: &cache_key,
+                    row_id: &row_id,
+                    source_revision: tool.updated_sequence,
+                    title: Cow::Owned(format!("Tool · {} · live", tool.name)),
+                    text: &tool.detail,
+                    detail: &tool.arguments,
+                    kind: ConversationBlockKind::Tool,
+                    done: !matches!(tool.status, desktop::projection::DesktopToolStatus::Running),
+                    is_error: matches!(tool.status, desktop::projection::DesktopToolStatus::Failed),
+                    image_count: 0,
+                    truncated: tool.truncated,
+                    durable: false,
+                },
+                panel_width,
+            ));
+        }
+
+        self.conversation_render_cache.finish_frame();
+        debug_assert_eq!(rows.len(), expected_count);
+        self.conversation_render_rows = rows;
     }
 
     fn focus_active_target(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2678,6 +2586,8 @@ impl Render for NativeShell {
         let theme = SemanticTheme::GEEK_DARK;
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
+        let layout_width = conversation_width_bucket(layout.conversation.width);
+        self.rebuild_conversation_render_rows(layout_width);
         let status = self.semantic_status();
         let authorization_request = self
             .projection
@@ -2999,9 +2909,14 @@ impl Render for NativeShell {
         let profile_count = project.profiles.len();
         let model_count = project.models.len();
         let config_diagnostic_count = project.diagnostics.len();
-        let layout_width = conversation_width_bucket(layout.conversation.width);
-        let row_layout_inputs = (0..visible_conversation_count)
-            .filter_map(|index| self.visible_conversation_row_layout(index, layout_width))
+        let row_layout_inputs = self
+            .conversation_render_rows
+            .iter()
+            .map(|row| ConversationRowLayoutInput {
+                key: row.cache_key.to_string(),
+                target_height: row.measured_height,
+                streaming: !row.done,
+            })
             .collect::<Vec<_>>();
         debug_assert_eq!(row_layout_inputs.len(), visible_conversation_count);
         let previous_scroll_top = (!self.conversation_viewport.follow_latest())
@@ -3032,7 +2947,7 @@ impl Render for NativeShell {
             {
                 self.conversation_height_refresh_deadline = Some(deadline);
                 cx.spawn(async move |this, cx| {
-                    gpui::Timer::after(delay).await;
+                    cx.background_executor().timer(delay).await;
                     let _ = this.update(cx, |this, cx| {
                         if this.conversation_height_refresh_deadline == Some(deadline) {
                             this.conversation_height_refresh_deadline = None;
@@ -3057,55 +2972,27 @@ impl Render for NativeShell {
             |this, visible_range, window, cx| {
                 visible_range
                     .filter_map(|index| {
-                        let block = this.visible_conversation_block(index)?;
+                        let block = this.conversation_render_rows.get(index)?.clone();
                         let selected = this.conversation_viewport.selected_block_id()
-                            == Some(block.id.as_str());
-                        let block_id = block.id.clone();
-                        let session_id = &this.projection.conversation().session_id;
-                        let markdown_id = ElementId::Name(
-                            format!("transcript-markdown:{session_id}:{}", block.id).into(),
-                        );
-                        let detail_markdown_id = ElementId::Name(
-                            format!("transcript-detail-markdown:{session_id}:{}", block.id).into(),
-                        );
+                            == Some(block.row_id.as_ref());
+                        let block_id = block.row_id.to_string();
+                        let markdown_id = ElementId::Name(SharedString::new(
+                            block.markdown_state_key.clone(),
+                        ));
+                        let detail_markdown_id = ElementId::Name(SharedString::new(
+                            block.detail_markdown_state_key.clone(),
+                        ));
                         let durable = block.durable;
                         let text_render_mode = conversation_text_render_mode(block.done);
-                        let (text, detail_text, preview_truncated, media_neutralized) =
-                            if text_render_mode == ConversationTextRenderMode::FinalMarkdown {
-                                let markdown = bounded_markdown_preview(&block.text);
-                                let detail_markdown = bounded_markdown_preview(&block.detail);
-                                (
-                                    markdown.text,
-                                    detail_markdown.text,
-                                    block.truncated
-                                        || markdown.truncated
-                                        || detail_markdown.truncated,
-                                    markdown.media_neutralized || detail_markdown.media_neutralized,
-                                )
-                            } else {
-                                (
-                                    block.text.clone(),
-                                    block.detail.clone(),
-                                    block.truncated,
-                                    false,
-                                )
-                            };
+                        let text = block.text.clone();
+                        let detail_text = block.detail.clone();
                         let theme = SemanticTheme::GEEK_DARK;
                         let visual =
                             conversation_block_visual(block.kind, block.is_error, theme);
                         let row_height = this
                             .conversation_layout
-                            .height_for(&block.id)
-                            .unwrap_or_else(|| {
-                                conversation_block_height(
-                                    block.kind,
-                                    &block.text,
-                                    &block.detail,
-                                    conversation_width_bucket(
-                                        this.layout(window).conversation.width,
-                                    ),
-                                )
-                            });
+                            .height_for(&block.cache_key)
+                            .unwrap_or(block.measured_height);
                         let is_assistant = block.kind == ConversationBlockKind::Assistant;
                         let is_tool = block.kind == ConversationBlockKind::Tool;
                         let terminal_label = if block.is_error {
@@ -3192,7 +3079,9 @@ impl Render for NativeShell {
                                                                 .text_color(rgb(
                                                                     theme.text.value(),
                                                                 ))
-                                                                .child(block.title),
+                                                                .child(SharedString::new(
+                                                                    block.title.clone(),
+                                                                )),
                                                         ),
                                                 )
                                                 .when_some(
@@ -3273,14 +3162,14 @@ impl Render for NativeShell {
                                                     )),
                                             )
                                         })
-                                        .when(preview_truncated, |card| {
+                                        .when(block.preview_truncated, |card| {
                                             card.child(
                                                 div().text_color(rgb(theme.warning.value())).child(
                                                     "! preview truncated at desktop safety limit",
                                                 ),
                                             )
                                         })
-                                        .when(media_neutralized, |card| {
+                                        .when(block.media_neutralized, |card| {
                                             card.child(
                                                 div()
                                                     .text_color(rgb(theme.muted_text.value()))
@@ -4546,15 +4435,6 @@ mod tests {
     }
 
     #[test]
-    fn conversation_row_estimates_use_display_width_for_unicode() {
-        assert_eq!(estimated_text_rows("abcdefghij", 10, 20), 1);
-        assert_eq!(estimated_text_rows("界界界界界", 10, 20), 1);
-        assert_eq!(estimated_text_rows("界界界界界界", 10, 20), 2);
-        assert_eq!(estimated_text_rows("🙂🙂🙂🙂🙂", 10, 20), 1);
-        assert_eq!(estimated_text_rows("e\u{301}e\u{301}e\u{301}", 3, 20), 1);
-    }
-
-    #[test]
     fn conversation_bottom_distance_matches_negative_gpui_offsets() {
         assert_eq!(conversation_distance_to_bottom(0.0, 640.0), 640.0);
         assert_eq!(conversation_distance_to_bottom(-400.0, 640.0), 240.0);
@@ -4613,17 +4493,20 @@ mod tests {
         );
 
         let source = include_str!("native_shell.rs");
-        assert!(source.contains("transcript-markdown:{session_id}:{}"));
-        assert!(source.contains("transcript-detail-markdown:{session_id}:{}"));
+        assert!(source.contains("block.markdown_state_key.clone()"));
+        assert!(source.contains("block.detail_markdown_state_key.clone()"));
         assert!(!source.contains("(\"transcript-markdown\", index)"));
         assert!(!source.contains("(\"transcript-detail-markdown\", index)"));
+        let legacy_per_render_sanitizer =
+            ["bounded_markdown_preview(", "&block.text", ")"].concat();
+        assert!(!source.contains(&legacy_per_render_sanitizer));
     }
 
     #[test]
     fn composer_and_transcript_source_do_not_restore_fixed_heights() {
         let source = include_str!("native_shell.rs");
         assert!(source.contains(".auto_grow(2, 8)"));
-        assert!(source.contains("visible_conversation_block_height"));
+        assert!(source.contains("row.measured_height"));
         let fixed_row_height = [".h(px(", "220.))"].concat();
         let fixed_composer_height = [".h(px(", "COMPOSER_HEIGHT"].concat();
         assert!(!source.contains(&fixed_row_height));
