@@ -33,7 +33,7 @@ use gpui::{
 use gpui_component::{
     Disableable as _, VirtualListScrollHandle,
     button::Button,
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, InputState},
     text::TextView,
 };
 use std::borrow::Cow;
@@ -301,6 +301,7 @@ pub(super) struct NativeShell {
     conversation_height_refresh_full: bool,
     conversation_pane: gpui::Entity<ConversationPane>,
     sessions_pane: gpui::Entity<SessionsPane>,
+    composer_pane: gpui::Entity<ComposerPane>,
     composer: ComposerState,
     composer_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
@@ -373,7 +374,8 @@ impl NativeShell {
         });
         let owner = cx.weak_entity();
         let conversation_pane = cx.new(|_| ConversationPane::new(owner.clone()));
-        let sessions_pane = cx.new(|_| SessionsPane::new(owner));
+        let sessions_pane = cx.new(|_| SessionsPane::new(owner.clone()));
+        let composer_pane = cx.new(|_| ComposerPane::new(owner));
 
         let subscriptions = vec![
             cx.on_focus(&sessions_focus, window, |this, window, cx| {
@@ -394,7 +396,7 @@ impl NativeShell {
                 |this, input, event: &InputEvent, window, cx| match event {
                     InputEvent::Change => {
                         this.composer.edit(input.read(cx).value().to_string());
-                        cx.notify();
+                        this.notify_composer_pane(cx);
                     }
                     InputEvent::Focus => {
                         this.record_focus(FocusTarget::Composer, window, cx);
@@ -404,7 +406,8 @@ impl NativeShell {
                             this.submit_primary_composer(cx);
                         }
                     }
-                    InputEvent::PressEnter { secondary: false } | InputEvent::Blur => {}
+                    InputEvent::Blur => this.notify_composer_pane(cx),
+                    InputEvent::PressEnter { secondary: false } => {}
                 },
             ),
             cx.subscribe_in(
@@ -430,6 +433,19 @@ impl NativeShell {
                     SessionsPaneEvent::Refresh => this.request_session_catalog(cx),
                     SessionsPaneEvent::Open(session_id) => {
                         this.open_session(session_id.clone(), cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &composer_pane,
+                window,
+                |this, _, event: &ComposerPaneEvent, _, cx| match event {
+                    ComposerPaneEvent::Submit => this.submit_composer(cx),
+                    ComposerPaneEvent::Steer => {
+                        this.submit_active_control(ComposerSubmissionKind::Steer, cx);
+                    }
+                    ComposerPaneEvent::FollowUp => {
+                        this.submit_active_control(ComposerSubmissionKind::FollowUp, cx);
                     }
                 },
             ),
@@ -482,6 +498,7 @@ impl NativeShell {
             conversation_height_refresh_full: false,
             conversation_pane,
             sessions_pane,
+            composer_pane,
             composer: ComposerState::default(),
             composer_input,
             composer_needs_sync: false,
@@ -530,6 +547,9 @@ impl NativeShell {
         }
         if previous == FocusTarget::Sessions || target == FocusTarget::Sessions {
             self.notify_sessions_pane(cx);
+        }
+        if previous == FocusTarget::Composer || target == FocusTarget::Composer {
+            self.notify_composer_pane(cx);
         }
     }
 
@@ -580,6 +600,7 @@ impl NativeShell {
         }
         let mut applied = 0;
         let mut sessions_pane_dirty = false;
+        let mut composer_pane_dirty = false;
         while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
             let Some(update) = self.runtime_updates.pop_front() else {
                 break;
@@ -646,6 +667,7 @@ impl NativeShell {
                 }
                 update => update,
             };
+            let composer_pane_state_before = self.composer_pane_state();
             let reload_completion = match &update {
                 desktop::runtime::DesktopRuntimeUpdate::Reloaded {
                     command_id,
@@ -1214,6 +1236,9 @@ impl NativeShell {
                 self.reconcile_file_review();
             }
             self.request_resync_if_needed();
+            if composer_pane_state_before != self.composer_pane_state() {
+                composer_pane_dirty = true;
+            }
             applied += 1;
         }
         if let Some(writer) = &self.preference_writer
@@ -1227,6 +1252,9 @@ impl NativeShell {
         if sessions_pane_dirty {
             self.notify_sessions_pane(cx);
         }
+        if composer_pane_dirty {
+            self.notify_composer_pane(cx);
+        }
         !matches!(
             self.projection.lifecycle(),
             DesktopProjectionLifecycle::Stopped
@@ -1235,6 +1263,19 @@ impl NativeShell {
 
     fn notify_sessions_pane(&self, cx: &mut Context<Self>) {
         self.sessions_pane.update(cx, |_, cx| cx.notify());
+    }
+
+    fn composer_pane_state(&self) -> (bool, bool, bool, bool) {
+        (
+            matches!(self.composer.admission(), ComposerAdmission::Pending { .. }),
+            self.projection.snapshot().active_operation.is_some(),
+            self.composer.submitted().is_some(),
+            self.composer.rejection().is_some(),
+        )
+    }
+
+    fn notify_composer_pane(&self, cx: &mut Context<Self>) {
+        self.composer_pane.update(cx, |_, cx| cx.notify());
     }
 
     fn schedule_preferences(&mut self) {
@@ -1532,6 +1573,7 @@ impl NativeShell {
             Err(error) => {
                 self.command_ledger.complete(command_id, &intent);
                 self.preference_notice = Some(error.to_string());
+                self.notify_composer_pane(cx);
                 cx.notify();
                 return;
             }
@@ -1549,6 +1591,7 @@ impl NativeShell {
             self.command_ledger.complete(command_id, &intent);
             let _ = self.composer.rejected(command_id, message);
         }
+        self.notify_composer_pane(cx);
         cx.notify();
     }
 
@@ -1593,6 +1636,7 @@ impl NativeShell {
             Err(error) => {
                 self.command_ledger.complete(command_id, &intent);
                 self.preference_notice = Some(error.to_string());
+                self.notify_composer_pane(cx);
                 cx.notify();
                 return;
             }
@@ -1614,6 +1658,7 @@ impl NativeShell {
             self.command_ledger.complete(command_id, &intent);
             let _ = self.composer.rejected(command_id, message);
         }
+        self.notify_composer_pane(cx);
         cx.notify();
     }
 
@@ -3239,11 +3284,8 @@ impl Render for NativeShell {
         };
         let omitted_transcript_count = self.projection.conversation().omitted_blocks();
         let notice = self.preference_notice.clone();
-        let composer_pending =
-            matches!(self.composer.admission(), ComposerAdmission::Pending { .. });
         let composer_running = snapshot.active_operation.is_some();
         let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
-        let composer_disabled = composer_pending || awaiting_prompt_start;
         let abort_pending = self
             .command_ledger
             .contains_where(|intent| matches!(intent, DesktopCommandIntent::Abort { .. }));
@@ -3454,8 +3496,6 @@ impl Render for NativeShell {
                     )
             }
         };
-        let composer_rejection = self.composer.rejection().map(str::to_owned);
-        let composer_focused = self.composer_input.focus_handle(cx).is_focused(window);
         let conversation_focused = self.conversation_focus.is_focused(window);
         let conversation_focus_accent = conversation_focus_accent(conversation_focused, theme);
         let committed_selection = self
@@ -3975,109 +4015,7 @@ impl Render for NativeShell {
                             })
                     }),
             )
-            .child(
-                div()
-                    .id("composer-panel")
-                    .min_h(px(COMPOSER_MIN_HEIGHT))
-                    .max_h(px(COMPOSER_MAX_HEIGHT))
-                    .flex_shrink_0()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(rgb(theme.border.value()))
-                    .bg(rgb(theme.canvas.value()))
-                    .when(composer_focused, |composer| {
-                        composer.border_color(rgb(theme.focus_ring.value()))
-                    })
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .gap_2()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(rgb(theme.border.value()))
-                            .bg(rgb(theme.elevated.value()))
-                            .p_2()
-                            .child(
-                                div().flex_1().min_w_0().child(
-                                    Input::new(&self.composer_input)
-                                        .appearance(false)
-                                        .bordered(false)
-                                        .focus_bordered(false)
-                                        .disabled(composer_disabled),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .w(px(116.))
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .justify_end()
-                                    .when(!composer_running, |actions| {
-                                        actions.child(
-                                            Button::new("submit-composer")
-                                                .label(if composer_pending {
-                                                    "Sending…"
-                                                } else {
-                                                    "Send"
-                                                })
-                                                .tooltip("Send the composer draft · Ctrl/Cmd+Enter")
-                                                .disabled(composer_disabled)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.submit_composer(cx);
-                                                })),
-                                        )
-                                    })
-                                    .when(composer_running, |actions| {
-                                        actions
-                                            .child(
-                                                Button::new("steer-operation")
-                                                    .compact()
-                                                    .label(if composer_pending {
-                                                        "Sending…"
-                                                    } else {
-                                                        "Steer"
-                                                    })
-                                                    .tooltip(
-                                                        "Send the composer draft as steering input",
-                                                    )
-                                                    .disabled(composer_disabled)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.submit_active_control(
-                                                            ComposerSubmissionKind::Steer,
-                                                            cx,
-                                                        );
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("follow-up-operation")
-                                                    .compact()
-                                                    .label("Follow up")
-                                                    .tooltip(
-                                                        "Queue the composer draft as a follow-up",
-                                                    )
-                                                    .disabled(composer_disabled)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.submit_active_control(
-                                                            ComposerSubmissionKind::FollowUp,
-                                                            cx,
-                                                        );
-                                                    })),
-                                            )
-                                    })
-                                    .when_some(composer_rejection, |actions, rejection| {
-                                        actions.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(theme.danger.value()))
-                                                .child(truncate_label(&rejection, 22)),
-                                        )
-                                    }),
-                            ),
-                    ),
-            );
+            .child(self.composer_pane.clone());
 
         let status_bar = div()
             .id("status-panel")
@@ -4710,7 +4648,7 @@ mod tests {
             .find("let conversation = div()")
             .expect("conversation panel source remains present");
         let composer_start = source[conversation_start..]
-            .find(".id(\"composer-panel\")")
+            .find(".child(self.composer_pane.clone())")
             .map(|offset| conversation_start + offset)
             .expect("composer follows the conversation transcript");
         let conversation_source = &source[conversation_start..composer_start];
@@ -4809,6 +4747,28 @@ mod tests {
     }
 
     #[test]
+    fn composer_rendering_and_input_changes_are_isolated_in_a_child_entity() {
+        let shell = include_str!("native_shell.rs");
+        let pane = include_str!("native_shell/composer_pane.rs");
+        let composer_panel_id = [".id(\"composer-", "panel\")"].concat();
+        let input_constructor = ["Input", "::new(&input)"].concat();
+
+        assert!(!shell.contains(&composer_panel_id));
+        assert!(pane.contains(&composer_panel_id));
+        assert!(shell.contains("composer_pane: gpui::Entity<ComposerPane>"));
+        assert!(shell.contains(".child(self.composer_pane.clone())"));
+        assert!(pane.contains("impl EventEmitter<ComposerPaneEvent>"));
+        assert!(pane.contains(&input_constructor));
+        assert!(shell.contains("InputEvent::Change =>"));
+        assert!(shell.contains("this.notify_composer_pane(cx)"));
+        assert!(shell.contains("ComposerPaneEvent::Steer"));
+        assert!(shell.contains("ComposerSubmissionKind::Steer"));
+        assert!(shell.contains("ComposerPaneEvent::FollowUp"));
+        assert!(shell.contains("ComposerSubmissionKind::FollowUp"));
+        assert!(!pane.contains("conversation_render_dirty_sequences"));
+    }
+
+    #[test]
     fn indexed_row_update_accepts_non_clone_history_and_changes_one_slot() {
         #[derive(Debug, PartialEq, Eq)]
         struct NonClone(usize);
@@ -4839,8 +4799,10 @@ mod tests {
         assert!(!notice.contains(SECRET));
     }
 }
+mod composer_pane;
 mod conversation_pane;
 mod sessions_pane;
 
+use composer_pane::{ComposerPane, ComposerPaneEvent};
 use conversation_pane::{ConversationPane, ConversationPaneEvent};
 use sessions_pane::{SessionsPane, SessionsPaneEvent};

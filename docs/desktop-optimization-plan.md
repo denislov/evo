@@ -206,6 +206,7 @@ NativeShell
 - [ ] 拆出 TitleBar、Sessions、Conversation、Composer、Inspector、StatusBar、OverlayHost。
 - [x] Conversation transcript 已迁入独立 `ConversationPane` Entity；持久 row/size 通过 `WeakEntity<NativeShell>` 零拷贝读取，selection 通过 typed child event 回传。
 - [x] Sessions 已迁入独立 `SessionsPane` Entity；新建、刷新、打开会话通过 typed child event 回传，streaming token 不 notify 该区域。
+- [x] Composer 已迁入独立 `ComposerPane` Entity；输入变化仅 notify Composer，Submit/Steer/Follow-up 通过 typed child event 进入原 command ledger 路径。
 - [ ] token 更新只 notify Conversation/live row。
 - [ ] usage、telemetry 等低优先级信息最多 2–4Hz 更新。
 - [ ] 保持现有 typed command ledger、authorization 和 recovery 安全边界。
