@@ -176,12 +176,12 @@ NativeShell
 
 #### DESK-008 Projection 返回 typed delta
 
-- [ ] 定义 `DesktopProjectionDelta` 和 `ContextDirtyFlags`。
-- [ ] message/thinking/tool/usage/change/terminal 事件只标记相关实体 dirty。
-- [ ] 删除每个 product event 后全量收集 messages/tools/diagnostics/recoveries 的路径。
-- [ ] 保留 resync/session replace 的明确全量重建路径。
+- [x] 定义 `DesktopProjectionDelta` 和位集合 `ContextDirtyFlags`，映射共享 reducer 的全部 `CodingAgentClientProjectionArea`。
+- [x] message/thinking/tool/usage/change/terminal 事件只返回对应 conversation/tool/context/terminal dirty 信息；NativeShell 只在 conversation/tool delta 时更新滚动状态，只在 change delta 时校验文件审查。
+- [x] 删除 product event 后全量收集 messages/tools/diagnostics/recoveries 的路径，改为按 event sequence/业务 ID 更新单个 bounded overlay。
+- [x] resync、session、metadata 和 recovery snapshot replace 保留显式 `full_replace` 与全量兼容视图重建路径。
 
-验收：token delta 的工作量与单条 dirty row 大小相关，而不与历史消息总数相关。
+验收：跨 adapter fixture 继续逐事件一致；测试计数器证明 product event 的 message/tool/diagnostic/recovery 增量更新不会增加 full view rebuild 次数，snapshot replace 才增加。
 
 #### DESK-009 ConversationRowRenderCache
 
@@ -346,7 +346,8 @@ desktop.input.latency
 | DESK-005 | 进行中 | Markdown 已使用稳定业务 ID；typed key 和 row element 迁移待完成 |
 | DESK-006 | 完成 | 基于真实 offset 的迟滞状态机、streaming unseen 计数和无布局占位的浮动 pill 已完成；GUI 像素门禁归入 DESK-017 |
 | DESK-007 | 完成 | 文本保持 16ms 批次，行高约 15Hz；Following 底部锚定、Paused offset compensation 和 Unicode display width 已完成 |
-| DESK-008～018 | 待开始 | 下一步让 Projection 返回 typed delta，停止 token 事件后的全量 overlay 重建 |
+| DESK-008 | 完成 | typed delta 已贯穿 Projection→NativeShell；product event 只增量同步 dirty overlay，replace 路径保留全量重建 |
+| DESK-009～018 | 待开始 | 下一步建立 ConversationRowRenderCache，缓存 sanitized text、revision、Markdown state 和 measured height |
 
 ## 10. 完成定义
 

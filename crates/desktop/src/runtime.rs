@@ -2615,7 +2615,7 @@ mod tests {
 
     use crate::conversation::{MAX_TRANSCRIPT_BLOCKS, MAX_TRANSCRIPT_BYTES};
     use crate::projection::{
-        DesktopMessageStatus, DesktopProjection, DesktopProjectionApply,
+        ContextDirtyFlags, DesktopMessageStatus, DesktopProjection, DesktopProjectionApply,
         DesktopProjectionLifecycle, DesktopToolStatus, MAX_AUTHORIZATION_TEXT_BYTES,
         MAX_DESKTOP_MESSAGE_OVERLAYS,
     };
@@ -2921,7 +2921,7 @@ mod tests {
         };
         assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
         assert_eq!(metadata.session.session.session_id, session_id);
-        assert_eq!(projection.apply(update), DesktopProjectionApply::Replaced);
+        assert!(projection.apply(update).is_replaced());
         assert_eq!(projection.conversation(), &conversation);
 
         bridge.try_select_session_profile(9, "review").unwrap();
@@ -2939,7 +2939,7 @@ mod tests {
             "review"
         );
         assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
-        assert_eq!(projection.apply(update), DesktopProjectionApply::Replaced);
+        assert!(projection.apply(update).is_replaced());
         assert_eq!(projection.conversation(), &conversation);
 
         bridge
@@ -3046,17 +3046,18 @@ mod tests {
                     metadata: metadata.clone(),
                 },
             };
-            assert_eq!(projection.apply(update), DesktopProjectionApply::Replaced);
+            assert!(projection.apply(update).is_replaced());
         }
         for command_id in 164..180 {
-            assert_eq!(
-                projection.apply(DesktopRuntimeUpdate::RecoveryChanged {
-                    command_id,
-                    action: DesktopRecoveryAction::Retry,
-                    recovery_id: format!("recovery-{command_id}"),
-                    recovery: recovery.clone(),
-                }),
-                DesktopProjectionApply::Replaced
+            assert!(
+                projection
+                    .apply(DesktopRuntimeUpdate::RecoveryChanged {
+                        command_id,
+                        action: DesktopRecoveryAction::Retry,
+                        recovery_id: format!("recovery-{command_id}"),
+                        recovery: recovery.clone(),
+                    })
+                    .is_replaced()
             );
         }
 
@@ -3226,11 +3227,12 @@ mod tests {
                         Some(baseline.snapshot().session.session_id.as_str()),
                         submitted_operation.as_deref(),
                     );
-                    assert_eq!(
-                        baseline.apply(DesktopRuntimeUpdate::ProductEvent {
-                            event: valid.clone(),
-                        }),
-                        DesktopProjectionApply::Applied
+                    assert!(
+                        baseline
+                            .apply(DesktopRuntimeUpdate::ProductEvent {
+                                event: valid.clone(),
+                            })
+                            .is_applied()
                     );
                     assert_eq!(
                         baseline.apply(DesktopRuntimeUpdate::ProductEvent { event: valid }),
@@ -3255,15 +3257,16 @@ mod tests {
                         gap_projection.lifecycle(),
                         DesktopProjectionLifecycle::NeedsResync
                     );
-                    assert_eq!(
-                        gap_projection.apply(DesktopRuntimeUpdate::ResyncRequired {
-                            reason: DesktopRuntimeError {
-                                code: "test_resync".into(),
-                                message: "replace after an injected cursor gap".into(),
-                            },
-                            snapshot: projection.snapshot().clone(),
-                        }),
-                        DesktopProjectionApply::Replaced
+                    assert!(
+                        gap_projection
+                            .apply(DesktopRuntimeUpdate::ResyncRequired {
+                                reason: DesktopRuntimeError {
+                                    code: "test_resync".into(),
+                                    message: "replace after an injected cursor gap".into(),
+                                },
+                                snapshot: projection.snapshot().clone(),
+                            })
+                            .is_replaced()
                     );
                     assert_eq!(
                         gap_projection.lifecycle(),
@@ -3417,10 +3420,10 @@ mod tests {
                 shared.apply(&event),
                 CodingAgentClientProjectionApply::Applied(_)
             ));
-            assert_eq!(
-                desktop.apply(DesktopRuntimeUpdate::ProductEvent { event }),
-                DesktopProjectionApply::Applied
-            );
+            let terminal = event.terminal_operation().is_some();
+            let outcome = desktop.apply(DesktopRuntimeUpdate::ProductEvent { event });
+            assert!(outcome.is_applied());
+            assert_eq!(outcome.delta().unwrap().terminal, terminal);
         }
 
         assert_eq!(desktop.product_for_tests(), &shared);
@@ -3510,6 +3513,7 @@ mod tests {
         let session_id = overlays.snapshot().session.session_id.clone();
         let initial_usage_input = overlays.snapshot().context.usage.input;
         let initial_usage_output = overlays.snapshot().context.usage.output;
+        let initial_view_rebuilds = overlays.counters().product_view_rebuilds;
         let mut sequence = overlays.cursor().last_event_sequence;
 
         sequence += 1;
@@ -3529,10 +3533,13 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(
-            overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: started }),
-            DesktopProjectionApply::Applied
-        );
+        let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: started });
+        assert!(outcome.is_applied());
+        let delta = outcome.delta().unwrap();
+        assert!(delta.cursor);
+        assert!(delta.conversation);
+        assert!(!delta.tools);
+        assert!(!delta.context.contains(ContextDirtyFlags::USAGE));
 
         sequence += 1;
         let delta = rewritten_event_kind(
@@ -3552,9 +3559,10 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(
-            overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: delta }),
-            DesktopProjectionApply::Applied
+        assert!(
+            overlays
+                .apply(DesktopRuntimeUpdate::ProductEvent { event: delta })
+                .is_applied()
         );
 
         sequence += 1;
@@ -3588,10 +3596,11 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(
-            overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: completed }),
-            DesktopProjectionApply::Applied
-        );
+        let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: completed });
+        assert!(outcome.is_applied());
+        let delta = outcome.delta().unwrap();
+        assert!(delta.conversation);
+        assert!(delta.context.contains(ContextDirtyFlags::USAGE));
         let message = overlays.messages().back().unwrap();
         assert_eq!(message.text, "final text");
         assert_eq!(message.status, DesktopMessageStatus::Completed);
@@ -3636,9 +3645,10 @@ mod tests {
                     }
                 }),
             );
-            assert_eq!(
-                overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: completed }),
-                DesktopProjectionApply::Applied
+            assert!(
+                overlays
+                    .apply(DesktopRuntimeUpdate::ProductEvent { event: completed })
+                    .is_applied()
             );
         }
         assert_eq!(overlays.messages().len(), MAX_DESKTOP_MESSAGE_OVERLAYS);
@@ -3662,11 +3672,12 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(
-            overlays.apply(DesktopRuntimeUpdate::ProductEvent {
-                event: tool_started,
-            }),
-            DesktopProjectionApply::Applied
+        assert!(
+            overlays
+                .apply(DesktopRuntimeUpdate::ProductEvent {
+                    event: tool_started,
+                })
+                .is_applied()
         );
         sequence += 1;
         let tool_completed = rewritten_event_kind(
@@ -3687,12 +3698,14 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(
-            overlays.apply(DesktopRuntimeUpdate::ProductEvent {
-                event: tool_completed,
-            }),
-            DesktopProjectionApply::Applied
-        );
+        let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent {
+            event: tool_completed,
+        });
+        assert!(outcome.is_applied());
+        let delta = outcome.delta().unwrap();
+        assert!(delta.tools);
+        assert!(delta.context.contains(ContextDirtyFlags::CHANGES));
+        assert!(!delta.conversation);
         assert_eq!(
             overlays.tools().back().unwrap().status,
             DesktopToolStatus::Completed
@@ -3726,10 +3739,12 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(
-            overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: delegation }),
-            DesktopProjectionApply::Applied
-        );
+        let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: delegation });
+        assert!(outcome.is_applied());
+        let delta = outcome.delta().unwrap();
+        assert!(delta.context.contains(ContextDirtyFlags::DELEGATIONS));
+        assert!(!delta.conversation);
+        assert!(!delta.tools);
         assert_eq!(
             overlays
                 .snapshot()
@@ -3764,10 +3779,9 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(
-            overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: recovery }),
-            DesktopProjectionApply::Applied
-        );
+        let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: recovery });
+        assert!(outcome.is_applied());
+        assert!(outcome.delta().unwrap().recoveries);
         assert_eq!(
             overlays.recoveries().front().unwrap().status,
             crate::projection::DesktopRecoveryStatus::Pending
@@ -3794,29 +3808,42 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(
-            overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: diagnostic }),
-            DesktopProjectionApply::Applied
-        );
+        let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: diagnostic });
+        assert!(outcome.is_applied());
+        assert!(outcome.delta().unwrap().diagnostics);
         assert_eq!(
             overlays.diagnostics().back().unwrap().message,
             "projection diagnostic"
         );
+        let incremental_counters = overlays.counters();
+        assert_eq!(
+            incremental_counters.product_view_rebuilds, initial_view_rebuilds,
+            "product events must not rebuild every compatibility view"
+        );
+        assert!(incremental_counters.incremental_message_updates > 1);
+        assert_eq!(incremental_counters.incremental_tool_updates, 2);
+        assert_eq!(incremental_counters.incremental_recovery_updates, 1);
+        assert_eq!(incremental_counters.incremental_diagnostic_updates, 1);
 
         let mut fresh = overlays.snapshot().clone();
         fresh.cursor = overlays.cursor().clone();
-        assert_eq!(
-            overlays.apply(DesktopRuntimeUpdate::ResyncRequired {
-                reason: DesktopRuntimeError {
-                    code: "overlay_resync".into(),
-                    message: "discard incomplete live overlays".into(),
-                },
-                snapshot: fresh,
-            }),
-            DesktopProjectionApply::Replaced
+        assert!(
+            overlays
+                .apply(DesktopRuntimeUpdate::ResyncRequired {
+                    reason: DesktopRuntimeError {
+                        code: "overlay_resync".into(),
+                        message: "discard incomplete live overlays".into(),
+                    },
+                    snapshot: fresh,
+                })
+                .is_replaced()
         );
         assert!(overlays.messages().is_empty());
         assert!(overlays.tools().is_empty());
+        assert_eq!(
+            overlays.counters().product_view_rebuilds,
+            initial_view_rebuilds + 1
+        );
         assert_eq!(
             overlays
                 .recoveries()
@@ -4020,7 +4047,7 @@ mod tests {
             panic!("live lag must become a typed resync update");
         };
         assert_eq!(reason.code, "product_event_live_receiver_lag");
-        assert_eq!(projection.apply(live_lag), DesktopProjectionApply::Replaced);
+        assert!(projection.apply(live_lag).is_replaced());
         assert_eq!(
             projection
                 .last_resync_reason()
@@ -4040,10 +4067,7 @@ mod tests {
             panic!("retained gap must become a typed resync update");
         };
         assert_eq!(reason.code, "product_event_retained_history_gap");
-        assert_eq!(
-            projection.apply(retained_gap),
-            DesktopProjectionApply::Replaced
-        );
+        assert!(projection.apply(retained_gap).is_replaced());
         assert!(projection.recent_events().is_empty());
         assert_eq!(
             projection.apply(DesktopRuntimeUpdate::Stopped),

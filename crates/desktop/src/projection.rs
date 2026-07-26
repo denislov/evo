@@ -3,6 +3,7 @@ use std::collections::{HashSet, VecDeque};
 use coding_agent::api::client::{
     CodingAgentClientBootstrap, CodingAgentClientDiagnostic, CodingAgentClientMessage,
     CodingAgentClientMessageStatus, CodingAgentClientProjection, CodingAgentClientProjectionApply,
+    CodingAgentClientProjectionArea, CodingAgentClientProjectionChanges,
     CodingAgentClientProjectionIssue, CodingAgentClientProjectionLifecycle,
     CodingAgentClientRecovery, CodingAgentClientRecoveryStatus, CodingAgentClientTool,
     CodingAgentClientToolStatus, CodingAgentSnapshot, CodingAgentSnapshotCursor,
@@ -36,11 +37,123 @@ pub enum DesktopProjectionLifecycle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopProjectionApply {
-    Applied,
-    Replaced,
+    Applied(DesktopProjectionDelta),
+    Replaced(DesktopProjectionDelta),
     IgnoredDuplicate,
     NoChange,
     NeedsResync,
+}
+
+impl DesktopProjectionApply {
+    #[cfg(test)]
+    pub const fn is_applied(&self) -> bool {
+        matches!(self, Self::Applied(_))
+    }
+
+    pub const fn is_replaced(&self) -> bool {
+        matches!(self, Self::Replaced(_))
+    }
+
+    pub const fn delta(&self) -> Option<&DesktopProjectionDelta> {
+        match self {
+            Self::Applied(delta) | Self::Replaced(delta) => Some(delta),
+            Self::IgnoredDuplicate | Self::NoChange | Self::NeedsResync => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContextDirtyFlags(u8);
+
+impl ContextDirtyFlags {
+    pub const OPERATIONS: Self = Self(1 << 0);
+    pub const DELEGATIONS: Self = Self(1 << 1);
+    pub const CHANGES: Self = Self(1 << 2);
+    pub const USAGE: Self = Self(1 << 3);
+
+    pub const fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 == flag.0
+    }
+
+    fn insert(&mut self, flag: Self) {
+        self.0 |= flag.0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DesktopProjectionDelta {
+    pub full_replace: bool,
+    pub cursor: bool,
+    pub session: bool,
+    pub conversation: bool,
+    pub tools: bool,
+    pub authorizations: bool,
+    pub context: ContextDirtyFlags,
+    pub diagnostics: bool,
+    pub recoveries: bool,
+    pub profiles: bool,
+    pub capabilities: bool,
+    pub lifecycle: bool,
+    pub terminal: bool,
+}
+
+impl DesktopProjectionDelta {
+    fn from_client_changes(changes: &CodingAgentClientProjectionChanges, terminal: bool) -> Self {
+        let mut delta = Self {
+            terminal,
+            ..Self::default()
+        };
+        for area in changes.areas() {
+            match area {
+                CodingAgentClientProjectionArea::Cursor => delta.cursor = true,
+                CodingAgentClientProjectionArea::Session => delta.session = true,
+                CodingAgentClientProjectionArea::Operations => {
+                    delta.context.insert(ContextDirtyFlags::OPERATIONS)
+                }
+                CodingAgentClientProjectionArea::Conversation => delta.conversation = true,
+                CodingAgentClientProjectionArea::Tools => delta.tools = true,
+                CodingAgentClientProjectionArea::Authorizations => delta.authorizations = true,
+                CodingAgentClientProjectionArea::Delegations => {
+                    delta.context.insert(ContextDirtyFlags::DELEGATIONS)
+                }
+                CodingAgentClientProjectionArea::Changes => {
+                    delta.context.insert(ContextDirtyFlags::CHANGES)
+                }
+                CodingAgentClientProjectionArea::Usage => {
+                    delta.context.insert(ContextDirtyFlags::USAGE)
+                }
+                CodingAgentClientProjectionArea::Diagnostics => delta.diagnostics = true,
+                CodingAgentClientProjectionArea::Recoveries => delta.recoveries = true,
+                CodingAgentClientProjectionArea::Profiles => delta.profiles = true,
+                CodingAgentClientProjectionArea::Capabilities => delta.capabilities = true,
+                CodingAgentClientProjectionArea::Lifecycle => delta.lifecycle = true,
+            }
+        }
+        delta
+    }
+
+    fn full_replace() -> Self {
+        Self {
+            full_replace: true,
+            cursor: true,
+            session: true,
+            conversation: true,
+            tools: true,
+            authorizations: true,
+            context: ContextDirtyFlags(
+                ContextDirtyFlags::OPERATIONS.0
+                    | ContextDirtyFlags::DELEGATIONS.0
+                    | ContextDirtyFlags::CHANGES.0
+                    | ContextDirtyFlags::USAGE.0,
+            ),
+            diagnostics: true,
+            recoveries: true,
+            profiles: true,
+            capabilities: true,
+            lifecycle: true,
+            terminal: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -51,6 +164,11 @@ pub(crate) struct DesktopProjectionCounters {
     pub metadata_replacements: u64,
     pub recovery_replacements: u64,
     pub product_snapshot_replacements: u64,
+    pub product_view_rebuilds: u64,
+    pub incremental_message_updates: u64,
+    pub incremental_tool_updates: u64,
+    pub incremental_diagnostic_updates: u64,
+    pub incremental_recovery_updates: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,7 +378,7 @@ impl DesktopProjection {
                 ..DesktopProjectionCounters::default()
             },
         };
-        projection.sync_product_views();
+        projection.rebuild_product_views();
         Ok(projection)
     }
 
@@ -399,13 +517,17 @@ impl DesktopProjection {
         }
         let applied = self.product.apply(&event);
         match applied {
-            CodingAgentClientProjectionApply::Applied(_) => {
+            CodingAgentClientProjectionApply::Applied(changes) => {
                 if let Some(recovery_id) = event_recovery_id(&event) {
                     self.authoritative_recovery_ids.remove(recovery_id);
                 }
                 self.push_event_marker(&event);
-                self.sync_product_views();
-                DesktopProjectionApply::Applied
+                let delta = DesktopProjectionDelta::from_client_changes(
+                    &changes,
+                    event.terminal_operation().is_some(),
+                );
+                self.sync_product_delta(&delta, event.sequence());
+                DesktopProjectionApply::Applied(delta)
             }
             CodingAgentClientProjectionApply::IgnoredDuplicate => {
                 DesktopProjectionApply::IgnoredDuplicate
@@ -478,8 +600,8 @@ impl DesktopProjection {
         self.lifecycle = DesktopProjectionLifecycle::Running;
         self.recent_events.clear();
         self.last_resync_reason = resync_reason;
-        self.sync_product_views();
-        DesktopProjectionApply::Replaced
+        self.rebuild_product_views();
+        DesktopProjectionApply::Replaced(DesktopProjectionDelta::full_replace())
     }
 
     fn replace_product_snapshot(
@@ -496,8 +618,8 @@ impl DesktopProjection {
         self.lifecycle = DesktopProjectionLifecycle::Running;
         self.recent_events.clear();
         self.last_resync_reason = resync_reason;
-        self.sync_product_views();
-        DesktopProjectionApply::Replaced
+        self.rebuild_product_views();
+        DesktopProjectionApply::Replaced(DesktopProjectionDelta::full_replace())
     }
 
     fn replace_metadata_snapshot(
@@ -515,8 +637,8 @@ impl DesktopProjection {
         self.lifecycle = DesktopProjectionLifecycle::Running;
         self.recent_events.clear();
         self.last_resync_reason = None;
-        self.sync_product_views();
-        DesktopProjectionApply::Replaced
+        self.rebuild_product_views();
+        DesktopProjectionApply::Replaced(DesktopProjectionDelta::full_replace())
     }
 
     fn replace_recovery_snapshot(
@@ -551,8 +673,8 @@ impl DesktopProjection {
         self.lifecycle = DesktopProjectionLifecycle::Running;
         self.recent_events.clear();
         self.last_resync_reason = None;
-        self.sync_product_views();
-        DesktopProjectionApply::Replaced
+        self.rebuild_product_views();
+        DesktopProjectionApply::Replaced(DesktopProjectionDelta::full_replace())
     }
 
     fn require_resync(&mut self, issue: DesktopProjectionIssue) -> DesktopProjectionApply {
@@ -574,7 +696,119 @@ impl DesktopProjection {
         }
     }
 
-    fn sync_product_views(&mut self) {
+    fn sync_product_delta(&mut self, delta: &DesktopProjectionDelta, sequence: u64) {
+        if delta.conversation {
+            self.sync_message_overlay(sequence);
+        }
+        if delta.tools {
+            self.sync_tool_overlay(sequence);
+        }
+        if delta.diagnostics {
+            self.sync_diagnostic_overlay(sequence);
+        }
+        if delta.recoveries {
+            self.sync_recovery_overlay(sequence);
+        }
+        if delta.lifecycle {
+            self.sync_lifecycle();
+        }
+    }
+
+    fn sync_message_overlay(&mut self, sequence: u64) {
+        let product_len = self.product.messages().len();
+        let Some(updated) = self
+            .product
+            .messages()
+            .iter()
+            .find(|message| message.updated_sequence == sequence)
+            .map(DesktopMessageOverlay::from)
+        else {
+            return;
+        };
+        if let Some(current) = self.messages.iter_mut().find(|current| {
+            current.operation_id == updated.operation_id
+                && current.turn_id == updated.turn_id
+                && current.message_id == updated.message_id
+        }) {
+            *current = updated;
+        } else {
+            self.messages.push_back(updated);
+        }
+        while self.messages.len() > product_len {
+            self.messages.pop_front();
+        }
+        self.counters.incremental_message_updates += 1;
+    }
+
+    fn sync_tool_overlay(&mut self, sequence: u64) {
+        let product_len = self.product.tools().len();
+        let Some(updated) = self
+            .product
+            .tools()
+            .iter()
+            .find(|tool| tool.updated_sequence == sequence)
+            .map(DesktopToolOverlay::from)
+        else {
+            return;
+        };
+        if let Some(current) = self
+            .tools
+            .iter_mut()
+            .find(|current| current.tool_call_id == updated.tool_call_id)
+        {
+            *current = updated;
+        } else {
+            self.tools.push_back(updated);
+        }
+        while self.tools.len() > product_len {
+            self.tools.pop_front();
+        }
+        self.counters.incremental_tool_updates += 1;
+    }
+
+    fn sync_diagnostic_overlay(&mut self, sequence: u64) {
+        let product_len = self.product.diagnostics().len();
+        let Some(updated) = self
+            .product
+            .diagnostics()
+            .back()
+            .filter(|diagnostic| diagnostic.sequence == sequence)
+            .map(DesktopDiagnostic::from)
+        else {
+            return;
+        };
+        self.diagnostics.push_back(updated);
+        while self.diagnostics.len() > product_len {
+            self.diagnostics.pop_front();
+        }
+        self.counters.incremental_diagnostic_updates += 1;
+    }
+
+    fn sync_recovery_overlay(&mut self, sequence: u64) {
+        let product_len = self.product.recoveries().len();
+        let Some(updated) = self
+            .product
+            .recoveries()
+            .iter()
+            .find(|recovery| recovery.updated_sequence == sequence)
+            .map(|recovery| {
+                desktop_recovery(
+                    recovery,
+                    self.authoritative_recovery_ids
+                        .contains(&recovery.recovery_id),
+                )
+            })
+        else {
+            return;
+        };
+        self.recoveries
+            .retain(|current| current.recovery_id != updated.recovery_id);
+        self.recoveries.push_front(updated);
+        self.recoveries.truncate(product_len);
+        self.counters.incremental_recovery_updates += 1;
+    }
+
+    fn rebuild_product_views(&mut self) {
         self.messages = self
             .product
             .messages()
@@ -605,6 +839,11 @@ impl DesktopProjection {
                 )
             })
             .collect();
+        self.sync_lifecycle();
+        self.counters.product_view_rebuilds += 1;
+    }
+
+    fn sync_lifecycle(&mut self) {
         self.lifecycle = match self.product.lifecycle() {
             CodingAgentClientProjectionLifecycle::Running => DesktopProjectionLifecycle::Running,
             CodingAgentClientProjectionLifecycle::NeedsResync => {

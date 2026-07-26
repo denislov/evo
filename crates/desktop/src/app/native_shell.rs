@@ -988,51 +988,43 @@ impl NativeShell {
                 _ => {}
             }
             let outcome = self.projection.apply(update);
+            let conversation_dirty = outcome
+                .delta()
+                .is_some_and(|delta| delta.conversation || delta.tools);
+            let file_changes_dirty = outcome.delta().is_some_and(|delta| {
+                delta
+                    .context
+                    .contains(desktop::projection::ContextDirtyFlags::CHANGES)
+            });
             if let Some(command_id) = resync_completion
                 && self
                     .command_ledger
                     .complete(command_id, &DesktopCommandIntent::Resync)
             {
-                self.preference_notice = Some(
-                    if matches!(
-                        outcome,
-                        desktop::projection::DesktopProjectionApply::Replaced
-                    ) {
-                        "Runtime state resynchronized.".into()
-                    } else {
-                        "Resync response failed projection validation.".into()
-                    },
-                );
-                if matches!(
-                    outcome,
-                    desktop::projection::DesktopProjectionApply::Replaced
-                ) {
+                self.preference_notice = Some(if outcome.is_replaced() {
+                    "Runtime state resynchronized.".into()
+                } else {
+                    "Resync response failed projection validation.".into()
+                });
+                if outcome.is_replaced() {
                     self.request_session_catalog(cx);
                 }
             }
             if let Some((command_id, intent)) = session_completion
                 && self.command_ledger.complete(command_id, &intent)
             {
-                self.preference_notice = Some(
-                    if matches!(
-                        outcome,
-                        desktop::projection::DesktopProjectionApply::Replaced
-                    ) {
-                        match intent {
-                            DesktopCommandIntent::CreateSession => "Created a new session.".into(),
-                            DesktopCommandIntent::OpenSession { .. } => {
-                                "Opened the requested session.".into()
-                            }
-                            _ => unreachable!("session completion was filtered by typed intent"),
+                self.preference_notice = Some(if outcome.is_replaced() {
+                    match intent {
+                        DesktopCommandIntent::CreateSession => "Created a new session.".into(),
+                        DesktopCommandIntent::OpenSession { .. } => {
+                            "Opened the requested session.".into()
                         }
-                    } else {
-                        "Session response failed projection validation; resync is required.".into()
-                    },
-                );
-                if matches!(
-                    outcome,
-                    desktop::projection::DesktopProjectionApply::Replaced
-                ) {
+                        _ => unreachable!("session completion was filtered by typed intent"),
+                    }
+                } else {
+                    "Session response failed projection validation; resync is required.".into()
+                });
+                if outcome.is_replaced() {
                     self.request_session_catalog(cx);
                 }
             }
@@ -1041,52 +1033,41 @@ impl NativeShell {
                     .command_ledger
                     .complete(command_id, &DesktopCommandIntent::Reload)
             {
-                self.preference_notice = Some(
-                    if matches!(
-                        outcome,
-                        desktop::projection::DesktopProjectionApply::Replaced
-                    ) {
-                        format!(
-                            "Reloaded {skill_count} skills, {prompt_count} prompts, and \
+                self.preference_notice = Some(if outcome.is_replaced() {
+                    format!(
+                        "Reloaded {skill_count} skills, {prompt_count} prompts, and \
                          {profile_count} profiles."
-                        )
-                    } else {
-                        "Reload response failed projection validation; resync is required.".into()
-                    },
-                );
+                    )
+                } else {
+                    "Reload response failed projection validation; resync is required.".into()
+                });
             }
             if let Some((command_id, selection)) = selection_completion
                 && self
                     .command_ledger
                     .complete(command_id, &DesktopCommandIntent::Selection(selection))
             {
-                self.preference_notice = Some(
-                    if matches!(
-                        outcome,
-                        desktop::projection::DesktopProjectionApply::Replaced
-                    ) {
-                        match selection {
-                            DesktopRuntimeSelectionKind::Model => format!(
-                                "Future prompts will use model {}.",
-                                truncate_label(&self.projection.project().selected_model_id, 28)
-                            ),
-                            DesktopRuntimeSelectionKind::SessionProfile => format!(
-                                "Session profile changed to {}.",
-                                truncate_label(
-                                    self.projection
-                                        .snapshot()
-                                        .session
-                                        .default_agent_profile_id
-                                        .as_str(),
-                                    28
-                                )
-                            ),
-                        }
-                    } else {
-                        "Selection response failed projection validation; resync is required."
-                            .into()
-                    },
-                );
+                self.preference_notice = Some(if outcome.is_replaced() {
+                    match selection {
+                        DesktopRuntimeSelectionKind::Model => format!(
+                            "Future prompts will use model {}.",
+                            truncate_label(&self.projection.project().selected_model_id, 28)
+                        ),
+                        DesktopRuntimeSelectionKind::SessionProfile => format!(
+                            "Session profile changed to {}.",
+                            truncate_label(
+                                self.projection
+                                    .snapshot()
+                                    .session
+                                    .default_agent_profile_id
+                                    .as_str(),
+                                28
+                            )
+                        ),
+                    }
+                } else {
+                    "Selection response failed projection validation; resync is required.".into()
+                });
             }
             if let Some((command_id, action, recovery_id)) = recovery_completion
                 && self.command_ledger.complete(
@@ -1097,27 +1078,19 @@ impl NativeShell {
                     },
                 )
             {
-                self.preference_notice = Some(
-                    if matches!(
-                        outcome,
-                        desktop::projection::DesktopProjectionApply::Replaced
-                    ) {
-                        format!(
-                            "Recovery {} accepted for {}.",
-                            recovery_action_label(action),
-                            truncate_label(&recovery_id, 28)
-                        )
-                    } else {
-                        "Recovery changed, but its snapshot failed projection validation; resync \
+                self.preference_notice = Some(if outcome.is_replaced() {
+                    format!(
+                        "Recovery {} accepted for {}.",
+                        recovery_action_label(action),
+                        truncate_label(&recovery_id, 28)
+                    )
+                } else {
+                    "Recovery changed, but its snapshot failed projection validation; resync \
                          is required."
-                            .into()
-                    },
-                );
+                        .into()
+                });
             }
-            if matches!(
-                outcome,
-                desktop::projection::DesktopProjectionApply::Replaced
-            ) {
+            if outcome.is_replaced() {
                 if self.projection.snapshot().active_operation.is_none()
                     && self.composer.submitted().is_some()
                 {
@@ -1141,7 +1114,7 @@ impl NativeShell {
                     self.conversation_scroll
                         .scroll_to_item(visible_blocks - 1, ScrollStrategy::Bottom);
                 }
-            } else {
+            } else if conversation_dirty {
                 let visible_blocks = self.visible_conversation_count();
                 let content_revision = self.projection.cursor().last_event_sequence;
                 self.conversation_viewport
@@ -1171,7 +1144,9 @@ impl NativeShell {
                 self.command_ledger
                     .complete_authorization(command_id, &authorization_id);
             }
-            self.reconcile_file_review();
+            if outcome.is_replaced() || file_changes_dirty {
+                self.reconcile_file_review();
+            }
             self.request_resync_if_needed();
             applied += 1;
         }
