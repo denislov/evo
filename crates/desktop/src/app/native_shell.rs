@@ -4374,7 +4374,8 @@ mod tests {
         CodingAgentEmbeddingSnapshot, CodingAgentResourceSummary, CodingAgentSettingsSummary,
     };
     use coding_agent::api::view::{
-        CodingAgentCapabilities, CodingAgentSessionView, CodingAgentTranscriptSnapshot, ProfileId,
+        CodingAgentCapabilities, CodingAgentSessionTranscriptItem, CodingAgentSessionView,
+        CodingAgentTranscriptSnapshot, ProfileId,
     };
     use gpui::TestAppContext;
     use gpui_component::{Theme, ThemeMode};
@@ -4438,6 +4439,18 @@ mod tests {
             .expect("visual test fixture is a valid product projection")
     }
 
+    fn visual_performance_projection(block_count: usize) -> DesktopProjection {
+        let mut snapshot = visual_test_snapshot();
+        let payload = "headless frame replay 中文 🙂 ".repeat(8);
+        snapshot.transcript.items = (0..block_count)
+            .map(|index| CodingAgentSessionTranscriptItem::User {
+                text: format!("message {index}: {payload}"),
+            })
+            .collect();
+        DesktopProjection::new(snapshot)
+            .expect("headless frame replay fixture is a valid product projection")
+    }
+
     fn initialize_visual_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
@@ -4499,6 +4512,12 @@ mod tests {
             "{selector} must retain a 32x32 desktop hit target, got {:?}",
             bounds.size
         );
+    }
+
+    fn test_percentile_95(samples: &mut [u128]) -> u128 {
+        samples.sort_unstable();
+        let index = (samples.len() * 95).div_ceil(100).saturating_sub(1);
+        samples[index]
     }
 
     #[gpui::test]
@@ -4628,6 +4647,96 @@ mod tests {
                     .get()
                     .is_some_and(|latency| latency <= changed_at.elapsed())
         }));
+    }
+
+    #[gpui::test]
+    #[ignore = "release performance gate"]
+    fn desktop_release_gpui_headless_frame_and_input_replay(cx: &mut TestAppContext) {
+        const SAMPLE_COUNT: usize = 200;
+        const CPU_FRAME_BUDGET_MICROS: u128 = 16_700;
+        const WINDOW_RSS_GROWTH_BUDGET: u64 = 64 * 1024 * 1024;
+
+        initialize_visual_test(cx);
+        let projection =
+            visual_performance_projection(desktop::conversation::MAX_TRANSCRIPT_BLOCKS);
+        let window_rss_before = crate::allocation_probe::resident_bytes();
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection,
+        );
+        cx.simulate_resize(size(px(1_300.), px(900.)));
+        cx.run_until_parked();
+        let window_rss_after = crate::allocation_probe::resident_bytes();
+        let window_rss_growth = match (window_rss_before, window_rss_after) {
+            (Some(before), Some(after)) => Some(after.saturating_sub(before)),
+            _ => None,
+        };
+
+        let mut frame_samples = Vec::with_capacity(SAMPLE_COUNT);
+        for _ in 0..SAMPLE_COUNT {
+            let started = Instant::now();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            frame_samples.push(started.elapsed().as_micros());
+        }
+
+        let input = shell.read_with(cx, |shell, _| shell.composer_input.clone());
+        let mut input_roundtrip_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut input_to_render_samples = Vec::with_capacity(SAMPLE_COUNT);
+        for sample in 0..SAMPLE_COUNT {
+            shell.read_with(cx, |shell, _| {
+                shell.composer_input_latency.last_observed.set(None);
+            });
+            let draft = format!("headless composer change {sample} 中文 🙂");
+            let started = Instant::now();
+            cx.update(|window, cx| {
+                input.update(cx, |input, cx| input.set_value(draft, window, cx));
+            });
+            cx.run_until_parked();
+            input_roundtrip_samples.push(started.elapsed().as_micros());
+            let observed = shell
+                .read_with(cx, |shell, _| {
+                    shell.composer_input_latency.last_observed.get()
+                })
+                .expect("InputEvent::Change reaches the next ComposerPane render");
+            input_to_render_samples.push(observed.as_micros());
+        }
+
+        let frame_p95_micros = test_percentile_95(&mut frame_samples);
+        let input_roundtrip_p95_micros = test_percentile_95(&mut input_roundtrip_samples);
+        let input_to_render_p95_micros = test_percentile_95(&mut input_to_render_samples);
+        println!(
+            "desktop_perf\theadless_blocks={}\theadless_cpu_frame_p95_us={frame_p95_micros}\t\
+             headless_input_roundtrip_p95_us={input_roundtrip_p95_micros}\t\
+             input_change_to_render_p95_us={input_to_render_p95_micros}\t\
+             window_rss_supported={}\twindow_rss_before_bytes={}\twindow_rss_after_bytes={}\t\
+             window_rss_growth_bytes={}",
+            desktop::conversation::MAX_TRANSCRIPT_BLOCKS,
+            window_rss_before.is_some() && window_rss_after.is_some(),
+            window_rss_before.unwrap_or_default(),
+            window_rss_after.unwrap_or_default(),
+            window_rss_growth.unwrap_or_default()
+        );
+        assert!(
+            frame_p95_micros <= CPU_FRAME_BUDGET_MICROS,
+            "headless full-tree CPU frame P95 exceeded one frame: {frame_p95_micros} us"
+        );
+        assert!(
+            input_roundtrip_p95_micros <= CPU_FRAME_BUDGET_MICROS,
+            "headless Composer roundtrip P95 exceeded one frame: \
+             {input_roundtrip_p95_micros} us"
+        );
+        assert!(
+            input_to_render_p95_micros <= CPU_FRAME_BUDGET_MICROS,
+            "Composer change-to-render P95 exceeded one frame: {input_to_render_p95_micros} us"
+        );
+        if let Some(window_rss_growth) = window_rss_growth {
+            assert!(
+                window_rss_growth <= WINDOW_RSS_GROWTH_BUDGET,
+                "10k NativeShell window RSS growth exceeded 64 MiB: {window_rss_growth} bytes"
+            );
+        }
     }
 
     #[gpui::test]

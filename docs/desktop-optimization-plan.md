@@ -102,7 +102,7 @@ NativeShell
 
 #### DESK-001 建立优化基线
 
-- [ ] 已为 runtime batch/wait、projection apply、preview sanitize、row height/layout、row prepare、view render、input handler 和最新 change→ComposerPane render 建立 opt-in tracing；真实 Markdown parser、paint 与端到端 input latency 仍缺公开 hook。
+- [ ] 已为 runtime batch/wait、projection apply、preview sanitize、row height/layout、row prepare、view render、input handler 和最新 change→ComposerPane render 建立 opt-in tracing；release gate 另覆盖完整 GPUI headless CPU frame/input roundtrip，真实 Markdown parser、GPU present 与 click-to-photon latency 仍缺公开 hook。
 - [x] release replay fixture 可重复生成 1、100、1,000、10,000 条历史消息并输出 hydration/prepare 数据。
 - [x] release fixture 覆盖 10、50、200 次 streaming revision 回放。
 - [ ] 记录改造前 frame time、输入延迟、分配量和滚动行为。
@@ -276,8 +276,8 @@ NativeShell
 
 - [x] release gate 覆盖 1/100/1,000/10,000 条消息和 10/50/200 次增量 row revision。
 - [x] release gate 覆盖 256KB Markdown、512KB Reasoning、1MB Bash output、表格、代码块、CJK 和 Emoji。
-- [ ] release hydration 已输出 allocation count/cumulative bytes/retained bytes 线性曲线和 Linux RSS before/after/growth，并设置回归预算；真实 GPUI frame/paint、端到端 input 和跨平台窗口 memory 曲线仍待 instrumented window harness。
-- [x] `scripts/desktop-perf-gate.sh` 提供串行、可重复的本地 release benchmark，并断言 frame preparation、Composer edit 和 final parse 预算；基线记录在 `docs/desktop-performance-baseline.md`。
+- [ ] release hydration 已输出 allocation count/cumulative bytes/retained bytes 线性曲线和 Linux RSS before/after/growth；10,000-block NativeShell 已输出强制 uncached headless CPU frame/input roundtrip P95 与额外 window/component RSS 并设置预算；GPU present、click-to-photon input 和跨平台窗口 memory 仍待 native harness。
+- [x] `scripts/desktop-perf-gate.sh` 提供串行、可重复的本地 release benchmark，并断言 headless full-tree CPU frame、真实 InputState roundtrip、frame preparation、Composer edit、allocation/RSS 和 final parse 预算；基线记录在 `docs/desktop-performance-baseline.md`。
 
 #### DESK-018 组件、截图和端到端回归
 
@@ -348,7 +348,7 @@ desktop.input.latency
 
 | 任务 | 状态 | 备注 |
 |---|---|---|
-| DESK-001 | 进行中 | release replay/streaming fixture、可比较日志、主要 CPU tracing 与 input change→render 边界已完成；待 GPUI paint/end-to-end input 和 Markdown parser hook |
+| DESK-001 | 进行中 | release replay/streaming fixture、可比较日志、主要 CPU tracing、uncached GPUI headless CPU frame 与 input change→render 已完成；待 GPU present/click-to-photon input 和 Markdown parser hook |
 | DESK-002 | 完成 | 已移除动态面板边框，改用已有 header divider 和标题颜色；回归测试已通过 |
 | DESK-003 | 完成 | ShellLayout 改为稳定 workspace 模型；sidebar/composer/status/content width 共享 token，响应式临界点与 width bucket 均有回归 |
 | DESK-004 | 进行中 | StreamingText 三态 revision 协议、16ms 合批、100ms settling 与 stale rejection 已完成；待后台 Markdown parser 和 final parse 计数 |
@@ -364,7 +364,7 @@ desktop.input.latency
 | DESK-014 | 完成 | Idle/Running 均为单主操作；每 session draft/mode、pending/authorization/rejected 文案与 InputState IME 边界已落实 |
 | DESK-015 | 完成 | Sessions 搜索/相对时间/自动刷新与 Inspector 按需分区已完成；sidebar 宽度可持久化、拖动和双击复位，窄屏继续使用 drawer |
 | DESK-016 | 进行中 | 区域/消息键盘导航、overlay focus restore、focus-visible 与 32x32 primary hit-target 门禁已完成；待 GPUI accessibility tree 收口 |
-| DESK-017 | 进行中 | release scale/content/streaming/allocation/Linux RSS matrix 与本地门禁已完成；待真实 GPUI frame/paint/end-to-end input 和跨平台窗口 memory 曲线 |
+| DESK-017 | 进行中 | release scale/content/streaming/allocation/Linux hydration+window RSS/10k NativeShell headless frame matrix 与本地门禁已完成；待 native GPU present/click-to-photon input 和跨平台窗口 memory 曲线 |
 | DESK-018 | 进行中 | Focus bounds、session key、scroll anchor、Streaming→Final 与四条关键流程 smoke 已覆盖；待 screenshot golden 基础设施 |
 
 ## 10. 完成定义
