@@ -3,7 +3,8 @@
 //! These reducers remain independent of GPUI. The renderer may virtualize the
 //! resulting blocks without owning product transcript truth.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use coding_agent::api::view::{CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot};
 
@@ -26,6 +27,8 @@ pub const MAX_CODE_BLOCK_PREVIEW_BYTES: usize = 128 * 1024;
 pub const FOLLOW_LATEST_PAUSE_THRESHOLD_PX: f32 = 48.0;
 /// A paused reader must return this close to the bottom before following resumes.
 pub const FOLLOW_LATEST_RESUME_THRESHOLD_PX: f32 = 32.0;
+pub const STREAMING_ROW_HEIGHT_INTERVAL: Duration = Duration::from_millis(67);
+pub const CONVERSATION_WIDTH_BUCKET_PX: u32 = 24;
 
 const TRUNCATED_LINE_NOTICE: &str = "\n\n> … line truncated by desktop preview bounds …\n";
 const TRUNCATED_CODE_NOTICE: &str = "\n… code block truncated by desktop preview bounds …\n";
@@ -424,6 +427,157 @@ fn next_diagnostic_title(title: &str) -> String {
     format!("Diagnostic · {count} related events")
 }
 
+pub const fn conversation_width_bucket(panel_width: u32) -> u32 {
+    let bucket = panel_width / CONVERSATION_WIDTH_BUCKET_PX;
+    if bucket == 0 {
+        CONVERSATION_WIDTH_BUCKET_PX
+    } else {
+        bucket * CONVERSATION_WIDTH_BUCKET_PX
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationRowLayoutInput {
+    pub key: String,
+    pub target_height: f32,
+    pub streaming: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationRowLayoutResolution {
+    pub heights: Vec<f32>,
+    pub paused_scroll_top: Option<f32>,
+    pub next_refresh_after: Option<Duration>,
+}
+
+#[derive(Debug, Clone)]
+struct ConversationRowHeight {
+    committed: f32,
+    width_bucket: u32,
+    streaming: bool,
+    last_commit_at: Instant,
+}
+
+#[derive(Debug, Default)]
+pub struct ConversationRowLayoutState {
+    rows: HashMap<String, ConversationRowHeight>,
+    order: Vec<String>,
+}
+
+impl ConversationRowLayoutState {
+    pub fn resolve(
+        &mut self,
+        inputs: Vec<ConversationRowLayoutInput>,
+        width_bucket: u32,
+        now: Instant,
+        paused_scroll_top: Option<f32>,
+    ) -> ConversationRowLayoutResolution {
+        let anchor = paused_scroll_top.and_then(|scroll_top| self.anchor_at(scroll_top));
+        let mut previous_rows = std::mem::take(&mut self.rows);
+        let mut next_rows = HashMap::with_capacity(inputs.len());
+        let mut next_order = Vec::with_capacity(inputs.len());
+        let mut heights = Vec::with_capacity(inputs.len());
+        let mut next_refresh_after: Option<Duration> = None;
+
+        for input in inputs {
+            let target_height = sanitize_row_height(input.target_height);
+            let mut row = previous_rows
+                .remove(&input.key)
+                .unwrap_or(ConversationRowHeight {
+                    committed: target_height,
+                    width_bucket,
+                    streaming: input.streaming,
+                    last_commit_at: now,
+                });
+
+            let width_changed = row.width_bucket != width_bucket;
+            let streaming_changed = row.streaming != input.streaming;
+            let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
+            if target_changed {
+                let elapsed = now
+                    .checked_duration_since(row.last_commit_at)
+                    .unwrap_or_default();
+                if width_changed
+                    || streaming_changed
+                    || !input.streaming
+                    || elapsed >= STREAMING_ROW_HEIGHT_INTERVAL
+                {
+                    row.committed = target_height;
+                    row.last_commit_at = now;
+                } else {
+                    let remaining = STREAMING_ROW_HEIGHT_INTERVAL.saturating_sub(elapsed);
+                    next_refresh_after = Some(
+                        next_refresh_after.map_or(remaining, |scheduled| scheduled.min(remaining)),
+                    );
+                }
+            }
+
+            row.width_bucket = width_bucket;
+            row.streaming = input.streaming;
+            heights.push(row.committed);
+            next_order.push(input.key.clone());
+            next_rows.insert(input.key, row);
+        }
+
+        self.rows = next_rows;
+        self.order = next_order;
+        let paused_scroll_top = anchor
+            .and_then(|(key, intra_row_offset)| self.scroll_top_for_anchor(&key, intra_row_offset));
+
+        ConversationRowLayoutResolution {
+            heights,
+            paused_scroll_top,
+            next_refresh_after,
+        }
+    }
+
+    pub fn height_for(&self, key: &str) -> Option<f32> {
+        self.rows.get(key).map(|row| row.committed)
+    }
+
+    fn anchor_at(&self, scroll_top: f32) -> Option<(String, f32)> {
+        if self.order.is_empty() {
+            return None;
+        }
+        let scroll_top = if scroll_top.is_finite() {
+            scroll_top.max(0.0)
+        } else {
+            0.0
+        };
+        let mut row_top = 0.0;
+        for key in &self.order {
+            let height = self.rows.get(key)?.committed;
+            if scroll_top < row_top + height {
+                return Some((key.clone(), (scroll_top - row_top).max(0.0)));
+            }
+            row_top += height;
+        }
+        let key = self.order.last()?.clone();
+        let height = self.rows.get(&key)?.committed;
+        Some((key, height))
+    }
+
+    fn scroll_top_for_anchor(&self, anchor_key: &str, intra_row_offset: f32) -> Option<f32> {
+        let mut row_top = 0.0;
+        for key in &self.order {
+            let height = self.rows.get(key)?.committed;
+            if key == anchor_key {
+                return Some(row_top + intra_row_offset.clamp(0.0, height));
+            }
+            row_top += height;
+        }
+        None
+    }
+}
+
+fn sanitize_row_height(height: f32) -> f32 {
+    if height.is_finite() {
+        height.max(1.0)
+    } else {
+        1.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationViewport {
     selected_block_id: Option<String>,
@@ -491,6 +645,7 @@ impl ConversationViewport {
             || self.unseen_updates != previous_unseen_updates
     }
 
+    #[cfg(test)]
     pub fn pause_follow_latest(&mut self) {
         self.follow_latest = false;
     }
@@ -966,6 +1121,14 @@ mod tests {
         }
     }
 
+    fn row_layout(key: &str, target_height: f32, streaming: bool) -> ConversationRowLayoutInput {
+        ConversationRowLayoutInput {
+            key: key.into(),
+            target_height,
+            streaming,
+        }
+    }
+
     #[test]
     fn adjacent_equivalent_diagnostics_coalesce_for_presentation() {
         let message = "invalid terminal tool-call name";
@@ -1309,6 +1472,135 @@ mod tests {
         assert!(viewport.reconcile_scroll_distance(31.9));
         assert!(viewport.follow_latest());
         assert!(!viewport.reconcile_scroll_distance(0.0));
+    }
+
+    #[test]
+    fn streaming_row_height_commits_at_fifteen_hz_and_settles_immediately() {
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let initial = layout.resolve(
+            vec![row_layout("assistant:1", 100.0, true)],
+            600,
+            started,
+            None,
+        );
+        assert_eq!(initial.heights, vec![100.0]);
+
+        let early = layout.resolve(
+            vec![row_layout("assistant:1", 120.0, true)],
+            600,
+            started + Duration::from_millis(16),
+            None,
+        );
+        assert_eq!(early.heights, vec![100.0]);
+        assert_eq!(early.next_refresh_after, Some(Duration::from_millis(51)));
+
+        let latest_before_deadline = layout.resolve(
+            vec![row_layout("assistant:1", 140.0, true)],
+            600,
+            started + Duration::from_millis(66),
+            None,
+        );
+        assert_eq!(latest_before_deadline.heights, vec![100.0]);
+        assert_eq!(
+            latest_before_deadline.next_refresh_after,
+            Some(Duration::from_millis(1))
+        );
+
+        let committed = layout.resolve(
+            vec![row_layout("assistant:1", 140.0, true)],
+            600,
+            started + STREAMING_ROW_HEIGHT_INTERVAL,
+            None,
+        );
+        assert_eq!(committed.heights, vec![140.0]);
+        assert_eq!(committed.next_refresh_after, None);
+
+        let settled = layout.resolve(
+            vec![row_layout("assistant:1", 150.0, false)],
+            600,
+            started + Duration::from_millis(68),
+            None,
+        );
+        assert_eq!(settled.heights, vec![150.0]);
+        assert_eq!(settled.next_refresh_after, None);
+    }
+
+    #[test]
+    fn paused_anchor_survives_growth_insertion_and_eviction_above_it() {
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        layout.resolve(
+            vec![
+                row_layout("a", 100.0, false),
+                row_layout("b", 100.0, false),
+                row_layout("c", 100.0, false),
+            ],
+            600,
+            started,
+            None,
+        );
+
+        let grown = layout.resolve(
+            vec![
+                row_layout("a", 140.0, false),
+                row_layout("b", 130.0, false),
+                row_layout("c", 100.0, false),
+            ],
+            600,
+            started + Duration::from_millis(1),
+            Some(150.0),
+        );
+        assert_eq!(grown.paused_scroll_top, Some(190.0));
+
+        let inserted = layout.resolve(
+            vec![
+                row_layout("x", 30.0, false),
+                row_layout("a", 140.0, false),
+                row_layout("b", 130.0, false),
+                row_layout("c", 100.0, false),
+            ],
+            600,
+            started + Duration::from_millis(2),
+            grown.paused_scroll_top,
+        );
+        assert_eq!(inserted.paused_scroll_top, Some(220.0));
+
+        let evicted = layout.resolve(
+            vec![
+                row_layout("x", 30.0, false),
+                row_layout("b", 130.0, false),
+                row_layout("c", 100.0, false),
+            ],
+            600,
+            started + Duration::from_millis(3),
+            inserted.paused_scroll_top,
+        );
+        assert_eq!(evicted.paused_scroll_top, Some(80.0));
+    }
+
+    #[test]
+    fn width_bucket_changes_commit_streaming_height_immediately() {
+        assert_eq!(conversation_width_bucket(610), 600);
+        assert_eq!(conversation_width_bucket(623), 600);
+        assert_eq!(conversation_width_bucket(624), 624);
+
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        layout.resolve(
+            vec![row_layout("assistant:1", 100.0, true)],
+            600,
+            started,
+            None,
+        );
+        let resized = layout.resolve(
+            vec![row_layout("assistant:1", 180.0, true)],
+            624,
+            started + Duration::from_millis(1),
+            None,
+        );
+        assert_eq!(resized.heights, vec![180.0]);
+        assert_eq!(resized.next_refresh_after, None);
     }
 
     #[test]

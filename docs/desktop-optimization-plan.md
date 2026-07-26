@@ -165,12 +165,12 @@ NativeShell
 
 #### DESK-007 限制流式高度抖动
 
-- [ ] streaming 行文本可 30–60Hz 更新，高度最多 10–20Hz 更新。
-- [ ] Following 模式使用底部像素锚定。
-- [ ] Paused 模式对锚点上方高度变化做 offset compensation。
-- [ ] 使用 Unicode display width 或 GPUI 实测，替换 `str.len()` 字节估算。
+- [x] 保留 16ms streaming 文本批次；行高通过独立状态以 67ms 间隔提交（约 15Hz），完成态立即 settle，并用定时补刷覆盖流中停顿。
+- [x] Following 模式在每次布局解析后请求最后一项的 Bottom 锚定，包括仅由行高定时器触发的帧。
+- [x] Paused 模式保存稳定 row key + intra-row pixel offset；锚点上方增长、插入和淘汰时对 `ScrollHandle` 做 offset compensation。
+- [x] 使用 `unicode-width` display width 替换 UTF-8 `str.len()` 字节估算，并以 24px width bucket 抑制 resize 抖动。
 
-验收：中文、Emoji、代码块和长行不产生异常空白、裁剪或明显垂直跳动。
+验收：15Hz 提交、settle、width bucket、中文、Emoji、组合字符以及 grow/insert/evict 锚点补偿均有自动化测试；真实字体与代码块截图检查并入 DESK-017。
 
 ### Phase 2：增量投影、缓存和渲染隔离
 
@@ -345,7 +345,8 @@ desktop.input.latency
 | DESK-004 | 进行中 | 最小双阶段路径已完成；后续抽取 StreamingText、revision 和后台 settling parse |
 | DESK-005 | 进行中 | Markdown 已使用稳定业务 ID；typed key 和 row element 迁移待完成 |
 | DESK-006 | 完成 | 基于真实 offset 的迟滞状态机、streaming unseen 计数和无布局占位的浮动 pill 已完成；GUI 像素门禁归入 DESK-017 |
-| DESK-007～018 | 待开始 | 下一步限制 streaming 高度更新频率并补齐 Paused 锚点补偿 |
+| DESK-007 | 完成 | 文本保持 16ms 批次，行高约 15Hz；Following 底部锚定、Paused offset compensation 和 Unicode display width 已完成 |
+| DESK-008～018 | 待开始 | 下一步让 Projection 返回 typed delta，停止 token 事件后的全量 overlay 重建 |
 
 ## 10. 完成定义
 
