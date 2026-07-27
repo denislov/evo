@@ -14,7 +14,8 @@ use coding_agent::api::view::{
     CodingAgentTranscriptSnapshot, ProfileId,
 };
 use gpui::{
-    App, Bounds, Keystroke, Window, WindowBounds, WindowOptions, point, prelude::*, px, size,
+    App, Bounds, Context, FocusHandle, KeyDownEvent, Keystroke, Render, Window, WindowBounds,
+    WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 use gpui_component::Root;
 
@@ -25,6 +26,7 @@ use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot};
 
 const PERFORMANCE_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_PERF_REPLAY";
 const VISUAL_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_VISUAL_REPLAY";
+const CLICK_TO_PHOTON_REPLAY_ENV: &str = "EVO_DESKTOP_CLICK_TO_PHOTON_REPLAY";
 const WARMUP_FRAMES: usize = 20;
 const SAMPLE_FRAMES: usize = 200;
 const INPUT_SAMPLE_FRAMES: usize = 50;
@@ -34,6 +36,7 @@ const INPUT_SAMPLE_STRIDE: usize = SAMPLE_FRAMES / INPUT_SAMPLE_FRAMES;
 pub(super) enum NativeReplayRequest {
     Performance,
     Visual(VisualReplayLayout),
+    ClickToPhoton,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +82,61 @@ struct NativeFrameReplay {
     pending_input_at: Option<Instant>,
     input_dispatches: usize,
     input_post_render_samples: Vec<u128>,
+    resident_before: Option<u64>,
+    resident_after_warmup: Option<u64>,
+}
+
+struct ClickToPhotonReplay {
+    focus_handle: FocusHandle,
+    bright: bool,
+    samples: u64,
+}
+
+impl ClickToPhotonReplay {
+    fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            bright: false,
+            samples: 0,
+        }
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "escape" {
+            cx.quit();
+            return;
+        }
+        if event.is_held || event.keystroke.key != "space" {
+            return;
+        }
+
+        self.bright = !self.bright;
+        self.samples = self.samples.saturating_add(1);
+        let sample = self.samples;
+        let bright = self.bright;
+        let received_at = Instant::now();
+        println!("desktop_trace\tclick_to_photon_input_received\tsample={sample}\tbright={bright}");
+        window.on_next_frame(move |_, _| {
+            println!(
+                "desktop_trace\tclick_to_photon_post_render\tsample={sample}\tbright={bright}\t\
+                 input_received_to_post_render_us={}",
+                received_at.elapsed().as_micros()
+            );
+        });
+        cx.notify();
+    }
+}
+
+impl Render for ClickToPhotonReplay {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        div()
+            .id("desktop-click-to-photon-surface")
+            .track_focus(&self.focus_handle)
+            .key_context("DesktopClickToPhotonReplay")
+            .capture_key_down(cx.listener(Self::on_key_down))
+            .size_full()
+            .bg(rgb(if self.bright { 0xffffff } else { 0x000000 }))
+    }
 }
 
 impl NativeFrameReplay {
@@ -90,6 +148,8 @@ impl NativeFrameReplay {
             pending_input_at: None,
             input_dispatches: 0,
             input_post_render_samples: Vec::with_capacity(INPUT_SAMPLE_FRAMES),
+            resident_before: crate::resident_memory::resident_bytes(),
+            resident_after_warmup: None,
         }
     }
 
@@ -111,6 +171,9 @@ impl NativeFrameReplay {
         }
         self.last_callback_at = Some(now);
         self.callbacks += 1;
+        if self.callbacks == WARMUP_FRAMES {
+            self.resident_after_warmup = crate::resident_memory::resident_bytes();
+        }
     }
 
     fn should_dispatch_input(&self) -> bool {
@@ -138,21 +201,27 @@ impl NativeFrameReplay {
 pub(super) fn request() -> Result<Option<NativeReplayRequest>, String> {
     let performance = std::env::var(PERFORMANCE_REPLAY_ENV)
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let click_to_photon = std::env::var(CLICK_TO_PHOTON_REPLAY_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let visual = std::env::var(VISUAL_REPLAY_ENV).ok();
-    request_from_values(performance, visual.as_deref())
+    request_from_values(performance, click_to_photon, visual.as_deref())
 }
 
 fn request_from_values(
     performance: bool,
+    click_to_photon: bool,
     visual: Option<&str>,
 ) -> Result<Option<NativeReplayRequest>, String> {
-    if performance && visual.is_some() {
+    if usize::from(performance) + usize::from(click_to_photon) + usize::from(visual.is_some()) > 1 {
         return Err(format!(
-            "{PERFORMANCE_REPLAY_ENV} and {VISUAL_REPLAY_ENV} are mutually exclusive"
+            "{PERFORMANCE_REPLAY_ENV}, {CLICK_TO_PHOTON_REPLAY_ENV}, and {VISUAL_REPLAY_ENV} are mutually exclusive"
         ));
     }
     if performance {
         return Ok(Some(NativeReplayRequest::Performance));
+    }
+    if click_to_photon {
+        return Ok(Some(NativeReplayRequest::ClickToPhoton));
     }
     visual
         .map(VisualReplayLayout::parse)
@@ -161,6 +230,9 @@ fn request_from_values(
 }
 
 pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), String> {
+    if request == NativeReplayRequest::ClickToPhoton {
+        return open_click_to_photon(cx);
+    }
     let (projection, viewport, title, replay) = match request {
         NativeReplayRequest::Performance => (
             performance_projection()?,
@@ -174,6 +246,7 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             format!("evo-desktop-visual-{}", layout.key()),
             None,
         ),
+        NativeReplayRequest::ClickToPhoton => unreachable!("handled before projection setup"),
     };
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -209,6 +282,27 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
     .map_err(|error| error.to_string())
 }
 
+fn open_click_to_photon(cx: &mut App) -> Result<(), String> {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(40.), px(40.)),
+            size: size(px(1_000.), px(700.)),
+        })),
+        window_min_size: Some(size(px(640.), px(480.))),
+        app_id: Some("evo.desktop.click-to-photon".into()),
+        ..WindowOptions::default()
+    };
+    cx.open_window(options, |window, cx| {
+        window.set_window_title("evo · click-to-photon measurement · Space toggles · Esc exits");
+        let replay = cx.new(ClickToPhotonReplay::new);
+        let focus_handle = replay.read(cx).focus_handle.clone();
+        focus_handle.focus(window, cx);
+        cx.new(|cx| Root::new(replay, window, cx))
+    })
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
 fn schedule_frame(window: &mut Window, replay: Rc<RefCell<NativeFrameReplay>>) {
     window.on_next_frame(move |window, cx| {
         let now = Instant::now();
@@ -225,14 +319,36 @@ fn schedule_frame(window: &mut Window, replay: Rc<RefCell<NativeFrameReplay>>) {
                 percentile(&mut replay_ref.input_post_render_samples, 95);
             let input_post_render_p99_micros =
                 percentile(&mut replay_ref.input_post_render_samples, 99);
+            let resident_after = crate::resident_memory::resident_bytes();
+            let resident_startup_growth =
+                match (replay_ref.resident_before, replay_ref.resident_after_warmup) {
+                    (Some(before), Some(after)) => Some(after.saturating_sub(before)),
+                    _ => None,
+                };
+            let resident_steady_growth = match (replay_ref.resident_after_warmup, resident_after) {
+                (Some(before), Some(after)) => Some(after.saturating_sub(before)),
+                _ => None,
+            };
             println!(
-                "desktop_perf\tnative_presented_frames={}\t\
+                "desktop_perf\tplatform={}\tnative_presented_frames={}\t\
                  native_frame_cadence_p95_us={cadence_p95_micros}\t\
                  native_input_samples={}\t\
                  native_input_dispatch_to_post_render_p95_us={input_post_render_p95_micros}\t\
-                 native_input_dispatch_to_post_render_p99_us={input_post_render_p99_micros}",
+                 native_input_dispatch_to_post_render_p99_us={input_post_render_p99_micros}\t\
+                 native_rss_supported={}\tnative_rss_before_bytes={}\t\
+                 native_rss_after_warmup_bytes={}\tnative_rss_after_bytes={}\t\
+                 native_rss_startup_growth_bytes={}\tnative_rss_steady_growth_bytes={}",
+                std::env::consts::OS,
                 replay_ref.cadence_samples.len(),
-                replay_ref.input_post_render_samples.len()
+                replay_ref.input_post_render_samples.len(),
+                replay_ref.resident_before.is_some()
+                    && replay_ref.resident_after_warmup.is_some()
+                    && resident_after.is_some(),
+                replay_ref.resident_before.unwrap_or_default(),
+                replay_ref.resident_after_warmup.unwrap_or_default(),
+                resident_after.unwrap_or_default(),
+                resident_startup_growth.unwrap_or_default(),
+                resident_steady_growth.unwrap_or_default()
             );
             cx.quit();
         } else {
@@ -429,13 +545,19 @@ mod tests {
     #[test]
     fn native_replay_request_parser_rejects_conflicts_and_unknown_layouts() {
         assert_eq!(
-            request_from_values(false, Some("medium")),
+            request_from_values(false, false, Some("medium")),
             Ok(Some(NativeReplayRequest::Visual(
                 VisualReplayLayout::Medium
             )))
         );
-        assert!(request_from_values(true, Some("wide")).is_err());
-        assert!(request_from_values(false, Some("compact")).is_err());
+        assert_eq!(
+            request_from_values(false, true, None),
+            Ok(Some(NativeReplayRequest::ClickToPhoton))
+        );
+        assert!(request_from_values(true, false, Some("wide")).is_err());
+        assert!(request_from_values(true, true, None).is_err());
+        assert!(request_from_values(false, true, Some("wide")).is_err());
+        assert!(request_from_values(false, false, Some("compact")).is_err());
     }
 
     #[test]

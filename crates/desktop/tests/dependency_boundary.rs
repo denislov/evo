@@ -95,10 +95,12 @@ fn release_memory_probe_covers_every_supported_desktop_platform() {
         );
     }
     assert!(source.contains("resident_memory_probe_reports_the_current_process"));
+    assert!(source.contains("mod resident_memory"));
+    assert!(!source.contains("#[cfg(test)]\nmod resident_memory"));
 
     let manifest = manifest();
     let windows = &manifest["target"]["cfg(target_os = \"windows\")"];
-    let windows_sys = &windows["dev-dependencies"]["windows-sys"];
+    let windows_sys = &windows["dependencies"]["windows-sys"];
     assert_eq!(windows_sys["version"].as_str(), Some("0.61"));
     let features = windows_sys["features"]
         .as_array()
@@ -114,6 +116,44 @@ fn release_memory_probe_covers_every_supported_desktop_platform() {
             "Win32_System_Threading",
         ])
     );
+}
+
+#[test]
+fn external_desktop_performance_gates_are_cross_platform_and_fail_closed() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root should resolve");
+    let bash_native = fs::read_to_string(root.join("scripts/desktop-native-perf-gate.sh"))
+        .expect("bash native gate should be readable");
+    let powershell_native = fs::read_to_string(root.join("scripts/desktop-native-perf-gate.ps1"))
+        .expect("PowerShell native gate should be readable");
+    let powershell_headless = fs::read_to_string(root.join("scripts/desktop-perf-gate.ps1"))
+        .expect("PowerShell headless gate should be readable");
+    let external_report =
+        fs::read_to_string(root.join("scripts/desktop-click-to-photon-report.py"))
+            .expect("external click-to-photon report should be readable");
+
+    for gate in [&bash_native, &powershell_native] {
+        for contract in [
+            "EVO_DESKTOP_MARKDOWN_TRACE",
+            "production_markdown_completion_samples",
+            "native_rss_steady_growth_bytes",
+            "native_rss_absolute_budget_bytes",
+            "native_rss_steady_budget_bytes",
+        ] {
+            assert!(
+                gate.contains(contract),
+                "native gate must retain {contract}"
+            );
+        }
+    }
+    assert!(powershell_headless.contains("desktop_release_"));
+    assert!(powershell_headless.contains("desktop_release_gpui_"));
+    assert!(external_report.contains("sample_id"));
+    assert!(external_report.contains("latency_us"));
+    assert!(external_report.contains("paired_app_log"));
+    assert!(external_report.contains("p95_budget_us"));
 }
 
 #[test]

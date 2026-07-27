@@ -5405,6 +5405,10 @@ mod tests {
         assert!(streaming.contains("StreamingTextPhase::SettlingMarkdown"));
         assert!(streaming.contains("StreamingTextPhase::FinalMarkdown"));
         assert!(streaming.contains("TextView::markdown"));
+        assert!(streaming.contains("EVO_DESKTOP_MARKDOWN_TRACE"));
+        assert!(streaming.contains("element.request_layout(window, cx)"));
+        assert!(streaming.contains("desktop.markdown.parse_complete"));
+        assert!(streaming.contains("markdown_parse_to_layout_us"));
         assert!(!pane.contains(".id((\"conversation-block\", index))"));
         assert!(!source.contains("(\"transcript-markdown\", index)"));
         assert!(!source.contains("(\"transcript-detail-markdown\", index)"));

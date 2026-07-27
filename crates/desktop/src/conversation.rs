@@ -22,7 +22,9 @@ pub const MAX_COPY_BYTES: usize = 1024 * 1024;
 pub const MAX_COMPOSER_BYTES: usize = 1024 * 1024;
 pub const MAX_MARKDOWN_PREVIEW_BYTES: usize = 256 * 1024;
 pub const MAX_MARKDOWN_LINE_BYTES: usize = 16 * 1024;
-pub const MAX_MARKDOWN_LINES: usize = 4_096;
+// Keep final parsing comfortably inside the 150 ms completion budget on the
+// locked GPUI parser. Full copy text remains available outside this preview.
+pub const MAX_MARKDOWN_LINES: usize = 3_072;
 pub const MAX_MARKDOWN_NESTING: usize = 24;
 pub const MAX_MARKDOWN_MARKERS_PER_LINE: usize = 128;
 pub const MAX_MARKDOWN_TABLE_ROWS: usize = 256;

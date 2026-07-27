@@ -100,6 +100,10 @@ mod allocation_probe {
         }
     }
 
+    pub(crate) use crate::resident_memory::resident_bytes;
+}
+
+mod resident_memory {
     #[cfg(target_os = "linux")]
     pub(crate) fn resident_bytes() -> Option<u64> {
         let status = std::fs::read_to_string("/proc/self/status").ok()?;
@@ -211,7 +215,7 @@ mod tests {
     #[test]
     fn resident_memory_probe_reports_the_current_process() {
         assert!(
-            super::allocation_probe::resident_bytes().is_some_and(|bytes| bytes > 0),
+            super::resident_memory::resident_bytes().is_some_and(|bytes| bytes > 0),
             "supported desktop platforms must report a nonzero resident set"
         );
     }
@@ -220,13 +224,13 @@ mod tests {
     #[test]
     fn linux_resident_memory_parser_requires_vmrss_and_converts_kibibytes() {
         assert_eq!(
-            super::allocation_probe::parse_linux_resident_bytes(
+            super::resident_memory::parse_linux_resident_bytes(
                 "Name:\tdesktop\nVmSize:\t9000 kB\nVmRSS:\t1234 kB\n"
             ),
             Some(1_263_616)
         );
         assert_eq!(
-            super::allocation_probe::parse_linux_resident_bytes("VmSize:\t9000 kB\n"),
+            super::resident_memory::parse_linux_resident_bytes("VmSize:\t9000 kB\n"),
             None
         );
     }
