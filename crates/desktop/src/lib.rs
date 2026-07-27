@@ -106,7 +106,54 @@ mod allocation_probe {
         parse_linux_resident_bytes(&status)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    pub(crate) fn resident_bytes() -> Option<u64> {
+        let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info>::uninit();
+        let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+        #[allow(deprecated)]
+        // SAFETY: reading the process-global send right does not transfer or
+        // mutate ownership; task_info only borrows it for this syscall.
+        let task = unsafe { libc::mach_task_self_ };
+        // SAFETY: `info` has the exact layout and count required by
+        // MACH_TASK_BASIC_INFO, and remains alive for the duration of the call.
+        let result = unsafe {
+            libc::task_info(
+                task,
+                libc::MACH_TASK_BASIC_INFO,
+                info.as_mut_ptr().cast::<libc::integer_t>(),
+                &mut count,
+            )
+        };
+        if result != libc::KERN_SUCCESS || count < libc::MACH_TASK_BASIC_INFO_COUNT {
+            return None;
+        }
+        // SAFETY: a successful task_info call initialized the complete struct.
+        let info = unsafe { info.assume_init() };
+        Some(info.resident_size)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn resident_bytes() -> Option<u64> {
+        use windows_sys::Win32::System::ProcessStatus::{
+            K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let mut counters = PROCESS_MEMORY_COUNTERS {
+            cb: u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?,
+            ..PROCESS_MEMORY_COUNTERS::default()
+        };
+        // SAFETY: GetCurrentProcess returns a process-owned pseudo-handle, and
+        // counters points to a writable structure whose byte size is supplied.
+        let succeeded =
+            unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+        if succeeded == 0 {
+            return None;
+        }
+        u64::try_from(counters.WorkingSetSize).ok()
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     pub(crate) fn resident_bytes() -> Option<u64> {
         None
     }
@@ -160,6 +207,15 @@ pub fn run(options: DesktopApplicationOptions) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn resident_memory_probe_reports_the_current_process() {
+        assert!(
+            super::allocation_probe::resident_bytes().is_some_and(|bytes| bytes > 0),
+            "supported desktop platforms must report a nonzero resident set"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_resident_memory_parser_requires_vmrss_and_converts_kibibytes() {

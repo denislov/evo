@@ -59,6 +59,37 @@ It builds the real release binary, opens a deterministic 1,300×900 NativeShell 
 | 336 KB code + CJK + Emoji | bounded-preview sanitize / actual GPUI parser P95 | 630 / 7,541 µs |
 | 10 / 50 / 200 streaming row revisions | per-event P95 | 21 / 9 / 5 µs |
 
+## Pre-optimization comparison
+
+The repository's initial commit, `a39615f`, already contains the same 12,948,890-byte/10,000-block interaction fixture. Five release runs on the baseline machine provide a source-level pre-optimization comparison for hydration, visible-window preparation, and Composer state updates. A test-only counting allocator was backported without changing product code; the exact reproducible patch is `docs/desktop-pre-optimization-allocation.patch`.
+
+| Metric | Initial commit, five-run median | Current implementation, five-run median | Interpretation |
+|---|---:|---:|---|
+| Hydration | 1,739 µs | 14,577 µs | Current stable identity, revision, cache, and retained-size metadata add work, but remain inside one 16.7 ms frame |
+| Hydration allocation count | 30,015 | 30,015 | Still linear at approximately three allocations per block |
+| Hydration cumulative allocated bytes | 3,939,583 B | 4,725,919 B | +786,336 B / +20.0%, covered by the 8 MiB release ceiling |
+| 500 visible-window preparations | 181 µs P95 | 178 µs P95 | Effectively unchanged at this fixture scale |
+| 500 Composer edits | 1 µs P95 | 1 µs P95 | Unchanged |
+
+Raw initial-commit hydration samples were 1,739 / 1,594 / 1,801 / 3,313 / 1,615 µs; scroll-preparation P95 samples were 181 / 190 / 167 / 193 / 171 µs. Raw current hydration samples were 14,492 / 14,577 / 14,580 / 14,375 / 15,568 µs; scroll-preparation P95 samples were 177 / 176 / 178 / 188 / 191 µs. Allocation values and the 1 µs Composer P95 were stable across all five runs.
+
+To reproduce the historical measurement from the current repository:
+
+```bash
+repository_root="$(pwd)"
+prebaseline_dir="$(mktemp -d /tmp/evo-desktop-prebaseline.XXXXXX)"
+git worktree add --detach "${prebaseline_dir}" a39615f
+git -C "${prebaseline_dir}" apply \
+  "${repository_root}/docs/desktop-pre-optimization-allocation.patch"
+cargo test --manifest-path "${prebaseline_dir}/Cargo.toml" \
+  -p desktop --lib --release \
+  conversation::tests::desktop_release_ten_mib_interaction_baseline -- \
+  --ignored --nocapture --test-threads=1
+git worktree remove --force "${prebaseline_dir}"
+```
+
+The initial commit did not contain the later NativeShell headless/native frame replay, an RSS probe, or a committed `Cargo.lock`. Consequently this evidence does not invent a historical full-tree frame, process-RSS, or GPU/present number: it uses the pinned UI git revisions and a Rust-1.96-compatible dependency resolution, and reports only the metrics actually exercised by the original fixture. Those missing historical measurements cannot be reconstructed without backporting a materially different render harness into the old implementation.
+
 Timing at this scale varies with CPU frequency, scheduler activity, and compiler changes. The enforced budgets are intentionally tied to user-visible limits rather than these exact baseline values:
 
 - visible-window and incremental row preparation P95: no more than 16.7 ms;
@@ -71,7 +102,7 @@ Timing at this scale varies with CPU frequency, scheduler activity, and compiler
 - bounded-preview sanitization and actual GPUI final-content parser P95: no more than 150 ms each;
 - hydration: no more than four allocations per block plus fixed slack;
 - 10 MiB fixture hydration: no more than 8 MiB cumulatively allocated, guarding against cloning the retained payload during projection;
-- when `/proc/self/status` is available, hydration RSS growth: no more than 64 MiB per fixture.
+- on Linux, macOS, and Windows, hydration RSS/working-set growth: no more than 64 MiB per fixture.
 
 ## What the gate covers
 
@@ -81,7 +112,7 @@ Timing at this scale varies with CPU frequency, scheduler activity, and compiler
 - the same deterministic tree in an opt-in native window with 20 warmup, 200 measured GPU/present redraws, and 50 paired InputState dispatch-to-post-render samples;
 - simulated incremental rates of 10, 50, and 200 row revisions per second;
 - Markdown, Reasoning, Bash output, tables, fenced code, CJK, and Emoji;
-- bounded-preview sanitization, the actual GPUI Markdown parser, hydration, hydration allocation pressure, Linux process RSS, visible-window preparation, Composer state update, cache-retained bytes, and projection-retained bytes.
+- bounded-preview sanitization, the actual GPUI Markdown parser, hydration, hydration allocation pressure, supported-platform process resident memory, visible-window preparation, Composer state update, cache-retained bytes, and projection-retained bytes.
 
 ## Remaining instrumentation
 
@@ -91,6 +122,6 @@ The separate native replay uses the production binary rather than a GPUI test bi
 
 The native rows above are the last qualifying reference run. A later validation attempt on 2026-07-27 was correctly rejected because the active X11 session throttled callbacks to approximately 1 Hz (`native_frame_cadence_p95_us=1,008,248`, draw/present P95 `1,000,185 µs`, input-to-post-render P95 `1,000,014 µs`). Those samples are environmental failure evidence, not a replacement baseline; the gate failed closed instead of publishing them as a 60/120 Hz result.
 
-The test binary uses a test-only counting system allocator to report cumulative successful allocations around hydration. The release gate is single-threaded so unrelated tests cannot contaminate the deltas. On Linux it additionally samples `VmRSS` immediately before and after hydration; fixture construction is outside that window. RSS is allocator- and scheduler-sensitive, so the gate uses a regression ceiling rather than treating small deltas as exact retained-heap measurements. Other platforms report `rss_supported=false`; their numeric RSS fields are zero sentinels and must not be interpreted as measurements.
+The test binary uses a test-only counting system allocator to report cumulative successful allocations around hydration. The release gate is single-threaded so unrelated tests cannot contaminate the deltas. It samples the current process immediately before and after hydration: Linux reads `VmRSS` from `/proc/self/status`, macOS queries `MACH_TASK_BASIC_INFO.resident_size`, and Windows queries `PROCESS_MEMORY_COUNTERS.WorkingSetSize`. Fixture construction is outside that window. Resident memory is allocator- and scheduler-sensitive, so the gate uses a regression ceiling rather than treating small deltas as exact retained-heap measurements. Unsupported platforms report `rss_supported=false`; their numeric RSS fields are zero sentinels and must not be interpreted as measurements. Linux has a recorded curve; macOS and Windows now run the same gate natively but still require qualifying machine samples before DESK-017 can close.
 
 The desktop adapter now exposes opt-in `tracing` spans/events for `desktop.runtime.batch_wait`, `desktop.runtime.receive`, `desktop.runtime.batch_size`, `desktop.projection.apply`, `desktop.preview.sanitize`, `desktop.list.height_update`, `desktop.list.layout`, `desktop.render.prepare_rows`, `desktop.render`, `desktop.input.change`, and `desktop.input.to_render`. The input event measures the latest Composer change handler to the next ComposerPane render and is consumed exactly once. The release parser matrix directly constructs `TextViewState::markdown` with the same bounded content fixtures, so parser completion is measured without mislabeling preview sanitization as parsing. The component does not expose a production per-row parser-completion hook; an attempted externally owned state lifecycle also regressed the 10k InputState→ComposerPane replay and was rejected. The host application or benchmark harness owns subscriber installation; the desktop library does not replace a process-global subscriber. These spans and gates provide CPU/render-preparation timing boundaries but do not claim GPU paint or end-to-end input latency.

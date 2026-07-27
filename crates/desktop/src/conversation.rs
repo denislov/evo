@@ -2265,10 +2265,11 @@ mod tests {
         let scroll_p95_micros = percentile_95(&mut scroll_samples);
         let input_p95_micros = percentile_95(&mut input_samples).div_ceil(1_000);
         println!(
-            "desktop_perf\tfixture_bytes={fixture_bytes}\thydration_us={hydration_micros}\t\
+            "desktop_perf\tplatform={}\tfixture_bytes={fixture_bytes}\thydration_us={hydration_micros}\t\
              hydration_allocations={}\thydration_allocated_bytes={}\tretained_bytes={}\t\
              rss_supported={}\trss_before_bytes={}\trss_after_bytes={}\trss_growth_bytes={}\t\
              scroll_render_p95_us={scroll_p95_micros}\tinput_p95_us={input_p95_micros}",
+            std::env::consts::OS,
             hydration_allocations.count(),
             hydration_allocations.bytes(),
             projection.retained_bytes(),
@@ -2325,9 +2326,10 @@ mod tests {
             let rss_after = crate::allocation_probe::resident_bytes();
             let rss_growth = resident_growth(rss_before, rss_after);
             println!(
-                "desktop_perf\tscale_blocks={block_count}\thydration_us={hydration_micros}\t\
+                "desktop_perf\tplatform={}\tscale_blocks={block_count}\thydration_us={hydration_micros}\t\
                  hydration_allocations={}\thydration_allocated_bytes={}\tretained_bytes={}\t\
                  rss_supported={}\trss_before_bytes={}\trss_after_bytes={}\trss_growth_bytes={}",
+                std::env::consts::OS,
                 hydration_allocations.count(),
                 hydration_allocations.bytes(),
                 projection.retained_bytes(),

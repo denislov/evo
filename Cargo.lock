@@ -1610,6 +1610,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "unicode-width",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

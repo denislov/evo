@@ -80,6 +80,43 @@ fn unstable_ui_dependencies_are_exactly_pinned() {
 }
 
 #[test]
+fn release_memory_probe_covers_every_supported_desktop_platform() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join("src/lib.rs"))
+        .expect("desktop library source should be readable");
+    for platform_probe in [
+        "parse_linux_resident_bytes",
+        "MACH_TASK_BASIC_INFO",
+        "K32GetProcessMemoryInfo",
+    ] {
+        assert!(
+            source.contains(platform_probe),
+            "release memory gate must retain the {platform_probe} platform probe"
+        );
+    }
+    assert!(source.contains("resident_memory_probe_reports_the_current_process"));
+
+    let manifest = manifest();
+    let windows = &manifest["target"]["cfg(target_os = \"windows\")"];
+    let windows_sys = &windows["dev-dependencies"]["windows-sys"];
+    assert_eq!(windows_sys["version"].as_str(), Some("0.61"));
+    let features = windows_sys["features"]
+        .as_array()
+        .expect("windows-sys features should be explicit")
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        features,
+        BTreeSet::from([
+            "Win32_Foundation",
+            "Win32_System_ProcessStatus",
+            "Win32_System_Threading",
+        ])
+    );
+}
+
+#[test]
 fn desktop_public_api_is_the_application_boundary_not_an_adapter_sdk() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let library = fs::read_to_string(manifest_dir.join("src/lib.rs"))

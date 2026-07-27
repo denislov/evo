@@ -4730,11 +4730,12 @@ mod tests {
         let input_roundtrip_p95_micros = test_percentile_95(&mut input_roundtrip_samples);
         let input_to_render_p95_micros = test_percentile_95(&mut input_to_render_samples);
         println!(
-            "desktop_perf\theadless_blocks={}\theadless_cpu_frame_p95_us={frame_p95_micros}\t\
+            "desktop_perf\tplatform={}\theadless_blocks={}\theadless_cpu_frame_p95_us={frame_p95_micros}\t\
              headless_input_roundtrip_p95_us={input_roundtrip_p95_micros}\t\
              input_change_to_render_p95_us={input_to_render_p95_micros}\t\
              window_rss_supported={}\twindow_rss_before_bytes={}\twindow_rss_after_bytes={}\t\
              window_rss_growth_bytes={}",
+            std::env::consts::OS,
             desktop::conversation::MAX_TRANSCRIPT_BLOCKS,
             window_rss_before.is_some() && window_rss_after.is_some(),
             window_rss_before.unwrap_or_default(),
