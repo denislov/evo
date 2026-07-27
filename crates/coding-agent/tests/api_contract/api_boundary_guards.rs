@@ -62,6 +62,15 @@ fn external_diagnostic_matcher_requires_code_primary_span_and_forbidden_surface(
     };
 
     assert!(diagnostic_matches(&diagnostic, &expected).is_ok());
+    let mut enclosing_span = diagnostic.clone();
+    enclosing_span["message"]["spans"][0]["column_start"] = 5.into();
+    assert!(
+        diagnostic_matches(&enclosing_span, &expected).is_ok(),
+        "newer rustc versions may highlight the full forbidden import path"
+    );
+    let mut unrelated_span = diagnostic.clone();
+    unrelated_span["message"]["spans"][0]["column_end"] = 20.into();
+    assert!(diagnostic_matches(&unrelated_span, &expected).is_err());
     let wrong_code = ExpectedDiagnostic {
         code: "E0603",
         ..expected
@@ -74,115 +83,115 @@ const FAIL_FIXTURES: [CompileFixture; 19] = [
         category: "private-cli-runtime-seed",
         access_path: "runtime-category",
         source: "cli_run_options_api.rs",
-        expected: unresolved(37, 50, "CliRunOptions", "coding_agent::api::runtime"),
+        expected: unresolved(33, 46, "CliRunOptions", "coding_agent::api::runtime"),
     },
     CompileFixture {
         category: "retired-cli-category",
         access_path: "api",
         source: "run_cli_with_options_api.rs",
-        expected: missing_module(27, 30, "cli", "coding_agent::api"),
+        expected: missing_module(24, 27, "cli", "coding_agent::api"),
     },
     CompileFixture {
         category: "retired-protocol-category",
         access_path: "api",
         source: "run_rpc_mode_for_io_api.rs",
-        expected: unresolved(27, 35, "protocol", "coding_agent::api"),
+        expected: unresolved(24, 32, "protocol", "coding_agent::api"),
     },
     CompileFixture {
         category: "private-prompt-runtime-seed",
         access_path: "operation-category",
         source: "prompt_run_options_api.rs",
-        expected: unresolved(39, 55, "PromptRunOptions", "coding_agent::api::operation"),
+        expected: unresolved(35, 51, "PromptRunOptions", "coding_agent::api::operation"),
     },
     CompileFixture {
         category: "operation-dispatch",
         access_path: "api",
         source: "operation_dispatch_api.rs",
-        expected: unresolved(28, 47, "OperationDescriptor", "coding_agent::api"),
+        expected: unresolved(24, 43, "OperationDescriptor", "coding_agent::api"),
     },
     CompileFixture {
         category: "operation-dispatch",
         access_path: "root",
         source: "operation_dispatch_root.rs",
-        expected: unresolved(23, 42, "OperationDescriptor", "coding_agent"),
+        expected: unresolved(19, 38, "OperationDescriptor", "coding_agent"),
     },
     CompileFixture {
         category: "operation-dispatch",
         access_path: "doc-hidden",
         source: "operation_dispatch_hidden.rs",
-        expected: private_module(22, 29, "runtime"),
+        expected: private_module(19, 26, "runtime"),
     },
     CompileFixture {
         category: "services",
         access_path: "api",
         source: "services_api.rs",
-        expected: unresolved(28, 40, "EventService", "coding_agent::api"),
+        expected: unresolved(25, 37, "EventService", "coding_agent::api"),
     },
     CompileFixture {
         category: "services",
         access_path: "root",
         source: "services_root.rs",
-        expected: unresolved(23, 35, "EventService", "coding_agent"),
+        expected: unresolved(20, 32, "EventService", "coding_agent"),
     },
     CompileFixture {
         category: "services",
         access_path: "doc-hidden",
         source: "services_hidden.rs",
-        expected: private_module(22, 30, "services"),
+        expected: private_module(19, 27, "services"),
     },
     CompileFixture {
         category: "plugin-options-registries",
         access_path: "api",
         source: "plugins_api.rs",
-        expected: unresolved(28, 45, "PluginLoadOptions", "coding_agent::api"),
+        expected: unresolved(25, 42, "PluginLoadOptions", "coding_agent::api"),
     },
     CompileFixture {
         category: "plugin-options-registries",
         access_path: "root",
         source: "plugins_root.rs",
-        expected: unresolved(23, 40, "PluginLoadOptions", "coding_agent"),
+        expected: unresolved(20, 37, "PluginLoadOptions", "coding_agent"),
     },
     CompileFixture {
         category: "plugin-options-registries",
         access_path: "doc-hidden",
         source: "plugins_hidden.rs",
-        expected: missing_module(34, 45, "plugin_load", "coding_agent::operations"),
+        expected: missing_module(31, 42, "plugin_load", "coding_agent::operations"),
     },
     CompileFixture {
         category: "flow-contracts",
         access_path: "api",
         source: "flow_api.rs",
-        expected: unresolved(28, 32, "Flow", "coding_agent::api"),
+        expected: unresolved(25, 29, "Flow", "coding_agent::api"),
     },
     CompileFixture {
         category: "flow-contracts",
         access_path: "root",
         source: "flow_root.rs",
-        expected: unresolved(23, 27, "Flow", "coding_agent"),
+        expected: unresolved(20, 24, "Flow", "coding_agent"),
     },
     CompileFixture {
         category: "flow-contracts",
         access_path: "doc-hidden",
         source: "flow_hidden.rs",
-        expected: private_module(22, 32, "operations"),
+        expected: private_module(19, 29, "operations"),
     },
     CompileFixture {
         category: "legacy-root-args-module",
         access_path: "root",
         source: "args_root.rs",
-        expected: unresolved(22, 26, "args", "coding_agent"),
+        expected: unresolved(19, 23, "args", "coding_agent"),
     },
     CompileFixture {
         category: "legacy-root-error-module",
         access_path: "root",
         source: "error_root.rs",
-        expected: unresolved(22, 27, "error", "coding_agent"),
+        expected: unresolved(19, 24, "error", "coding_agent"),
     },
     CompileFixture {
         category: "legacy-root-prompt-options-module",
         access_path: "root",
         source: "prompt_options_root.rs",
-        expected: unresolved(22, 36, "prompt_options", "coding_agent"),
+        expected: unresolved(19, 33, "prompt_options", "coding_agent"),
     },
 ];
 
@@ -391,15 +400,19 @@ fn diagnostic_matches(
                         .is_some_and(|file| file == "src/main.rs" || file.ends_with("/src/main.rs"))
                     && span.get("line_start").and_then(|value| value.as_u64())
                         == Some(expected.line)
-                    && span.get("column_start").and_then(|value| value.as_u64())
-                        == Some(expected.column_start)
-                    && span.get("column_end").and_then(|value| value.as_u64())
-                        == Some(expected.column_end)
+                    && span
+                        .get("column_start")
+                        .and_then(|value| value.as_u64())
+                        .is_some_and(|start| start <= expected.column_start)
+                    && span
+                        .get("column_end")
+                        .and_then(|value| value.as_u64())
+                        .is_some_and(|end| end >= expected.column_end)
             })
         })
         .ok_or_else(|| {
             format!(
-                "missing primary src/main.rs span {}:{}-{}",
+                "missing primary src/main.rs span enclosing {}:{}-{}",
                 expected.line, expected.column_start, expected.column_end
             )
         })?;

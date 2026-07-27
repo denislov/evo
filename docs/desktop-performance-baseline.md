@@ -8,7 +8,7 @@ This document records the repeatable headless and opt-in native release gates in
 ./scripts/desktop-perf-gate.sh
 ```
 
-The gate runs ignored release-only tests so ordinary debug unit-test runs stay fast. Hydration/RSS fixtures run in a fresh process before the NativeShell replay, preventing the GPUI window fixture from preheating allocator pages and flattening the RSS curve. Each threshold is asserted by the test, and the complete output—including raw tab-separated `desktop_perf` rows—is written to `target/desktop-perf/latest.log` for local or CI comparison.
+The gate runs ignored release-only tests so ordinary debug unit-test runs stay fast. Hydration/RSS fixtures run in a fresh process before the NativeShell replay, preventing the GPUI window fixture from preheating allocator pages and flattening the RSS curve. The content matrix separately measures bounded-preview sanitization and GPUI's real synchronous `TextViewState::markdown` parser. Each threshold is asserted by the test, and the complete output—including raw tab-separated `desktop_perf` rows—is written to `target/desktop-perf/latest.log` for local or CI comparison.
 
 On a machine with an interactive X11 or Wayland display, run the native platform gate separately:
 
@@ -34,30 +34,30 @@ It builds the real release binary, opens a deterministic 1,300×900 NativeShell 
 | Fixture | Measurement | Baseline |
 |---|---:|---:|
 | Empty conversation | retained blocks | 0 |
-| 12,948,890-byte / 10,000-block transcript | hydration | 11,805 µs |
-| Same transcript | hydration allocations | 30,015 allocations / 4,201,695 cumulative bytes |
+| 12,948,890-byte / 10,000-block transcript | hydration | 14,311 µs |
+| Same transcript | hydration allocations | 30,015 allocations / 4,725,919 cumulative bytes |
 | Same transcript | retained projection text and metadata | 13,108,890 bytes |
-| Same transcript | Linux hydration RSS before / after / growth | 25,198,592 / 25,231,360 / 32,768 bytes |
-| Same transcript, 500 visible-window preparations | P95 | 180 µs |
+| Same transcript | Linux hydration RSS before / after / growth | 25,669,632 / 28,676,096 / 3,006,464 bytes |
+| Same transcript, 500 visible-window preparations | P95 | 164 µs |
 | Same transcript, 500 Composer edits | P95 | 1 µs |
-| 10,000-block NativeShell, 200 forced uncached headless frames | CPU frame P95 | 1,346 µs |
-| Same NativeShell, 200 real InputState changes | headless input roundtrip P95 | 1,212 µs |
-| Same input replay | change handler → ComposerPane render P95 | 170 µs |
-| Same NativeShell after projection construction | Linux window/component RSS before / after / growth | 24,223,744 / 49,217,536 / 24,993,792 bytes |
+| 10,000-block NativeShell, 200 forced uncached headless frames | CPU frame P95 | 1,573 µs |
+| Same NativeShell, 200 keyboard-dispatched InputState changes | headless input roundtrip P95 | 2,765 µs |
+| Same input replay | change handler → ComposerPane render P95 | 210 µs |
+| Same NativeShell after projection construction | Linux window/component RSS before / after / growth | 27,516,928 / 51,294,208 / 23,777,280 bytes |
 | Same 10,000-block fixture in a real X11 window, 200 post-warmup forced redraws | native GPU/present frame P95 | 3,181 µs |
 | Same native replay | native GPU/present frame P99 | 3,444 µs |
 | Same native replay | platform frame callback cadence P95 | 8,422 µs |
 | Same native replay, 50 InputState keystrokes | dispatch → first post-render callback P95 / P99 | 9,094 / 9,369 µs |
-| 1 / 100 / 1,000 / 10,000 short blocks | hydration | 8 / 47 / 531 / 2,869 µs |
+| 1 / 100 / 1,000 / 10,000 short blocks | hydration | 19 / 61 / 536 / 2,140 µs |
 | Same scale matrix | hydration allocations | 6 / 308 / 3,011 / 30,015 |
-| Same scale matrix | cumulative allocated bytes | 522 / 32,955 / 272,295 / 4,201,695 bytes |
-| Same scale matrix | Linux hydration RSS growth | 65,536 / 28,672 / 0 / 77,824 bytes |
-| 256 KB Markdown | bounded parse P95 | 753 µs |
-| 648 KB Reasoning | bounded parse P95 | 527 µs |
-| 1 MB Bash output | bounded parse P95 | 72 µs |
-| 226 KB table | bounded parse P95 | 361 µs |
-| 336 KB code + CJK + Emoji | bounded parse P95 | 65 µs |
-| 10 / 50 / 200 streaming row revisions | per-event P95 | 18 / 3 / 3 µs |
+| Same scale matrix | cumulative allocated bytes | 586 / 36,987 / 304,999 / 4,725,919 bytes |
+| Same scale matrix | Linux hydration RSS growth | 131,072 / 24,576 / 57,344 / 245,760 bytes |
+| 256 KB Markdown | bounded-preview sanitize / actual GPUI parser P95 | 521 / 143,038 µs |
+| 648 KB Reasoning | bounded-preview sanitize / actual GPUI parser P95 | 887 / 32,919 µs |
+| 1 MB Bash output | bounded-preview sanitize / actual GPUI parser P95 | 88 / 9,404 µs |
+| 226 KB table | bounded-preview sanitize / actual GPUI parser P95 | 333 / 6,119 µs |
+| 336 KB code + CJK + Emoji | bounded-preview sanitize / actual GPUI parser P95 | 630 / 7,541 µs |
+| 10 / 50 / 200 streaming row revisions | per-event P95 | 21 / 9 / 5 µs |
 
 Timing at this scale varies with CPU frequency, scheduler activity, and compiler changes. The enforced budgets are intentionally tied to user-visible limits rather than these exact baseline values:
 
@@ -68,7 +68,7 @@ Timing at this scale varies with CPU frequency, scheduler activity, and compiler
 - native GPUI draw + platform GPU/present frame P99: no more than 33 ms;
 - native InputState dispatch to first post-render callback P95: no more than 50 ms;
 - 10,000-block NativeShell window/component-tree RSS growth on Linux: no more than 64 MiB;
-- bounded final-content parse P95: no more than 150 ms;
+- bounded-preview sanitization and actual GPUI final-content parser P95: no more than 150 ms each;
 - hydration: no more than four allocations per block plus fixed slack;
 - 10 MiB fixture hydration: no more than 8 MiB cumulatively allocated, guarding against cloning the retained payload during projection;
 - when `/proc/self/status` is available, hydration RSS growth: no more than 64 MiB per fixture.
@@ -77,18 +77,20 @@ Timing at this scale varies with CPU frequency, scheduler activity, and compiler
 
 - transcript scales of 1, 100, 1,000, and 10,000 blocks;
 - a retained transcript larger than 10 MiB;
-- a real 10,000-block NativeShell/GPUI component tree with 200 forced uncached CPU frames and 200 InputState changes;
+- a real 10,000-block NativeShell/GPUI component tree with 200 forced uncached CPU frames and 200 keyboard-dispatched InputState changes;
 - the same deterministic tree in an opt-in native window with 20 warmup, 200 measured GPU/present redraws, and 50 paired InputState dispatch-to-post-render samples;
 - simulated incremental rates of 10, 50, and 200 row revisions per second;
 - Markdown, Reasoning, Bash output, tables, fenced code, CJK, and Emoji;
-- bounded parse, hydration, hydration allocation pressure, Linux process RSS, visible-window preparation, Composer state update, cache-retained bytes, and projection-retained bytes.
+- bounded-preview sanitization, the actual GPUI Markdown parser, hydration, hydration allocation pressure, Linux process RSS, visible-window preparation, Composer state update, cache-retained bytes, and projection-retained bytes.
 
 ## Remaining instrumentation
 
-The headless GPUI release replay constructs the 10,000-block projection before its window RSS baseline, then measures the additional NativeShell/component-tree footprint after the first completed render. It calls `Window::refresh()` before every timing sample, so entity caching cannot turn the measurement into an idle no-op. `VisualTestContext` executes the real NativeShell render, layout, prepaint, CPU paint, InputState event, and child-entity notification paths. Its test platform deliberately does not implement platform `on_request_frame`, GPU submission, or presentation; `headless_cpu_frame` and `headless_input_roundtrip` therefore must not be reported as GPU frame or click-to-photon latency.
+The headless GPUI release replay constructs the 10,000-block projection before its window RSS baseline, then measures the additional NativeShell/component-tree footprint after the first completed render. It calls `Window::refresh()` before every timing sample, so entity caching cannot turn the measurement into an idle no-op. Input samples use `Window::dispatch_keystroke`; programmatic `InputState::set_value` is intentionally not used because the component suppresses `InputEvent::Change` for that API. After dispatch, the harness drains the real change subscription and explicitly refreshes the window because `VisualTestContext` deliberately has no platform `on_request_frame` callback. It then executes the real NativeShell render, layout, prepaint, CPU paint, InputState event, and child-entity notification paths. The test platform does not implement GPU submission or presentation; `headless_cpu_frame` and `headless_input_roundtrip` therefore must not be reported as GPU frame or click-to-photon latency.
 
 The separate native replay uses the production binary rather than a GPUI test binary because only the production platform loop exposes GPUI's internal `frame duration` measurement. It records exact nearest-rank P95/P99 values for the locked GPUI draw/present boundary and an informational callback-cadence P95; cadence reflects display refresh scheduling and is not added to draw/present time. For input, GPUI documents `on_next_frame` as running directly after the current frame is rendered. The replay therefore dispatches a keystroke before the current draw and timestamps the next callback, proving that InputState handling and at least one changed frame completed inside the measured interval. The value deliberately includes callback scheduling delay and is treated as a conservative upper bound. It excludes the physical keyboard/OS queue before dispatch and display scanout after present, so DESK-017 remains open for externally observed click-to-photon latency and a cross-platform resident-memory curve. DESK-018's production-window screenshot/golden coverage is documented in `docs/desktop-visual-goldens.md`.
 
+The native rows above are the last qualifying reference run. A later validation attempt on 2026-07-27 was correctly rejected because the active X11 session throttled callbacks to approximately 1 Hz (`native_frame_cadence_p95_us=1,008,248`, draw/present P95 `1,000,185 µs`, input-to-post-render P95 `1,000,014 µs`). Those samples are environmental failure evidence, not a replacement baseline; the gate failed closed instead of publishing them as a 60/120 Hz result.
+
 The test binary uses a test-only counting system allocator to report cumulative successful allocations around hydration. The release gate is single-threaded so unrelated tests cannot contaminate the deltas. On Linux it additionally samples `VmRSS` immediately before and after hydration; fixture construction is outside that window. RSS is allocator- and scheduler-sensitive, so the gate uses a regression ceiling rather than treating small deltas as exact retained-heap measurements. Other platforms report `rss_supported=false`; their numeric RSS fields are zero sentinels and must not be interpreted as measurements.
 
-The desktop adapter now exposes opt-in `tracing` spans/events for `desktop.runtime.batch_wait`, `desktop.runtime.receive`, `desktop.runtime.batch_size`, `desktop.projection.apply`, `desktop.preview.sanitize`, `desktop.list.height_update`, `desktop.list.layout`, `desktop.render.prepare_rows`, `desktop.render`, `desktop.input.change`, `desktop.input.to_render`, and `desktop.markdown.parse_request`. The input event measures the latest Composer change handler to the next ComposerPane render and is consumed exactly once. The Markdown event is emitted once per visible keyed text/detail background submission and distinguishes settling from final content. The host application or benchmark harness owns subscriber installation; the desktop library does not replace a process-global subscriber. These spans provide CPU/render-preparation timing boundaries but do not claim GPU paint or end-to-end input latency.
+The desktop adapter now exposes opt-in `tracing` spans/events for `desktop.runtime.batch_wait`, `desktop.runtime.receive`, `desktop.runtime.batch_size`, `desktop.projection.apply`, `desktop.preview.sanitize`, `desktop.list.height_update`, `desktop.list.layout`, `desktop.render.prepare_rows`, `desktop.render`, `desktop.input.change`, and `desktop.input.to_render`. The input event measures the latest Composer change handler to the next ComposerPane render and is consumed exactly once. The release parser matrix directly constructs `TextViewState::markdown` with the same bounded content fixtures, so parser completion is measured without mislabeling preview sanitization as parsing. The component does not expose a production per-row parser-completion hook; an attempted externally owned state lifecycle also regressed the 10k InputState→ComposerPane replay and was rejected. The host application or benchmark harness owns subscriber installation; the desktop library does not replace a process-global subscriber. These spans and gates provide CPU/render-preparation timing boundaries but do not claim GPU paint or end-to-end input latency.

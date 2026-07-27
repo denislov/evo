@@ -4396,7 +4396,7 @@ mod tests {
         CodingAgentTranscriptSnapshot, ProfileId,
     };
     use gpui::TestAppContext;
-    use gpui_component::{Theme, ThemeMode};
+    use gpui_component::{Theme, ThemeMode, text::TextViewState};
 
     fn visual_test_snapshot() -> desktop::runtime::DesktopRuntimeHydratedSnapshot {
         let session_id = "desktop-visual-test".to_owned();
@@ -4699,18 +4699,23 @@ mod tests {
             frame_samples.push(started.elapsed().as_micros());
         }
 
-        let input = shell.read_with(cx, |shell, _| shell.composer_input.clone());
         let mut input_roundtrip_samples = Vec::with_capacity(SAMPLE_COUNT);
         let mut input_to_render_samples = Vec::with_capacity(SAMPLE_COUNT);
-        for sample in 0..SAMPLE_COUNT {
+        let keystroke = gpui::Keystroke::parse("a")
+            .expect("the headless composer input keystroke remains valid");
+        for _ in 0..SAMPLE_COUNT {
             shell.read_with(cx, |shell, _| {
                 shell.composer_input_latency.last_observed.set(None);
             });
-            let draft = format!("headless composer change {sample} 中文 🙂");
             let started = Instant::now();
-            cx.update(|window, cx| {
-                input.update(cx, |input, cx| input.set_value(draft, window, cx));
-            });
+            let dispatched =
+                cx.update(|window, cx| window.dispatch_keystroke(keystroke.clone(), cx));
+            assert!(dispatched, "headless composer accepts keyboard input");
+            // The headless platform deliberately has no on_request_frame
+            // callback. Dispatch through the real keyboard/InputEvent::Change
+            // path, drain it, then force the requested ComposerPane frame.
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
             cx.run_until_parked();
             input_roundtrip_samples.push(started.elapsed().as_micros());
             let observed = shell
@@ -4753,6 +4758,66 @@ mod tests {
             assert!(
                 window_rss_growth <= WINDOW_RSS_GROWTH_BUDGET,
                 "10k NativeShell window RSS growth exceeded 64 MiB: {window_rss_growth} bytes"
+            );
+        }
+    }
+
+    #[gpui::test]
+    #[ignore = "release performance gate"]
+    fn desktop_release_gpui_markdown_parser_matrix(cx: &mut TestAppContext) {
+        const SAMPLE_COUNT: usize = 20;
+        const MARKDOWN_PARSE_BUDGET_MICROS: u128 = 150_000;
+
+        initialize_visual_test(cx);
+        let table_row = format!(
+            "| {} |\n",
+            (0..32).map(|_| "cell").collect::<Vec<_>>().join(" | ")
+        );
+        let content_cases = [
+            (
+                "markdown_256k",
+                format!(
+                    "# heading\n\n{}",
+                    "paragraph **bold** `code`\n".repeat(10_000)
+                ),
+            ),
+            ("reasoning_512k", "reasoning step 中文 🧠\n".repeat(24_000)),
+            (
+                "bash_output",
+                format!("```text\n{}\n```", "build output\n".repeat(80_000)),
+            ),
+            ("table", table_row.repeat(1_000)),
+            (
+                "code_cjk_emoji",
+                format!(
+                    "```rust\n{}\n```\n{}",
+                    "fn main() {}\n".repeat(12_000),
+                    "中文🙂🚀\n".repeat(12_000)
+                ),
+            ),
+        ];
+
+        for (name, payload) in content_cases {
+            let preview = desktop::conversation::bounded_markdown_preview(&payload);
+            let bounded_bytes = preview.text.len();
+            let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+            for _ in 0..SAMPLE_COUNT {
+                let source = preview.text.clone();
+                let started = Instant::now();
+                let state =
+                    cx.update(|cx| cx.new(move |cx| TextViewState::markdown(source.as_str(), cx)));
+                std::hint::black_box(state);
+                samples.push(started.elapsed().as_micros());
+            }
+            let parse_p95_micros = test_percentile_95(&mut samples);
+            println!(
+                "desktop_perf\tcontent={name}\tinput_bytes={}\tbounded_bytes={bounded_bytes}\t\
+                 markdown_parser_p95_us={parse_p95_micros}",
+                payload.len()
+            );
+            assert!(
+                parse_p95_micros <= MARKDOWN_PARSE_BUDGET_MICROS,
+                "{name} GPUI Markdown parser P95 exceeded 150ms: {parse_p95_micros} us"
             );
         }
     }

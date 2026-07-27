@@ -11,6 +11,6 @@ mkdir -p "${artifact_dir}"
     cargo test -p desktop --lib --release conversation::tests::desktop_release_ -- \
         --ignored --nocapture --test-threads=1
     cargo test -p desktop --lib --release \
-        app::native_shell::tests::desktop_release_gpui_headless_frame_and_input_replay -- \
+        app::native_shell::tests::desktop_release_gpui_ -- \
         --ignored --nocapture --test-threads=1
 } 2>&1 | tee "${artifact_dir}/latest.log"

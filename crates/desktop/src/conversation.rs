@@ -2388,14 +2388,14 @@ mod tests {
                 std::hint::black_box(preview);
                 samples.push(started.elapsed().as_micros());
             }
-            let parse_p95_micros = percentile_95(&mut samples);
+            let preview_p95_micros = percentile_95(&mut samples);
             println!(
-                "desktop_perf\tcontent={name}\tinput_bytes={}\tparse_p95_us={parse_p95_micros}",
+                "desktop_perf\tcontent={name}\tinput_bytes={}\tpreview_sanitize_p95_us={preview_p95_micros}",
                 payload.len()
             );
             assert!(
-                parse_p95_micros <= FINAL_PARSE_BUDGET_MICROS,
-                "{name} bounded final parse P95 exceeded 150ms: {parse_p95_micros} us"
+                preview_p95_micros <= FINAL_PARSE_BUDGET_MICROS,
+                "{name} bounded preview sanitize P95 exceeded 150ms: {preview_p95_micros} us"
             );
         }
 
