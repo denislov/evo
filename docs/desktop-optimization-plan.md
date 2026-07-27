@@ -103,13 +103,14 @@ NativeShell
 #### DESK-001 建立优化基线
 
 - [x] 已为 runtime batch/wait、projection apply、preview sanitize、row height/layout、row prepare、view render、input handler 和最新 change→ComposerPane render 建立 opt-in tracing；release gate 另覆盖完整 GPUI headless CPU frame/input roundtrip，并直接调用 `TextViewState::markdown` 门禁真实解析器 P95；opt-in native gate 覆盖真实 draw+GPU/present P95/P99，以及 50 个真实 InputState 模拟按键从 dispatch 到首个 post-render callback 的保守上界。
-- [ ] 生产界面逐行 Markdown parser completion tracing 与包含显示扫描的 click-to-photon latency 仍缺上游公开 hook/外部光学观测。
+- [x] production settling/final 消息行已用透明 Element 包装真实 `TextView::markdown` request-layout；`EVO_DESKTOP_MARKDOWN_TRACE=1` 为每次实际挂载/解析输出 session-scoped state key、phase、bytes 与 parse→layout completion，native gate 强制采样并门禁 P95 ≤ 150ms，默认路径无 trace-state/timer/log 开销。
+- [ ] 包含物理按键、OS 输入队列和显示扫描的 click-to-photon latency 仍需外部光学/光电观测合格样本；production 黑白翻转 replay、应用配对日志和 fail-closed CSV validator 已完成。
 - [x] release replay fixture 可重复生成 1、100、1,000、10,000 条历史消息并输出 hydration/prepare 数据。
 - [x] release fixture 覆盖 10、50、200 次 streaming revision 回放。
 - [x] 从初始提交 `a39615f` 的同一 10 MiB/10k fixture 记录五次 release 中位数：hydration 1.739ms、30,015 allocations/3,939,583B、滚动准备 P95 181µs、Composer edit P95 1µs；可复现 patch 与原始样本记录在性能基线文档。
-- [ ] 初始提交没有 NativeShell frame replay、RSS probe 或锁文件；不通过移植当前 render harness 伪造“改造前”full-tree/GPU frame 与 RSS 数据。
+- [x] 历史能力审计已完成：初始提交没有 NativeShell frame replay、RSS probe 或锁文件；基线文档明确记录不可重建边界，不通过移植当前 render harness 伪造“改造前”full-tree/GPU frame 与 RSS 数据。
 
-验收：`scripts/desktop-perf-gate.sh` 串行执行 headless fixture、真实 GPUI Markdown parser 矩阵并写入 `target/desktop-perf/latest.log`；`scripts/desktop-native-perf-gate.sh` 在交互式 display 上执行相同 10k fixture、断言真实 GPUI draw/present P95/P99，并对 50 个输入配对样本断言 dispatch→post-render P95 ≤ 50ms，结果写入 `target/desktop-perf/native-latest.log`；该内部上界覆盖应用渲染与 present submit，但 click-to-photon 仍待外部呈现观测能力。
+验收：`scripts/desktop-perf-gate.sh` 串行执行 headless fixture、真实 GPUI Markdown parser 矩阵并写入 `target/desktop-perf/latest.log`；`scripts/desktop-native-perf-gate.sh` 在交互式 display 上执行相同 10k fixture、断言真实 GPUI draw/present P95/P99、production row Markdown completion、原生窗口 RSS，并对 50 个输入配对样本断言 dispatch→post-render P95 ≤ 50ms，结果写入 `target/desktop-perf/native-latest.log`；该内部上界覆盖应用渲染与 present submit，物理 click-to-photon 流程见 `docs/desktop-external-performance.md`。
 
 #### DESK-002 消除 Conversation 焦点几何跳变
 
@@ -284,9 +285,11 @@ Reasoning duration 兼容契约：历史 transcript、没有独立 Thinking 生�
 - [x] release gate 覆盖 1/100/1,000/10,000 条消息和 10/50/200 次增量 row revision。
 - [x] release gate 覆盖 256KB Markdown、512KB+ Reasoning、1MB Bash output、表格、代码块、CJK 和 Emoji，并分别记录 bounded-preview sanitize 与真实 `TextViewState::markdown` parser P95。
 - [x] release hydration 已输出 allocation count/cumulative bytes/retained bytes 线性曲线；Linux `/proc`、macOS Mach 和 Windows working-set probe 已接入同一 RSS before/after/growth 门禁；10,000-block NativeShell 已输出 headless CPU frame/input roundtrip P95、额外 window/component RSS，并通过 production binary 输出 native draw+GPU/present P95/P99 与 InputState dispatch→post-render P95/P99。
-- [ ] 补齐包含 OS 输入队列和显示扫描的外部 click-to-photon input，以及 macOS/Windows 原生窗口 memory 合格样本。
+- [x] production binary 已直接输出 Linux/macOS/Windows 原生进程 RSS before/warmup/after、startup/steady growth；native gate 门禁总 RSS ≤ 256MiB、200 帧 steady growth ≤ 64MiB，headless 10k component-tree 的 64MiB 独立门禁保持不变。
+- [x] Linux/macOS Bash 与 Windows PowerShell headless/native gate、物理 Space→全屏黑白 replay、应用 sample pairing 和 external CSV P95 validator 已就绪；执行与归档契约见 `docs/desktop-external-performance.md`。
+- [ ] 补齐包含物理输入、OS 输入队列和显示扫描的外部 click-to-photon 合格样本，以及 macOS/Windows production 原生窗口 memory 合格样本。
 - [x] `scripts/desktop-perf-gate.sh` 提供串行、可重复的本地 release benchmark，并断言 headless full-tree CPU frame、真实 InputState roundtrip、frame preparation、Composer edit、allocation/RSS 和 final parse 预算；基线记录在 `docs/desktop-performance-baseline.md`。
-- [x] `scripts/desktop-native-perf-gate.sh` 在显式 X11/Wayland display 上启动无 runtime 的确定性 production replay，预热 20 帧后门禁 200 个 GPUI draw+present 样本的 P95 ≤ 16.7ms、P99 ≤ 33ms，并门禁 50 个 InputState dispatch→post-render 配对样本的 P95 ≤ 50ms；无 display 时明确拒绝运行。
+- [x] `scripts/desktop-native-perf-gate.sh` 与 PowerShell 等价入口启动无 runtime 的确定性 production replay，预热 20 帧后门禁 200 个 GPUI draw+present 样本的 P95 ≤ 16.7ms、P99 ≤ 33ms、50 个 InputState dispatch→post-render 配对样本的 P95 ≤ 50ms、production Markdown completion P95 ≤ 150ms 与 production RSS；Bash 入口无 display 时明确拒绝运行。
 
 #### DESK-018 组件、截图和端到端回归
 
@@ -360,7 +363,7 @@ release: markdown_parser_p95_us
 
 | 任务 | 状态 | 备注 |
 |---|---|---|
-| DESK-001 | 进行中 | 初始提交同 fixture 的 hydration/allocation/scroll/input 五次中位数、release replay/streaming fixture、主要 CPU tracing、uncached GPUI headless CPU frame、真实 GPUI Markdown parser P95、native GPU/present P95/P99 与输入内部上界已完成；初始 full-tree/GPU/RSS 无原始 harness，另待生产逐行 parser completion hook 与外部 click-to-photon |
+| DESK-001 | 进行中 | 初始提交同 fixture 的 hydration/allocation/scroll/input 五次中位数、历史不可重建边界、release replay/streaming fixture、主要 CPU tracing、production 逐行 Markdown completion、uncached GPUI headless CPU frame、native GPU/present P95/P99 与输入内部上界已完成；待外部 click-to-photon 合格样本 |
 | DESK-002 | 完成 | 已移除动态面板边框，改用已有 header divider 和标题颜色；回归测试已通过 |
 | DESK-003 | 完成 | ShellLayout 改为稳定 workspace 模型；sidebar/composer/status/content width 共享 token，响应式临界点与 width bucket 均有回归 |
 | DESK-004 | 完成 | StreamingText 三态 revision 协议、16ms 合批、100ms settling、stale rejection、live 纯文本与 settling/final 稳定 keyed Markdown 路径均已完成；真实解析成本由 release matrix 门禁 |
@@ -376,7 +379,7 @@ release: markdown_parser_p95_us
 | DESK-014 | 完成 | Idle/Running 均为单主操作；每 session draft/mode、pending/authorization/rejected 文案与 InputState IME 边界已落实 |
 | DESK-015 | 完成 | Sessions 搜索/相对时间/自动刷新与 Inspector 按需分区已完成；sidebar 宽度可持久化、拖动和双击复位，窄屏继续使用 drawer |
 | DESK-016 | 完成 | 区域/消息键盘导航、overlay focus restore、focus-visible、32x32 primary hit-target 与 AccessKit accessibility tree 已完成；真实 node 元数据、语义映射、modal focus 及依赖锁定均有自动门禁 |
-| DESK-017 | 进行中 | release scale/content/streaming/allocation、Linux/macOS/Windows resident-memory probe、Linux hydration+window RSS、10k NativeShell headless frame、production native GPU/present 与 InputState dispatch→post-render 门禁已完成；待外部 click-to-photon input 和 macOS/Windows 原生窗口 memory 样本 |
+| DESK-017 | 进行中 | release scale/content/streaming/allocation、三平台 production resident-memory probe、Linux hydration/headless/native RSS、10k NativeShell headless frame、production Markdown completion、native GPU/present、InputState dispatch→post-render、Bash/PowerShell 与物理测量工具链均已完成；待外部 click-to-photon 与 macOS/Windows production 原生窗口样本 |
 | DESK-018 | 完成 | Focus bounds、session key、scroll anchor、Streaming→Final、四条关键流程 smoke、production wide/medium/narrow screenshot golden 与跨 crate release API snapshot 均已覆盖 |
 
 ## 10. 完成定义
