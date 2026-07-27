@@ -2,37 +2,20 @@ diff --git a/crates/desktop/src/conversation.rs b/crates/desktop/src/conversatio
 index 138bd7d..7e33846 100644
 --- a/crates/desktop/src/conversation.rs
 +++ b/crates/desktop/src/conversation.rs
-@@ -999,9 +999,13 @@ mod tests {
-             .sum::<usize>();
-         assert!(fixture_bytes >= 10 * 1024 * 1024);
- 
+@@ -1001,0 +1002 @@ mod tests {
 +        let allocations_before = crate::allocation_probe::snapshot();
-         let hydration_started = std::time::Instant::now();
-         let projection = ConversationProjection::hydrate(transcript(items));
-         let hydration_micros = hydration_started.elapsed().as_micros();
+@@ -1004,0 +1006,3 @@ mod tests {
 +        let allocations_after = crate::allocation_probe::snapshot();
 +        let hydration_allocations = allocations_after.0.saturating_sub(allocations_before.0);
 +        let hydration_allocated_bytes = allocations_after.1.saturating_sub(allocations_before.1);
-         assert_eq!(projection.blocks().len(), MAX_TRANSCRIPT_BLOCKS);
- 
-         let mut viewport = ConversationViewport::new(VISIBLE_BLOCKS);
-@@ -1037,6 +1041,8 @@ mod tests {
-         let input_p95_micros = percentile_95(&mut input_samples).div_ceil(1_000);
-         println!(
-             "desktop_perf\tfixture_bytes={fixture_bytes}\thydration_us={hydration_micros}\t\
+@@ -1039,0 +1044,2 @@ mod tests {
 +             hydration_allocations={hydration_allocations}\t\
 +             hydration_allocated_bytes={hydration_allocated_bytes}\t\
-              scroll_render_p95_us={scroll_p95_micros}\tinput_p95_us={input_p95_micros}"
-         );
-         assert!(
 diff --git a/crates/desktop/src/lib.rs b/crates/desktop/src/lib.rs
-index 436ffb8..9148080 100644
+index 436ffb8..3990b27 100644
 --- a/crates/desktop/src/lib.rs
 +++ b/crates/desktop/src/lib.rs
-@@ -17,6 +17,59 @@ mod projection;
- mod runtime;
- mod shell;
- 
+@@ -19,0 +20,53 @@ mod shell;
 +#[cfg(test)]
 +mod allocation_probe {
 +    use std::alloc::{GlobalAlloc, Layout, System};
@@ -86,6 +69,3 @@ index 436ffb8..9148080 100644
 +    }
 +}
 +
- /// Supported startup inputs for the native desktop application.
- #[derive(Debug, Clone, PartialEq, Eq)]
- pub struct DesktopApplicationOptions {
