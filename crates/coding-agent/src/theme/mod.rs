@@ -18,14 +18,14 @@ mod resolve;
 mod runtime;
 mod tokens;
 
-pub use builtin::{builtin_dark, builtin_light};
 #[cfg(test)]
 pub use builtin::{DARK_JSON, LIGHT_JSON, SCHEMA_JSON};
+pub use builtin::{builtin_dark, builtin_light};
 pub use color_value::ColorValue;
 #[cfg(test)]
 pub use detection::{
-    detect_terminal_background, get_theme_for_rgb_color, parse_osc11_background_color,
-    DetectionConfidence, DetectionSource, TerminalTheme,
+    DetectionConfidence, DetectionSource, TerminalTheme, detect_terminal_background,
+    get_theme_for_rgb_color, parse_osc11_background_color,
 };
 #[cfg(test)]
 pub use export::{get_theme_export_colors, is_light_theme};
@@ -33,6 +33,6 @@ pub use json::ThemeJson;
 #[cfg(test)]
 pub use reload::should_watch_target;
 pub use reload::{ThemeReloadSignal, ThemeWatcher};
-pub use resolve::{resolve, ResolveError, ResolvedColor};
+pub use resolve::{ResolveError, ResolvedColor, resolve};
 pub use runtime::ResolvedTheme;
-pub use tokens::{ThemeBg, ThemeColor, REQUIRED_TOKEN_KEYS};
+pub use tokens::{REQUIRED_TOKEN_KEYS, ThemeBg, ThemeColor};

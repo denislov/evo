@@ -4,10 +4,17 @@ use gpui::{
     div, prelude::*, px, rgb,
 };
 use gpui_component::input::Input;
-use gpui_component::{Disableable as _, button::Button};
+use gpui_component::{
+    Disableable as _,
+    button::Button,
+    menu::{DropdownMenu as _, PopupMenuItem},
+};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::{DesktopCommandIntent, NativeShell};
+use super::{
+    DesktopCommandIntent, NativeShell,
+    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SessionsPaneEvent {
@@ -69,6 +76,8 @@ impl Render for SessionsPane {
         let search = search_input.read(cx).value().trim().to_lowercase();
         let omitted_sessions = owner.omitted_sessions;
         let focused = owner.sessions_focus.is_focused(window) && owner.keyboard_focus_visible();
+        let active_semantic_status = owner.semantic_status();
+        let refresh_target = cx.entity().downgrade();
         let now = OffsetDateTime::now_utc();
         let visible_session_count = owner
             .session_catalog
@@ -97,12 +106,19 @@ impl Render for SessionsPane {
                     format!("Recent task {}", index + 1)
                 };
                 let relative_time = relative_session_time(&session.updated_at, now);
-                let status = if active && composer_running {
-                    "running"
-                } else if active {
-                    "current"
+                let (status_glyph, status, status_color) = if active {
+                    let label = active_semantic_status.label();
+                    (
+                        active_semantic_status.glyph(),
+                        if label == "Idle" {
+                            "current".to_owned()
+                        } else {
+                            label.to_lowercase()
+                        },
+                        owner.status_color(active_semantic_status),
+                    )
                 } else {
-                    "idle"
+                    ("○", "available".to_owned(), rgb(theme.muted_text.value()))
                 };
                 let accessible_label =
                     format!("{semantic_name}, {status}, updated {relative_time}");
@@ -113,11 +129,11 @@ impl Render for SessionsPane {
                     .aria_selected(active)
                     .aria_position_in_set(index + 1)
                     .aria_size_of_set(visible_session_count)
-                    .rounded_md()
-                    .p_2()
+                    .rounded_token(DesignRadius::Md)
+                    .p_token(DesignSpace::Sm)
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap_token(DesignSpace::Xs)
                     .bg(rgb(if active {
                         theme.elevated.value()
                     } else {
@@ -138,9 +154,13 @@ impl Render for SessionsPane {
                     )
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_token(DesignSpace::Xs)
                             .font_family(MONOSPACE_FONT_FAMILY)
-                            .text_xs()
+                            .text_token(DesignText::Metadata)
                             .text_color(rgb(theme.muted_text.value()))
+                            .child(div().text_color(status_color).child(status_glyph))
                             .child(format!("{} · {status}", truncate_label(&target, 22))),
                     )
                     .when(!active, |row| {
@@ -174,29 +194,64 @@ impl Render for SessionsPane {
             .border_color(rgb(if focused {
                 theme.focus_ring.value()
             } else {
-                theme.border.value()
+                theme.divider.value()
             }))
             .bg(rgb(theme.surface.value()))
             .child(
                 div()
                     .h_12()
-                    .px_4()
+                    .px_token(DesignSpace::Lg)
                     .flex()
                     .items_center()
                     .justify_between()
                     .border_b_1()
-                    .border_color(rgb(theme.border.value()))
+                    .border_color(rgb(theme.divider.value()))
                     .child("SESSIONS")
                     .child(
-                        Button::new("create-session")
-                            .debug_selector(|| "desktop-hit-create-session".into())
-                            .compact()
-                            .label("New")
-                            .tooltip("Create a new session · Ctrl/Cmd+N")
-                            .disabled(composer_running || awaiting_prompt_start || session_pending)
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(SessionsPaneEvent::Create);
-                            })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_token(DesignSpace::Xs)
+                            .child(
+                                Button::new("create-session")
+                                    .debug_selector(|| "desktop-hit-create-session".into())
+                                    .compact()
+                                    .label("New")
+                                    .tooltip("Create a new session · Ctrl/Cmd+N")
+                                    .disabled(
+                                        composer_running
+                                            || awaiting_prompt_start
+                                            || session_pending,
+                                    )
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(SessionsPaneEvent::Create);
+                                    })),
+                            )
+                            .child(
+                                Button::new("sessions-overflow")
+                                    .debug_selector(|| "desktop-hit-sessions-overflow".into())
+                                    .compact()
+                                    .label("...")
+                                    .tooltip("More Sessions actions")
+                                    .dropdown_menu(move |menu, _, _| {
+                                        let refresh_target = refresh_target.clone();
+                                        menu.item(
+                                            PopupMenuItem::new(if session_catalog_pending {
+                                                "Loading sessions…"
+                                            } else {
+                                                "Refresh sessions"
+                                            })
+                                            .disabled(session_catalog_pending || composer_running)
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(target) = refresh_target.upgrade() {
+                                                    target.update(cx, |_, cx| {
+                                                        cx.emit(SessionsPaneEvent::Refresh);
+                                                    });
+                                                }
+                                            }),
+                                        )
+                                    }),
+                            ),
                     ),
             )
             .child(
@@ -207,10 +262,10 @@ impl Render for SessionsPane {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .p_3()
+                    .p_token(DesignSpace::Md)
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_token(DesignSpace::Sm)
                     .child(
                         div()
                             .id("sessions-search")
@@ -222,20 +277,6 @@ impl Render for SessionsPane {
                                     .appearance(false),
                             ),
                     )
-                    .child(
-                        Button::new("refresh-session-catalog")
-                            .compact()
-                            .label(if session_catalog_pending {
-                                "Loading sessions…"
-                            } else {
-                                "Refresh sessions"
-                            })
-                            .tooltip("Load the bounded project session catalog")
-                            .disabled(session_catalog_pending || composer_running)
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(SessionsPaneEvent::Refresh);
-                            })),
-                    )
                     .children(session_rows)
                     .when(
                         !search.is_empty()
@@ -246,7 +287,7 @@ impl Render for SessionsPane {
                         |panel| {
                             panel.child(
                                 div()
-                                    .p_2()
+                                    .p_token(DesignSpace::Sm)
                                     .text_color(rgb(theme.muted_text.value()))
                                     .child("No matching sessions."),
                             )
@@ -255,7 +296,7 @@ impl Render for SessionsPane {
                     .when(omitted_sessions > 0, |panel| {
                         panel.child(
                             div()
-                                .text_sm()
+                                .text_token(DesignText::Body)
                                 .text_color(rgb(theme.warning.value()))
                                 .child(format!("+ {omitted_sessions} older session(s) omitted")),
                         )

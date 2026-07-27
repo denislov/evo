@@ -91,9 +91,11 @@ mod tests {
         assert_eq!(value["default_agent_profile_id"], "default");
         assert_eq!(value["event_log"], SESSION_EVENT_LOG_FILE);
         assert_eq!(value["outbox_log"], SESSION_OUTBOX_LOG_FILE);
-        assert!(value["event_log"]
-            .as_str()
-            .is_some_and(|path| !path.starts_with('/')));
+        assert!(
+            value["event_log"]
+                .as_str()
+                .is_some_and(|path| !path.starts_with('/'))
+        );
 
         let decoded: SessionManifest = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, manifest);

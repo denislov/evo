@@ -22,6 +22,66 @@ pub const UI_FONT_FAMILY: &str = ".SystemUIFont";
 pub const MONOSPACE_FONT_FAMILY: &str = "monospace";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopSpacingScale {
+    pub xs: u32,
+    pub sm: u32,
+    pub md: u32,
+    pub lg: u32,
+    pub xl: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopRadiusScale {
+    pub sm: u32,
+    pub md: u32,
+    pub lg: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopTypographyScale {
+    pub metadata_size: u32,
+    pub body_size: u32,
+    pub title_size: u32,
+    pub metadata_line_height: u32,
+    pub body_line_height: u32,
+    pub title_line_height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopDesignTokens {
+    pub spacing: DesktopSpacingScale,
+    pub radius: DesktopRadiusScale,
+    pub typography: DesktopTypographyScale,
+}
+
+pub const DESKTOP_DESIGN_TOKENS: DesktopDesignTokens = DesktopDesignTokens {
+    spacing: DesktopSpacingScale {
+        xs: 4,
+        sm: 8,
+        md: 12,
+        lg: 16,
+        xl: 24,
+    },
+    radius: DesktopRadiusScale {
+        sm: 6,
+        md: 10,
+        lg: 12,
+    },
+    typography: DesktopTypographyScale {
+        metadata_size: 12,
+        body_size: 14,
+        title_size: 16,
+        metadata_line_height: 16,
+        body_line_height: 21,
+        title_line_height: 24,
+    },
+};
+
+/// Vertical space owned by the virtual transcript row outside the measured card.
+pub const CONVERSATION_ROW_VERTICAL_PADDING_PX: u32 = DESKTOP_DESIGN_TOKENS.spacing.xs * 2;
+pub const DESKTOP_OVERLAY_SCRIM_RGBA: u32 = 0x0b0e_14dd;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -267,6 +327,8 @@ pub struct SemanticTheme {
     pub canvas: SemanticColor,
     pub surface: SemanticColor,
     pub elevated: SemanticColor,
+    pub hover: SemanticColor,
+    pub selection: SemanticColor,
     pub user_surface: SemanticColor,
     pub assistant_surface: SemanticColor,
     pub thinking_surface: SemanticColor,
@@ -274,8 +336,10 @@ pub struct SemanticTheme {
     pub diagnostic_surface: SemanticColor,
     pub summary_surface: SemanticColor,
     pub border: SemanticColor,
+    pub divider: SemanticColor,
     pub text: SemanticColor,
     pub muted_text: SemanticColor,
+    pub subtle_text: SemanticColor,
     pub accent: SemanticColor,
     pub success: SemanticColor,
     pub warning: SemanticColor,
@@ -289,6 +353,8 @@ impl SemanticTheme {
         canvas: SemanticColor::rgb(0x0b0e14),
         surface: SemanticColor::rgb(0x11161f),
         elevated: SemanticColor::rgb(0x18202c),
+        hover: SemanticColor::rgb(0x151c26),
+        selection: SemanticColor::rgb(0x19324d),
         user_surface: SemanticColor::rgb(0x10243a),
         assistant_surface: SemanticColor::rgb(0x121923),
         thinking_surface: SemanticColor::rgb(0x1d1930),
@@ -296,8 +362,10 @@ impl SemanticTheme {
         diagnostic_surface: SemanticColor::rgb(0x26151a),
         summary_surface: SemanticColor::rgb(0x171c26),
         border: SemanticColor::rgb(0x2a3442),
+        divider: SemanticColor::rgb(0x202a36),
         text: SemanticColor::rgb(0xe8edf4),
         muted_text: SemanticColor::rgb(0x9aa8ba),
+        subtle_text: SemanticColor::rgb(0x8795a8),
         accent: SemanticColor::rgb(0x60a5fa),
         success: SemanticColor::rgb(0x56d364),
         warning: SemanticColor::rgb(0xe3b341),
@@ -311,6 +379,7 @@ impl SemanticTheme {
         [
             self.text,
             self.muted_text,
+            self.subtle_text,
             self.accent,
             self.success,
             self.warning,
@@ -323,6 +392,8 @@ impl SemanticTheme {
             && self.text.contrast_ratio(self.surface) >= 4.5
             && self.text.contrast_ratio(self.elevated) >= 4.5
             && [
+                self.hover,
+                self.selection,
                 self.user_surface,
                 self.assistant_surface,
                 self.thinking_surface,
@@ -543,8 +614,43 @@ mod tests {
         assert_ne!(theme.warning, theme.danger);
         assert_ne!(theme.canvas, theme.surface);
         assert_ne!(theme.surface, theme.elevated);
+        assert_ne!(theme.hover, theme.selection);
+        assert_ne!(theme.divider, theme.focus_ring);
+        assert_ne!(theme.subtle_text, theme.muted_text);
         assert_eq!(UI_FONT_FAMILY, ".SystemUIFont");
         assert_eq!(MONOSPACE_FONT_FAMILY, "monospace");
+    }
+
+    #[test]
+    fn desktop_design_tokens_use_the_documented_spacing_radius_and_type_scales() {
+        let tokens = DESKTOP_DESIGN_TOKENS;
+        assert_eq!(
+            [
+                tokens.spacing.xs,
+                tokens.spacing.sm,
+                tokens.spacing.md,
+                tokens.spacing.lg,
+                tokens.spacing.xl,
+            ],
+            [4, 8, 12, 16, 24]
+        );
+        assert_eq!(
+            [tokens.radius.sm, tokens.radius.md, tokens.radius.lg],
+            [6, 10, 12]
+        );
+        assert_eq!(
+            [
+                tokens.typography.metadata_size,
+                tokens.typography.body_size,
+                tokens.typography.title_size,
+            ],
+            [12, 14, 16]
+        );
+        assert!(tokens.typography.metadata_line_height > tokens.typography.metadata_size);
+        assert!(tokens.typography.body_line_height > tokens.typography.body_size);
+        assert!(tokens.typography.title_line_height > tokens.typography.title_size);
+        assert_eq!(CONVERSATION_ROW_VERTICAL_PADDING_PX, 8);
+        assert_eq!(DESKTOP_OVERLAY_SCRIM_RGBA, 0x0b0e_14dd);
     }
 
     #[test]

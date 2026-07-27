@@ -2,13 +2,18 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 
+use coding_agent::api::authorization::{
+    ToolAuthorizationPreview, ToolAuthorizationRequest, ToolAuthorizationRisk,
+    ToolAuthorizationScope,
+};
 use coding_agent::api::client::{
-    CodingAgentContextSnapshot, CodingAgentSnapshot, CodingAgentSnapshotCursor,
-    UI_SNAPSHOT_PROTOCOL_VERSION,
+    CodingAgentContextSnapshot, CodingAgentFileChangeSnapshot, CodingAgentSnapshot,
+    CodingAgentSnapshotCursor, UI_SNAPSHOT_PROTOCOL_VERSION,
 };
 use coding_agent::api::embedding::{
     CodingAgentEmbeddingSnapshot, CodingAgentResourceSummary, CodingAgentSettingsSummary,
 };
+use coding_agent::api::event::CodingAgentProductEvent;
 use coding_agent::api::view::{
     CodingAgentCapabilities, CodingAgentSessionTranscriptItem, CodingAgentSessionView,
     CodingAgentTranscriptSnapshot, ProfileId,
@@ -22,7 +27,7 @@ use gpui_component::Root;
 use super::native_shell::{NativeShell, NativeShellInit};
 use crate::preferences::DesktopPreferences;
 use crate::projection::DesktopProjection;
-use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot};
+use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot, DesktopRuntimeUpdate};
 
 const PERFORMANCE_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_PERF_REPLAY";
 const VISUAL_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_VISUAL_REPLAY";
@@ -35,7 +40,7 @@ const INPUT_SAMPLE_STRIDE: usize = SAMPLE_FRAMES / INPUT_SAMPLE_FRAMES;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NativeReplayRequest {
     Performance,
-    Visual(VisualReplayLayout),
+    Visual(VisualReplaySpec),
     ClickToPhoton,
 }
 
@@ -44,6 +49,48 @@ pub(super) enum VisualReplayLayout {
     Wide,
     Medium,
     Narrow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VisualReplayState {
+    Standard,
+    Authorization,
+    ReducedMotion,
+    KeyboardFocus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VisualReplaySpec {
+    layout: VisualReplayLayout,
+    state: VisualReplayState,
+}
+
+impl VisualReplaySpec {
+    fn parse(value: &str) -> Result<Self, String> {
+        let (layout, state) = if let Some(layout) = value.strip_suffix("-authorization") {
+            (layout, VisualReplayState::Authorization)
+        } else if let Some(layout) = value.strip_suffix("-reduced-motion") {
+            (layout, VisualReplayState::ReducedMotion)
+        } else if let Some(layout) = value.strip_suffix("-keyboard-focus") {
+            (layout, VisualReplayState::KeyboardFocus)
+        } else {
+            (value, VisualReplayState::Standard)
+        };
+        Ok(Self {
+            layout: VisualReplayLayout::parse(layout)?,
+            state,
+        })
+    }
+
+    fn key(self) -> String {
+        let state = match self.state {
+            VisualReplayState::Standard => return self.layout.key().into(),
+            VisualReplayState::Authorization => "authorization",
+            VisualReplayState::ReducedMotion => "reduced-motion",
+            VisualReplayState::KeyboardFocus => "keyboard-focus",
+        };
+        format!("{}-{state}", self.layout.key())
+    }
 }
 
 impl VisualReplayLayout {
@@ -224,7 +271,7 @@ fn request_from_values(
         return Ok(Some(NativeReplayRequest::ClickToPhoton));
     }
     visual
-        .map(VisualReplayLayout::parse)
+        .map(VisualReplaySpec::parse)
         .transpose()
         .map(|layout| layout.map(NativeReplayRequest::Visual))
 }
@@ -240,10 +287,10 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             "evo · native performance replay".to_owned(),
             Some(Rc::new(RefCell::new(NativeFrameReplay::new()))),
         ),
-        NativeReplayRequest::Visual(layout) => (
-            visual_projection()?,
-            layout.viewport(),
-            format!("evo-desktop-visual-{}", layout.key()),
+        NativeReplayRequest::Visual(spec) => (
+            visual_projection(spec.state)?,
+            spec.layout.viewport(),
+            format!("evo-desktop-visual-{}", spec.key()),
             None,
         ),
         NativeReplayRequest::ClickToPhoton => unreachable!("handled before projection setup"),
@@ -257,14 +304,30 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
         app_id: Some("evo.desktop.native-perf".into()),
         ..WindowOptions::default()
     };
+    let keyboard_focus_replay = matches!(
+        request,
+        NativeReplayRequest::Visual(VisualReplaySpec {
+            state: VisualReplayState::KeyboardFocus,
+            ..
+        })
+    );
+    let reduced_motion_replay = matches!(
+        request,
+        NativeReplayRequest::Visual(VisualReplaySpec {
+            state: VisualReplayState::ReducedMotion,
+            ..
+        })
+    );
     cx.open_window(options, move |window, cx| {
         window.set_window_title(&title);
+        let mut preferences = DesktopPreferences::default();
+        preferences.reduced_motion = reduced_motion_replay;
         let shell = cx.new(|cx| {
             NativeShell::new(
                 NativeShellInit {
                     runtime: DesktopRuntimeBridge::disconnected_for_replay(),
                     projection,
-                    preferences: DesktopPreferences::default(),
+                    preferences,
                     preference_writer: None,
                     preference_notice: None,
                     initial_session_id: None,
@@ -275,6 +338,16 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
         });
         if let Some(replay) = replay {
             schedule_frame(window, replay);
+        }
+        if keyboard_focus_replay {
+            window.on_next_frame(|window, cx| {
+                let keystroke = Keystroke::parse("tab")
+                    .expect("the visual keyboard-focus replay keystroke remains valid");
+                if !window.dispatch_keystroke(keystroke, cx) {
+                    eprintln!("desktop visual replay could not dispatch keyboard focus input");
+                }
+                window.refresh();
+            });
         }
         cx.new(|cx| Root::new(shell, window, cx))
     })
@@ -396,7 +469,7 @@ fn performance_projection() -> Result<DesktopProjection, String> {
     projection_with_transcript("desktop-native-performance", items)
 }
 
-fn visual_projection() -> Result<DesktopProjection, String> {
+fn visual_projection(state: VisualReplayState) -> Result<DesktopProjection, String> {
     let items = vec![
         CodingAgentSessionTranscriptItem::User {
             text: "请优化 desktop 的消息流体验，并保持键盘导航和中文输入稳定。".into(),
@@ -409,13 +482,21 @@ fn visual_projection() -> Result<DesktopProjection, String> {
             is_error: false,
             duration_millis: Some(842),
         },
+        CodingAgentSessionTranscriptItem::Tool {
+            call_id: "visual-failed-shell".into(),
+            name: "shell".into(),
+            args: serde_json::json!({"command": "cargo test -p desktop"}),
+            result: Some("test failed: responsive context tabs exceeded their panel bounds".into()),
+            is_error: true,
+            duration_millis: Some(1_184),
+        },
         CodingAgentSessionTranscriptItem::Diagnostic {
             message: "One stale render sample was discarded and recovered without losing product events."
                 .into(),
         },
         CodingAgentSessionTranscriptItem::Assistant {
             id: "visual-assistant-final".into(),
-            text: "## Desktop update\n\nThe conversation now keeps a stable geometry while content streams.\n\n- Focus uses color without changing bounds\n- Streaming text updates continuously\n- Native frame budgets are enforced\n\n```rust\nwindow.refresh();\n```"
+            text: "## Desktop update\n\nThe conversation now keeps a stable geometry while content streams. This longer fixture deliberately exercises wrapped prose, headings, lists, quotes, inline code, and a fenced block without relying on a synthetic fixed row height.\n\n> Every message remains reachable, even when the viewport changes while content is streaming.\n\n- Focus uses a visible outline and a text marker without changing bounds\n- Streaming text updates continuously while finalized Markdown is cached\n- Native frame budgets and stale-measurement rejection remain enforced\n- 中文、emoji 🙂 and composed text stay intact across line wrapping\n\n```rust\nwindow.on_next_frame(|window, _| {\n    window.refresh();\n});\n```\n\nThe final paragraph is intentionally long enough to exercise multiple body lines and stable bottom anchoring in wide, medium, and narrow layouts."
                 .into(),
             thinking: "Checked layout stability, render isolation, and the native presentation gate."
                 .into(),
@@ -424,7 +505,127 @@ fn visual_projection() -> Result<DesktopProjection, String> {
             reasoning_duration_millis: Some(2_430),
         },
     ];
-    projection_with_transcript("desktop-native-visual", items)
+    let session_id = "desktop-native-visual".to_owned();
+    let transcript = CodingAgentTranscriptSnapshot {
+        session_id: session_id.clone(),
+        active_leaf_id: None,
+        items,
+    };
+    let mut snapshot = hydrated_snapshot(session_id, transcript);
+    snapshot.session.context.changes = vec![
+        CodingAgentFileChangeSnapshot {
+            path: "crates/desktop/src/app/native_shell/inspector_pane.rs".into(),
+            mutation_kind: "edit".into(),
+            operation_id: "visual-operation".into(),
+            tool_call_id: Some("visual-running-edit".into()),
+            updated_sequence: 2,
+            first_changed_line: Some(343),
+            added_lines: Some(1),
+            removed_lines: Some(0),
+            diff: Some("@@ -348,0 +349 @@\n+                    .flex_wrap()".into()),
+        },
+        CodingAgentFileChangeSnapshot {
+            path: "scripts/desktop-visual-golden.sh".into(),
+            mutation_kind: "edit".into(),
+            operation_id: "visual-operation".into(),
+            tool_call_id: Some("visual-running-edit".into()),
+            updated_sequence: 2,
+            first_changed_line: Some(1),
+            added_lines: Some(24),
+            removed_lines: Some(3),
+            diff: None,
+        },
+    ];
+    if state == VisualReplayState::Authorization {
+        snapshot.session.pending_authorizations = vec![visual_authorization_request()];
+    }
+    let mut projection = DesktopProjection::new(snapshot).map_err(|issue| issue.message)?;
+    apply_visual_running_tool(&mut projection)?;
+    Ok(projection)
+}
+
+fn visual_authorization_request() -> ToolAuthorizationRequest {
+    ToolAuthorizationRequest {
+        authorization_id: "visual-authorization".into(),
+        operation_id: "visual-operation".into(),
+        turn_id: "visual-turn".into(),
+        tool_call_id: "visual-authorized-shell".into(),
+        tool_name: "shell".into(),
+        risk: ToolAuthorizationRisk::ShellExecution,
+        scope: ToolAuthorizationScope::Shell {
+            cwd: "/desktop-native-replay".into(),
+            command_fingerprint: "visual-golden-cargo-test".into(),
+        },
+        preview: ToolAuthorizationPreview {
+            summary: "Run the desktop verification suite before updating reviewed visual goldens."
+                .into(),
+            path: None,
+            command: Some("cargo test -p desktop --all-targets".into()),
+            cwd: Some("/desktop-native-replay".into()),
+            content_preview: None,
+        },
+        capability_generation: 0,
+        requested_at: "2026-07-27T00:00:00Z".into(),
+    }
+}
+
+fn apply_visual_running_tool(projection: &mut DesktopProjection) -> Result<(), String> {
+    let mut events = serde_json::from_str::<Vec<CodingAgentProductEvent>>(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../coding-agent/tests/fixtures/client_projection/cross-adapter-events.json"
+    )))
+    .map_err(|error| format!("visual product-event fixture is invalid: {error}"))?;
+    let base = events
+        .drain(..)
+        .next()
+        .ok_or_else(|| "visual product-event fixture is empty".to_owned())?;
+    let stream_id = projection.cursor().stream_id.clone();
+    let session_id = projection.snapshot().session.session_id.clone();
+    for (sequence, event) in [
+        serde_json::json!({
+            "family": "workflow",
+            "payload": {
+                "kind": "prompt_started",
+                "operation_id": "visual-operation",
+                "turn_id": "visual-turn"
+            }
+        }),
+        serde_json::json!({
+            "family": "tool",
+            "payload": {
+                "kind": "started",
+                "operation_id": "visual-operation",
+                "turn_id": "visual-turn",
+                "tool_call_id": "visual-running-edit",
+                "name": "edit",
+                "arguments_json": "{\"path\":\"crates/desktop/src/app/native_shell/inspector_pane.rs\"}"
+            }
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut value = serde_json::to_value(&base)
+            .map_err(|error| format!("could not encode visual product event: {error}"))?;
+        value["stream_id"] = serde_json::json!(stream_id);
+        value["sequence"] = serde_json::json!(sequence + 1);
+        value["session_id"] = serde_json::json!(session_id);
+        value["operation_id"] = serde_json::json!("visual-operation");
+        value["parent_operation_id"] = serde_json::Value::Null;
+        value["root_operation_id"] = serde_json::Value::Null;
+        value["event"] = event;
+        value["terminal_status"] = serde_json::Value::Null;
+        value["terminal_operation"] = serde_json::Value::Null;
+        let event = serde_json::from_value(value)
+            .map_err(|error| format!("could not decode visual product event: {error}"))?;
+        if !matches!(
+            projection.apply(DesktopRuntimeUpdate::ProductEvent { event }),
+            crate::projection::DesktopProjectionApply::Applied(_)
+        ) {
+            return Err("visual running-tool event did not apply to the projection".into());
+        }
+    }
+    Ok(())
 }
 
 fn projection_with_transcript(
@@ -444,7 +645,14 @@ fn projection_from_transcript(
     session_id: String,
     transcript: CodingAgentTranscriptSnapshot,
 ) -> Result<DesktopProjection, String> {
-    let snapshot = DesktopRuntimeHydratedSnapshot {
+    DesktopProjection::new(hydrated_snapshot(session_id, transcript)).map_err(|issue| issue.message)
+}
+
+fn hydrated_snapshot(
+    session_id: String,
+    transcript: CodingAgentTranscriptSnapshot,
+) -> DesktopRuntimeHydratedSnapshot {
+    DesktopRuntimeHydratedSnapshot {
         project: CodingAgentEmbeddingSnapshot {
             cwd: std::path::PathBuf::from("/desktop-native-replay"),
             global_config_dir: std::path::PathBuf::from("/desktop-native-replay/config"),
@@ -489,8 +697,7 @@ fn projection_from_transcript(
         },
         transcript,
         pending_recoveries: Vec::new(),
-    };
-    DesktopProjection::new(snapshot).map_err(|issue| issue.message)
+    }
 }
 
 #[cfg(test)]
@@ -546,9 +753,10 @@ mod tests {
     fn native_replay_request_parser_rejects_conflicts_and_unknown_layouts() {
         assert_eq!(
             request_from_values(false, false, Some("medium")),
-            Ok(Some(NativeReplayRequest::Visual(
-                VisualReplayLayout::Medium
-            )))
+            Ok(Some(NativeReplayRequest::Visual(VisualReplaySpec {
+                layout: VisualReplayLayout::Medium,
+                state: VisualReplayState::Standard,
+            })))
         );
         assert_eq!(
             request_from_values(false, true, None),
@@ -558,6 +766,13 @@ mod tests {
         assert!(request_from_values(true, true, None).is_err());
         assert!(request_from_values(false, true, Some("wide")).is_err());
         assert!(request_from_values(false, false, Some("compact")).is_err());
+        assert_eq!(
+            request_from_values(false, false, Some("wide-authorization")),
+            Ok(Some(NativeReplayRequest::Visual(VisualReplaySpec {
+                layout: VisualReplayLayout::Wide,
+                state: VisualReplayState::Authorization,
+            })))
+        );
     }
 
     #[test]
@@ -566,12 +781,65 @@ mod tests {
         assert_eq!(VisualReplayLayout::Medium.viewport(), (900., 800.));
         assert_eq!(VisualReplayLayout::Narrow.viewport(), (700., 800.));
         assert_eq!(
-            visual_projection()
+            visual_projection(VisualReplayState::Standard)
                 .expect("visual fixture remains valid")
                 .conversation()
                 .blocks()
                 .len(),
-            4
+            5
         );
+        let standard = visual_projection(VisualReplayState::Standard)
+            .expect("standard visual fixture remains valid");
+        let blocks = standard.conversation().blocks();
+        assert!(
+            blocks
+                .iter()
+                .any(|block| { block.kind == crate::conversation::ConversationBlockKind::User })
+        );
+        assert!(blocks.iter().any(|block| {
+            block.kind == crate::conversation::ConversationBlockKind::Assistant
+                && !block.detail.is_empty()
+        }));
+        assert!(blocks.iter().any(|block| {
+            block.kind == crate::conversation::ConversationBlockKind::Tool
+                && block.done
+                && !block.is_error
+        }));
+        assert!(blocks.iter().any(|block| {
+            block.kind == crate::conversation::ConversationBlockKind::Tool && block.is_error
+        }));
+        assert!(
+            blocks.iter().any(|block| {
+                block.kind == crate::conversation::ConversationBlockKind::Diagnostic
+            })
+        );
+        assert_eq!(standard.tools().len(), 1);
+        let projection = visual_projection(VisualReplayState::Authorization)
+            .expect("authorization visual fixture remains valid");
+        assert_eq!(projection.tools().len(), 1);
+        assert_eq!(projection.snapshot().context.changes.len(), 2);
+        assert_eq!(projection.snapshot().pending_authorizations.len(), 1);
+    }
+
+    #[test]
+    fn visual_golden_updates_require_reviewed_before_after_artifacts() {
+        let script = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/desktop-visual-golden.sh"
+        ));
+        assert!(script.contains("--review | --update --review-note FILE"));
+        assert!(script.contains("manifest.sha256"));
+        assert!(script.contains("park_pointer_outside_replay"));
+        assert!(script.contains("-before.png"));
+        assert!(script.contains("-after.png"));
+        assert!(script.contains("-diff.png"));
+        for fixture in [
+            "wide-authorization",
+            "wide-reduced-motion",
+            "wide-keyboard-focus",
+            "wide-no-color",
+        ] {
+            assert!(script.contains(fixture), "missing visual fixture {fixture}");
+        }
     }
 }

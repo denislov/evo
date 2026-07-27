@@ -11,7 +11,7 @@ pub(crate) const CONVERSATION_KEY_CONTEXT: &str = "PiDesktopConversation";
 pub(crate) const PALETTE_KEY_CONTEXT: &str = "PiDesktopPalette";
 pub(crate) const AUTHORIZATION_KEY_CONTEXT: &str = "PiDesktopAuthorization";
 pub(crate) const NARROW_SESSIONS_KEY_CONTEXT: &str = "PiDesktopNarrowSessions";
-pub(crate) const NARROW_CONTEXT_KEY_CONTEXT: &str = "PiDesktopNarrowContext";
+pub(crate) const NARROW_INSPECTOR_KEY_CONTEXT: &str = "PiDesktopNarrowInspector";
 
 actions!(
     desktop,
@@ -24,7 +24,7 @@ actions!(
         AbortActiveOperation,
         EscapeHierarchy,
         FollowLatestOutput,
-        ToggleContextPanel,
+        ToggleInspectorPanel,
         FocusNextRegion,
         FocusPreviousRegion,
         SelectPreviousConversation,
@@ -46,11 +46,11 @@ pub(crate) enum DesktopPaletteCommand {
     NewSession,
     SwitchNextSession,
     ToggleSessions,
-    ToggleContext,
+    ToggleInspector,
     FocusSessions,
     FocusConversation,
     FocusComposer,
-    FocusContext,
+    FocusInspector,
     SubmitPrompt,
     SteerOperation,
     FollowUpOperation,
@@ -99,10 +99,10 @@ pub(crate) const PALETTE_ENTRIES: &[DesktopPaletteEntry] = &[
         "Show or hide the sessions surface",
     ),
     entry(
-        DesktopPaletteCommand::ToggleContext,
-        "Toggle context",
+        DesktopPaletteCommand::ToggleInspector,
+        "Toggle Inspector",
         Some("Ctrl/Cmd+\\"),
-        "Show or hide the context surface",
+        "Show or hide the Inspector surface",
     ),
     entry(
         DesktopPaletteCommand::FocusSessions,
@@ -123,10 +123,10 @@ pub(crate) const PALETTE_ENTRIES: &[DesktopPaletteEntry] = &[
         "Return keyboard focus to the prompt composer",
     ),
     entry(
-        DesktopPaletteCommand::FocusContext,
-        "Focus context",
+        DesktopPaletteCommand::FocusInspector,
+        "Focus Inspector",
         None,
-        "Move keyboard focus to the context surface",
+        "Move keyboard focus to the Inspector surface",
     ),
     entry(
         DesktopPaletteCommand::SubmitPrompt,
@@ -352,8 +352,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-escape", AbortActiveOperation, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("escape", EscapeHierarchy, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("end", FollowLatestOutput, Some(ROOT_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-\\", ToggleContextPanel, Some(ROOT_KEY_CONTEXT)),
-        KeyBinding::new("cmd-\\", ToggleContextPanel, Some(ROOT_KEY_CONTEXT)),
+        KeyBinding::new("ctrl-\\", ToggleInspectorPanel, Some(ROOT_KEY_CONTEXT)),
+        KeyBinding::new("cmd-\\", ToggleInspectorPanel, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("ctrl-tab", FocusNextRegion, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new(
             "ctrl-shift-tab",
@@ -414,13 +414,17 @@ pub(crate) fn bind_keys(cx: &mut App) {
             Some(NARROW_SESSIONS_KEY_CONTEXT),
         ),
         KeyBinding::new("escape", EscapeHierarchy, Some(NARROW_SESSIONS_KEY_CONTEXT)),
-        KeyBinding::new("tab", TrapOverlayFocus, Some(NARROW_CONTEXT_KEY_CONTEXT)),
+        KeyBinding::new("tab", TrapOverlayFocus, Some(NARROW_INSPECTOR_KEY_CONTEXT)),
         KeyBinding::new(
             "shift-tab",
             TrapOverlayFocus,
-            Some(NARROW_CONTEXT_KEY_CONTEXT),
+            Some(NARROW_INSPECTOR_KEY_CONTEXT),
         ),
-        KeyBinding::new("escape", EscapeHierarchy, Some(NARROW_CONTEXT_KEY_CONTEXT)),
+        KeyBinding::new(
+            "escape",
+            EscapeHierarchy,
+            Some(NARROW_INSPECTOR_KEY_CONTEXT),
+        ),
     ]);
 }
 
@@ -438,6 +442,13 @@ mod tests {
         assert_eq!(commands.len(), PALETTE_ENTRIES.len());
         assert!(PALETTE_ENTRIES.iter().all(|entry| {
             !entry.label.trim().is_empty() && !entry.semantic_label.trim().is_empty()
+        }));
+        assert!(PALETTE_ENTRIES.iter().all(|entry| {
+            !entry.label.to_lowercase().contains("context")
+                && !entry
+                    .semantic_label
+                    .to_lowercase()
+                    .contains("context surface")
         }));
     }
 

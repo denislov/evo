@@ -7,9 +7,7 @@ use agent_core::api::resources::AgentResources;
 use ai::api::model::{Model, ModelInput};
 
 use crate::app::auth::CodingAgentAuthController;
-use crate::app::bootstrap::{
-    PromptInvocation, SessionMode,
-};
+use crate::app::bootstrap::{PromptInvocation, SessionMode};
 use crate::app::invocation::CodingAgentInvocationOptions;
 use crate::app::operation_factory::CodingAgentOperationFactory;
 use crate::app::profile_catalog::CodingAgentProfileCatalog;

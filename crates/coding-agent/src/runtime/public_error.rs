@@ -508,9 +508,7 @@ mod tests {
         let raw = ProfileDiagnostic {
             source: ProfileSource::Project,
             kind: ProfileKind::Agent,
-            path: Some(PathBuf::from(
-                "/private/project/.evo/agents/secret.toml",
-            )),
+            path: Some(PathBuf::from("/private/project/.evo/agents/secret.toml")),
             profile_id: Some(ProfileId::from("secret")),
             message: format!(
                 "Authorization: Bearer {SECRET}; failed to read /private/project/.evo/agents/secret.toml"

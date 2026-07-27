@@ -232,7 +232,9 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
     assert!(actions.contains("PALETTE_KEY_CONTEXT"));
     assert!(actions.contains("AUTHORIZATION_KEY_CONTEXT"));
     assert!(actions.contains("NARROW_SESSIONS_KEY_CONTEXT"));
-    assert!(actions.contains("NARROW_CONTEXT_KEY_CONTEXT"));
+    assert!(actions.contains("NARROW_INSPECTOR_KEY_CONTEXT"));
+    assert!(actions.contains("ToggleInspectorPanel"));
+    assert!(actions.contains("Toggle Inspector"));
     assert!(!actions.contains("slash_command"));
     assert!(!actions.contains("rpc"));
 
@@ -277,6 +279,48 @@ fn desktop_bootstrap_and_native_shell_have_distinct_module_owners() {
     assert!(shell.contains("fn submit_composer"));
     assert!(!shell.contains("application().run"));
     assert!(!shell.contains("DesktopRuntimeBridge::spawn"));
+}
+
+#[test]
+fn native_shell_controllers_keep_update_command_and_conversation_ownership_separate() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/app");
+    let shell = fs::read_to_string(root.join("native_shell.rs"))
+        .expect("native shell composition owner should be readable");
+    let controller_root = root.join("native_shell");
+    let update = fs::read_to_string(controller_root.join("update.rs"))
+        .expect("runtime update controller should be readable");
+    let commands = fs::read_to_string(controller_root.join("commands.rs"))
+        .expect("typed command controller should be readable");
+    let conversation = fs::read_to_string(controller_root.join("conversation_controller.rs"))
+        .expect("conversation controller should be readable");
+
+    for module in ["commands", "conversation_controller", "update"] {
+        assert!(shell.contains(&format!("mod {module};")));
+    }
+    assert!(update.contains("struct ProjectionDirtyRouting"));
+    assert!(update.contains("fn inspector_projection_immediate_dirty"));
+    assert!(!shell.contains("fn inspector_projection_immediate_dirty"));
+
+    assert!(commands.contains("struct ProjectionCommandCompletions"));
+    assert!(commands.contains("fn reconcile_direct_update"));
+    assert!(commands.contains("DesktopRuntimeUpdate::FileReviewed"));
+    assert!(!shell.contains("DesktopRuntimeUpdate::FileReviewed"));
+
+    for algorithm in [
+        "fn row_target_height",
+        "fn submit_row_measurement",
+        "fn compensate_scroll_top_for_single_row_height",
+        "event = \"scroll_anchor_compensate\"",
+    ] {
+        assert!(
+            conversation.contains(algorithm),
+            "conversation controller must own {algorithm}"
+        );
+        assert!(
+            !shell.contains(algorithm),
+            "native shell composition must not own {algorithm}"
+        );
+    }
 }
 
 #[test]
@@ -464,13 +508,15 @@ fn desktop_pending_commands_use_one_bounded_checked_typed_ledger() {
         .expect("desktop command ledger should be readable");
     let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
         .expect("desktop native shell should be readable");
+    let commands = fs::read_to_string(manifest_dir.join("src/app/native_shell/commands.rs"))
+        .expect("desktop command controller should be readable");
 
     assert!(ledger.contains("pub(crate) const MAX_PENDING_DESKTOP_COMMANDS: usize = 32"));
     assert!(ledger.contains("pub(crate) enum DesktopCommandIntent"));
     assert!(ledger.contains("checked_add(1)"));
     assert!(!ledger.contains("saturating_add"));
     assert!(shell.contains("command_ledger: DesktopCommandLedger"));
-    assert!(shell.contains("self.command_ledger.reserve(intent)"));
+    assert!(commands.contains("shell.command_ledger.reserve(intent)"));
     for obsolete_pending_field in [
         "next_command_id:",
         "pending_abort_command",

@@ -1,21 +1,34 @@
 use coding_agent::api::authorization::{
     ToolAuthorizationDecision, ToolAuthorizationIdentity, ToolAuthorizationScope,
 };
-use desktop::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme, truncate_label};
-use gpui::{
-    EventEmitter, IntoElement, ParentElement as _, Render, Role, Styled as _, WeakEntity, Window,
-    div, prelude::*, px, rgb, rgba,
+use desktop::shell::{
+    DESKTOP_OVERLAY_SCRIM_RGBA, MONOSPACE_FONT_FAMILY, SemanticTheme, truncate_label,
 };
-use gpui_component::{Disableable as _, Selectable as _, button::Button};
+use gpui::{
+    EventEmitter, IntoElement, ParentElement as _, Render, Role, SharedString, Styled as _,
+    WeakEntity, Window, div, prelude::*, px, rgb, rgba,
+};
+use gpui_component::{
+    Disableable as _, Selectable as _,
+    button::Button,
+    menu::{DropdownMenu as _, PopupMenuItem},
+};
+use std::sync::Arc;
 
-use super::{DesktopCommandIntent, DesktopPaletteCommand, NativeShell, PALETTE_ENTRIES, actions};
+use super::{
+    DesktopCommandIntent, DesktopPaletteCommand, NativeShell, PALETTE_ENTRIES, actions,
+    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OverlayHostEvent {
     ExecutePalette(DesktopPaletteCommand),
     CreateSession,
+    CloseNarrowSessions,
     RefreshSessions,
     OpenSession(String),
+    CopyFullMessage,
+    CloseFullMessage,
     DecideAuthorization {
         identity: ToolAuthorizationIdentity,
         decision: ToolAuthorizationDecision,
@@ -101,7 +114,7 @@ impl Render for OverlayHost {
                     .aria_size_of_set(PALETTE_ENTRIES.len())
                     .when(selected, |row| row.aria_active_descendant())
                     .font_family(MONOSPACE_FONT_FAMILY)
-                    .rounded_md()
+                    .rounded_token(DesignRadius::Md)
                     .border_l_2()
                     .border_color(rgb(if selected {
                         theme.focus_ring.value()
@@ -135,14 +148,14 @@ impl Render for OverlayHost {
                         .max_w(px(680.))
                         .max_h(max_height)
                         .overflow_y_scroll()
-                        .rounded_md()
+                        .rounded_token(DesignRadius::Md)
                         .border_1()
                         .border_color(rgb(theme.focus_ring.value()))
                         .bg(rgb(theme.elevated.value()))
-                        .p_4()
+                        .p_token(DesignSpace::Lg)
                         .flex()
                         .flex_col()
-                        .gap_2()
+                        .gap_token(DesignSpace::Sm)
                         .child(
                             div()
                                 .text_color(rgb(theme.accent.value()))
@@ -150,7 +163,7 @@ impl Render for OverlayHost {
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .text_token(DesignText::Body)
                                 .text_color(rgb(theme.muted_text.value()))
                                 .child("Up/Down or Tab selects · Enter runs · Esc closes"),
                         )
@@ -164,6 +177,8 @@ impl Render for OverlayHost {
                 )
         });
         let omitted_sessions = owner.omitted_sessions;
+        let close_sessions_target = cx.entity().downgrade();
+        let refresh_sessions_target = cx.entity().downgrade();
         let narrow_context_overlay = owner
             .narrow_context_open
             .then(|| owner.inspector_pane.clone());
@@ -182,44 +197,98 @@ impl Render for OverlayHost {
                         .max_w(px(520.))
                         .max_h(max_height)
                         .overflow_y_scroll()
-                        .rounded_md()
+                        .rounded_token(DesignRadius::Md)
                         .border_1()
                         .border_color(rgb(theme.focus_ring.value()))
                         .bg(rgb(theme.elevated.value()))
-                        .p_4()
+                        .p_token(DesignSpace::Lg)
                         .flex()
                         .flex_col()
-                        .gap_2()
+                        .gap_token(DesignSpace::Sm)
                         .child(
                             div()
                                 .flex()
+                                .items_center()
                                 .justify_between()
                                 .text_color(rgb(theme.accent.value()))
-                                .child("SESSIONS · narrow layout dialog")
-                                .child("Esc closes"),
+                                .child("SESSIONS")
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_token(DesignSpace::Xs)
+                                        .child(
+                                            Button::new("narrow-sessions-overflow")
+                                                .debug_selector(|| {
+                                                    "desktop-hit-narrow-sessions-overflow".into()
+                                                })
+                                                .compact()
+                                                .label("...")
+                                                .tooltip("More Sessions actions")
+                                                .dropdown_menu(move |menu, _, _| {
+                                                    let refresh_target =
+                                                        refresh_sessions_target.clone();
+                                                    menu.item(
+                                                        PopupMenuItem::new(
+                                                            if session_catalog_pending {
+                                                                "Loading sessions…"
+                                                            } else {
+                                                                "Refresh sessions"
+                                                            },
+                                                        )
+                                                        .disabled(
+                                                            session_catalog_pending
+                                                                || composer_running,
+                                                        )
+                                                        .on_click(move |_, _, cx| {
+                                                            if let Some(target) =
+                                                                refresh_target.upgrade()
+                                                            {
+                                                                target.update(cx, |_, cx| {
+                                                                    cx.emit(
+                                                                        OverlayHostEvent::RefreshSessions,
+                                                                    );
+                                                                });
+                                                            }
+                                                        }),
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("close-narrow-sessions")
+                                                .debug_selector(|| {
+                                                    "desktop-hit-close-narrow-sessions".into()
+                                                })
+                                                .compact()
+                                                .label("Close")
+                                                .tooltip("Close Sessions")
+                                                .on_click({
+                                                    let close_target =
+                                                        close_sessions_target.clone();
+                                                    move |_, _, cx| {
+                                                        if let Some(target) =
+                                                            close_target.upgrade()
+                                                        {
+                                                            target.update(cx, |_, cx| {
+                                                                cx.emit(
+                                                                    OverlayHostEvent::CloseNarrowSessions,
+                                                                );
+                                                            });
+                                                        }
+                                                    }
+                                                }),
+                                        ),
+                                ),
                         )
                         .child(
                             Button::new("narrow-create-session")
-                                .label("New session · Ctrl/Cmd+N")
+                                .label("New session")
                                 .tooltip("Create a new coding-agent session")
                                 .disabled(
                                     composer_running || awaiting_prompt_start || session_pending,
                                 )
                                 .on_click(cx.listener(|_, _, _, cx| {
                                     cx.emit(OverlayHostEvent::CreateSession);
-                                })),
-                        )
-                        .child(
-                            Button::new("narrow-refresh-sessions")
-                                .label(if session_catalog_pending {
-                                    "Loading sessions…"
-                                } else {
-                                    "Refresh sessions"
-                                })
-                                .tooltip("Load the bounded project session catalog")
-                                .disabled(session_catalog_pending || composer_running)
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(OverlayHostEvent::RefreshSessions);
                                 })),
                         )
                         .children(narrow_session_rows)
@@ -279,14 +348,14 @@ impl Render for OverlayHost {
                                 .max_w(px(720.))
                                 .max_h(max_height)
                                 .overflow_hidden()
-                                .rounded_md()
+                                .rounded_token(DesignRadius::Md)
                                 .border_1()
                                 .border_color(rgb(theme.warning.value()))
                                 .bg(rgb(theme.elevated.value()))
-                                .p_5()
+                                .p_token(DesignSpace::Xl)
                                 .flex()
                                 .flex_col()
-                                .gap_3()
+                                .gap_token(DesignSpace::Md)
                                 .child(
                                     div()
                                         .flex()
@@ -314,7 +383,7 @@ impl Render for OverlayHost {
                                         .font_family(MONOSPACE_FONT_FAMILY)
                                         .flex()
                                         .flex_col()
-                                        .gap_2()
+                                        .gap_token(DesignSpace::Sm)
                                         .children(details.into_iter().map(|detail| {
                                             div()
                                                 .whitespace_normal()
@@ -326,7 +395,7 @@ impl Render for OverlayHost {
                                     div()
                                         .flex()
                                         .justify_end()
-                                        .gap_2()
+                                        .gap_token(DesignSpace::Sm)
                                         .child(authorization_button(
                                             "deny-authorization",
                                             "1 · Deny",
@@ -359,6 +428,103 @@ impl Render for OverlayHost {
                                 ),
                         )
                 });
+        let full_message_overlay = owner.conversation_full_message.as_ref().map(|message| {
+            let text = SharedString::new(Arc::clone(&message.text));
+            overlay_surface("full-message-overlay", &owner.full_message_focus)
+                .role(Role::Dialog)
+                .aria_label("Full conversation message")
+                .aria_description(
+                    "Complete bounded message source. Use Copy full message or Escape to close.",
+                )
+                .child(
+                    div()
+                        .id("full-message-dialog")
+                        .debug_selector(|| "desktop-full-message-dialog".to_owned())
+                        .w_full()
+                        .max_w(px(1_100.))
+                        .max_h(max_height)
+                        .overflow_hidden()
+                        .rounded_token(DesignRadius::Md)
+                        .border_1()
+                        .border_color(rgb(theme.focus_ring.value()))
+                        .bg(rgb(theme.elevated.value()))
+                        .p_token(DesignSpace::Lg)
+                        .flex()
+                        .flex_col()
+                        .gap_token(DesignSpace::Md)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_token(DesignSpace::Md)
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_color(rgb(theme.text.value()))
+                                        .child(SharedString::new(Arc::clone(&message.title))),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_token(DesignText::Metadata)
+                                        .text_color(rgb(if message.source_truncated {
+                                            theme.warning.value()
+                                        } else {
+                                            theme.muted_text.value()
+                                        }))
+                                        .child(if message.source_truncated {
+                                            "bounded source · additional content unavailable"
+                                        } else {
+                                            "complete bounded source"
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("full-message-scroll")
+                                .debug_selector(|| "desktop-full-message-scroll".to_owned())
+                                .role(Role::Document)
+                                .aria_label("Full message source")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .rounded_token(DesignRadius::Md)
+                                .border_1()
+                                .border_color(rgb(theme.border.value()))
+                                .bg(rgb(theme.canvas.value()))
+                                .p_token(DesignSpace::Lg)
+                                .font_family(MONOSPACE_FONT_FAMILY)
+                                .whitespace_normal()
+                                .text_color(rgb(theme.text.value()))
+                                .child(text),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_token(DesignSpace::Sm)
+                                .child(
+                                    Button::new("copy-full-message")
+                                        .debug_selector(|| "desktop-copy-full-message".into())
+                                        .label("Copy full message")
+                                        .tooltip("Copy the complete bounded message source")
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(OverlayHostEvent::CopyFullMessage);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("close-full-message")
+                                        .debug_selector(|| "desktop-close-full-message".into())
+                                        .label("Close")
+                                        .tooltip("Close full message · Escape")
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(OverlayHostEvent::CloseFullMessage);
+                                        })),
+                                ),
+                        ),
+                )
+        });
 
         div()
             .id("overlay-host")
@@ -367,6 +533,7 @@ impl Render for OverlayHost {
             .children(narrow_context_overlay)
             .children(narrow_sessions_overlay)
             .children(command_palette_overlay)
+            .children(full_message_overlay)
             .children(authorization_overlay)
             .into_any_element()
     }
@@ -379,8 +546,8 @@ fn overlay_surface(id: &'static str, focus: &gpui::FocusHandle) -> gpui::Statefu
         .size_full()
         .occlude()
         .track_focus(focus)
-        .bg(rgba(0x0b0e14dd))
-        .p_4()
+        .bg(rgba(DESKTOP_OVERLAY_SCRIM_RGBA))
+        .p_token(DesignSpace::Lg)
         .flex()
         .items_center()
         .justify_center()

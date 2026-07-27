@@ -6,9 +6,11 @@ use desktop::conversation::StreamingTextPhase;
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Element, ElementId, GlobalElementId,
     InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ParentElement as _, Pixels,
-    SharedString, Styled as _, Window, div,
+    SharedString, Styled as _, WeakEntity, Window, div,
 };
 use gpui_component::{button::Button, text::TextView};
+
+use super::conversation_pane::{ConversationPane, ConversationPaneEvent};
 
 const MARKDOWN_COMPLETION_TRACE_ENV: &str = "EVO_DESKTOP_MARKDOWN_TRACE";
 
@@ -17,11 +19,22 @@ pub(super) struct StreamingText {
     id: ElementId,
     text: Arc<str>,
     phase: StreamingTextPhase,
+    event_target: WeakEntity<ConversationPane>,
 }
 
 impl StreamingText {
-    pub(super) fn new(id: ElementId, text: Arc<str>, phase: StreamingTextPhase) -> Self {
-        Self { id, text, phase }
+    pub(super) fn new(
+        id: ElementId,
+        text: Arc<str>,
+        phase: StreamingTextPhase,
+        event_target: WeakEntity<ConversationPane>,
+    ) -> Self {
+        Self {
+            id,
+            text,
+            phase,
+            event_target,
+        }
     }
 
     pub(super) fn into_any_element(self, _window: &mut Window, _cx: &mut gpui::App) -> AnyElement {
@@ -33,14 +46,18 @@ impl StreamingText {
                 .child(text)
                 .into_any_element(),
             StreamingTextPhase::SettlingMarkdown | StreamingTextPhase::FinalMarkdown => {
-                markdown_element(self.id, text)
+                markdown_element(self.id, text, self.event_target)
             }
         }
     }
 }
 
-fn markdown_element(id: ElementId, text: SharedString) -> AnyElement {
-    MarkdownCompletionTraceElement::new(id, text).into_any_element()
+fn markdown_element(
+    id: ElementId,
+    text: SharedString,
+    event_target: WeakEntity<ConversationPane>,
+) -> AnyElement {
+    MarkdownCompletionTraceElement::new(id, text, event_target).into_any_element()
 }
 
 /// Transparent production wrapper around the real gpui-component Markdown view.
@@ -53,6 +70,7 @@ struct MarkdownCompletionTraceElement {
     id: ElementId,
     state_key: SharedString,
     text: SharedString,
+    event_target: WeakEntity<ConversationPane>,
 }
 
 struct MarkdownCompletionTraceLayoutState {
@@ -60,7 +78,7 @@ struct MarkdownCompletionTraceLayoutState {
 }
 
 impl MarkdownCompletionTraceElement {
-    fn new(id: ElementId, text: SharedString) -> Self {
+    fn new(id: ElementId, text: SharedString, event_target: WeakEntity<ConversationPane>) -> Self {
         let state_key = match &id {
             ElementId::Name(name) => name.clone(),
             _ => SharedString::new(format!("{id:?}")),
@@ -69,13 +87,19 @@ impl MarkdownCompletionTraceElement {
             id,
             state_key,
             text,
+            event_target,
         }
     }
 
     fn markdown(&self) -> AnyElement {
+        let event_target = self.event_target.clone();
         TextView::markdown(self.id.clone(), self.text.clone())
-            .code_block_actions(|code_block, _, _| {
+            .w_full()
+            .min_w_0()
+            .selectable(true)
+            .code_block_actions(move |code_block, _, _| {
                 let code = code_block.code().to_string();
+                let event_target = event_target.clone();
                 Button::new("copy-markdown-code")
                     .debug_selector(|| "desktop-copy-markdown-code".into())
                     .compact()
@@ -83,6 +107,11 @@ impl MarkdownCompletionTraceElement {
                     .tooltip("Copy this code block")
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                        if let Some(target) = event_target.upgrade() {
+                            target.update(cx, |_, cx| {
+                                cx.emit(ConversationPaneEvent::CopyCodeCompleted);
+                            });
+                        }
                     })
             })
             .into_any_element()

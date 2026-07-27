@@ -8,15 +8,18 @@ use gpui::{
     EventEmitter, IntoElement, ParentElement as _, Render, Role, Styled as _, WeakEntity, Window,
     div, prelude::*, px, rgb,
 };
-use gpui_component::{Disableable as _, Selectable as _, button::Button};
+use gpui_component::{Disableable as _, Selectable as _, badge::Badge, button::Button};
 
 use super::{
     DesktopCommandIntent, DesktopFileReviewState, DesktopRecoveryStatus, InspectorSection,
-    NativeShell, actions, recovery_status_label, runtime_state_label, usage_cost_label,
+    NativeShell, actions,
+    desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
+    recovery_status_label, runtime_state_label, usage_cost_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum InspectorPaneEvent {
+    Close,
     RequestFileReview(CodingAgentFileReviewRequest),
     CopyReviewPath,
     CopyFileReview,
@@ -78,7 +81,7 @@ impl Render for InspectorPane {
                     .label(format!(
                         "{}  {}",
                         truncate_label(&change.mutation_kind, 10),
-                        truncate_label(&change.path, 38)
+                        truncate_label(&change.path, 24)
                     ))
                     .tooltip("Load this product-authorized changed-file review")
                     .disabled(composer_running || awaiting_prompt_start || file_review_pending)
@@ -90,11 +93,11 @@ impl Render for InspectorPane {
         let omitted_changed_files = change_count.saturating_sub(changed_file_rows.len());
         let file_review_panel = match &owner.file_review {
             DesktopFileReviewState::Empty => div()
-                .text_sm()
+                .text_token(DesignText::Body)
                 .text_color(rgb(theme.muted_text.value()))
                 .child("Select a changed file to load a product-authorized preview."),
             DesktopFileReviewState::Loading(request) => div()
-                .text_sm()
+                .text_token(DesignText::Body)
                 .text_color(rgb(theme.warning.value()))
                 .child(format!(
                     "Loading {}…",
@@ -105,8 +108,8 @@ impl Render for InspectorPane {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .text_sm()
+                    .gap_token(DesignSpace::Sm)
+                    .text_token(DesignText::Body)
                     .text_color(rgb(theme.danger.value()))
                     .child(format!(
                         "{} unavailable ({})",
@@ -149,8 +152,8 @@ impl Render for InspectorPane {
                         div()
                             .id(("file-review-line", index))
                             .flex()
-                            .gap_2()
-                            .text_sm()
+                            .gap_token(DesignSpace::Sm)
+                            .text_token(DesignText::Body)
                             .text_color(rgb(color.value()))
                             .child(marker)
                             .child(row.text.clone())
@@ -159,8 +162,8 @@ impl Render for InspectorPane {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .text_sm()
+                    .gap_token(DesignSpace::Sm)
+                    .text_token(DesignText::Body)
                     .child(
                         div()
                             .text_color(rgb(theme.text.value()))
@@ -191,7 +194,7 @@ impl Render for InspectorPane {
                         div()
                             .flex()
                             .flex_wrap()
-                            .gap_2()
+                            .gap_token(DesignSpace::Sm)
                             .child(
                                 Button::new("copy-review-path")
                                     .compact()
@@ -230,13 +233,13 @@ impl Render for InspectorPane {
                     )
                     .child(
                         div()
-                            .mt_1()
+                            .mt_token(DesignSpace::Xs)
                             .pl_2()
                             .border_l_1()
                             .border_color(rgb(theme.border.value()))
                             .flex()
                             .flex_col()
-                            .gap_1()
+                            .gap_token(DesignSpace::Xs)
                             .children(rows),
                     )
             }
@@ -277,6 +280,13 @@ impl Render for InspectorPane {
             .issues()
             .back()
             .map(|issue| truncate_label(&issue.code, 28));
+        let runtime_attention_count = owner
+            .projection
+            .diagnostics()
+            .len()
+            .saturating_add(owner.projection.recoveries().len())
+            .saturating_add(project.diagnostics.len())
+            .saturating_add(owner.projection.issues().len());
         let active_operation = snapshot
             .active_operation
             .as_deref()
@@ -296,16 +306,16 @@ impl Render for InspectorPane {
             .label(project.settings.default_thinking_level.as_deref());
 
         div()
-            .id("context-panel")
+            .id("inspector-panel")
             .role(Role::Complementary)
-            .aria_label("Task context")
-            .debug_selector(|| "desktop-context-panel".into())
+            .aria_label("Task Inspector")
+            .debug_selector(|| "desktop-inspector-panel".into())
             .when(context_is_overlay, |panel| {
                 panel
                     .role(Role::Dialog)
-                    .aria_label("Task context dialog")
-                    .aria_description("Review task context. Escape closes this dialog.")
-                    .key_context(actions::NARROW_CONTEXT_KEY_CONTEXT)
+                    .aria_label("Task Inspector dialog")
+                    .aria_description("Review task details. Escape closes this dialog.")
+                    .key_context(actions::NARROW_INSPECTOR_KEY_CONTEXT)
                     .absolute()
                     .top_0()
                     .right_0()
@@ -321,32 +331,44 @@ impl Render for InspectorPane {
             .border_color(rgb(if focused {
                 theme.focus_ring.value()
             } else {
-                theme.border.value()
+                theme.divider.value()
             }))
             .bg(rgb(theme.surface.value()))
             .child(
                 div()
                     .h_12()
-                    .px_4()
+                    .px_token(DesignSpace::Lg)
                     .flex()
                     .items_center()
                     .justify_between()
                     .border_b_1()
-                    .border_color(rgb(theme.border.value()))
-                    .child("CONTEXT")
-                    .child("Tab focus"),
+                    .border_color(rgb(theme.divider.value()))
+                    .child("INSPECTOR")
+                    .when(context_is_overlay, |header| {
+                        header.child(
+                            Button::new("close-inspector")
+                                .debug_selector(|| "desktop-hit-close-inspector".into())
+                                .compact()
+                                .label("Close")
+                                .tooltip("Close Inspector")
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(InspectorPaneEvent::Close);
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
-                    .id("context-tabs")
+                    .id("inspector-tabs")
                     .role(Role::TabList)
-                    .aria_label("Context sections")
-                    .px_2()
-                    .py_2()
+                    .aria_label("Inspector sections")
+                    .px_token(DesignSpace::Sm)
+                    .py_token(DesignSpace::Sm)
                     .flex()
-                    .gap_1()
+                    .flex_wrap()
+                    .gap_token(DesignSpace::Xs)
                     .border_b_1()
-                    .border_color(rgb(theme.border.value()))
+                    .border_color(rgb(theme.divider.value()))
                     .child(inspector_section_button(
                         "inspector-changes",
                         "Changes",
@@ -368,27 +390,33 @@ impl Render for InspectorPane {
                         selected_section,
                         cx,
                     ))
-                    .child(inspector_section_button(
-                        "inspector-runtime",
-                        "Runtime",
-                        InspectorSection::Runtime,
-                        selected_section,
-                        cx,
-                    )),
+                    .child(
+                        Badge::new()
+                            .count(runtime_attention_count)
+                            .max(99)
+                            .color(rgb(theme.warning.value()))
+                            .child(inspector_section_button(
+                                "inspector-runtime",
+                                "Runtime",
+                                InspectorSection::Runtime,
+                                selected_section,
+                                cx,
+                            )),
+                    ),
             )
             .child(
                 div()
-                    .id("context-details")
+                    .id("inspector-details")
                     .role(Role::TabPanel)
-                    .aria_label(format!("{selected_section_label} context details"))
+                    .aria_label(format!("{selected_section_label} Inspector details"))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .p_4()
+                    .p_token(DesignSpace::Lg)
                     .font_family(MONOSPACE_FONT_FAMILY)
                     .flex()
                     .flex_col()
-                    .gap_3()
+                    .gap_token(DesignSpace::Md)
                     .when(selected_section == InspectorSection::Changes, |panel| {
                         panel
                             .child(section("CHANGES", theme))
@@ -466,6 +494,11 @@ impl Render for InspectorPane {
                                 "state       {}",
                                 runtime_state_label(owner.projection.lifecycle(), composer_running)
                             ))
+                            .child(if owner.preferences.reduced_motion {
+                                "motion reduced"
+                            } else {
+                                "motion static"
+                            })
                             .child(format!(
                                 "stream      {}",
                                 truncate_label(&snapshot.cursor.stream_id, 18)
@@ -508,7 +541,7 @@ impl Render for InspectorPane {
                                             div()
                                                 .flex()
                                                 .flex_wrap()
-                                                .gap_2()
+                                                .gap_token(DesignSpace::Sm)
                                                 .child(recovery_button(
                                                     "retry-recovery",
                                                     "Retry",
@@ -562,8 +595,8 @@ impl Render for InspectorPane {
                             })
                             .child(
                                 div()
-                                    .mt_3()
-                                    .text_sm()
+                                    .mt_token(DesignSpace::Md)
+                                    .text_token(DesignText::Body)
                                     .text_color(rgb(theme.muted_text.value()))
                                     .child(truncate_label(&project.cwd.display().to_string(), 54)),
                             )
@@ -578,7 +611,10 @@ fn section(label: &'static str, theme: SemanticTheme) -> gpui::Div {
 }
 
 fn colored_section(label: &'static str, color: SemanticColor) -> gpui::Div {
-    div().mt_2().text_color(rgb(color.value())).child(label)
+    div()
+        .mt_token(DesignSpace::Sm)
+        .text_color(rgb(color.value()))
+        .child(label)
 }
 
 fn inspector_section_button(

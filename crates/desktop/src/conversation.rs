@@ -40,7 +40,11 @@ pub const MAX_SETTLING_MARKDOWN_BYTES: usize = 64 * 1024;
 pub const CONVERSATION_WIDTH_BUCKET_PX: u32 = 24;
 pub const MAX_ROW_RENDER_CACHE_ENTRIES: usize = MAX_TRANSCRIPT_BLOCKS + 256;
 pub const MAX_ROW_RENDER_CACHE_BYTES: usize = 40 * 1024 * 1024;
-pub const TRANSCRIPT_ROW_MAX_HEIGHT: f32 = 680.0;
+/// Maximum height used only for an explicitly collapsed secondary-detail preview.
+///
+/// Normal conversation rows are not capped: their estimate is replaced by a
+/// layout measurement from the rendered GPUI element.
+pub const TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT: f32 = 680.0;
 
 const TRUNCATED_LINE_NOTICE: &str = "\n\n> … line truncated by desktop preview bounds …\n";
 const TRUNCATED_CODE_NOTICE: &str = "\n… code block truncated by desktop preview bounds …\n";
@@ -336,9 +340,7 @@ pub fn conversation_block_height(
         ConversationBlockKind::Tool => 106.0,
         _ => 110.0,
     };
-    (chrome + main_height + detail_height)
-        .max(minimum)
-        .min(TRANSCRIPT_ROW_MAX_HEIGHT)
+    (chrome + main_height + detail_height).max(minimum)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -499,6 +501,27 @@ pub enum StreamingTextPhase {
     FinalMarkdown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationRowHeightSource {
+    Estimated,
+    Measured,
+}
+
+/// A row height observed after GPUI has laid out the actual conversation card.
+///
+/// Every presentation input that can change geometry is carried with the
+/// result, allowing late prepaint callbacks to be rejected instead of
+/// overwriting a newer streaming revision or a different responsive layout.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationRowMeasurement {
+    pub item_key: ConversationItemKey,
+    pub source_revision: u64,
+    pub width_bucket: u32,
+    pub text_phase: StreamingTextPhase,
+    pub details_expanded: bool,
+    pub height: f32,
+}
+
 /// Cheaply cloned render input for a conversation row.
 ///
 /// Completed Markdown and its stable GPUI state keys remain frozen until the
@@ -524,7 +547,7 @@ pub struct ConversationRowRenderData {
     pub media_neutralized: bool,
     pub durable: bool,
     pub width_bucket: u32,
-    pub measured_height: f32,
+    pub estimated_height: f32,
 }
 
 impl ConversationRowRenderData {
@@ -619,7 +642,7 @@ impl ConversationRowRenderCache {
             }
             if entry.data.width_bucket != width_bucket {
                 entry.data.width_bucket = width_bucket;
-                entry.data.measured_height = conversation_block_height(
+                entry.data.estimated_height = conversation_block_height(
                     entry.data.kind,
                     &entry.data.text,
                     &entry.data.detail,
@@ -674,7 +697,7 @@ impl ConversationRowRenderCache {
             source_revision: source.source_revision,
             sanitized_revision: source.source_revision,
             title: Arc::from(source.title.as_ref()),
-            measured_height: conversation_block_height(source.kind, &text, &detail, width_bucket),
+            estimated_height: conversation_block_height(source.kind, &text, &detail, width_bucket),
             text,
             detail,
             kind: source.kind,
@@ -862,9 +885,11 @@ pub const fn conversation_width_bucket(panel_width: u32) -> u32 {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversationRowLayoutInput {
-    pub key: String,
-    pub target_height: f32,
-    pub streaming: bool,
+    pub item_key: ConversationItemKey,
+    pub source_revision: u64,
+    pub text_phase: StreamingTextPhase,
+    pub details_expanded: bool,
+    pub estimated_height: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -877,14 +902,20 @@ pub struct ConversationRowLayoutResolution {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversationRowLayoutSingleResolution {
     pub height: f32,
+    pub source: ConversationRowHeightSource,
+    pub height_changed: bool,
     pub next_refresh_after: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
 struct ConversationRowHeight {
     committed: f32,
+    estimate: f32,
+    measured: Option<f32>,
+    source_revision: u64,
     width_bucket: u32,
-    streaming: bool,
+    text_phase: StreamingTextPhase,
+    details_expanded: bool,
     last_commit_at: Instant,
 }
 
@@ -908,26 +939,38 @@ impl ConversationRowLayoutState {
         let _span = tracing::trace_span!(
             "desktop.list.height_update",
             width_bucket,
-            streaming = input.streaming
+            streaming = input.text_phase == StreamingTextPhase::StreamingPlainText
         )
         .entered();
         #[cfg(test)]
         {
             self.single_row_updates = self.single_row_updates.saturating_add(1);
         }
-        let target_height = sanitize_row_height(input.target_height);
-        let is_new = !self.rows.contains_key(&input.key);
+        let key = input.item_key.stable_id().to_owned();
+        let estimate = sanitize_row_height(input.estimated_height);
+        let is_new = !self.rows.contains_key(&key);
         let row = self
             .rows
-            .entry(input.key.clone())
+            .entry(key.clone())
             .or_insert(ConversationRowHeight {
-                committed: target_height,
+                committed: estimate,
+                estimate,
+                measured: None,
+                source_revision: input.source_revision,
                 width_bucket,
-                streaming: input.streaming,
+                text_phase: input.text_phase,
+                details_expanded: input.details_expanded,
                 last_commit_at: now,
             });
         let width_changed = row.width_bucket != width_bucket;
-        let streaming_changed = row.streaming != input.streaming;
+        let phase_changed = row.text_phase != input.text_phase;
+        let details_changed = row.details_expanded != input.details_expanded;
+        let revision_changed = row.source_revision != input.source_revision;
+        if width_changed || phase_changed || details_changed || revision_changed {
+            row.measured = None;
+        }
+        row.estimate = estimate;
+        let target_height = row.measured.unwrap_or(row.estimate);
         let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
         let mut next_refresh_after = None;
         if target_changed {
@@ -935,8 +978,9 @@ impl ConversationRowLayoutState {
                 .checked_duration_since(row.last_commit_at)
                 .unwrap_or_default();
             if width_changed
-                || streaming_changed
-                || !input.streaming
+                || phase_changed
+                || details_changed
+                || input.text_phase != StreamingTextPhase::StreamingPlainText
                 || elapsed >= STREAMING_ROW_HEIGHT_INTERVAL
             {
                 row.committed = target_height;
@@ -945,15 +989,91 @@ impl ConversationRowLayoutState {
                 next_refresh_after = Some(STREAMING_ROW_HEIGHT_INTERVAL.saturating_sub(elapsed));
             }
         }
+        row.source_revision = input.source_revision;
         row.width_bucket = width_bucket;
-        row.streaming = input.streaming;
+        row.text_phase = input.text_phase;
+        row.details_expanded = input.details_expanded;
         if is_new {
-            self.order.push(input.key);
+            self.order.push(key);
         }
         ConversationRowLayoutSingleResolution {
             height: row.committed,
+            source: if row
+                .measured
+                .is_some_and(|height| (row.committed - height).abs() <= 0.5)
+            {
+                ConversationRowHeightSource::Measured
+            } else {
+                ConversationRowHeightSource::Estimated
+            },
+            height_changed: target_changed && (row.committed - target_height).abs() <= f32::EPSILON,
             next_refresh_after,
         }
+    }
+
+    /// Submit one actual GPUI row measurement without revisiting historical rows.
+    /// Returns `None` when the callback belongs to stale presentation input.
+    pub fn submit_measurement(
+        &mut self,
+        measurement: &ConversationRowMeasurement,
+        now: Instant,
+    ) -> Option<ConversationRowLayoutSingleResolution> {
+        let _span = tracing::trace_span!(
+            "desktop.row_measure",
+            source_revision = measurement.source_revision,
+            width_bucket = measurement.width_bucket,
+            height = measurement.height,
+        )
+        .entered();
+        if !measurement.height.is_finite() || measurement.height <= 0. {
+            tracing::trace!(target: "desktop", event = "row_measure_stale_drop", reason = "invalid");
+            return None;
+        }
+        let key = measurement.item_key.stable_id();
+        let Some(row) = self.rows.get_mut(key) else {
+            tracing::trace!(target: "desktop", event = "row_measure_stale_drop", reason = "missing");
+            return None;
+        };
+        if row.source_revision != measurement.source_revision
+            || row.width_bucket != measurement.width_bucket
+            || row.text_phase != measurement.text_phase
+            || row.details_expanded != measurement.details_expanded
+        {
+            tracing::trace!(target: "desktop", event = "row_measure_stale_drop", reason = "identity");
+            return None;
+        }
+
+        let measured = sanitize_row_height(measurement.height);
+        row.measured = Some(measured);
+        let target_changed = (row.committed - measured).abs() > 0.5;
+        let mut next_refresh_after = None;
+        let mut height_changed = false;
+        if target_changed {
+            let elapsed = now
+                .checked_duration_since(row.last_commit_at)
+                .unwrap_or_default();
+            if row.text_phase != StreamingTextPhase::StreamingPlainText
+                || elapsed >= STREAMING_ROW_HEIGHT_INTERVAL
+            {
+                row.committed = measured;
+                row.last_commit_at = now;
+                height_changed = true;
+                tracing::trace!(target: "desktop", event = "row_height_commit", height = measured);
+            } else {
+                next_refresh_after = Some(STREAMING_ROW_HEIGHT_INTERVAL.saturating_sub(elapsed));
+            }
+        }
+
+        Some(ConversationRowLayoutSingleResolution {
+            height: row.committed,
+            source: if (row.committed - measured).abs() <= 0.5 {
+                ConversationRowHeightSource::Measured
+            } else {
+                ConversationRowHeightSource::Estimated
+            },
+            height_changed,
+            next_refresh_after,
+        })
     }
 
     pub fn resolve(
@@ -981,26 +1101,37 @@ impl ConversationRowLayoutState {
         let mut next_refresh_after: Option<Duration> = None;
 
         for input in inputs {
-            let target_height = sanitize_row_height(input.target_height);
-            let mut row = previous_rows
-                .remove(&input.key)
-                .unwrap_or(ConversationRowHeight {
-                    committed: target_height,
-                    width_bucket,
-                    streaming: input.streaming,
-                    last_commit_at: now,
-                });
+            let key = input.item_key.stable_id().to_owned();
+            let estimate = sanitize_row_height(input.estimated_height);
+            let mut row = previous_rows.remove(&key).unwrap_or(ConversationRowHeight {
+                committed: estimate,
+                estimate,
+                measured: None,
+                source_revision: input.source_revision,
+                width_bucket,
+                text_phase: input.text_phase,
+                details_expanded: input.details_expanded,
+                last_commit_at: now,
+            });
 
             let width_changed = row.width_bucket != width_bucket;
-            let streaming_changed = row.streaming != input.streaming;
+            let phase_changed = row.text_phase != input.text_phase;
+            let details_changed = row.details_expanded != input.details_expanded;
+            let revision_changed = row.source_revision != input.source_revision;
+            if width_changed || phase_changed || details_changed || revision_changed {
+                row.measured = None;
+            }
+            row.estimate = estimate;
+            let target_height = row.measured.unwrap_or(row.estimate);
             let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
             if target_changed {
                 let elapsed = now
                     .checked_duration_since(row.last_commit_at)
                     .unwrap_or_default();
                 if width_changed
-                    || streaming_changed
-                    || !input.streaming
+                    || phase_changed
+                    || details_changed
+                    || input.text_phase != StreamingTextPhase::StreamingPlainText
                     || elapsed >= STREAMING_ROW_HEIGHT_INTERVAL
                 {
                     row.committed = target_height;
@@ -1013,11 +1144,13 @@ impl ConversationRowLayoutState {
                 }
             }
 
+            row.source_revision = input.source_revision;
             row.width_bucket = width_bucket;
-            row.streaming = input.streaming;
+            row.text_phase = input.text_phase;
+            row.details_expanded = input.details_expanded;
             heights.push(row.committed);
-            next_order.push(input.key.clone());
-            next_rows.insert(input.key, row);
+            next_order.push(key.clone());
+            next_rows.insert(key, row);
         }
 
         self.rows = next_rows;
@@ -1693,9 +1826,19 @@ mod tests {
 
     fn row_layout(key: &str, target_height: f32, streaming: bool) -> ConversationRowLayoutInput {
         ConversationRowLayoutInput {
-            key: key.into(),
-            target_height,
-            streaming,
+            item_key: ConversationItemKey::new(
+                "layout-test-session",
+                ConversationItemKind::Durable(ConversationBlockKind::Assistant),
+                key,
+            ),
+            source_revision: 1,
+            text_phase: if streaming {
+                StreamingTextPhase::StreamingPlainText
+            } else {
+                StreamingTextPhase::FinalMarkdown
+            },
+            details_expanded: false,
+            estimated_height: target_height,
         }
     }
 
@@ -1772,7 +1915,7 @@ mod tests {
         assert_eq!(cache.sanitization_count, 1);
         assert!(Arc::ptr_eq(&wide.text, &narrow.text));
         assert_ne!(wide.width_bucket, narrow.width_bucket);
-        assert!(narrow.measured_height >= wide.measured_height);
+        assert!(narrow.estimated_height >= wide.estimated_height);
     }
 
     #[test]
@@ -2188,6 +2331,7 @@ mod tests {
     #[test]
     #[ignore = "release performance gate"]
     fn desktop_release_empty_conversation_baseline() {
+        let _performance_guard = crate::allocation_probe::serial_guard();
         let projection = ConversationProjection::hydrate(transcript(Vec::new()));
         let viewport = ConversationViewport::new(30);
         let composer = ComposerState::default();
@@ -2198,6 +2342,7 @@ mod tests {
     #[test]
     #[ignore = "release performance gate"]
     fn desktop_release_ten_mib_interaction_baseline() {
+        let _performance_guard = crate::allocation_probe::serial_guard();
         const SAMPLE_COUNT: usize = 500;
         const VISIBLE_BLOCKS: usize = 30;
         const FRAME_BUDGET_MICROS: u128 = 16_700;
@@ -2310,6 +2455,7 @@ mod tests {
     #[test]
     #[ignore = "release performance gate"]
     fn desktop_release_scale_content_and_streaming_matrix() {
+        let _performance_guard = crate::allocation_probe::serial_guard();
         const FRAME_BUDGET_MICROS: u128 = 16_700;
         const FINAL_PARSE_BUDGET_MICROS: u128 = 150_000;
         const HYDRATION_RSS_GROWTH_BUDGET: u64 = 64 * 1024 * 1024;
@@ -2706,6 +2852,79 @@ mod tests {
         assert_eq!(layout.full_input_visits, MAX_TRANSCRIPT_BLOCKS);
         assert_eq!(layout.single_row_updates, 1);
         assert_eq!(layout.rows.len(), MAX_TRANSCRIPT_BLOCKS);
+    }
+
+    #[test]
+    fn actual_row_measurement_is_identity_bound_and_updates_only_one_row() {
+        let now = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let input = row_layout("measured-final", 120., false);
+        let item_key = input.item_key.clone();
+        let stable_id = item_key.stable_id().to_owned();
+        layout.resolve(vec![input], 960, now, None);
+        let visits_before = layout.full_input_visits;
+
+        let accepted = layout
+            .submit_measurement(
+                &ConversationRowMeasurement {
+                    item_key: item_key.clone(),
+                    source_revision: 1,
+                    width_bucket: 960,
+                    text_phase: StreamingTextPhase::FinalMarkdown,
+                    details_expanded: false,
+                    height: 734.25,
+                },
+                now + Duration::from_millis(1),
+            )
+            .expect("current final measurement is accepted");
+        assert_eq!(accepted.height, 734.25);
+        assert_eq!(accepted.source, ConversationRowHeightSource::Measured);
+        assert!(accepted.height_changed);
+        assert_eq!(layout.full_input_visits, visits_before);
+
+        for stale in [
+            ConversationRowMeasurement {
+                item_key: item_key.clone(),
+                source_revision: 0,
+                width_bucket: 960,
+                text_phase: StreamingTextPhase::FinalMarkdown,
+                details_expanded: false,
+                height: 900.,
+            },
+            ConversationRowMeasurement {
+                item_key: item_key.clone(),
+                source_revision: 1,
+                width_bucket: 936,
+                text_phase: StreamingTextPhase::FinalMarkdown,
+                details_expanded: false,
+                height: 900.,
+            },
+            ConversationRowMeasurement {
+                item_key: item_key.clone(),
+                source_revision: 1,
+                width_bucket: 960,
+                text_phase: StreamingTextPhase::SettlingMarkdown,
+                details_expanded: false,
+                height: 900.,
+            },
+            ConversationRowMeasurement {
+                item_key,
+                source_revision: 1,
+                width_bucket: 960,
+                text_phase: StreamingTextPhase::FinalMarkdown,
+                details_expanded: true,
+                height: 900.,
+            },
+        ] {
+            assert!(
+                layout
+                    .submit_measurement(&stale, now + Duration::from_millis(2))
+                    .is_none(),
+                "stale measurement must not replace the committed final bounds"
+            );
+        }
+        assert_eq!(layout.rows[&stable_id].committed, 734.25);
+        assert_eq!(layout.full_input_visits, visits_before);
     }
 
     #[test]

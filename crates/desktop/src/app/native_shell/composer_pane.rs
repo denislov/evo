@@ -1,12 +1,20 @@
 use desktop::conversation::ComposerAdmission;
-use desktop::shell::{COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, SemanticTheme, truncate_label};
+use desktop::shell::{COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, SemanticTheme};
 use gpui::{
     EventEmitter, Focusable as _, IntoElement, ParentElement as _, Render, Role, Styled as _,
     WeakEntity, Window, div, prelude::*, px, rgb,
 };
-use gpui_component::{Disableable as _, button::Button, input::Input};
+use gpui_component::{
+    Disableable as _,
+    button::{Button, DropdownButton},
+    input::Input,
+    menu::PopupMenuItem,
+};
 
-use super::{ComposerRunningMode, NativeShell};
+use super::{
+    ComposerRunningMode, NativeShell,
+    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ComposerPaneEvent {
@@ -81,6 +89,12 @@ impl Render for ComposerPane {
         } else {
             None
         };
+        let event_target_for_steer = cx.entity().downgrade();
+        let event_target_for_queue = cx.entity().downgrade();
+        let composer_notice = rejection
+            .as_deref()
+            .map(|notice| (notice, theme.danger))
+            .or_else(|| state_notice.map(|notice| (notice, theme.muted_text)));
 
         div()
             .id("composer-panel")
@@ -93,40 +107,66 @@ impl Render for ComposerPane {
             .min_h(px(COMPOSER_MIN_HEIGHT as f32))
             .max_h(px(COMPOSER_MAX_HEIGHT as f32))
             .flex_shrink_0()
-            .px_4()
-            .py_3()
+            .px_token(DesignSpace::Lg)
+            .py_token(DesignSpace::Md)
             .border_t_1()
             .border_color(rgb(if composer_focused {
                 theme.focus_ring.value()
             } else {
-                theme.border.value()
+                theme.divider.value()
             }))
             .bg(rgb(theme.canvas.value()))
+            .flex()
+            .flex_col()
+            .gap_token(DesignSpace::Sm)
+            .when_some(composer_notice, |composer, (notice, color)| {
+                composer.child(
+                    div()
+                        .id("composer-state-notice")
+                        .debug_selector(|| "desktop-composer-state-notice".into())
+                        .role(Role::Status)
+                        .aria_label(notice.to_owned())
+                        .w_full()
+                        .rounded_token(DesignRadius::Md)
+                        .bg(rgb(theme.surface.value()))
+                        .px_token(DesignSpace::Md)
+                        .py_token(DesignSpace::Xs)
+                        .text_token(DesignText::Metadata)
+                        .text_color(rgb(color.value()))
+                        .whitespace_normal()
+                        .child(notice.to_owned()),
+                )
+            })
             .child(
                 div()
                     .w_full()
                     .flex()
-                    .gap_2()
-                    .rounded_lg()
+                    .gap_token(DesignSpace::Sm)
+                    .rounded_token(DesignRadius::Lg)
                     .border_1()
                     .border_color(rgb(theme.border.value()))
                     .bg(rgb(theme.elevated.value()))
-                    .p_2()
+                    .p_token(DesignSpace::Sm)
                     .child(
-                        div().flex_1().min_w_0().child(
-                            Input::new(&input)
-                                .appearance(false)
-                                .bordered(false)
-                                .focus_bordered(false)
-                                .disabled(composer_disabled),
-                        ),
+                        div()
+                            .debug_selector(|| "desktop-composer-input-region".into())
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                Input::new(&input)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .focus_bordered(false)
+                                    .disabled(composer_disabled),
+                            ),
                     )
                     .child(
                         div()
-                            .w(px(188.))
+                            .debug_selector(|| "desktop-composer-actions".into())
+                            .w(px(176.))
                             .flex()
                             .flex_col()
-                            .gap_2()
+                            .gap_token(DesignSpace::Sm)
                             .justify_end()
                             .when(!composer_running, |actions| {
                                 actions.child(
@@ -148,55 +188,63 @@ impl Render for ComposerPane {
                                 actions
                                     .child(
                                         div()
-                                            .flex()
-                                            .gap_1()
+                                            .debug_selector(|| {
+                                                "desktop-composer-running-mode-selector".into()
+                                            })
                                             .child(
-                                                Button::new("composer-mode-steer")
+                                                DropdownButton::new("composer-running-mode-selector")
                                                     .compact()
-                                                    .label(
-                                                        if running_mode
-                                                            == ComposerRunningMode::SteerNow
-                                                        {
-                                                            "● Steer now"
-                                                        } else {
-                                                            "○ Steer now"
-                                                        },
-                                                    )
-                                                    .tooltip(
-                                                        "Send input to the active operation now",
-                                                    )
                                                     .disabled(composer_pending)
-                                                    .on_click(cx.listener(|_, _, _, cx| {
-                                                        cx.emit(ComposerPaneEvent::SetRunningMode(
-                                                            ComposerRunningMode::SteerNow,
-                                                        ));
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("composer-mode-follow-up")
-                                                    .compact()
-                                                    .label(
-                                                        if running_mode
-                                                            == ComposerRunningMode::QueueNext
-                                                        {
-                                                            "● Queue next"
-                                                        } else {
-                                                            "○ Queue next"
-                                                        },
+                                                    .tooltip("Choose how this draft enters the active operation")
+                                                    .button(
+                                                        Button::new("composer-running-mode-current")
+                                                            .label(running_action_label),
                                                     )
-                                                    .tooltip(
-                                                        "Queue input after the active operation",
-                                                    )
-                                                    .disabled(composer_pending)
-                                                    .on_click(cx.listener(|_, _, _, cx| {
-                                                        cx.emit(ComposerPaneEvent::SetRunningMode(
-                                                            ComposerRunningMode::QueueNext,
-                                                        ));
-                                                    })),
+                                                    .dropdown_menu(move |menu, _, _| {
+                                                        let steer_target =
+                                                            event_target_for_steer.clone();
+                                                        let queue_target =
+                                                            event_target_for_queue.clone();
+                                                        menu.item(
+                                                            PopupMenuItem::new("Steer now")
+                                                                .checked(
+                                                                    running_mode
+                                                                        == ComposerRunningMode::SteerNow,
+                                                                )
+                                                                .on_click(move |_, _, cx| {
+                                                                    if let Some(target) = steer_target.upgrade() {
+                                                                        target.update(cx, |_, cx| {
+                                                                            cx.emit(ComposerPaneEvent::SetRunningMode(
+                                                                                ComposerRunningMode::SteerNow,
+                                                                            ));
+                                                                        });
+                                                                    }
+                                                                }),
+                                                        )
+                                                        .item(
+                                                            PopupMenuItem::new("Queue next")
+                                                                .checked(
+                                                                    running_mode
+                                                                        == ComposerRunningMode::QueueNext,
+                                                                )
+                                                                .on_click(move |_, _, cx| {
+                                                                    if let Some(target) = queue_target.upgrade() {
+                                                                        target.update(cx, |_, cx| {
+                                                                            cx.emit(ComposerPaneEvent::SetRunningMode(
+                                                                                ComposerRunningMode::QueueNext,
+                                                                            ));
+                                                                        });
+                                                                    }
+                                                                }),
+                                                        )
+                                                    }),
                                             ),
                                     )
                                     .child(
                                         Button::new("submit-running-composer")
+                                            .debug_selector(|| {
+                                                "desktop-hit-submit-running-composer".into()
+                                            })
                                             .label(if composer_pending {
                                                 "Sending…"
                                             } else {
@@ -208,22 +256,6 @@ impl Render for ComposerPane {
                                                 cx.emit(ComposerPaneEvent::SubmitRunning);
                                             })),
                                     )
-                            })
-                            .when_some(state_notice, |actions, notice| {
-                                actions.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.muted_text.value()))
-                                        .child(notice),
-                                )
-                            })
-                            .when_some(rejection, |actions, rejection| {
-                                actions.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.danger.value()))
-                                        .child(truncate_label(&rejection, 22)),
-                                )
                             }),
                     ),
             )

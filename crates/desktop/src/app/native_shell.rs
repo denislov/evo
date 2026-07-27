@@ -4,11 +4,13 @@ use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
 use desktop::conversation::{
     ComposerAdmission, ComposerState, ComposerSubmissionKind, ConversationBlockKind,
-    ConversationItemKey, ConversationItemKind, ConversationRowLayoutInput,
-    ConversationRowLayoutState, ConversationRowRenderCache, ConversationRowRenderData,
-    ConversationRowRenderSource, ConversationViewport, TRANSCRIPT_ROW_MAX_HEIGHT,
-    conversation_block_height, conversation_copy_text, conversation_width_bucket,
+    ConversationItemKey, ConversationItemKind, ConversationRowLayoutState,
+    ConversationRowMeasurement, ConversationRowRenderCache, ConversationRowRenderData,
+    ConversationRowRenderSource, ConversationViewport, MAX_COPY_BYTES, conversation_copy_text,
+    conversation_width_bucket,
 };
+#[cfg(test)]
+use desktop::conversation::{TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, conversation_block_height};
 use desktop::file_review::DesktopFileReviewDocument;
 use desktop::preferences::{DesktopPreferences, PreferenceWriter};
 use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
@@ -35,25 +37,27 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use self::desktop_style::{DesignText, DesktopStyledExt as _};
 use crate::actions::{
     self, AbortActiveOperation, AuthorizationAllowForOperation, AuthorizationAllowOnce,
     AuthorizationDeny, CopySelectedConversation, DesktopCommandPalette, DesktopPaletteCommand,
     EscapeHierarchy, FocusComposer, FocusNextRegion, FocusPreviousRegion, FollowLatestOutput,
     NewSession, OpenCommandPalette, OpenFileSurface, PALETTE_ENTRIES, PaletteConfirm, PaletteNext,
     PalettePrevious, SelectNextConversation, SelectPreviousConversation, SubmitComposer,
-    ToggleContextPanel, ToggleSelectedConversationDetails, TrapOverlayFocus,
+    ToggleInspectorPanel, ToggleSelectedConversationDetails, TrapOverlayFocus,
 };
 use crate::command_ledger::{DesktopCommandIntent, DesktopCommandLedger};
 
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const MAX_DIRTY_CONVERSATION_SEQUENCES: usize = 256;
-const CONVERSATION_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(67);
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_EXPANDED_CONVERSATION_DETAILS: usize = 256;
-const COLLAPSED_CONVERSATION_DETAIL_HEIGHT: f32 = 36.;
 const MAX_COMPOSER_SESSION_STATES: usize = 256;
+const MAX_INSPECTOR_SESSION_STATES: usize = 256;
+const CONVERSATION_ANNOUNCEMENT_DURATION: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
 struct InputRenderLatencyProbe {
@@ -98,63 +102,7 @@ struct ConversationBlockVisual {
 }
 
 fn conversation_focus_accent(focused: bool, theme: SemanticTheme) -> SemanticColor {
-    if focused { theme.accent } else { theme.border }
-}
-
-fn conversation_distance_to_bottom(offset_y: f32, max_offset_y: f32) -> f32 {
-    (max_offset_y.max(0.0) + offset_y.min(0.0)).max(0.0)
-}
-
-fn minimum_duration(
-    current: Option<std::time::Duration>,
-    next: Option<std::time::Duration>,
-) -> Option<std::time::Duration> {
-    match (current, next) {
-        (Some(current), Some(next)) => Some(current.min(next)),
-        (Some(current), None) => Some(current),
-        (None, next) => next,
-    }
-}
-
-#[cfg(test)]
-fn inspector_projection_dirty(delta: &desktop::projection::DesktopProjectionDelta) -> bool {
-    inspector_projection_immediate_dirty(delta)
-        || delta
-            .context
-            .contains(desktop::projection::ContextDirtyFlags::USAGE)
-}
-
-fn inspector_projection_immediate_dirty(
-    delta: &desktop::projection::DesktopProjectionDelta,
-) -> bool {
-    delta
-        .context
-        .contains(desktop::projection::ContextDirtyFlags::OPERATIONS)
-        || delta
-            .context
-            .contains(desktop::projection::ContextDirtyFlags::DELEGATIONS)
-        || delta
-            .context
-            .contains(desktop::projection::ContextDirtyFlags::CHANGES)
-        || delta.diagnostics
-        || delta.recoveries
-        || delta.session
-        || delta.profiles
-        || delta.capabilities
-        || delta.lifecycle
-}
-
-fn status_projection_dirty(delta: &desktop::projection::DesktopProjectionDelta) -> bool {
-    delta
-        .context
-        .contains(desktop::projection::ContextDirtyFlags::OPERATIONS)
-        || delta.authorizations
-        || delta.terminal
-        || delta.recoveries
-        || delta.session
-        || delta.profiles
-        || delta.capabilities
-        || delta.lifecycle
+    if focused { theme.accent } else { theme.divider }
 }
 
 fn inspector_telemetry_refresh_delay(last_refresh: Option<Instant>, now: Instant) -> Duration {
@@ -162,81 +110,6 @@ fn inspector_telemetry_refresh_delay(last_refresh: Option<Instant>, now: Instant
         INSPECTOR_TELEMETRY_REFRESH_INTERVAL
             .saturating_sub(now.saturating_duration_since(last_refresh))
     })
-}
-
-fn conversation_header_projection_dirty(
-    delta: &desktop::projection::DesktopProjectionDelta,
-) -> bool {
-    delta
-        .context
-        .contains(desktop::projection::ContextDirtyFlags::OPERATIONS)
-        || delta.lifecycle
-        || delta.session
-}
-
-fn overlay_host_projection_dirty(delta: &desktop::projection::DesktopProjectionDelta) -> bool {
-    conversation_header_projection_dirty(delta) || delta.authorizations
-}
-
-fn root_projection_dirty(
-    projection_replaced: bool,
-    delta: Option<&desktop::projection::DesktopProjectionDelta>,
-) -> bool {
-    projection_replaced || delta.is_some_and(|delta| delta.authorizations)
-}
-
-fn conversation_row_target_height(
-    row: &ConversationRowRenderData,
-    expanded_details: &HashSet<String>,
-    panel_width: u32,
-) -> f32 {
-    if expanded_details.contains(row.item_key.row_id()) {
-        return row.measured_height;
-    }
-    let collapsed = match row.kind {
-        ConversationBlockKind::Assistant if !row.detail.is_empty() => Some(
-            conversation_block_height(row.kind, &row.text, "", panel_width),
-        ),
-        ConversationBlockKind::Tool if !row.text.is_empty() || !row.detail.is_empty() => {
-            Some(conversation_block_height(row.kind, "", "", panel_width))
-        }
-        _ => None,
-    };
-    collapsed.map_or(row.measured_height, |height| {
-        (height + COLLAPSED_CONVERSATION_DETAIL_HEIGHT).min(TRANSCRIPT_ROW_MAX_HEIGHT)
-    })
-}
-
-fn upsert_indexed_item<T>(
-    items: &mut Vec<T>,
-    existing_index: Option<usize>,
-    mut desired_index: usize,
-    item: T,
-) -> usize {
-    if let Some(existing_index) = existing_index {
-        if existing_index == desired_index {
-            items[existing_index] = item;
-            return existing_index;
-        }
-        items.remove(existing_index);
-        if existing_index < desired_index {
-            desired_index = desired_index.saturating_sub(1);
-        }
-    }
-    desired_index = desired_index.min(items.len());
-    items.insert(desired_index, item);
-    desired_index
-}
-
-fn message_conversation_block_id(message: &desktop::projection::DesktopMessageOverlay) -> String {
-    message.message_id.as_ref().map_or_else(
-        || format!("assistant:{}:{}", message.operation_id, message.turn_id),
-        |message_id| format!("assistant:{message_id}"),
-    )
-}
-
-fn tool_conversation_block_id(tool: &desktop::projection::DesktopToolOverlay) -> String {
-    format!("tool:{}", tool.tool_call_id)
 }
 
 fn conversation_block_visual(
@@ -253,7 +126,7 @@ fn conversation_block_visual(
         },
         ConversationBlockKind::Assistant => ConversationBlockVisual {
             glyph: "AI",
-            surface: theme.assistant_surface,
+            surface: theme.canvas,
             accent: theme.text,
             align_right: false,
         },
@@ -382,6 +255,26 @@ fn reconcile_composer_session_state(
     true
 }
 
+fn reconcile_inspector_session_section_state(
+    selected: &mut InspectorSection,
+    sections: &mut HashMap<String, InspectorSection>,
+    previous_session_id: &str,
+    current_session_id: &str,
+) -> bool {
+    if current_session_id == previous_session_id {
+        return false;
+    }
+    if sections.len() >= MAX_INSPECTOR_SESSION_STATES
+        && !sections.contains_key(previous_session_id)
+        && let Some(stale) = sections.keys().next().cloned()
+    {
+        sections.remove(&stale);
+    }
+    sections.insert(previous_session_id.to_owned(), *selected);
+    *selected = sections.remove(current_session_id).unwrap_or_default();
+    true
+}
+
 impl DesktopThinkingSelection {
     const fn next(self) -> Self {
         match self {
@@ -440,6 +333,15 @@ enum DesktopOverlayKind {
     CommandPalette,
     NarrowSessions,
     NarrowContext,
+    FullMessage,
+}
+
+#[derive(Debug, Clone)]
+struct ConversationFullMessageView {
+    block_id: String,
+    title: Arc<str>,
+    text: Arc<str>,
+    source_truncated: bool,
 }
 
 pub(super) struct NativeShell {
@@ -451,6 +353,8 @@ pub(super) struct NativeShell {
     preference_notice: Option<String>,
     conversation_viewport: ConversationViewport,
     conversation_scroll: VirtualListScrollHandle,
+    conversation_session_views: HashMap<String, ConversationSessionViewState>,
+    conversation_pending_scroll_restore: Option<f32>,
     conversation_layout: ConversationRowLayoutState,
     conversation_live_layout: ConversationRowLayoutState,
     conversation_render_cache: ConversationRowRenderCache,
@@ -474,6 +378,7 @@ pub(super) struct NativeShell {
     composer_pane: gpui::Entity<ComposerPane>,
     inspector_pane: gpui::Entity<InspectorPane>,
     inspector_section: InspectorSection,
+    inspector_session_sections: HashMap<String, InspectorSection>,
     status_bar: gpui::Entity<StatusBar>,
     overlay_host: gpui::Entity<OverlayHost>,
     composer: ComposerState,
@@ -492,10 +397,14 @@ pub(super) struct NativeShell {
     authorization_focus: FocusHandle,
     command_palette_focus: FocusHandle,
     narrow_sessions_focus: FocusHandle,
+    full_message_focus: FocusHandle,
     thinking_selection: DesktopThinkingSelection,
     file_review: DesktopFileReviewState,
     command_palette: DesktopCommandPalette,
     active_overlay: Option<DesktopOverlayKind>,
+    conversation_full_message: Option<ConversationFullMessageView>,
+    conversation_announcement: Option<(u64, String)>,
+    conversation_announcement_sequence: u64,
     narrow_sessions_open: bool,
     narrow_context_open: bool,
     session_catalog: Vec<desktop::runtime::DesktopSessionCatalogEntry>,
@@ -548,6 +457,7 @@ impl NativeShell {
         let authorization_focus = cx.focus_handle().tab_stop(true).tab_index(3);
         let command_palette_focus = cx.focus_handle().tab_stop(true).tab_index(3);
         let narrow_sessions_focus = cx.focus_handle().tab_stop(true).tab_index(3);
+        let full_message_focus = cx.focus_handle().tab_stop(true).tab_index(3);
         let composer_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(2, 8)
@@ -635,8 +545,29 @@ impl NativeShell {
                     ConversationPaneEvent::Copy { block_id } => {
                         this.copy_conversation_row(block_id, cx);
                     }
+                    ConversationPaneEvent::CopyToolCommand { block_id } => {
+                        this.copy_tool_command(block_id, cx);
+                    }
+                    ConversationPaneEvent::CopyToolOutput { block_id } => {
+                        this.copy_tool_output(block_id, cx);
+                    }
+                    ConversationPaneEvent::CopyCodeCompleted => {
+                        this.announce_conversation_copy("Code copied.", cx);
+                    }
                     ConversationPaneEvent::ToggleDetails { block_id } => {
                         this.toggle_conversation_details(block_id, cx);
+                    }
+                    ConversationPaneEvent::OpenFull { block_id } => {
+                        this.open_full_conversation_message(block_id, window, cx);
+                    }
+                    ConversationPaneEvent::OpenToolOutput { block_id } => {
+                        this.open_full_tool_output(block_id, window, cx);
+                    }
+                    ConversationPaneEvent::Recovery { identity, action } => {
+                        this.submit_recovery_action(identity.clone(), *action, cx);
+                    }
+                    ConversationPaneEvent::Measured(measurement) => {
+                        this.submit_conversation_row_measurement(measurement, cx);
                     }
                     ConversationPaneEvent::FollowLatest => this.follow_latest(cx),
                 },
@@ -646,11 +577,13 @@ impl NativeShell {
                 window,
                 |this, _, event: &ConversationHeaderEvent, window, cx| match event {
                     ConversationHeaderEvent::ToggleSessions => this.toggle_sessions(window, cx),
-                    ConversationHeaderEvent::ToggleContext => this.toggle_context(window, cx),
+                    ConversationHeaderEvent::ToggleInspector => this.toggle_context(window, cx),
                     ConversationHeaderEvent::Reload => this.reload_local_resources(cx),
-                    ConversationHeaderEvent::CopySelected => {
-                        this.copy_selected_conversation(cx);
+                    ConversationHeaderEvent::SelectNextModel => this.select_next_model(cx),
+                    ConversationHeaderEvent::SelectNextSessionProfile => {
+                        this.select_next_session_profile(cx);
                     }
+                    ConversationHeaderEvent::CycleThinking => this.cycle_thinking_selection(cx),
                     ConversationHeaderEvent::Abort => this.abort_active_operation(cx),
                 },
             ),
@@ -684,7 +617,11 @@ impl NativeShell {
             cx.subscribe_in(
                 &inspector_pane,
                 window,
-                |this, _, event: &InspectorPaneEvent, _, cx| match event {
+                |this, _, event: &InspectorPaneEvent, window, cx| match event {
+                    InspectorPaneEvent::Close => {
+                        this.narrow_context_open = false;
+                        this.dismiss_overlay(window, cx);
+                    }
                     InspectorPaneEvent::RequestFileReview(request) => {
                         this.request_file_review(request.clone(), cx);
                     }
@@ -723,12 +660,27 @@ impl NativeShell {
                         this.execute_palette_command(*command, window, cx);
                     }
                     OverlayHostEvent::CreateSession => this.create_session(cx),
+                    OverlayHostEvent::CloseNarrowSessions => {
+                        this.narrow_sessions_open = false;
+                        this.dismiss_overlay(window, cx);
+                    }
                     OverlayHostEvent::RefreshSessions => this.request_session_catalog(cx),
                     OverlayHostEvent::OpenSession(session_id) => {
                         this.open_session(session_id.clone(), cx);
                     }
                     OverlayHostEvent::DecideAuthorization { identity, decision } => {
                         this.decide_tool_authorization(identity.clone(), decision.clone(), cx);
+                    }
+                    OverlayHostEvent::CopyFullMessage => {
+                        if let Some(message) = &this.conversation_full_message {
+                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                message.text.to_string(),
+                            ));
+                            this.announce_conversation_copy("Full message copied.", cx);
+                        }
+                    }
+                    OverlayHostEvent::CloseFullMessage => {
+                        this.close_full_conversation_message(window, cx);
                     }
                 },
             ),
@@ -764,6 +716,8 @@ impl NativeShell {
             preference_notice,
             conversation_viewport: ConversationViewport::new(8),
             conversation_scroll: VirtualListScrollHandle::new(),
+            conversation_session_views: HashMap::new(),
+            conversation_pending_scroll_restore: None,
             conversation_layout: ConversationRowLayoutState::default(),
             conversation_live_layout: ConversationRowLayoutState::default(),
             conversation_render_cache: ConversationRowRenderCache::default(),
@@ -787,6 +741,7 @@ impl NativeShell {
             composer_pane,
             inspector_pane,
             inspector_section: InspectorSection::default(),
+            inspector_session_sections: HashMap::new(),
             status_bar,
             overlay_host,
             composer: ComposerState::default(),
@@ -805,10 +760,14 @@ impl NativeShell {
             authorization_focus,
             command_palette_focus,
             narrow_sessions_focus,
+            full_message_focus,
             thinking_selection: DesktopThinkingSelection::Default,
             file_review: DesktopFileReviewState::default(),
             command_palette: DesktopCommandPalette::default(),
             active_overlay: None,
+            conversation_full_message: None,
+            conversation_announcement: None,
+            conversation_announcement_sequence: 0,
             narrow_sessions_open: false,
             narrow_context_open: false,
             session_catalog: Vec::new(),
@@ -1053,145 +1012,20 @@ impl NativeShell {
                 overlay_host_dirty = true;
                 root_dirty = true;
             }
-            let update = match update {
-                desktop::runtime::DesktopRuntimeUpdate::FileReviewed { command_id, review } => {
-                    let request =
-                        CodingAgentFileReviewRequest::new(review.change.clone(), review.revision);
-                    if self.command_ledger.complete(
-                        command_id,
-                        &DesktopCommandIntent::FileReview {
-                            request: request.clone(),
-                        },
-                    ) {
-                        self.file_review = DesktopFileReviewState::Ready(
-                            DesktopFileReviewDocument::from_product(review),
-                        );
-                        self.preference_notice = Some("Changed-file review loaded.".into());
-                        inspector_pane_dirty = true;
-                    }
-                    applied += 1;
-                    continue;
-                }
-                desktop::runtime::DesktopRuntimeUpdate::ExternalEditorOpened {
-                    command_id,
-                    project_relative_path,
+            let update = match commands::reconcile_direct_update(self, update, cx) {
+                DirectCommandUpdate::Continue(update) => update,
+                DirectCommandUpdate::Consumed {
+                    sessions_dirty,
+                    inspector_dirty,
                 } => {
-                    if self.command_ledger.complete(
-                        command_id,
-                        &DesktopCommandIntent::ExternalEditor {
-                            project_relative_path: project_relative_path.clone(),
-                        },
-                    ) {
-                        self.preference_notice = Some(format!(
-                            "Opened {} in the configured editor.",
-                            truncate_label(&project_relative_path, 48)
-                        ));
-                        inspector_pane_dirty = true;
-                    }
+                    sessions_pane_dirty |= sessions_dirty;
+                    inspector_pane_dirty |= inspector_dirty;
                     applied += 1;
                     continue;
                 }
-                desktop::runtime::DesktopRuntimeUpdate::SessionsListed {
-                    command_id,
-                    sessions,
-                    omitted,
-                } => {
-                    if self
-                        .command_ledger
-                        .complete(command_id, &DesktopCommandIntent::ListSessions)
-                    {
-                        self.session_catalog = sessions;
-                        self.omitted_sessions = omitted;
-                        self.preference_notice = Some(if omitted == 0 {
-                            format!("Loaded {} session(s).", self.session_catalog.len())
-                        } else {
-                            format!(
-                                "Loaded {} session(s); {omitted} older session(s) omitted.",
-                                self.session_catalog.len()
-                            )
-                        });
-                        sessions_pane_dirty = true;
-                        self.schedule_session_catalog_refresh(cx);
-                    }
-                    applied += 1;
-                    continue;
-                }
-                update => update,
             };
             let composer_pane_state_before = self.composer_pane_state();
-            let reload_completion = match &update {
-                desktop::runtime::DesktopRuntimeUpdate::Reloaded {
-                    command_id,
-                    metadata,
-                } if self
-                    .command_ledger
-                    .matches(*command_id, &DesktopCommandIntent::Reload) =>
-                {
-                    Some((
-                        *command_id,
-                        metadata.project.resources.skill_names.len(),
-                        metadata.project.resources.prompt_template_names.len(),
-                        metadata.project.profiles.len(),
-                    ))
-                }
-                _ => None,
-            };
-            let selection_completion = match &update {
-                desktop::runtime::DesktopRuntimeUpdate::SelectionChanged {
-                    command_id,
-                    selection,
-                    ..
-                } if self
-                    .command_ledger
-                    .matches(*command_id, &DesktopCommandIntent::Selection(*selection)) =>
-                {
-                    Some((*command_id, *selection))
-                }
-                _ => None,
-            };
-            let recovery_completion = match &update {
-                desktop::runtime::DesktopRuntimeUpdate::RecoveryChanged {
-                    command_id,
-                    action,
-                    recovery_id,
-                    ..
-                } if self.command_ledger.matches(
-                    *command_id,
-                    &DesktopCommandIntent::Recovery {
-                        recovery_id: recovery_id.clone(),
-                        action: *action,
-                    },
-                ) =>
-                {
-                    Some((*command_id, *action, recovery_id.clone()))
-                }
-                _ => None,
-            };
-            let resync_completion = match &update {
-                desktop::runtime::DesktopRuntimeUpdate::Resynced { command_id, .. }
-                    if self
-                        .command_ledger
-                        .matches(*command_id, &DesktopCommandIntent::Resync) =>
-                {
-                    Some(*command_id)
-                }
-                _ => None,
-            };
-            let session_completion = match &update {
-                desktop::runtime::DesktopRuntimeUpdate::SessionChanged { command_id, .. } => self
-                    .command_ledger
-                    .intent(*command_id)
-                    .filter(|intent| {
-                        matches!(
-                            intent,
-                            DesktopCommandIntent::CreateSession
-                                | DesktopCommandIntent::OpenSession { .. }
-                        )
-                    })
-                    .cloned()
-                    .map(|intent| (*command_id, intent)),
-                _ => None,
-            };
+            let projection_completions = ProjectionCommandCompletions::capture(self, &update);
             match &update {
                 desktop::runtime::DesktopRuntimeUpdate::PromptAccepted { command_id } => {
                     if self
@@ -1509,46 +1343,36 @@ impl NativeShell {
             let outcome = self.projection.apply(update);
             if outcome.is_replaced() {
                 self.reconcile_composer_session(&previous_session_id);
+                self.reconcile_conversation_session_view(&previous_session_id);
+                self.reconcile_inspector_session_section(&previous_session_id);
             }
-            if root_projection_dirty(outcome.is_replaced(), outcome.delta()) {
+            let dirty =
+                ProjectionDirtyRouting::for_projection(outcome.is_replaced(), outcome.delta());
+            if dirty.root {
                 root_dirty = true;
             }
-            if outcome.is_replaced() || outcome.delta().is_some_and(|delta| delta.authorizations) {
+            if dirty.composer {
                 composer_pane_dirty = true;
             }
             if had_active_operation != self.projection.snapshot().active_operation.is_some() {
                 sessions_pane_dirty = true;
             }
-            let conversation_dirty = outcome
-                .delta()
-                .is_some_and(|delta| delta.conversation || delta.tools);
-            if outcome.is_replaced()
-                || outcome
-                    .delta()
-                    .is_some_and(inspector_projection_immediate_dirty)
-            {
+            let conversation_dirty = dirty.conversation;
+            if dirty.inspector_immediate {
                 inspector_pane_dirty = true;
-            } else if outcome.delta().is_some_and(|delta| {
-                delta
-                    .context
-                    .contains(desktop::projection::ContextDirtyFlags::USAGE)
-            }) {
+            } else if dirty.inspector_telemetry {
                 inspector_telemetry_dirty = true;
             }
-            if outcome.is_replaced() || outcome.delta().is_some_and(status_projection_dirty) {
+            if dirty.status {
                 status_bar_dirty = true;
             }
-            if outcome.is_replaced()
-                || outcome
-                    .delta()
-                    .is_some_and(conversation_header_projection_dirty)
-            {
+            if dirty.conversation_header {
                 conversation_header_dirty = true;
             }
-            if outcome.is_replaced() || outcome.delta().is_some_and(overlay_host_projection_dirty) {
+            if dirty.overlay {
                 overlay_host_dirty = true;
             }
-            if outcome.is_replaced() {
+            if dirty.sessions {
                 sessions_pane_dirty = true;
                 self.conversation_render_full_dirty = true;
                 self.conversation_render_live_dirty = true;
@@ -1568,105 +1392,9 @@ impl NativeShell {
                         .push_back(self.projection.cursor().last_event_sequence);
                 }
             }
-            let file_changes_dirty = outcome.delta().is_some_and(|delta| {
-                delta
-                    .context
-                    .contains(desktop::projection::ContextDirtyFlags::CHANGES)
-            });
-            if let Some(command_id) = resync_completion
-                && self
-                    .command_ledger
-                    .complete(command_id, &DesktopCommandIntent::Resync)
-            {
-                self.preference_notice = Some(if outcome.is_replaced() {
-                    "Runtime state resynchronized.".into()
-                } else {
-                    "Resync response failed projection validation.".into()
-                });
-                if outcome.is_replaced() {
-                    self.request_session_catalog(cx);
-                }
-            }
-            if let Some((command_id, intent)) = session_completion
-                && self.command_ledger.complete(command_id, &intent)
-            {
+            let file_changes_dirty = dirty.file_changes;
+            if projection_completions.reconcile(self, outcome.is_replaced(), cx) {
                 sessions_pane_dirty = true;
-                self.preference_notice = Some(if outcome.is_replaced() {
-                    match intent {
-                        DesktopCommandIntent::CreateSession => "Created a new session.".into(),
-                        DesktopCommandIntent::OpenSession { .. } => {
-                            "Opened the requested session.".into()
-                        }
-                        _ => unreachable!("session completion was filtered by typed intent"),
-                    }
-                } else {
-                    "Session response failed projection validation; resync is required.".into()
-                });
-                if outcome.is_replaced() {
-                    self.request_session_catalog(cx);
-                }
-            }
-            if let Some((command_id, skill_count, prompt_count, profile_count)) = reload_completion
-                && self
-                    .command_ledger
-                    .complete(command_id, &DesktopCommandIntent::Reload)
-            {
-                self.preference_notice = Some(if outcome.is_replaced() {
-                    format!(
-                        "Reloaded {skill_count} skills, {prompt_count} prompts, and \
-                         {profile_count} profiles."
-                    )
-                } else {
-                    "Reload response failed projection validation; resync is required.".into()
-                });
-            }
-            if let Some((command_id, selection)) = selection_completion
-                && self
-                    .command_ledger
-                    .complete(command_id, &DesktopCommandIntent::Selection(selection))
-            {
-                self.preference_notice = Some(if outcome.is_replaced() {
-                    match selection {
-                        DesktopRuntimeSelectionKind::Model => format!(
-                            "Future prompts will use model {}.",
-                            truncate_label(&self.projection.project().selected_model_id, 28)
-                        ),
-                        DesktopRuntimeSelectionKind::SessionProfile => format!(
-                            "Session profile changed to {}.",
-                            truncate_label(
-                                self.projection
-                                    .snapshot()
-                                    .session
-                                    .default_agent_profile_id
-                                    .as_str(),
-                                28
-                            )
-                        ),
-                    }
-                } else {
-                    "Selection response failed projection validation; resync is required.".into()
-                });
-            }
-            if let Some((command_id, action, recovery_id)) = recovery_completion
-                && self.command_ledger.complete(
-                    command_id,
-                    &DesktopCommandIntent::Recovery {
-                        recovery_id: recovery_id.clone(),
-                        action,
-                    },
-                )
-            {
-                self.preference_notice = Some(if outcome.is_replaced() {
-                    format!(
-                        "Recovery {} accepted for {}.",
-                        recovery_action_label(action),
-                        truncate_label(&recovery_id, 28)
-                    )
-                } else {
-                    "Recovery changed, but its snapshot failed projection validation; resync \
-                         is required."
-                        .into()
-                });
             }
             if outcome.is_replaced() {
                 if self.projection.snapshot().active_operation.is_none()
@@ -1823,6 +1551,30 @@ impl NativeShell {
         ) {
             self.composer_needs_sync = true;
         }
+    }
+
+    fn reconcile_conversation_session_view(&mut self, previous_session_id: &str) {
+        let current_session_id = self.projection.snapshot().session.session_id.clone();
+        let scroll_top = (-f32::from(self.conversation_scroll.offset().y)).max(0.);
+        let _ = reconcile_conversation_session_view_state(
+            &mut self.conversation_viewport,
+            &mut self.conversation_expanded_details,
+            &mut self.conversation_session_views,
+            &mut self.conversation_pending_scroll_restore,
+            previous_session_id,
+            &current_session_id,
+            scroll_top,
+        );
+    }
+
+    fn reconcile_inspector_session_section(&mut self, previous_session_id: &str) {
+        let current_session_id = self.projection.snapshot().session.session_id.clone();
+        let _ = reconcile_inspector_session_section_state(
+            &mut self.inspector_section,
+            &mut self.inspector_session_sections,
+            previous_session_id,
+            &current_session_id,
+        );
     }
 
     fn notify_composer_pane(&self, cx: &mut Context<Self>) {
@@ -1995,13 +1747,7 @@ impl NativeShell {
     }
 
     fn reserve_command(&mut self, intent: DesktopCommandIntent) -> Option<u64> {
-        match self.command_ledger.reserve(intent) {
-            Ok(command_id) => Some(command_id),
-            Err(error) => {
-                self.preference_notice = Some(error.to_string());
-                None
-            }
-        }
+        commands::reserve_command(self, intent)
     }
 
     fn request_resync_if_needed(&mut self) {
@@ -2632,31 +2378,215 @@ impl NativeShell {
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.preference_notice = Some("Selected conversation block copied.".into());
-        self.notify_status_bar(cx);
-        cx.notify();
+        self.announce_conversation_copy("Selected message copied.", cx);
+    }
+
+    fn conversation_full_message_view(
+        &self,
+        block_id: &str,
+    ) -> Option<ConversationFullMessageView> {
+        if let Some(block) = self.projection.conversation().block(block_id) {
+            return Some(ConversationFullMessageView {
+                block_id: block_id.to_owned(),
+                title: Arc::from(block.title.as_str()),
+                text: Arc::from(block.copy_text()),
+                source_truncated: block.truncated
+                    || block.text.len().saturating_add(block.detail.len()) > MAX_COPY_BYTES,
+            });
+        }
+        if let Some(message) = self
+            .projection
+            .messages()
+            .iter()
+            .find(|message| message_conversation_block_id(message) == block_id)
+        {
+            return Some(ConversationFullMessageView {
+                block_id: block_id.to_owned(),
+                title: Arc::from("Assistant · live"),
+                text: Arc::from(conversation_copy_text(&message.text, &message.thinking)),
+                source_truncated: message.truncated
+                    || message.text.len().saturating_add(message.thinking.len()) > MAX_COPY_BYTES,
+            });
+        }
+        if let Some(tool) = self
+            .projection
+            .tools()
+            .iter()
+            .find(|tool| tool_conversation_block_id(tool) == block_id)
+        {
+            return Some(ConversationFullMessageView {
+                block_id: block_id.to_owned(),
+                title: Arc::from(format!("Tool · {}", tool.name)),
+                text: Arc::from(conversation_copy_text(&tool.detail, &tool.arguments)),
+                source_truncated: tool.truncated
+                    || tool.detail.len().saturating_add(tool.arguments.len()) > MAX_COPY_BYTES,
+            });
+        }
+        self.conversation_render_rows
+            .iter()
+            .find(|row| row.item_key.row_id() == block_id)
+            .map(|row| ConversationFullMessageView {
+                block_id: block_id.to_owned(),
+                title: Arc::clone(&row.title),
+                text: Arc::from(conversation_copy_text(&row.text, &row.detail)),
+                source_truncated: row.preview_truncated,
+            })
     }
 
     fn copy_conversation_row(&mut self, block_id: &str, cx: &mut Context<Self>) {
-        let text = self
-            .projection
-            .conversation()
-            .block(block_id)
-            .map(desktop::conversation::ConversationBlock::copy_text)
-            .or_else(|| {
-                self.conversation_render_rows
-                    .iter()
-                    .find(|row| row.item_key.row_id() == block_id)
-                    .map(|row| conversation_copy_text(&row.text, &row.detail))
-            });
-        let Some(text) = text else {
+        let Some(message) = self.conversation_full_message_view(block_id) else {
             self.preference_notice = Some("Message is no longer available to copy.".into());
             self.notify_status_bar(cx);
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.preference_notice = Some("Conversation message copied.".into());
-        self.notify_status_bar(cx);
+        cx.write_to_clipboard(ClipboardItem::new_string(message.text.to_string()));
+        self.announce_conversation_copy("Message copied.", cx);
+    }
+
+    fn tool_command(&self, block_id: &str) -> Option<String> {
+        let arguments = self
+            .projection
+            .conversation()
+            .block(block_id)
+            .filter(|block| block.kind == ConversationBlockKind::Tool)
+            .map(|block| block.detail.as_str())
+            .or_else(|| {
+                self.projection
+                    .tools()
+                    .iter()
+                    .find(|tool| tool_conversation_block_id(tool) == block_id)
+                    .map(|tool| tool.arguments.as_str())
+            })?;
+        serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()?
+            .get("command")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    fn tool_output(&self, block_id: &str) -> Option<(Arc<str>, Arc<str>, bool)> {
+        if let Some(block) = self
+            .projection
+            .conversation()
+            .block(block_id)
+            .filter(|block| block.kind == ConversationBlockKind::Tool)
+        {
+            return Some((
+                Arc::from(block.title.as_str()),
+                Arc::from(block.text.as_str()),
+                block.truncated || block.text.len() > MAX_COPY_BYTES,
+            ));
+        }
+        self.projection
+            .tools()
+            .iter()
+            .find(|tool| tool_conversation_block_id(tool) == block_id)
+            .map(|tool| {
+                (
+                    Arc::from(format!("Tool · {} · output", tool.name)),
+                    Arc::from(tool.detail.as_str()),
+                    tool.truncated || tool.detail.len() > MAX_COPY_BYTES,
+                )
+            })
+    }
+
+    fn copy_tool_command(&mut self, block_id: &str, cx: &mut Context<Self>) {
+        let Some(command) = self.tool_command(block_id) else {
+            self.preference_notice = Some("This tool does not expose a structured command.".into());
+            self.notify_status_bar(cx);
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(command));
+        self.announce_conversation_copy("Tool command copied.", cx);
+    }
+
+    fn copy_tool_output(&mut self, block_id: &str, cx: &mut Context<Self>) {
+        let Some((_, output, _)) = self.tool_output(block_id) else {
+            self.preference_notice = Some("Tool output is no longer available to copy.".into());
+            self.notify_status_bar(cx);
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(conversation_copy_text(
+            &output, "",
+        )));
+        self.announce_conversation_copy("Tool output copied.", cx);
+    }
+
+    fn announce_conversation_copy(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.conversation_announcement_sequence =
+            self.conversation_announcement_sequence.wrapping_add(1);
+        let sequence = self.conversation_announcement_sequence;
+        self.conversation_announcement = Some((sequence, message.to_owned()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(CONVERSATION_ANNOUNCEMENT_DURATION)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .conversation_announcement
+                    .as_ref()
+                    .is_some_and(|(current, _)| *current == sequence)
+                {
+                    this.conversation_announcement = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_full_tool_output(
+        &mut self,
+        block_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((title, text, source_truncated)) = self.tool_output(block_id) else {
+            self.preference_notice = Some("Tool output is no longer available to open.".into());
+            self.notify_status_bar(cx);
+            return;
+        };
+        tracing::trace!(
+            target: "desktop",
+            event = "message_full_view_open",
+            block_id,
+            content = "tool_output",
+            bytes = text.len(),
+        );
+        self.conversation_full_message = Some(ConversationFullMessageView {
+            block_id: block_id.to_owned(),
+            title,
+            text,
+            source_truncated,
+        });
+        self.activate_overlay(DesktopOverlayKind::FullMessage, window, cx);
+    }
+
+    fn open_full_conversation_message(
+        &mut self,
+        block_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self.conversation_full_message_view(block_id) else {
+            self.preference_notice = Some("Message is no longer available to open.".into());
+            self.notify_status_bar(cx);
+            return;
+        };
+        tracing::trace!(
+            target: "desktop",
+            event = "message_full_view_open",
+            block_id = message.block_id,
+            bytes = message.text.len(),
+        );
+        self.conversation_full_message = Some(message);
+        self.activate_overlay(DesktopOverlayKind::FullMessage, window, cx);
+    }
+
+    fn close_full_conversation_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.conversation_full_message = None;
+        self.dismiss_overlay(window, cx);
     }
 
     fn toggle_conversation_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
@@ -2901,6 +2831,7 @@ impl NativeShell {
             DesktopOverlayKind::CommandPalette => self.command_palette_focus.focus(window, cx),
             DesktopOverlayKind::NarrowSessions => self.narrow_sessions_focus.focus(window, cx),
             DesktopOverlayKind::NarrowContext => self.context_focus.focus(window, cx),
+            DesktopOverlayKind::FullMessage => self.full_message_focus.focus(window, cx),
         }
         self.notify_overlay_host(cx);
         cx.notify();
@@ -2924,6 +2855,7 @@ impl NativeShell {
             self.command_palette.close();
             self.narrow_sessions_open = false;
             self.narrow_context_open = false;
+            self.conversation_full_message = None;
             if self.active_overlay != Some(DesktopOverlayKind::Authorization) {
                 self.activate_overlay(DesktopOverlayKind::Authorization, window, cx);
             }
@@ -2990,7 +2922,10 @@ impl NativeShell {
                     "Choose a session or close the sessions dialog first."
                 }
                 DesktopOverlayKind::NarrowContext => {
-                    "Use the context surface or close it before workspace shortcuts."
+                    "Use the Inspector surface or close it before workspace shortcuts."
+                }
+                DesktopOverlayKind::FullMessage => {
+                    "Close the full message viewer before using workspace shortcuts."
                 }
             }
             .into(),
@@ -3001,25 +2936,15 @@ impl NativeShell {
     }
 
     fn follow_latest(&mut self, cx: &mut Context<Self>) {
-        let block_count = self.visible_conversation_count();
-        self.conversation_viewport.resume_latest(block_count);
-        if block_count > 0 {
-            self.conversation_scroll
-                .scroll_to_item(block_count - 1, ScrollStrategy::Bottom);
-        }
-        cx.notify();
+        conversation_controller::follow_latest(self, cx);
+    }
+
+    fn align_conversation_scroll_to_bottom(&mut self) {
+        conversation_controller::align_scroll_to_bottom(self);
     }
 
     fn reconcile_conversation_scroll(&mut self, cx: &mut Context<Self>) {
-        let offset_y = f32::from(self.conversation_scroll.offset().y);
-        let max_offset_y = f32::from(self.conversation_scroll.max_offset().y);
-        let distance_to_bottom = conversation_distance_to_bottom(offset_y, max_offset_y);
-        if self
-            .conversation_viewport
-            .reconcile_scroll_distance(distance_to_bottom)
-        {
-            cx.notify();
-        }
+        conversation_controller::reconcile_scroll(self, cx);
     }
 
     fn review_next_file(&mut self, cx: &mut Context<Self>) {
@@ -3075,7 +3000,7 @@ impl NativeShell {
             DesktopPaletteCommand::NewSession => self.create_session(cx),
             DesktopPaletteCommand::SwitchNextSession => self.switch_next_session(cx),
             DesktopPaletteCommand::ToggleSessions => self.toggle_sessions(window, cx),
-            DesktopPaletteCommand::ToggleContext => self.toggle_context(window, cx),
+            DesktopPaletteCommand::ToggleInspector => self.toggle_context(window, cx),
             DesktopPaletteCommand::FocusSessions => {
                 self.focus_target(FocusTarget::Sessions, window, cx);
             }
@@ -3085,7 +3010,7 @@ impl NativeShell {
             DesktopPaletteCommand::FocusComposer => {
                 self.focus_target(FocusTarget::Composer, window, cx);
             }
-            DesktopPaletteCommand::FocusContext => {
+            DesktopPaletteCommand::FocusInspector => {
                 self.focus_target(FocusTarget::Context, window, cx);
             }
             DesktopPaletteCommand::SubmitPrompt => {
@@ -3237,6 +3162,9 @@ impl NativeShell {
                 self.narrow_context_open = false;
                 self.dismiss_overlay(window, cx);
             }
+            Some(DesktopOverlayKind::FullMessage) => {
+                self.close_full_conversation_message(window, cx);
+            }
             None if !matches!(self.file_review, DesktopFileReviewState::Empty) => {
                 self.file_review = DesktopFileReviewState::Empty;
                 self.preference_notice = Some("Closed the changed-file review.".into());
@@ -3258,9 +3186,9 @@ impl NativeShell {
         self.follow_latest(cx);
     }
 
-    fn on_toggle_context_panel(
+    fn on_toggle_inspector_panel(
         &mut self,
-        _: &ToggleContextPanel,
+        _: &ToggleInspectorPanel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3779,15 +3707,7 @@ impl NativeShell {
         now: Instant,
     ) -> Option<std::time::Duration> {
         let layout = self.conversation_live_layout.resolve_one(
-            ConversationRowLayoutInput {
-                key: row.item_key.stable_id().to_owned(),
-                target_height: conversation_row_target_height(
-                    &row,
-                    &self.conversation_expanded_details,
-                    panel_width,
-                ),
-                streaming: !row.done,
-            },
+            conversation_row_layout_input(&row, &self.conversation_expanded_details, panel_width),
             panel_width,
             now,
         );
@@ -3816,6 +3736,14 @@ impl NativeShell {
         debug_assert_eq!(row_index, height_index);
         debug_assert_eq!(row_index, size_index);
         layout.next_refresh_after
+    }
+
+    fn submit_conversation_row_measurement(
+        &mut self,
+        measurement: &ConversationRowMeasurement,
+        cx: &mut Context<Self>,
+    ) {
+        conversation_controller::submit_row_measurement(self, measurement, cx);
     }
 
     fn live_conversation_rows_match_projection(&self) -> bool {
@@ -3898,8 +3826,10 @@ impl NativeShell {
         )
         .entered();
         let visible_conversation_count = self.visible_conversation_count();
-        let previous_scroll_top = (!self.conversation_viewport.follow_latest())
-            .then(|| (-f32::from(self.conversation_scroll.offset().y)).max(0.0));
+        let session_scroll_restore = self.conversation_pending_scroll_restore.take();
+        let previous_scroll_top = (session_scroll_restore.is_none()
+            && !self.conversation_viewport.follow_latest())
+        .then(|| (-f32::from(self.conversation_scroll.offset().y)).max(0.0));
         let full_render_update = self.conversation_render_full_dirty
             || self.conversation_render_width_bucket != Some(layout_width);
         let mut paused_scroll_top = None;
@@ -3910,14 +3840,12 @@ impl NativeShell {
             let row_layout_inputs = self
                 .conversation_render_rows
                 .iter()
-                .map(|row| ConversationRowLayoutInput {
-                    key: row.item_key.stable_id().to_owned(),
-                    target_height: conversation_row_target_height(
+                .map(|row| {
+                    conversation_row_layout_input(
                         row,
                         &self.conversation_expanded_details,
                         layout_width,
-                    ),
-                    streaming: !row.done,
+                    )
                 })
                 .collect::<Vec<_>>();
             let row_layout = self.conversation_layout.resolve(
@@ -3940,14 +3868,12 @@ impl NativeShell {
             let durable_count = self.projection.conversation().blocks().len();
             let live_inputs = self.conversation_render_rows[durable_count..]
                 .iter()
-                .map(|row| ConversationRowLayoutInput {
-                    key: row.item_key.stable_id().to_owned(),
-                    target_height: conversation_row_target_height(
+                .map(|row| {
+                    conversation_row_layout_input(
                         row,
                         &self.conversation_expanded_details,
                         layout_width,
-                    ),
-                    streaming: !row.done,
+                    )
                 })
                 .collect();
             let _ = self.conversation_live_layout.resolve(
@@ -3970,14 +3896,12 @@ impl NativeShell {
                     self.rebuild_live_conversation_render_rows(layout_width);
                     let live_inputs = self.conversation_render_rows[durable_count..]
                         .iter()
-                        .map(|row| ConversationRowLayoutInput {
-                            key: row.item_key.stable_id().to_owned(),
-                            target_height: conversation_row_target_height(
+                        .map(|row| {
+                            conversation_row_layout_input(
                                 row,
                                 &self.conversation_expanded_details,
                                 layout_width,
-                            ),
-                            streaming: !row.done,
+                            )
                         })
                         .collect();
                     let live_layout = self.conversation_live_layout.resolve(
@@ -4022,7 +3946,18 @@ impl NativeShell {
             self.conversation_render_heights.len(),
             visible_conversation_count
         );
-        if let (Some(previous_scroll_top), Some(adjusted_scroll_top)) =
+        if let Some(restored_scroll_top) = session_scroll_restore
+            && !self.conversation_viewport.follow_latest()
+        {
+            let mut offset = self.conversation_scroll.offset();
+            offset.y = px(-restored_scroll_top);
+            self.conversation_scroll.set_offset(offset);
+            tracing::trace!(
+                target: "desktop",
+                event = "session_scroll_restore",
+                scroll_top = restored_scroll_top,
+            );
+        } else if let (Some(previous_scroll_top), Some(adjusted_scroll_top)) =
             (previous_scroll_top, paused_scroll_top)
             && (previous_scroll_top - adjusted_scroll_top).abs() > 0.5
         {
@@ -4030,9 +3965,8 @@ impl NativeShell {
             offset.y = px(-adjusted_scroll_top);
             self.conversation_scroll.set_offset(offset);
         }
-        if self.conversation_viewport.follow_latest() && visible_conversation_count > 0 {
-            self.conversation_scroll
-                .scroll_to_item(visible_conversation_count - 1, ScrollStrategy::Bottom);
+        if self.conversation_viewport.follow_latest() {
+            self.align_conversation_scroll_to_bottom();
         }
         next_refresh_after.map(|delay| (delay, refresh_requires_full))
     }
@@ -4110,6 +4044,7 @@ impl NativeShell {
                     self.narrow_sessions_focus.focus(window, cx);
                 }
                 Some(DesktopOverlayKind::NarrowContext) => self.context_focus.focus(window, cx),
+                Some(DesktopOverlayKind::FullMessage) => self.full_message_focus.focus(window, cx),
                 None => self.composer_input.focus_handle(cx).focus(window, cx),
             },
         }
@@ -4213,7 +4148,7 @@ impl Render for NativeShell {
                 .child(self.inspector_pane.clone())
                 .child(
                     div()
-                        .id("context-resize-handle")
+                        .id("inspector-resize-handle")
                         .absolute()
                         .top_0()
                         .left_0()
@@ -4252,6 +4187,10 @@ impl Render for NativeShell {
         let status_bar = self.status_bar.clone();
 
         let overlay_host = self.overlay_host.clone();
+        let conversation_announcement = self
+            .conversation_announcement
+            .as_ref()
+            .map(|(_, message)| message.clone());
 
         div()
             .id("desktop-application")
@@ -4266,7 +4205,7 @@ impl Render for NativeShell {
             .on_action(cx.listener(Self::on_abort_active_operation))
             .on_action(cx.listener(Self::on_escape_hierarchy))
             .on_action(cx.listener(Self::on_follow_latest_output))
-            .on_action(cx.listener(Self::on_toggle_context_panel))
+            .on_action(cx.listener(Self::on_toggle_inspector_panel))
             .on_action(cx.listener(Self::on_focus_next_region))
             .on_action(cx.listener(Self::on_focus_previous_region))
             .on_action(cx.listener(Self::on_select_previous_conversation))
@@ -4289,7 +4228,7 @@ impl Render for NativeShell {
             .flex()
             .flex_col()
             .font_family(UI_FONT_FAMILY)
-            .text_sm()
+            .text_token(DesignText::Body)
             .bg(rgb(theme.canvas.value()))
             .text_color(rgb(theme.text.value()))
             .child(
@@ -4303,6 +4242,26 @@ impl Render for NativeShell {
             )
             .child(status_bar)
             .child(overlay_host)
+            .when_some(conversation_announcement, |app, message| {
+                app.child(
+                    div()
+                        .id("conversation-copy-announcement")
+                        .debug_selector(|| "desktop-conversation-copy-announcement".into())
+                        .role(Role::Status)
+                        .aria_label(message.clone())
+                        .absolute()
+                        .top_4()
+                        .right_4()
+                        .rounded_token(desktop_style::DesignRadius::Md)
+                        .border_1()
+                        .border_color(rgb(theme.success.value()))
+                        .bg(rgb(theme.elevated.value()))
+                        .px_token(desktop_style::DesignSpace::Md)
+                        .py_token(desktop_style::DesignSpace::Sm)
+                        .text_color(rgb(theme.text.value()))
+                        .child(message),
+                )
+            })
     }
 }
 
@@ -4311,7 +4270,7 @@ fn focus_target_label(target: FocusTarget) -> &'static str {
         FocusTarget::Sessions => "Sessions",
         FocusTarget::Conversation => "Conversation",
         FocusTarget::Composer => "Composer",
-        FocusTarget::Context => "Context",
+        FocusTarget::Context => "Inspector",
         FocusTarget::Status => "Status",
         FocusTarget::Overlay => "Overlay",
     }
@@ -4398,6 +4357,8 @@ mod tests {
     use gpui::TestAppContext;
     use gpui_component::{Theme, ThemeMode, text::TextViewState};
 
+    use desktop::shell::{COMPOSER_MAX_HEIGHT, CONVERSATION_ROW_VERTICAL_PADDING_PX};
+
     fn visual_test_snapshot() -> desktop::runtime::DesktopRuntimeHydratedSnapshot {
         let session_id = "desktop-visual-test".to_owned();
         desktop::runtime::DesktopRuntimeHydratedSnapshot {
@@ -4469,6 +4430,92 @@ mod tests {
             .expect("headless frame replay fixture is a valid product projection")
     }
 
+    fn clipping_regression_projection() -> DesktopProjection {
+        let mut snapshot = visual_test_snapshot();
+        let mut text = String::from(
+            "# Complete final response\n\n> The tail marker must remain inside the measured row.\n\n",
+        );
+        for line in 1..=60 {
+            text.push_str(&format!(
+                "{line}. Layout line {line} — 长中文内容用于验证系统字体回退和换行 🙂 e\u{301}\n"
+            ));
+        }
+        text.push_str(
+            "\n- list item one\n- list item two\n\n| column | value |\n|---|---|\n| 中文 | 🙂 |\n\n```rust\nfn tail() {\n    println!(\"visible\");\n}\n```\n\nFINAL TAIL TEXT",
+        );
+        snapshot
+            .transcript
+            .items
+            .push(CodingAgentSessionTranscriptItem::Assistant {
+                id: "clipping-regression-final".into(),
+                text,
+                thinking: String::new(),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: None,
+            });
+        DesktopProjection::new(snapshot)
+            .expect("clipping regression fixture is a valid product projection")
+    }
+
+    fn long_integrity_text(label: &str) -> String {
+        let mut text = format!("# {label}\n\n> Every final line must remain measurable.\n\n");
+        for line in 1..=60 {
+            text.push_str(&format!(
+                "{line}. {label} line {line} — 中文换行 🙂 e\u{301} {}\n",
+                "unbroken-width-probe".repeat(8)
+            ));
+        }
+        text.push_str("\nFINAL TYPE-SPECIFIC TAIL");
+        text
+    }
+
+    fn projection_with_last_item(item: CodingAgentSessionTranscriptItem) -> DesktopProjection {
+        let mut snapshot = visual_test_snapshot();
+        snapshot.transcript.items.push(item);
+        DesktopProjection::new(snapshot)
+            .expect("message-integrity fixture is a valid product projection")
+    }
+
+    fn settle_visual_measurements(cx: &mut gpui::VisualTestContext) {
+        cx.executor().advance_clock(Duration::from_millis(100));
+        for _ in 0..4 {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+    }
+
+    fn assert_last_row_matches_card_and_tail(cx: &mut gpui::VisualTestContext, label: &str) {
+        let row = cx
+            .debug_bounds("conversation-last-row")
+            .unwrap_or_else(|| panic!("{label}: final virtual row is mounted"));
+        let card = cx
+            .debug_bounds("conversation-last-card")
+            .unwrap_or_else(|| panic!("{label}: final card is laid out"));
+        let tail = cx
+            .debug_bounds("conversation-tail-marker")
+            .unwrap_or_else(|| panic!("{label}: tail marker is laid out"));
+        let composer = cx
+            .debug_bounds("desktop-composer-panel")
+            .unwrap_or_else(|| panic!("{label}: Composer remains visible"));
+
+        assert!(
+            (f32::from(row.size.height)
+                - (f32::from(card.size.height) + CONVERSATION_ROW_VERTICAL_PADDING_PX as f32))
+                .abs()
+                <= 1.,
+            "{label}: virtual row must match the actual card: row={row:?}, card={card:?}"
+        );
+        assert!(
+            tail.bottom() <= row.bottom() + px(1.),
+            "{label}: tail must remain inside the row: tail={tail:?}, row={row:?}"
+        );
+        assert!(
+            tail.bottom() <= composer.top() + px(1.),
+            "{label}: tail must remain above the Composer: tail={tail:?}, composer={composer:?}"
+        );
+    }
+
     fn initialize_visual_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
@@ -4516,7 +4563,7 @@ mod tests {
             cx.debug_bounds("desktop-sessions-panel"),
             cx.debug_bounds("desktop-conversation-panel"),
             cx.debug_bounds("desktop-composer-panel"),
-            cx.debug_bounds("desktop-context-panel"),
+            cx.debug_bounds("desktop-inspector-panel"),
             cx.debug_bounds("desktop-status-panel"),
         ]
     }
@@ -4597,6 +4644,540 @@ mod tests {
     }
 
     #[gpui::test]
+    fn shell_header_and_status_fold_without_overlap_at_all_viewports(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+
+        for width in [1_300., 1_000., 700.] {
+            cx.simulate_resize(size(px(width), px(900.)));
+            cx.run_until_parked();
+
+            let header = cx
+                .debug_bounds("desktop-conversation-header")
+                .expect("conversation header remains visible");
+            let identity = cx
+                .debug_bounds("desktop-header-identity")
+                .expect("header identity region remains visible");
+            let title = cx
+                .debug_bounds("desktop-header-session-title")
+                .expect("semantic session title remains visible");
+            let actions = cx
+                .debug_bounds("desktop-header-actions")
+                .expect("header actions remain visible");
+            let runtime = cx
+                .debug_bounds("desktop-header-runtime-status")
+                .expect("running status remains visible");
+            assert!(identity.right() <= actions.left());
+            assert!(title.left() >= identity.left() && title.right() <= identity.right());
+            assert!(runtime.left() >= actions.left() && runtime.right() <= actions.right());
+            assert!(actions.right() <= header.right());
+
+            let status = cx
+                .debug_bounds("desktop-status-panel")
+                .expect("status bar remains visible");
+            let primary = cx
+                .debug_bounds("desktop-status-primary")
+                .expect("connection and change status remain visible");
+            let secondary = cx
+                .debug_bounds("desktop-status-secondary")
+                .expect("command palette hint remains visible");
+            assert!(primary.right() <= secondary.left());
+            assert!(primary.left() >= status.left() && secondary.right() <= status.right());
+
+            assert_eq!(
+                cx.debug_bounds("desktop-status-configuration").is_some(),
+                width >= 1_200.,
+                "model/profile/thinking footer controls fold before medium width"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn responsive_drawers_preserve_conversation_geometry_scroll_and_owner_focus(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::User {
+                text: "Drawer geometry must remain stable.".into(),
+            }),
+        );
+
+        cx.simulate_resize(size(px(1_000.), px(900.)));
+        settle_visual_measurements(cx);
+        let medium_conversation = cx
+            .debug_bounds("desktop-conversation-panel")
+            .expect("medium conversation remains visible");
+        let medium_row = cx
+            .debug_bounds("conversation-last-row")
+            .expect("medium conversation row remains mounted");
+        let medium_scroll = shell.read_with(cx, |shell, _| shell.conversation_scroll.offset());
+
+        cx.dispatch_action(ToggleInspectorPanel);
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_overlay),
+            Some(DesktopOverlayKind::NarrowContext)
+        );
+        assert!(cx.debug_bounds("desktop-inspector-panel").is_some());
+        assert_minimum_hit_target(cx, "desktop-hit-close-inspector");
+        assert_eq!(
+            cx.debug_bounds("desktop-conversation-panel"),
+            Some(medium_conversation)
+        );
+        assert_eq!(cx.debug_bounds("conversation-last-row"), Some(medium_row));
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.conversation_scroll.offset()),
+            medium_scroll
+        );
+
+        cx.dispatch_action(EscapeHierarchy);
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_overlay), None);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Composer
+        );
+
+        cx.simulate_resize(size(px(700.), px(900.)));
+        settle_visual_measurements(cx);
+        let narrow_conversation = cx
+            .debug_bounds("desktop-conversation-panel")
+            .expect("narrow conversation remains visible");
+        let narrow_row = cx
+            .debug_bounds("conversation-last-row")
+            .expect("narrow conversation row remains mounted");
+        let narrow_scroll = shell.read_with(cx, |shell, _| shell.conversation_scroll.offset());
+        let sessions_toggle = cx
+            .debug_bounds("desktop-hit-toggle-sessions")
+            .expect("narrow layout retains the Sessions drawer toggle");
+        cx.simulate_click(sessions_toggle.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_overlay),
+            Some(DesktopOverlayKind::NarrowSessions)
+        );
+        assert_minimum_hit_target(cx, "desktop-hit-narrow-sessions-overflow");
+        assert_minimum_hit_target(cx, "desktop-hit-close-narrow-sessions");
+        assert_eq!(
+            cx.debug_bounds("desktop-conversation-panel"),
+            Some(narrow_conversation)
+        );
+        assert_eq!(cx.debug_bounds("conversation-last-row"), Some(narrow_row));
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.conversation_scroll.offset()),
+            narrow_scroll
+        );
+
+        cx.dispatch_action(EscapeHierarchy);
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_overlay), None);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Composer
+        );
+    }
+
+    #[gpui::test]
+    fn final_long_markdown_tail_is_inside_measured_row_at_all_viewports(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            clipping_regression_projection(),
+        );
+
+        for (width, height) in [(1_300., 900.), (1_000., 800.), (700., 800.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            for _ in 0..4 {
+                cx.update(|window, _| window.refresh());
+                cx.run_until_parked();
+            }
+
+            let shell_state = cx.update(|_, app| {
+                let shell = shell.read(app);
+                (
+                    shell.conversation_render_rows.len(),
+                    shell.conversation_render_heights.clone(),
+                    shell.conversation_scroll.offset(),
+                )
+            });
+            let row = cx.debug_bounds("conversation-last-row").unwrap_or_else(|| {
+                panic!(
+                    "final virtual row is mounted: state={shell_state:?}, card={:?}, tail={:?}, panel={:?}",
+                    cx.debug_bounds("conversation-last-card"),
+                    cx.debug_bounds("conversation-tail-marker"),
+                    cx.debug_bounds("desktop-conversation-panel"),
+                )
+            });
+            let card = cx
+                .debug_bounds("conversation-last-card")
+                .expect("final conversation card is laid out");
+            let tail = cx
+                .debug_bounds("conversation-tail-marker")
+                .expect("tail layout marker is laid out");
+            let composer = cx
+                .debug_bounds("desktop-composer-panel")
+                .expect("composer remains visible");
+
+            assert!(
+                f32::from(card.size.height) > TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT,
+                "{width}px fixture must exceed the former silent clipping limit"
+            );
+            assert!(
+                (f32::from(row.size.height)
+                    - (f32::from(card.size.height) + CONVERSATION_ROW_VERTICAL_PADDING_PX as f32))
+                    .abs()
+                    <= 1.,
+                "{width}px virtual row must match actual card bounds: row={row:?}, card={card:?}"
+            );
+            assert!(
+                tail.bottom() <= row.bottom() + px(1.),
+                "{width}px tail marker must remain inside the virtual row"
+            );
+            assert!(
+                tail.bottom() <= composer.top() + px(1.),
+                "{width}px final tail must not be hidden below the Composer: tail={tail:?}, composer={composer:?}, row={row:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn final_long_user_tail_is_inside_its_measured_row(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::User {
+                text: long_integrity_text("User"),
+            }),
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+
+        assert_last_row_matches_card_and_tail(cx, "User");
+        assert!(
+            f32::from(
+                cx.debug_bounds("conversation-last-card")
+                    .expect("User card remains mounted")
+                    .size
+                    .height
+            ) > TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT,
+            "long User content must not inherit the former silent height cap"
+        );
+    }
+
+    #[gpui::test]
+    fn final_long_diagnostic_tail_is_inside_its_measured_row(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::Diagnostic {
+                message: long_integrity_text("Diagnostic"),
+            }),
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+
+        assert_last_row_matches_card_and_tail(cx, "Diagnostic");
+        assert!(
+            f32::from(
+                cx.debug_bounds("conversation-last-card")
+                    .expect("Diagnostic card remains mounted")
+                    .size
+                    .height
+            ) > TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT,
+            "long Diagnostic content must not inherit the former silent height cap"
+        );
+    }
+
+    #[gpui::test]
+    fn final_long_tool_expands_without_losing_its_tail(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::Tool {
+                call_id: "long-tool-output".into(),
+                name: "shell".into(),
+                args: serde_json::json!({
+                    "command": "cargo test --workspace",
+                    "notes": "参数 中文 🙂".repeat(80),
+                }),
+                result: Some(long_integrity_text("Tool output")),
+                is_error: false,
+                duration_millis: Some(1_240),
+            }),
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+        assert_last_row_matches_card_and_tail(cx, "collapsed Tool");
+        let collapsed_height = f32::from(
+            cx.debug_bounds("conversation-last-card")
+                .expect("collapsed Tool card is laid out")
+                .size
+                .height,
+        );
+
+        let block_id = shell.read_with(cx, |shell, _| {
+            shell
+                .conversation_render_rows
+                .last()
+                .expect("Tool row exists")
+                .item_key
+                .row_id()
+                .to_owned()
+        });
+        shell.update(cx, |shell, cx| {
+            shell.toggle_conversation_details(&block_id, cx);
+        });
+        settle_visual_measurements(cx);
+
+        assert_last_row_matches_card_and_tail(cx, "expanded Tool");
+        let expanded_height = f32::from(
+            cx.debug_bounds("conversation-last-card")
+                .expect("expanded Tool card is laid out")
+                .size
+                .height,
+        );
+        assert!(
+            expanded_height > collapsed_height + 100.,
+            "expanded Tool output must contribute its real content height: collapsed={collapsed_height}, expanded={expanded_height}"
+        );
+    }
+
+    #[gpui::test]
+    fn expanded_tool_actions_copy_structured_sources_and_open_output(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let command = "cargo test -p desktop";
+        let output = "desktop tests passed\n";
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::Tool {
+                call_id: "tool-actions".into(),
+                name: "bash".into(),
+                args: serde_json::json!({ "command": command, "timeout": 120 }),
+                result: Some(output.into()),
+                is_error: false,
+                duration_millis: Some(320),
+            }),
+        );
+        let block_id = shell.read_with(cx, |shell, _| {
+            shell
+                .conversation_render_rows
+                .last()
+                .expect("Tool row exists")
+                .item_key
+                .row_id()
+                .to_owned()
+        });
+        shell.update(cx, |shell, cx| {
+            shell.toggle_conversation_details(&block_id, cx);
+        });
+        settle_visual_measurements(cx);
+
+        let copy_command = cx
+            .debug_bounds("desktop-copy-tool-command")
+            .expect("structured shell command exposes a copy action");
+        cx.simulate_click(copy_command.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(command.into())
+        );
+
+        let copy_output = cx
+            .debug_bounds("desktop-copy-tool-output")
+            .expect("tool output exposes a copy action");
+        cx.simulate_click(copy_output.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(output.into())
+        );
+
+        let open_output = cx
+            .debug_bounds("desktop-open-tool-output")
+            .expect("tool output exposes a full-output action");
+        cx.simulate_click(open_output.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_overlay),
+            Some(DesktopOverlayKind::FullMessage)
+        );
+        assert!(shell.read_with(cx, |shell, _| {
+            shell
+                .conversation_full_message
+                .as_ref()
+                .is_some_and(|message| message.text.as_ref() == output)
+        }));
+    }
+
+    #[gpui::test]
+    fn assistant_reasoning_expands_without_losing_the_answer_tail(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::Assistant {
+                id: "reasoning-layout".into(),
+                text: "Final answer tail remains visible.".into(),
+                thinking: long_integrity_text("Reasoning"),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: Some(2_430),
+            }),
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+        assert_last_row_matches_card_and_tail(cx, "collapsed Reasoning");
+        let collapsed_height = f32::from(
+            cx.debug_bounds("conversation-last-card")
+                .expect("collapsed reasoning card is laid out")
+                .size
+                .height,
+        );
+
+        let block_id = shell.read_with(cx, |shell, _| {
+            shell
+                .conversation_render_rows
+                .last()
+                .expect("Assistant row exists")
+                .item_key
+                .row_id()
+                .to_owned()
+        });
+        shell.update(cx, |shell, cx| {
+            shell.toggle_conversation_details(&block_id, cx);
+        });
+        settle_visual_measurements(cx);
+
+        assert_last_row_matches_card_and_tail(cx, "expanded Reasoning");
+        let expanded_height = f32::from(
+            cx.debug_bounds("conversation-last-card")
+                .expect("expanded reasoning card is laid out")
+                .size
+                .height,
+        );
+        assert!(
+            expanded_height > collapsed_height + 100.,
+            "expanded reasoning must contribute its real content height: collapsed={collapsed_height}, expanded={expanded_height}"
+        );
+    }
+
+    #[gpui::test]
+    fn truncated_preview_opens_and_copies_the_complete_bounded_message(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let mut snapshot = visual_test_snapshot();
+        let full_text = format!(
+            "BEGIN FULL MESSAGE\n{}END FULL MESSAGE",
+            "完整消息内容 🙂 e\u{301}\n".repeat(24_000)
+        );
+        assert!(full_text.len() > desktop::conversation::MAX_MARKDOWN_PREVIEW_BYTES);
+        assert!(full_text.len() < MAX_COPY_BYTES);
+        snapshot
+            .transcript
+            .items
+            .push(CodingAgentSessionTranscriptItem::Assistant {
+                id: "full-message-regression".into(),
+                text: full_text.clone(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: None,
+            });
+        let projection = DesktopProjection::new(snapshot)
+            .expect("full-message fixture is a valid product projection");
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection,
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        cx.executor().advance_clock(Duration::from_millis(100));
+        for _ in 0..4 {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+
+        let open = cx
+            .debug_bounds("desktop-open-full-message")
+            .expect("truncated preview exposes an explicit full-message action");
+        let composer = cx
+            .debug_bounds("desktop-composer-panel")
+            .expect("Composer remains visible below the preview");
+        let row = cx
+            .debug_bounds("conversation-last-row")
+            .expect("truncated preview row is mounted");
+        assert!(
+            open.top() >= row.top()
+                && open.bottom() <= row.bottom()
+                && open.bottom() <= composer.top(),
+            "full-message action must be reachable inside its row and above the Composer: open={open:?}, row={row:?}, composer={composer:?}, offset={:?}",
+            shell.read_with(cx, |shell, _| shell.conversation_scroll.offset())
+        );
+        cx.update(|window, app| {
+            shell.update(app, |shell, cx| {
+                shell.open_full_conversation_message(
+                    "assistant:full-message-regression",
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_overlay),
+            Some(DesktopOverlayKind::FullMessage)
+        );
+        let dialog = cx
+            .debug_bounds("desktop-full-message-dialog")
+            .expect("full message uses a modal dialog");
+        let scroll = cx
+            .debug_bounds("desktop-full-message-scroll")
+            .expect("full message uses one explicit scroll container");
+        assert!(scroll.size.height < dialog.size.height);
+        assert!(shell.read_with(cx, |shell, _| {
+            shell
+                .conversation_full_message
+                .as_ref()
+                .is_some_and(|message| {
+                    message.text.starts_with("BEGIN FULL MESSAGE")
+                        && message.text.ends_with("END FULL MESSAGE")
+                        && !message.source_truncated
+                })
+        }));
+
+        let copy = cx
+            .debug_bounds("desktop-copy-full-message")
+            .expect("full viewer exposes its complete-source copy action");
+        cx.simulate_click(copy.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(full_text)
+        );
+
+        let close = cx
+            .debug_bounds("desktop-close-full-message")
+            .expect("full viewer exposes a close action");
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_overlay), None);
+        assert!(shell.read_with(cx, |shell, _| shell.conversation_full_message.is_none()));
+    }
+
+    #[gpui::test]
     fn native_shell_primary_controls_keep_minimum_hit_targets(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let (_, cx) = add_visual_shell(
@@ -4610,8 +5191,9 @@ mod tests {
             cx.run_until_parked();
             for selector in [
                 "desktop-hit-toggle-sessions",
+                "desktop-hit-toggle-inspector",
                 "desktop-hit-submit-composer",
-                "desktop-hit-cycle-model",
+                "desktop-header-model-profile",
             ] {
                 assert_minimum_hit_target(cx, selector);
             }
@@ -4619,6 +5201,7 @@ mod tests {
 
         cx.simulate_resize(size(px(1_300.), px(900.)));
         cx.run_until_parked();
+        assert_minimum_hit_target(cx, "desktop-hit-cycle-model");
         assert_minimum_hit_target(cx, "desktop-hit-create-session");
     }
 
@@ -4668,8 +5251,194 @@ mod tests {
     }
 
     #[gpui::test]
+    fn composer_auto_grows_from_two_lines_to_its_bounded_maximum(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        cx.run_until_parked();
+
+        shell.update(cx, |shell, cx| {
+            shell.composer.edit("line one\nline two");
+            shell.composer_needs_sync = true;
+            cx.notify();
+        });
+        settle_visual_measurements(cx);
+        let two_line_height = f32::from(
+            cx.debug_bounds("desktop-composer-panel")
+                .expect("two-line Composer is laid out")
+                .size
+                .height,
+        );
+
+        shell.update(cx, |shell, cx| {
+            shell.composer.edit(
+                (1..=20)
+                    .map(|line| format!("composer line {line} 中文 🙂"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            shell.composer_needs_sync = true;
+            cx.notify();
+        });
+        settle_visual_measurements(cx);
+        let maximum_height = f32::from(
+            cx.debug_bounds("desktop-composer-panel")
+                .expect("maximum-height Composer is laid out")
+                .size
+                .height,
+        );
+
+        shell.update(cx, |shell, cx| {
+            shell.composer.edit(
+                (1..=40)
+                    .map(|line| format!("saturation line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            shell.composer_needs_sync = true;
+            cx.notify();
+        });
+        settle_visual_measurements(cx);
+        let saturated_height = f32::from(
+            cx.debug_bounds("desktop-composer-panel")
+                .expect("saturated Composer is laid out")
+                .size
+                .height,
+        );
+
+        assert!(
+            maximum_height > two_line_height,
+            "Composer must grow beyond its two-line geometry: two={two_line_height}, max={maximum_height}"
+        );
+        assert!(
+            maximum_height <= COMPOSER_MAX_HEIGHT as f32 + 1.,
+            "Composer auto-grow must remain bounded: {maximum_height}"
+        );
+        assert!(
+            (saturated_height - maximum_height).abs() <= 1.,
+            "content beyond the eight-row auto-grow maximum must not keep expanding the Composer: twenty={maximum_height}, forty={saturated_height}"
+        );
+    }
+
+    #[gpui::test]
+    fn composer_running_authorization_and_rejection_fit_at_narrow_width(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+
+        let mut running_snapshot = visual_test_snapshot();
+        running_snapshot.session.active_operation = Some("operation-running-composer".into());
+        let running_projection = DesktopProjection::new(running_snapshot)
+            .expect("running Composer fixture is a valid product projection");
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            running_projection,
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+        assert_composer_regions_do_not_overlap(cx, false);
+        let selector = cx
+            .debug_bounds("desktop-composer-running-mode-selector")
+            .expect("running Composer exposes one mode selector");
+        let submit = cx
+            .debug_bounds("desktop-hit-submit-running-composer")
+            .expect("running Composer exposes one primary submit action");
+        assert!(selector.bottom() <= submit.top());
+        assert!(cx.debug_bounds("desktop-hit-submit-composer").is_none());
+
+        let mut authorization_snapshot = visual_test_snapshot();
+        authorization_snapshot
+            .session
+            .pending_authorizations
+            .push(ToolAuthorizationRequest {
+                authorization_id: "authorization-composer-layout".into(),
+                operation_id: "operation-composer-layout".into(),
+                turn_id: "turn-composer-layout".into(),
+                tool_call_id: "tool-composer-layout".into(),
+                tool_name: "bash".into(),
+                risk: ToolAuthorizationRisk::ShellExecution,
+                scope: ToolAuthorizationScope::Shell {
+                    cwd: "/desktop-visual-test".into(),
+                    command_fingerprint: "composer-layout-fingerprint".into(),
+                },
+                preview: ToolAuthorizationPreview {
+                    summary: "Authorize the pending shell command".into(),
+                    path: None,
+                    command: Some("cargo check".into()),
+                    cwd: Some("/desktop-visual-test".into()),
+                    content_preview: None,
+                },
+                capability_generation: 0,
+                requested_at: "2026-07-27T00:00:00Z".into(),
+            });
+        let authorization_projection = DesktopProjection::new(authorization_snapshot)
+            .expect("authorization Composer fixture is a valid product projection");
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            authorization_projection,
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+        assert_composer_regions_do_not_overlap(cx, true);
+
+        let (rejection_shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+        rejection_shell.update(cx, |shell, cx| {
+            shell.composer.edit("retry this exact draft");
+            shell
+                .composer
+                .begin_submit(91, ComposerSubmissionKind::Prompt)
+                .expect("test draft starts a pending submission");
+            shell
+                .composer
+                .rejected(
+                    91,
+                    "The submitted draft was rejected and remains available for editing.",
+                )
+                .expect("matching rejection is applied");
+            shell.notify_composer_pane(cx);
+        });
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+        assert_composer_regions_do_not_overlap(cx, true);
+    }
+
+    fn assert_composer_regions_do_not_overlap(
+        cx: &mut gpui::VisualTestContext,
+        notice_expected: bool,
+    ) {
+        let panel = cx
+            .debug_bounds("desktop-composer-panel")
+            .expect("Composer panel is laid out");
+        let input = cx
+            .debug_bounds("desktop-composer-input-region")
+            .expect("Composer input region is laid out");
+        let actions = cx
+            .debug_bounds("desktop-composer-actions")
+            .expect("Composer action region is laid out");
+        assert!(input.right() <= actions.left());
+        assert!(input.left() >= panel.left() && actions.right() <= panel.right());
+        match cx.debug_bounds("desktop-composer-state-notice") {
+            Some(notice) if notice_expected => {
+                assert!(notice.bottom() <= input.top());
+                assert!(notice.left() >= panel.left() && notice.right() <= panel.right());
+            }
+            None if !notice_expected => {}
+            notice => panic!("unexpected Composer notice state: {notice:?}"),
+        }
+    }
+
+    #[gpui::test]
     #[ignore = "release performance gate"]
     fn desktop_release_gpui_headless_frame_and_input_replay(cx: &mut TestAppContext) {
+        let _performance_guard = crate::allocation_probe::serial_guard();
         const SAMPLE_COUNT: usize = 200;
         const CPU_FRAME_BUDGET_MICROS: u128 = 16_700;
         const WINDOW_RSS_GROWTH_BUDGET: u64 = 64 * 1024 * 1024;
@@ -4766,6 +5535,7 @@ mod tests {
     #[gpui::test]
     #[ignore = "release performance gate"]
     fn desktop_release_gpui_markdown_parser_matrix(cx: &mut TestAppContext) {
+        let _performance_guard = crate::allocation_probe::serial_guard();
         const SAMPLE_COUNT: usize = 20;
         const MARKDOWN_PARSE_BUDGET_MICROS: u128 = 150_000;
 
@@ -4839,7 +5609,7 @@ mod tests {
         );
         let projection = DesktopProjection::new(snapshot)
             .expect("code-copy visual fixture is a valid product projection");
-        let (_, cx) = add_visual_shell(
+        let (shell, cx) = add_visual_shell(
             cx,
             DesktopRuntimeBridge::disconnected_for_test(),
             projection,
@@ -4848,6 +5618,7 @@ mod tests {
         cx.refresh()
             .expect("final Markdown renders in the first refreshed frame");
         cx.run_until_parked();
+        let notice_before_copy = shell.read_with(cx, |shell, _| shell.preference_notice.clone());
 
         let bounds = cx
             .debug_bounds("desktop-copy-markdown-code")
@@ -4859,6 +5630,24 @@ mod tests {
         assert_eq!(
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some("fn main() { println!(\"exact\"); }".into())
+        );
+        assert!(
+            cx.debug_bounds("desktop-conversation-copy-announcement")
+                .is_some(),
+            "Copy feedback is announced near the conversation instead of occupying the status bar"
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.preference_notice.clone()),
+            notice_before_copy,
+            "Copy feedback must not replace a persistent runtime or preference notice"
+        );
+        cx.executor()
+            .advance_clock(CONVERSATION_ANNOUNCEMENT_DURATION + Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("desktop-conversation-copy-announcement")
+                .is_none(),
+            "Copy announcement expires instead of becoming persistent chrome"
         );
     }
 
@@ -5041,6 +5830,59 @@ mod tests {
         }));
     }
 
+    #[gpui::test]
+    fn diagnostic_row_exposes_authoritative_recovery_action(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let recovery = CodingAgentRecoveryPending {
+            operation_id: "operation-inline-recovery".into(),
+            recovery_id: "recovery-inline-diagnostic".into(),
+            operation_kind: Some("prompt".into()),
+            record_version: 4,
+            descriptor_revision: 2,
+            capability_generation: Some(0),
+            attempt_count: 1,
+            last_attempt_at: Some("2026-07-27T00:00:00Z".into()),
+            next_attempt_at: None,
+        };
+        let mut snapshot = visual_test_snapshot();
+        snapshot.pending_recoveries.push(recovery);
+        snapshot
+            .transcript
+            .items
+            .push(CodingAgentSessionTranscriptItem::Diagnostic {
+                message: "The operation requires recovery.".into(),
+            });
+        let projection = DesktopProjection::new(snapshot)
+            .expect("inline recovery fixture is a valid product projection");
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, projection);
+        settle_visual_measurements(cx);
+        runtime_harness.drain_command_kinds();
+
+        let retry = cx
+            .debug_bounds("desktop-retry-diagnostic")
+            .expect("Diagnostic exposes an authoritative retry action in place");
+        cx.simulate_click(retry.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(
+            runtime_harness
+                .drain_command_kinds()
+                .contains(&desktop::runtime::DesktopRuntimeCommandKind::RetryRecovery)
+        );
+        assert!(shell.read_with(cx, |shell, _| {
+            shell.command_ledger.contains_where(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::Recovery {
+                        recovery_id,
+                        action: DesktopRecoveryAction::Retry,
+                    } if recovery_id == "recovery-inline-diagnostic"
+                )
+            })
+        }));
+    }
+
     #[test]
     fn runtime_and_recovery_labels_are_exhaustive_and_typed() {
         assert_eq!(
@@ -5159,6 +6001,122 @@ mod tests {
     }
 
     #[test]
+    fn conversation_scroll_selection_and_expansion_are_scoped_to_the_session() {
+        let mut viewport = ConversationViewport::new(8);
+        viewport.on_content_changed(40, 1);
+        viewport.pause_follow_latest();
+        viewport.select_live("tool:session-a");
+        let mut expanded_details = HashSet::from(["tool:session-a".to_owned()]);
+        let mut session_views = HashMap::new();
+        let mut pending_scroll_restore = None;
+
+        assert!(reconcile_conversation_session_view_state(
+            &mut viewport,
+            &mut expanded_details,
+            &mut session_views,
+            &mut pending_scroll_restore,
+            "session-a",
+            "session-b",
+            410.5,
+        ));
+        assert!(viewport.follow_latest());
+        assert_eq!(viewport.selected_block_id(), None);
+        assert!(expanded_details.is_empty());
+        assert_eq!(pending_scroll_restore, Some(0.));
+
+        viewport.on_content_changed(12, 2);
+        viewport.pause_follow_latest();
+        viewport.select_live("assistant:session-b");
+        expanded_details.insert("assistant:session-b".into());
+        assert!(reconcile_conversation_session_view_state(
+            &mut viewport,
+            &mut expanded_details,
+            &mut session_views,
+            &mut pending_scroll_restore,
+            "session-b",
+            "session-a",
+            95.,
+        ));
+
+        assert!(!viewport.follow_latest());
+        assert_eq!(viewport.selected_block_id(), Some("tool:session-a"));
+        assert_eq!(
+            expanded_details,
+            HashSet::from(["tool:session-a".to_owned()])
+        );
+        assert_eq!(pending_scroll_restore, Some(410.5));
+
+        let session_b = session_views
+            .get("session-b")
+            .expect("the outgoing session view should remain restorable");
+        assert_eq!(session_b.scroll_top, 95.);
+        assert_eq!(
+            session_b.viewport.selected_block_id(),
+            Some("assistant:session-b")
+        );
+    }
+
+    #[test]
+    fn same_session_projection_replacement_keeps_conversation_view_untouched() {
+        let mut viewport = ConversationViewport::new(8);
+        viewport.pause_follow_latest();
+        viewport.select_live("assistant:current");
+        let mut expanded_details = HashSet::from(["assistant:current".to_owned()]);
+        let mut session_views = HashMap::new();
+        let mut pending_scroll_restore = None;
+
+        assert!(!reconcile_conversation_session_view_state(
+            &mut viewport,
+            &mut expanded_details,
+            &mut session_views,
+            &mut pending_scroll_restore,
+            "session-a",
+            "session-a",
+            123.,
+        ));
+        assert!(!viewport.follow_latest());
+        assert_eq!(viewport.selected_block_id(), Some("assistant:current"));
+        assert_eq!(
+            expanded_details,
+            HashSet::from(["assistant:current".to_owned()])
+        );
+        assert!(session_views.is_empty());
+        assert_eq!(pending_scroll_restore, None);
+    }
+
+    #[test]
+    fn inspector_section_selection_is_scoped_to_the_session() {
+        let mut selected = InspectorSection::Runtime;
+        let mut sections = HashMap::new();
+
+        assert!(reconcile_inspector_session_section_state(
+            &mut selected,
+            &mut sections,
+            "session-a",
+            "session-b",
+        ));
+        assert_eq!(selected, InspectorSection::Changes);
+
+        selected = InspectorSection::Task;
+        assert!(reconcile_inspector_session_section_state(
+            &mut selected,
+            &mut sections,
+            "session-b",
+            "session-a",
+        ));
+        assert_eq!(selected, InspectorSection::Runtime);
+        assert_eq!(sections.get("session-b"), Some(&InspectorSection::Task));
+
+        assert!(!reconcile_inspector_session_section_state(
+            &mut selected,
+            &mut sections,
+            "session-a",
+            "session-a",
+        ));
+        assert_eq!(selected, InspectorSection::Runtime);
+    }
+
+    #[test]
     fn conversation_rows_adapt_to_kind_content_and_reasoning() {
         let diagnostic = conversation_block_height(
             ConversationBlockKind::Diagnostic,
@@ -5187,7 +6145,7 @@ mod tests {
 
         assert!(diagnostic < short_assistant);
         assert!(short_assistant < reasoning_assistant);
-        assert_eq!(long_assistant, TRANSCRIPT_ROW_MAX_HEIGHT);
+        assert!(long_assistant > TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT);
     }
 
     #[test]
@@ -5220,17 +6178,36 @@ mod tests {
         let expanded_ids = HashSet::from([assistant.item_key.row_id().to_owned()]);
         let expanded = conversation_row_target_height(&assistant, &expanded_ids, 900);
         assert!(collapsed < expanded);
-        assert_eq!(expanded, assistant.measured_height);
+        assert_eq!(expanded, assistant.estimated_height);
 
         let pane = include_str!("native_shell/conversation_pane.rs");
         assert!(pane.contains("Reasoning · collapsed"));
-        assert!(pane.contains("output + arguments collapsed"));
+        assert!(pane.contains("\"OUTPUT\""));
+        assert!(pane.contains("\"ARGUMENTS\""));
+        assert!(pane.contains("\"show-tool-details\""));
         assert!(pane.contains("ConversationPaneEvent::ToggleDetails"));
         assert!(pane.contains("group_hover(hover_group"));
         assert!(pane.contains(".absolute()"));
+        assert!(pane.contains(
+            ".id((\n                                    ElementId::from(\"conversation-block\")"
+        ));
+        assert!(!pane.contains("row_click_block_id"));
         assert!(pane.contains("USER_MESSAGE_WIDTH_PERCENT as f32 / 100."));
         assert!(pane.contains(".max_w(px(USER_MESSAGE_MAX_WIDTH as f32))"));
         assert!(pane.contains("card.max_w(px(ASSISTANT_MESSAGE_MAX_WIDTH as f32))"));
+        assert!(pane.contains(".h(px(row_height))\n                                .w_full()\n                                .min_w_0()"));
+        assert!(
+            !pane.contains(".w_full()\n                                        .flex_shrink_0()")
+        );
+        let streaming = include_str!("native_shell/streaming_text.rs");
+        assert!(streaming.contains(".selectable(true)"));
+        assert!(streaming.contains(
+            "TextView::markdown(self.id.clone(), self.text.clone())\n            .w_full()\n            .min_w_0()"
+        ));
+        assert!(pane.contains(
+            "block.kind\n                                                                != ConversationBlockKind::User"
+        ));
+        assert!(pane.contains("!is_assistant"));
     }
 
     #[test]
@@ -5240,6 +6217,23 @@ mod tests {
         assert_eq!(conversation_distance_to_bottom(-640.0, 640.0), 0.0);
         assert_eq!(conversation_distance_to_bottom(-641.0, 640.0), 0.0);
         assert_eq!(conversation_distance_to_bottom(4.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn single_measurement_compensates_the_exact_paused_anchor() {
+        let heights = [100., 100., 100.];
+        assert_eq!(
+            compensate_scroll_top_for_single_row_height(&heights, 0, 140., 150.),
+            190.
+        );
+        assert_eq!(
+            compensate_scroll_top_for_single_row_height(&heights, 1, 40., 150.),
+            140.
+        );
+        assert_eq!(
+            compensate_scroll_top_for_single_row_height(&heights, 2, 180., 150.),
+            150.
+        );
     }
 
     #[test]
@@ -5381,9 +6375,56 @@ mod tests {
     }
 
     #[test]
+    fn desktop_panes_consume_spacing_radius_and_typography_tokens() {
+        let panes = [
+            include_str!("native_shell/conversation_header.rs"),
+            include_str!("native_shell/conversation_pane.rs"),
+            include_str!("native_shell/composer_pane.rs"),
+            include_str!("native_shell/sessions_pane.rs"),
+            include_str!("native_shell/inspector_pane.rs"),
+            include_str!("native_shell/status_bar.rs"),
+            include_str!("native_shell/overlay_host.rs"),
+        ];
+        let legacy_utility_tokens = [
+            ".p_1()",
+            ".p_2()",
+            ".p_3()",
+            ".p_4()",
+            ".p_5()",
+            ".px_2()",
+            ".px_3()",
+            ".px_4()",
+            ".py_1()",
+            ".py_2()",
+            ".py_3()",
+            ".gap_1()",
+            ".gap_2()",
+            ".gap_3()",
+            ".mt_1()",
+            ".mt_2()",
+            ".mt_3()",
+            ".rounded_md()",
+            ".rounded_lg()",
+            ".text_xs()",
+            ".text_sm()",
+        ];
+
+        for pane in panes {
+            assert!(pane.contains("DesktopStyledExt"));
+            for legacy in legacy_utility_tokens {
+                assert!(
+                    !pane.contains(legacy),
+                    "desktop pane bypasses design tokens with {legacy}"
+                );
+            }
+        }
+        assert!(!include_str!("native_shell/overlay_host.rs").contains("rgba(0x"));
+    }
+
+    #[test]
     fn conversation_focus_uses_the_existing_header_divider_without_panel_geometry() {
         let theme = SemanticTheme::GEEK_DARK;
-        assert_eq!(conversation_focus_accent(false, theme), theme.border);
+        assert_eq!(conversation_focus_accent(false, theme), theme.divider);
         assert_eq!(conversation_focus_accent(true, theme), theme.accent);
 
         let header = include_str!("native_shell/conversation_header.rs");
@@ -5421,7 +6462,7 @@ mod tests {
     fn composer_and_transcript_source_do_not_restore_fixed_heights() {
         let source = include_str!("native_shell.rs");
         assert!(source.contains(".auto_grow(2, 8)"));
-        assert!(source.contains("row.measured_height"));
+        assert!(source.contains("row.estimated_height"));
         let fixed_row_height = [".h(px(", "220.))"].concat();
         let fixed_composer_height = [".h(px(", "COMPOSER_HEIGHT"].concat();
         assert!(!source.contains(&fixed_row_height));
@@ -5539,9 +6580,13 @@ mod tests {
         assert!(shell.contains("ComposerSubmissionKind::Steer"));
         assert!(shell.contains("ComposerPaneEvent::SetRunningMode"));
         assert!(shell.contains("ComposerSubmissionKind::FollowUp"));
-        assert!(pane.contains("composer-mode-steer"));
-        assert!(pane.contains("composer-mode-follow-up"));
+        assert!(pane.contains("DropdownButton::new(\"composer-running-mode-selector\")"));
+        assert!(pane.contains("PopupMenuItem::new(\"Steer now\")"));
+        assert!(pane.contains("PopupMenuItem::new(\"Queue next\")"));
+        assert!(!pane.contains("composer-mode-steer"));
+        assert!(!pane.contains("composer-mode-follow-up"));
         assert!(pane.contains("submit-running-composer"));
+        assert!(pane.contains("desktop-composer-state-notice"));
         let legacy_steer_button = ["Button::new(\"steer-", "operation\")"].concat();
         let legacy_follow_up_button = ["Button::new(\"follow-up-", "operation\")"].concat();
         assert!(!pane.contains(&legacy_steer_button));
@@ -5555,10 +6600,10 @@ mod tests {
     fn inspector_rendering_is_owned_by_a_non_streaming_child_entity() {
         let shell = include_str!("native_shell.rs");
         let pane = include_str!("native_shell/inspector_pane.rs");
-        let context_panel_id = [".id(\"context-", "panel\")"].concat();
+        let inspector_panel_id = [".id(\"inspector-", "panel\")"].concat();
 
-        assert!(!shell.contains(&context_panel_id));
-        assert!(pane.contains(&context_panel_id));
+        assert!(!shell.contains(&inspector_panel_id));
+        assert!(pane.contains(&inspector_panel_id));
         assert!(shell.contains("inspector_pane: gpui::Entity<InspectorPane>"));
         assert!(shell.contains(".child(self.inspector_pane.clone())"));
         assert!(pane.contains("impl EventEmitter<InspectorPaneEvent>"));
@@ -5599,6 +6644,9 @@ mod tests {
         assert!(pane.contains("Current task"));
         assert!(pane.contains("Recent task"));
         assert!(pane.contains("session_catalog.iter()"));
+        assert!(pane.contains("sessions-overflow"));
+        assert!(pane.contains("PopupMenuItem::new(if session_catalog_pending"));
+        assert!(!pane.contains("refresh-session-catalog"));
         assert!(!pane.contains(&active_duplicate));
     }
 
@@ -5613,6 +6661,8 @@ mod tests {
             assert!(pane.contains(section));
         }
         assert!(pane.contains("InspectorPaneEvent::SelectSection(section)"));
+        assert!(pane.contains("Badge::new()"));
+        assert!(pane.contains(".count(runtime_attention_count)"));
         assert!(pane.contains("when_some(latest_diagnostic"));
         assert!(pane.contains("when_some(latest_recovery"));
         assert!(!pane.contains(&permanent_diagnostics));
@@ -5624,11 +6674,11 @@ mod tests {
         let shell = include_str!("native_shell.rs");
         let preferences = include_str!("../preferences.rs");
         let sessions_handle = ["sessions-resize-", "handle"].concat();
-        let context_handle = ["context-resize-", "handle"].concat();
+        let inspector_handle = ["inspector-resize-", "handle"].concat();
         let double_click = ["event.click_count ", ">= 2"].concat();
 
         assert!(shell.contains(&sessions_handle));
-        assert!(shell.contains(&context_handle));
+        assert!(shell.contains(&inspector_handle));
         assert!(shell.contains(".absolute()"));
         assert!(shell.contains(".cursor_ew_resize()"));
         assert!(shell.contains(&double_click));
@@ -5679,10 +6729,17 @@ mod tests {
         assert!(shell.contains(".child(self.conversation_header.clone())"));
         assert!(header.contains("impl EventEmitter<ConversationHeaderEvent>"));
         assert!(shell.contains("ConversationHeaderEvent::ToggleSessions"));
-        assert!(shell.contains("ConversationHeaderEvent::ToggleContext"));
+        assert!(shell.contains("ConversationHeaderEvent::ToggleInspector"));
         assert!(shell.contains("ConversationHeaderEvent::Reload"));
-        assert!(shell.contains("ConversationHeaderEvent::CopySelected"));
+        assert!(shell.contains("ConversationHeaderEvent::SelectNextModel"));
+        assert!(shell.contains("ConversationHeaderEvent::SelectNextSessionProfile"));
+        assert!(shell.contains("ConversationHeaderEvent::CycleThinking"));
         assert!(shell.contains("ConversationHeaderEvent::Abort"));
+        assert!(!header.contains("copy-conversation-block"));
+        assert!(!header.contains("reload-local-resources"));
+        assert!(header.contains("header-overflow"));
+        assert!(header.contains("Reload local resources"));
+        assert!(header.contains("Inspector"));
         assert!(!header.contains("conversation_render_dirty_sequences"));
     }
 
@@ -5717,6 +6774,12 @@ mod tests {
         assert!(shell.contains("this.select_next_session_profile(cx)"));
         assert!(shell.contains("StatusBarEvent::CycleThinking"));
         assert!(shell.contains("this.cycle_thinking_selection(cx)"));
+        assert!(!bar.contains("seq {}"));
+        assert!(!bar.contains("motion static"));
+        assert!(!bar.contains("messages ↑/↓"));
+        assert!(!bar.contains("truncate_label(&notice, 28)"));
+        assert!(bar.contains("status-details"));
+        assert!(bar.contains("Commands Ctrl/Cmd+K"));
         assert!(!bar.contains("conversation_render_dirty_sequences"));
     }
 
@@ -5804,19 +6867,44 @@ mod tests {
         assert!(!notice.contains(SECRET));
     }
 }
+mod commands;
 mod composer_pane;
+mod conversation_controller;
 mod conversation_header;
 mod conversation_pane;
+mod desktop_style;
 mod inspector_pane;
 mod overlay_host;
 mod sessions_pane;
 mod status_bar;
 mod streaming_text;
+mod update;
 
+use commands::{DirectCommandUpdate, ProjectionCommandCompletions};
 use composer_pane::{ComposerPane, ComposerPaneEvent};
+use conversation_controller::{
+    ConversationSessionViewState, RESIZE_DEBOUNCE as CONVERSATION_RESIZE_DEBOUNCE,
+    message_block_id as message_conversation_block_id, minimum_duration,
+    reconcile_session_view_state as reconcile_conversation_session_view_state,
+    row_layout_input as conversation_row_layout_input, tool_block_id as tool_conversation_block_id,
+    upsert_indexed_item,
+};
+#[cfg(test)]
+use conversation_controller::{
+    compensate_scroll_top_for_single_row_height,
+    distance_to_bottom as conversation_distance_to_bottom,
+    row_target_height as conversation_row_target_height,
+};
 use conversation_header::{ConversationHeader, ConversationHeaderEvent};
 use conversation_pane::{ConversationPane, ConversationPaneEvent};
 use inspector_pane::{InspectorPane, InspectorPaneEvent};
 use overlay_host::{OverlayHost, OverlayHostEvent};
 use sessions_pane::{SessionsPane, SessionsPaneEvent};
 use status_bar::{StatusBar, StatusBarEvent};
+use update::ProjectionDirtyRouting;
+#[cfg(test)]
+use update::{
+    conversation_header_projection_dirty, inspector_projection_dirty,
+    inspector_projection_immediate_dirty, overlay_host_projection_dirty, root_projection_dirty,
+    status_projection_dirty,
+};

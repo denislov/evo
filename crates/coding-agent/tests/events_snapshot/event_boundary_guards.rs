@@ -870,11 +870,15 @@ fn production_event_runtime_has_no_raw_compatibility_storage_or_transport() {
     assert!(public_event_source.contains("pub struct CodingAgentProductEvent {"));
     assert!(public_event_source.contains("pub enum CodingAgentProductEventDeliveryClass {"));
     assert!(public_event_source.contains("pub fn delivery_class(&self)"));
-    assert!(public_event_source.contains("pub(crate) type ProductEvent = CodingAgentProductEvent;"));
+    assert!(
+        public_event_source.contains("pub(crate) type ProductEvent = CodingAgentProductEvent;")
+    );
     assert!(public_event_source.contains("pub(crate) fn from_draft_for_tests("));
-    assert!(!repo_root
-        .join("crates/coding-agent/src/events/internal.rs")
-        .exists());
+    assert!(
+        !repo_root
+            .join("crates/coding-agent/src/events/internal.rs")
+            .exists()
+    );
     assert!(SESSION_EVENT.contains("pub(crate) enum SessionWriteEvent {"));
     assert!(SESSION_EVENT.contains("pub(crate) enum SessionLifecycleEvent {"));
     assert!(PROMPT_EVENT.contains("pub(crate) enum PromptEvent {"));
@@ -896,8 +900,10 @@ fn production_event_runtime_has_no_raw_compatibility_storage_or_transport() {
     assert!(!client_projection_source.contains("from_internal"));
     assert!(!snapshot_source.contains("fn root_evidence("));
     assert!(snapshot_source.contains("pub(crate) struct OperationEventContext {"));
-    assert!(snapshot_source
-        .contains("operation_event_contexts: HashMap<String, OperationEventContext>"));
+    assert!(
+        snapshot_source
+            .contains("operation_event_contexts: HashMap<String, OperationEventContext>")
+    );
     assert!(!snapshot_source.contains("operation_capability_generations:"));
     assert!(!snapshot_source.contains("operation_kinds:"));
     assert!(snapshot_source.contains("let Some(terminal_operation) = event.terminal_operation()"));

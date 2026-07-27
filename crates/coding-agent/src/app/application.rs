@@ -71,7 +71,9 @@ mod tests {
 
     #[test]
     fn default_application_options_include_builtin_tools() {
-        let options = default_application_options(PathBuf::from("."), None, SessionMode::Enabled, None).unwrap();
+        let options =
+            default_application_options(PathBuf::from("."), None, SessionMode::Enabled, None)
+                .unwrap();
         let names: Vec<_> = options
             .tools
             .iter()

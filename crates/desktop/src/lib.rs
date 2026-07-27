@@ -20,12 +20,16 @@ mod shell;
 #[cfg(test)]
 mod allocation_probe {
     use std::alloc::{GlobalAlloc, Layout, System};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    };
 
     struct CountingAllocator;
 
     static ALLOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
     static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+    static PERFORMANCE_PROBE_LOCK: Mutex<()> = Mutex::new(());
 
     #[global_allocator]
     static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -98,6 +102,12 @@ mod allocation_probe {
             count: ALLOCATION_COUNT.load(Ordering::Relaxed),
             bytes: ALLOCATED_BYTES.load(Ordering::Relaxed),
         }
+    }
+
+    pub(crate) fn serial_guard() -> MutexGuard<'static, ()> {
+        PERFORMANCE_PROBE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) use crate::resident_memory::resident_bytes;
