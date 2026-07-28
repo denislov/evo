@@ -534,6 +534,7 @@ impl NativeShell {
                     ComposerPaneEvent::SetRunningMode(mode) => {
                         this.set_active_composer_running_mode(*mode, cx);
                     }
+                    ComposerPaneEvent::CycleThinking => this.cycle_thinking_selection(cx),
                 },
             ),
             cx.subscribe_in(
@@ -559,13 +560,6 @@ impl NativeShell {
                         this.inspector_section = *section;
                         this.notify_inspector_pane(cx);
                     }
-                },
-            ),
-            cx.subscribe_in(
-                &status_bar,
-                window,
-                |this, _, event: &StatusBarEvent, _, cx| match event {
-                    StatusBarEvent::CycleThinking => this.cycle_thinking_selection(cx),
                 },
             ),
             cx.subscribe_in(
@@ -2075,6 +2069,7 @@ impl NativeShell {
                 .as_deref(),
         );
         self.preference_notice = Some(format!("Future prompts will use thinking {label}."));
+        self.notify_composer_pane(cx);
         self.notify_status_bar(cx);
         self.notify_conversation_header(cx);
         cx.notify();
@@ -3224,7 +3219,11 @@ impl NativeShell {
 
     fn composer_pane_view_model(&self) -> ComposerPaneViewModel {
         let snapshot = self.projection.snapshot();
+        let project = self.projection.project();
         let composer_running = snapshot.active_operation.is_some();
+        let thinking = self
+            .thinking_selection
+            .label(project.settings.default_thinking_level.as_deref());
         ComposerPaneViewModel {
             composer_pending: matches!(
                 self.composer.admission(),
@@ -3234,6 +3233,7 @@ impl NativeShell {
             awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
             authorization_pending: !snapshot.pending_authorizations.is_empty(),
             running_mode: self.active_composer_running_mode(),
+            thinking: Arc::from(truncate_label(&thinking, 12)),
             rejection: self.composer.rejection().map(Arc::from),
             keyboard_focus_visible: self.keyboard_focus_visible(),
         }
@@ -3397,14 +3397,9 @@ impl NativeShell {
 
     fn status_bar_view_model(&self) -> StatusBarViewModel {
         let snapshot = self.projection.snapshot();
-        let project = self.projection.project();
-        let thinking = self
-            .thinking_selection
-            .label(project.settings.default_thinking_level.as_deref());
 
         StatusBarViewModel {
             status: self.semantic_status(),
-            thinking: Arc::from(truncate_label(&thinking, 12)),
             changed_file_count: snapshot.context.changes.len(),
             notice: self.preference_notice.as_deref().map(Arc::from),
             keyboard_focus_visible: self.keyboard_focus_visible(),
@@ -4142,8 +4137,12 @@ mod tests {
                 "model and profile belong only to the header selector"
             );
             assert!(
-                cx.debug_bounds("desktop-status-thinking").is_some(),
-                "the temporary thinking selector remains available in the status bar"
+                cx.debug_bounds("desktop-status-thinking").is_none(),
+                "thinking configuration no longer belongs to passive status chrome"
+            );
+            assert!(
+                cx.debug_bounds("desktop-composer-thinking").is_some(),
+                "the thinking selector remains available beside Composer actions"
             );
         }
     }
@@ -4660,7 +4659,7 @@ mod tests {
                 "desktop-hit-toggle-inspector",
                 "desktop-hit-submit-composer",
                 "desktop-header-model-profile",
-                "desktop-status-thinking",
+                "desktop-composer-thinking",
             ] {
                 assert_minimum_hit_target(cx, selector);
             }
@@ -4720,7 +4719,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn composer_auto_grows_from_two_lines_to_its_bounded_maximum(cx: &mut TestAppContext) {
+    fn composer_auto_grows_from_one_line_to_its_bounded_maximum(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let (shell, cx) = add_visual_shell(
             cx,
@@ -4731,16 +4730,26 @@ mod tests {
         cx.run_until_parked();
 
         shell.update(cx, |shell, cx| {
-            shell.composer.edit("line one\nline two");
+            shell.composer.edit("one compact line");
             shell.composer_needs_sync = true;
             cx.notify();
         });
         settle_visual_measurements(cx);
-        let two_line_height = f32::from(
+        let one_line_height = f32::from(
             cx.debug_bounds("desktop-composer-panel")
-                .expect("two-line Composer is laid out")
+                .expect("one-line Composer is laid out")
                 .size
                 .height,
+        );
+        let compact_content_height = f32::from(
+            cx.debug_bounds("desktop-composer-content")
+                .expect("compact Composer content is laid out")
+                .size
+                .height,
+        );
+        assert!(
+            (48. ..=56.).contains(&compact_content_height),
+            "empty and one-line Composer content stays compact: {compact_content_height}"
         );
 
         shell.update(cx, |shell, cx| {
@@ -4780,8 +4789,8 @@ mod tests {
         );
 
         assert!(
-            maximum_height > two_line_height,
-            "Composer must grow beyond its two-line geometry: two={two_line_height}, max={maximum_height}"
+            maximum_height > one_line_height,
+            "Composer must grow beyond its one-line geometry: one={one_line_height}, max={maximum_height}"
         );
         assert!(
             maximum_height <= COMPOSER_MAX_HEIGHT as f32 + 1.,
@@ -4815,7 +4824,11 @@ mod tests {
         let submit = cx
             .debug_bounds("desktop-hit-submit-running-composer")
             .expect("running Composer exposes one primary submit action");
-        assert!(selector.bottom() <= submit.top());
+        assert!(selector.right() <= submit.left());
+        assert!(
+            (f32::from(selector.bottom() - submit.bottom())).abs() <= 2.1,
+            "32 px selector and 36 px submit remain center-aligned: selector={selector:?}, submit={submit:?}"
+        );
         assert!(cx.debug_bounds("desktop-hit-submit-composer").is_none());
 
         let mut authorization_snapshot = visual_test_snapshot();
@@ -5431,6 +5444,41 @@ mod tests {
         assert_eq!(selection.next(), DesktopThinkingSelection::Default);
     }
 
+    #[gpui::test]
+    fn composer_thinking_selector_owns_the_typed_cycle_path(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        cx.run_until_parked();
+
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.thinking_selection),
+            DesktopThinkingSelection::Default
+        );
+        let selector = cx
+            .debug_bounds("desktop-composer-thinking")
+            .expect("Composer owns the thinking selector");
+        assert!(cx.debug_bounds("desktop-status-thinking").is_none());
+
+        cx.simulate_click(selector.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.thinking_selection),
+            DesktopThinkingSelection::Off
+        );
+        assert!(shell.read_with(cx, |shell, _| {
+            shell
+                .preference_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("thinking off"))
+        }));
+    }
+
     #[test]
     fn composer_mode_and_draft_are_scoped_to_the_active_session() {
         let mut modes = HashMap::new();
@@ -5930,13 +5978,14 @@ mod tests {
 
     #[test]
     fn composer_and_transcript_source_do_not_restore_fixed_heights() {
-        let source = include_str!("native_shell.rs");
-        assert!(source.contains(".auto_grow(2, 8)"));
-        assert!(source.contains("row.estimated_height"));
+        let shell = include_str!("native_shell.rs");
+        let composer = include_str!("native_shell/composer_pane.rs");
+        assert!(composer.contains(".auto_grow(1, 8)"));
+        assert!(shell.contains("row.estimated_height"));
         let fixed_row_height = [".h(px(", "220.))"].concat();
         let fixed_composer_height = [".h(px(", "COMPOSER_HEIGHT"].concat();
-        assert!(!source.contains(&fixed_row_height));
-        assert!(!source.contains(&fixed_composer_height));
+        assert!(!shell.contains(&fixed_row_height));
+        assert!(!composer.contains(&fixed_composer_height));
     }
 
     #[test]
@@ -6082,6 +6131,11 @@ mod tests {
         let root_input_field = ["composer_", "input:"].concat();
         let root_latency_field = ["composer_", "input_latency:"].concat();
         let weak_root_owner = ["WeakEntity", "<NativeShell>"].concat();
+        let cycle_thinking_handler = [
+            "ComposerPaneEvent::CycleThinking => this.",
+            "cycle_thinking_selection(cx)",
+        ]
+        .concat();
 
         assert!(!shell.contains(&composer_panel_id));
         assert!(pane.contains(&composer_panel_id));
@@ -6108,10 +6162,18 @@ mod tests {
         assert!(shell.contains("ComposerPaneEvent::SubmitRunning"));
         assert!(shell.contains("ComposerSubmissionKind::Steer"));
         assert!(shell.contains("ComposerPaneEvent::SetRunningMode"));
+        assert!(shell.contains(&cycle_thinking_handler));
         assert!(shell.contains("ComposerSubmissionKind::FollowUp"));
-        assert!(pane.contains("DropdownButton::new(\"composer-running-mode-selector\")"));
+        assert!(pane.contains("DesktopSelector::new("));
+        assert!(pane.contains("\"composer-running-mode-selector\""));
         assert!(pane.contains("PopupMenuItem::new(\"Steer now\")"));
         assert!(pane.contains("PopupMenuItem::new(\"Queue next\")"));
+        assert!(pane.contains("DesktopIconButton::new("));
+        assert!(pane.contains("DesktopIcon::Submit"));
+        assert!(pane.contains("desktop-composer-thinking"));
+        assert!(pane.contains("desktop-composer-surface"));
+        assert!(pane.contains(".min_h(px(48.))"));
+        assert!(!pane.contains(".w(px(176.))"));
         assert!(!pane.contains("composer-mode-steer"));
         assert!(!pane.contains("composer-mode-follow-up"));
         assert!(pane.contains("submit-running-composer"));
@@ -6332,16 +6394,13 @@ mod tests {
         let shell = include_str!("native_shell.rs");
         let bar = include_str!("native_shell/status_bar.rs");
         let status_panel_id = [".id(\"status-", "panel\")"].concat();
+        let status_thinking_event = ["StatusBarEvent", "::CycleThinking"].concat();
 
         assert!(!shell.contains(&status_panel_id));
         assert!(bar.contains(&status_panel_id));
         assert!(shell.contains("status_bar: gpui::Entity<StatusBar>"));
-        assert!(shell.contains("let status_bar = self.status_bar.clone()"));
-        assert!(bar.contains("impl EventEmitter<StatusBarEvent>"));
-        assert!(shell.contains("StatusBarEvent::CycleThinking"));
-        assert!(shell.contains("this.cycle_thinking_selection(cx)"));
-        assert!(!bar.contains("StatusBarEvent::SelectNextModel"));
-        assert!(!bar.contains("StatusBarEvent::SelectNextSessionProfile"));
+        assert!(!bar.contains("StatusBarEvent"));
+        assert!(!shell.contains(&status_thinking_event));
         assert!(bar.contains("StatusBarViewModel"));
         assert!(shell.contains("status_bar_view_model"));
         assert!(!bar.contains("WeakEntity"));
@@ -6354,7 +6413,8 @@ mod tests {
         assert!(!bar.contains("truncate_label(&notice, 28)"));
         assert!(bar.contains("status-details"));
         assert!(bar.contains("Commands Ctrl/Cmd+K"));
-        assert!(bar.contains("desktop-status-thinking"));
+        assert!(!bar.contains("desktop-status-thinking"));
+        assert!(!bar.contains("thinking: Arc<str>"));
         assert!(!bar.contains("desktop-status-configuration"));
         assert!(!bar.contains("cycle-model"));
         assert!(!bar.contains("cycle-session-profile"));
@@ -6502,7 +6562,7 @@ use inspector_pane::{
 use overlay_host::{OverlayAuthorizationView, OverlayHost, OverlayHostEvent, OverlayViewModel};
 use session_controller::SessionController;
 use sessions_pane::{SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
-use status_bar::{StatusBar, StatusBarEvent, StatusBarViewModel};
+use status_bar::{StatusBar, StatusBarViewModel};
 use update::ProjectionDirtyRouting;
 #[cfg(test)]
 use update::{

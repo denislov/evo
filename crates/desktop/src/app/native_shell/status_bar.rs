@@ -1,7 +1,7 @@
 use desktop::shell::{MONOSPACE_FONT_FAMILY, STATUS_HEIGHT, SemanticStatus, SemanticTheme};
 use gpui::{
-    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, Styled as _, Window,
-    div, prelude::*, px, rgb,
+    FocusHandle, IntoElement, ParentElement as _, Render, Role, Styled as _, Window, div,
+    prelude::*, px, rgb,
 };
 use gpui_component::{
     button::Button,
@@ -10,20 +10,13 @@ use gpui_component::{
 use std::sync::Arc;
 
 use super::{
-    desktop_controls::DesktopSelector,
     desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
     semantic_status_color,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StatusBarEvent {
-    CycleThinking,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StatusBarViewModel {
     pub(super) status: SemanticStatus,
-    pub(super) thinking: Arc<str>,
     pub(super) changed_file_count: usize,
     pub(super) notice: Option<Arc<str>>,
     pub(super) keyboard_focus_visible: bool,
@@ -47,10 +40,8 @@ impl StatusBar {
     }
 }
 
-impl EventEmitter<StatusBarEvent> for StatusBar {}
-
 impl Render for StatusBar {
-    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let Some(view_model) = self.view_model.clone() else {
             return div().h(px(STATUS_HEIGHT as f32)).into_any_element();
         };
@@ -118,18 +109,6 @@ impl Render for StatusBar {
                     .gap_token(DesignSpace::Sm)
                     .font_family(MONOSPACE_FONT_FAMILY)
                     .text_color(rgb(theme.subtle_text.value()))
-                    .child(
-                        DesktopSelector::new(
-                            "cycle-thinking",
-                            format!("T {}", view_model.thinking),
-                            "Cycle the composer thinking override",
-                        )
-                        .build()
-                        .debug_selector(|| "desktop-status-thinking".into())
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.emit(StatusBarEvent::CycleThinking);
-                        })),
-                    )
                     .when_some(notice_for_menu, |bar, notice| {
                         bar.child(
                             Button::new("status-details")
