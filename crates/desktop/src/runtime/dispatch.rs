@@ -185,7 +185,7 @@ async fn start_prompt(
             Some(snapshot) => Ok(DesktopRuntimeUpdate::PromptRejectedWithSession {
                 command_id,
                 metadata: state.metadata_snapshot(),
-                snapshot: Some(state.snapshot().unwrap_or(snapshot)),
+                snapshot: Some(Box::new(state.snapshot().unwrap_or(snapshot))),
                 error: runtime_error(&error),
             }),
             None => Err(error),

@@ -479,7 +479,7 @@ impl DesktopProjection {
                 ..
             } => {
                 let outcome = match snapshot {
-                    Some(snapshot) => self.replace_runtime_snapshot(snapshot, true, None),
+                    Some(snapshot) => self.replace_runtime_snapshot(*snapshot, true, None),
                     None => self.replace_metadata_snapshot(metadata),
                 };
                 self.push_issue(DesktopProjectionIssue::new(error.code, error.message));

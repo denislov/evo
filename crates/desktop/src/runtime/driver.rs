@@ -77,14 +77,25 @@ impl RuntimeState {
     pub(super) fn session_catalog(
         &self,
     ) -> Result<(Vec<DesktopSessionCatalogEntry>, usize), DesktopBridgeError> {
-        let summaries = self.context.list_sessions()?;
-        let omitted = summaries.len().saturating_sub(MAX_DESKTOP_SESSION_CATALOG);
-        let sessions = summaries
+        let catalog = self.context.session_query()?.overviews()?;
+        let omitted = catalog
+            .overviews
+            .len()
+            .saturating_sub(MAX_DESKTOP_SESSION_CATALOG)
+            + usize::from(catalog.truncated);
+        let sessions = catalog
+            .overviews
             .into_iter()
             .take(MAX_DESKTOP_SESSION_CATALOG)
-            .map(|summary| DesktopSessionCatalogEntry {
-                session_id: bounded_utf8_prefix(&summary.session_id, MAX_SESSION_ID_BYTES),
-                updated_at: bounded_utf8_prefix(&summary.updated_at, 128),
+            .map(|overview| DesktopSessionCatalogEntry {
+                session_id: bounded_utf8_prefix(&overview.session_id, MAX_SESSION_ID_BYTES),
+                name: overview.name.map(|name| bounded_utf8_prefix(&name, 256)),
+                cwd: overview.cwd.map(|cwd| bounded_utf8_prefix(&cwd, 1024)),
+                created_at: bounded_utf8_prefix(&overview.created_at, 128),
+                updated_at: bounded_utf8_prefix(&overview.updated_at, 128),
+                active_leaf_id: overview
+                    .active_leaf_id
+                    .map(|id| bounded_utf8_prefix(&id, 256)),
             })
             .collect();
         Ok((sessions, omitted))

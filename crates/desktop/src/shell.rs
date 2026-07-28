@@ -117,6 +117,7 @@ impl Default for PanelVisibility {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShellLayout {
+    pub idle: bool,
     pub viewport: Rect,
     pub sessions: Option<Rect>,
     /// The complete center column. GPUI owns the dynamic transcript/composer
@@ -163,6 +164,7 @@ impl ShellLayout {
             .saturating_sub(context_width);
 
         Self {
+            idle: false,
             viewport: Rect::new(0, 0, width, height),
             sessions: sessions_visible.then(|| Rect::new(0, 0, sessions_width, body_height)),
             workspace: Rect::new(sessions_width, 0, conversation_width, body_height),
@@ -178,11 +180,24 @@ impl ShellLayout {
         }
     }
 
+    pub fn resolve_idle(width: u32, height: u32) -> Self {
+        let body_height = height.saturating_sub(STATUS_HEIGHT);
+        Self {
+            idle: true,
+            viewport: Rect::new(0, 0, width, height),
+            sessions: None,
+            workspace: Rect::new(0, 0, width, body_height),
+            context: None,
+            status: Rect::new(0, body_height, width, height.saturating_sub(body_height)),
+        }
+    }
+
     pub fn is_visible(self, target: FocusTarget) -> bool {
         match target {
             FocusTarget::Sessions => self.sessions.is_some(),
             FocusTarget::Context => self.context.is_some(),
-            FocusTarget::Conversation | FocusTarget::Composer | FocusTarget::Status => true,
+            FocusTarget::Conversation => !self.idle,
+            FocusTarget::Composer | FocusTarget::Status => true,
             FocusTarget::Overlay => false,
         }
     }
@@ -192,7 +207,9 @@ impl ShellLayout {
         if self.sessions.is_some() {
             order.push(FocusTarget::Sessions);
         }
-        order.push(FocusTarget::Conversation);
+        if !self.idle {
+            order.push(FocusTarget::Conversation);
+        }
         order.push(FocusTarget::Composer);
         if self.context.is_some() {
             order.push(FocusTarget::Context);
@@ -597,6 +614,24 @@ mod tests {
                 FocusTarget::Status
             ]
         );
+    }
+
+    #[test]
+    fn idle_layout_hides_session_panels_and_gives_home_the_full_workspace() {
+        for (width, height) in [(1_300, 900), (900, 800), (700, 800)] {
+            let layout = ShellLayout::resolve_idle(width, height);
+            assert!(layout.idle);
+            assert!(layout.sessions.is_none());
+            assert!(layout.context.is_none());
+            assert_eq!(
+                layout.workspace,
+                Rect::new(0, 0, width, height - STATUS_HEIGHT)
+            );
+            assert_eq!(
+                layout.focus_order(),
+                vec![FocusTarget::Composer, FocusTarget::Status]
+            );
+        }
     }
 
     #[test]

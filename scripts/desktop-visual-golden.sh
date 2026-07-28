@@ -42,6 +42,9 @@ golden_names=(
     wide
     medium
     narrow
+    wide-idle
+    medium-idle
+    narrow-idle
     wide-authorization
     wide-reduced-motion
     wide-keyboard-focus
@@ -215,7 +218,12 @@ evaluate_image() {
             echo "missing ${golden_png}; run $0 --review to inspect a new baseline" >&2
             exit 1
         fi
-        baseline_png="${golden_dir}/wide.png"
+        local base_layout="${name%%-*}"
+        baseline_png="${golden_dir}/${base_layout}.png"
+        if [[ ! -f "${baseline_png}" ]]; then
+            echo "missing layout baseline ${baseline_png} for new fixture ${name}" >&2
+            exit 1
+        fi
         if [[ "${name}" == "wide-no-color" ]]; then
             baseline_png="${review_dir}/${name}-before.png"
             convert "${golden_dir}/wide.png" -colorspace Gray "${baseline_png}"
@@ -385,6 +393,9 @@ mode="${requested_mode}"
 capture_layout wide
 capture_layout medium
 capture_layout narrow
+capture_layout wide-idle
+capture_layout medium-idle
+capture_layout narrow-idle
 capture_layout wide-authorization
 capture_layout wide-reduced-motion
 capture_layout wide-keyboard-focus

@@ -1,6 +1,7 @@
 mod native_perf;
 mod native_shell;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use coding_agent::api::embedding::CodingAgentEmbeddingOptions;
@@ -25,37 +26,6 @@ const BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 struct StartupFailure {
     message: String,
-}
-
-struct ProjectReadySurface {
-    _runtime: DesktopRuntimeBridge,
-    model_id: String,
-    notice: Option<String>,
-}
-
-impl Render for ProjectReadySurface {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let theme = SemanticTheme::GEEK_DARK;
-        div()
-            .size_full()
-            .p_8()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .font_family(UI_FONT_FAMILY)
-            .bg(rgb(theme.canvas.value()))
-            .text_color(rgb(theme.text.value()))
-            .child(div().text_xl().child("Evo is ready"))
-            .child("No session is open. Start a new conversation or open a previous session.")
-            .child(
-                div()
-                    .font_family(MONOSPACE_FONT_FAMILY)
-                    .child(format!("Model: {}", self.model_id)),
-            )
-            .when_some(self.notice.clone(), |surface, notice| {
-                surface.child(div().text_color(rgb(theme.warning.value())).child(notice))
-            })
-    }
 }
 
 impl Render for StartupFailure {
@@ -182,27 +152,17 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                     }
                     None => None,
                 };
-                let Some(projection) = requested else {
-                    if let Err(error) = cx.open_window(options, |window, cx| {
-                        window.set_window_title("evo · native coding agent");
-                        let view = cx.new(|_| ProjectReadySurface {
-                            _runtime: runtime,
-                            model_id: snapshot.project.selected_model_id.clone(),
-                            notice,
-                        });
-                        cx.new(|cx| Root::new(view, window, cx))
-                    }) {
-                        eprintln!("desktop: failed to open native window: {error}");
-                    }
-                    return;
-                };
                 if let Err(error) = cx.open_window(options, |window, cx| {
                     window.set_window_title("evo · native coding agent");
                     let view = cx.new(|cx| {
                         NativeShell::new(
                             NativeShellInit {
                                 runtime,
-                                projection,
+                                project: snapshot.project,
+                                projection: requested,
+                                global_skills: Arc::from(
+                                    coding_agent::api::embedding::global_skill_catalog(),
+                                ),
                                 preferences: loaded.preferences,
                                 preference_writer: writer,
                                 preference_notice: notice,

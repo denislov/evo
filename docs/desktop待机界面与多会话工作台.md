@@ -1,8 +1,8 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
-> 更新日期：2026-07-28
+> 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
 > 原则：产品权威留在 `coding-agent`，Desktop 保持 adapter；增量 API 不破坏 CLI/TUI；每批可独立回退
 
@@ -842,6 +842,30 @@ feat(desktop): create the session atomically on first submission
 - 新增测试：待机态输入的草稿在会话建立后可见；
 - 新增 visual golden：待机态 wide / medium / narrow；
 - 全量 `cargo test -p desktop` 与 dependency boundary 通过。
+
+**实现记录（2026-07-29）**
+
+- `NativeShell` 现在分别持有始终可用的项目快照与
+  `Option<DesktopProjection>`。编译器枚举出的会话调用点均按语义处理：待机态的
+  view model 使用项目级默认值或空的有界集合，会话专属的文件审查、恢复、授权、复制
+  与滚动动作安全退化；没有哨兵 projection，也没有用 `expect` 绕过产品状态分支；
+- 新增独立 `HomePane`，以命名 main region 呈现当前模型 / thinking、最近会话与全局
+  skills，并继续复用原 Composer 作为唯一输入与提交入口。最近会话经 CAG-102 的
+  `session_query().overviews()` 获取，全局 skills 经 CAG-103 的
+  `global_skill_catalog()` 获取，项目事实来自不创建 session 的 L1 ready snapshot；
+  Home 不建立或连接任何会话运行时；
+- shell 收到首次提交的 `PromptAcceptedWithSession` 或
+  `PromptRejectedWithSession` 后才安装真实 projection；待机草稿使用仅限 Composer
+  内部的 `home` 槽保存，并在首个真实 session id 建立时迁移后删除，runtime 从未看到
+  该槽键。`ShellLayout::resolve_idle` 在 wide / medium / narrow 下隐藏两侧 session
+  pane，让 Home 占满 workspace；已有会话的焦点顺序保持不变；
+- 新增无会话六组 bounded view model + 三档真实 GPUI bounds 测试、Home 草稿迁移测试、
+  idle layout 纯函数测试，以及 wide / medium / narrow 三张 idle golden；golden runner
+  现在覆盖十档 fixture。十档自动比较均为 `RMSE=0`，review note 已记录三档布局与
+  accessibility 结果；
+- 本批验证通过：Desktop `201 passed / 5 ignored`，dependency boundary `16/16`，
+  `cargo check -p desktop --all-targets`、严格 Clippy `-D warnings`、fmt 与
+  `git diff --check` 全部通过。
 
 **建议提交**
 

@@ -2,7 +2,7 @@ use super::*;
 use desktop::runtime::DesktopRuntimeUpdate;
 
 pub(super) enum DirectCommandUpdate {
-    Continue(DesktopRuntimeUpdate),
+    Continue(Box<DesktopRuntimeUpdate>),
     Consumed {
         sessions_dirty: bool,
         inspector_dirty: bool,
@@ -83,7 +83,7 @@ pub(super) fn reconcile_direct_update(
                 inspector_dirty: false,
             }
         }
-        update => DirectCommandUpdate::Continue(update),
+        update => DirectCommandUpdate::Continue(Box::new(update)),
     }
 }
 
@@ -242,17 +242,22 @@ impl ProjectionCommandCompletions {
                 match selection {
                     DesktopRuntimeSelectionKind::Model => format!(
                         "Future prompts will use model {}.",
-                        truncate_label(&shell.projection.project().selected_model_id, 28)
+                        truncate_label(&shell.project.selected_model_id, 28)
                     ),
                     DesktopRuntimeSelectionKind::SessionProfile => format!(
                         "Session profile changed to {}.",
                         truncate_label(
                             shell
                                 .projection
-                                .snapshot()
-                                .session
-                                .default_agent_profile_id
-                                .as_str(),
+                                .as_ref()
+                                .map(|projection| {
+                                    projection
+                                        .snapshot()
+                                        .session
+                                        .default_agent_profile_id
+                                        .as_str()
+                                })
+                                .unwrap_or_else(|| shell.project.default_agent_profile_id.as_str()),
                             28
                         )
                     ),

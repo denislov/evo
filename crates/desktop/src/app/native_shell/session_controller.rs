@@ -65,7 +65,10 @@ impl SessionController {
 
 impl NativeShell {
     pub(super) fn create_session(&mut self, cx: &mut Context<Self>) {
-        if self.projection.snapshot().active_operation.is_some()
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self.composer.submitted().is_some()
             || self.command_ledger.contains_where(|intent| {
                 matches!(
@@ -139,21 +142,27 @@ impl NativeShell {
             cx.background_executor()
                 .timer(SESSION_CATALOG_REFRESH_INTERVAL)
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.session_controller.take_scheduled_refresh(deadline) {
-                    if this.projection.snapshot().active_operation.is_none() {
-                        this.request_session_catalog(cx);
-                    } else {
-                        this.schedule_session_catalog_refresh(cx);
+            let _ =
+                this.update(cx, |this, cx| {
+                    if this.session_controller.take_scheduled_refresh(deadline) {
+                        if this.projection.as_ref().is_none_or(|projection| {
+                            projection.snapshot().active_operation.is_none()
+                        }) {
+                            this.request_session_catalog(cx);
+                        } else {
+                            this.schedule_session_catalog_refresh(cx);
+                        }
                     }
-                }
-            });
+                });
         })
         .detach();
     }
 
     pub(super) fn open_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        if self.projection.snapshot().active_operation.is_some()
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self.composer.submitted().is_some()
             || self.command_ledger.contains_where(|intent| {
                 matches!(
@@ -167,7 +176,11 @@ impl NativeShell {
             cx.notify();
             return;
         }
-        if session_id == self.projection.snapshot().session.session_id {
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| session_id == projection.snapshot().session.session_id)
+        {
             self.preference_notice = Some("The requested session is already active.".into());
             cx.notify();
             return;
@@ -204,7 +217,11 @@ impl NativeShell {
     }
 
     pub(super) fn switch_next_session(&mut self, cx: &mut Context<Self>) {
-        let active = self.projection.snapshot().session.session_id.as_str();
+        let active = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.as_str())
+            .unwrap_or(HOME_COMPOSER_SESSION_KEY);
         let Some(session_id) = self.session_controller.next_session_id(active) else {
             self.preference_notice = Some("Loading the session catalog…".into());
             self.request_session_catalog(cx);
@@ -239,10 +256,12 @@ mod tests {
                 DesktopSessionCatalogEntry {
                     session_id: "session-a".into(),
                     updated_at: "2026-07-28T12:00:00Z".into(),
+                    ..Default::default()
                 },
                 DesktopSessionCatalogEntry {
                     session_id: "session-b".into(),
                     updated_at: "2026-07-28T11:00:00Z".into(),
+                    ..Default::default()
                 },
             ],
             3,

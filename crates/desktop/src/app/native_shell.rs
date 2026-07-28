@@ -1,5 +1,9 @@
 use coding_agent::api::authorization::{ToolAuthorizationDecision, ToolAuthorizationIdentity};
-use coding_agent::api::embedding::CodingAgentThinkingLevel;
+#[cfg(test)]
+use coding_agent::api::embedding::CodingAgentResourceCommandKind;
+use coding_agent::api::embedding::{
+    CodingAgentEmbeddingSnapshot, CodingAgentResourceCommand, CodingAgentThinkingLevel,
+};
 use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
 use desktop::conversation::{
@@ -47,6 +51,9 @@ const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250
 const MAX_COMPOSER_SESSION_STATES: usize = 256;
 const MAX_INSPECTOR_SESSION_STATES: usize = 256;
 const CONVERSATION_ANNOUNCEMENT_DURATION: Duration = Duration::from_secs(2);
+/// Draft slot for the idle Home surface. It is a Composer state key only; the
+/// runtime never sees it, and no projection is ever constructed for it.
+const HOME_COMPOSER_SESSION_KEY: &str = "home";
 
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
@@ -308,7 +315,9 @@ struct ConversationFullMessageView {
 pub(super) struct NativeShell {
     runtime: Option<DesktopRuntimeCommandHandle>,
     runtime_updates: VecDeque<desktop::runtime::DesktopRuntimeUpdate>,
-    projection: DesktopProjection,
+    project: CodingAgentEmbeddingSnapshot,
+    projection: Option<DesktopProjection>,
+    global_skills: Arc<[CodingAgentResourceCommand]>,
     preferences: DesktopPreferences,
     preference_writer: Option<PreferenceWriter>,
     preference_notice: Option<String>,
@@ -319,6 +328,7 @@ pub(super) struct NativeShell {
     conversation_header: gpui::Entity<ConversationHeader>,
     sessions_pane: gpui::Entity<SessionsPane>,
     composer_pane: gpui::Entity<ComposerPane>,
+    home_pane: gpui::Entity<HomePane>,
     inspector_pane: gpui::Entity<InspectorPane>,
     inspector_section: InspectorSection,
     inspector_session_sections: HashMap<String, InspectorSection>,
@@ -355,7 +365,9 @@ pub(super) struct NativeShell {
 
 pub(super) struct NativeShellInit {
     pub(super) runtime: DesktopRuntimeBridge,
-    pub(super) projection: DesktopProjection,
+    pub(super) project: CodingAgentEmbeddingSnapshot,
+    pub(super) projection: Option<DesktopProjection>,
+    pub(super) global_skills: Arc<[CodingAgentResourceCommand]>,
     pub(super) preferences: DesktopPreferences,
     pub(super) preference_writer: Option<PreferenceWriter>,
     pub(super) preference_notice: Option<String>,
@@ -366,7 +378,9 @@ impl NativeShell {
     pub(super) fn new(init: NativeShellInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let NativeShellInit {
             runtime,
+            project,
             projection,
+            global_skills,
             preferences,
             preference_writer,
             mut preference_notice,
@@ -400,6 +414,7 @@ impl NativeShell {
         let conversation_header = cx.new(|_| ConversationHeader::new(conversation_focus.clone()));
         let sessions_pane = cx.new(|cx| SessionsPane::new(sessions_focus.clone(), window, cx));
         let composer_pane = cx.new(|cx| ComposerPane::new(window, cx));
+        let home_pane = cx.new(|_| HomePane::new());
         let inspector_pane = cx.new(|_| InspectorPane::new(context_focus.clone()));
         let status_bar = cx.new(|_| StatusBar::new(status_focus.clone()));
         let overlay_host = cx.new(|_| {
@@ -432,10 +447,13 @@ impl NativeShell {
                 |this, _, event: &ConversationPaneEvent, window, cx| match event {
                     ConversationPaneEvent::Select { block_id, durable } => {
                         this.record_focus(FocusTarget::Conversation, window, cx);
+                        let Some(projection) = this.projection.as_ref() else {
+                            return;
+                        };
                         this.conversation_controller.select_row(
                             block_id.clone(),
                             *durable,
-                            this.projection.conversation(),
+                            projection.conversation(),
                         );
                         this.notify_conversation_pane(cx);
                         this.notify_conversation_header(cx);
@@ -534,6 +552,15 @@ impl NativeShell {
                 },
             ),
             cx.subscribe_in(
+                &home_pane,
+                window,
+                |this, _, event: &HomePaneEvent, _, cx| match event {
+                    HomePaneEvent::OpenSession(session_id) => {
+                        this.open_session(session_id.clone(), cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
                 &inspector_pane,
                 window,
                 |this, _, event: &InspectorPaneEvent, window, cx| match event {
@@ -610,7 +637,9 @@ impl NativeShell {
         let shell = Self {
             runtime: Some(runtime_commands),
             runtime_updates: VecDeque::new(),
+            project,
             projection,
+            global_skills,
             preferences,
             preference_writer,
             preference_notice,
@@ -621,6 +650,7 @@ impl NativeShell {
             conversation_header,
             sessions_pane,
             composer_pane,
+            home_pane,
             inspector_pane,
             inspector_section: InspectorSection::default(),
             inspector_session_sections: HashMap::new(),
@@ -672,6 +702,10 @@ impl NativeShell {
         shell.composer_pane.update(cx, |composer_pane, _| {
             composer_pane.set_view_model(composer_pane_view_model);
         });
+        let home_pane_view_model = shell.home_pane_view_model();
+        shell.home_pane.update(cx, |home_pane, _| {
+            home_pane.set_view_model(home_pane_view_model);
+        });
         let conversation_pane_view_model = shell.conversation_pane_view_model();
         shell.conversation_pane.update(cx, |conversation_pane, _| {
             conversation_pane.set_view_model(conversation_pane_view_model);
@@ -704,6 +738,9 @@ impl NativeShell {
     }
 
     fn resolve_layout(&self, width: u32, height: u32, visibility: PanelVisibility) -> ShellLayout {
+        if self.projection.is_none() {
+            return ShellLayout::resolve_idle(width, height);
+        }
         ShellLayout::resolve_with_panel_widths(
             width,
             height,
@@ -926,7 +963,7 @@ impl NativeShell {
                 root_dirty = true;
             }
             let update = match commands::reconcile_direct_update(self, update, cx) {
-                DirectCommandUpdate::Continue(update) => update,
+                DirectCommandUpdate::Continue(update) => *update,
                 DirectCommandUpdate::Consumed {
                     sessions_dirty,
                     inspector_dirty,
@@ -1279,13 +1316,85 @@ impl NativeShell {
                 }
                 _ => {}
             }
-            let had_active_operation = self.projection.snapshot().active_operation.is_some();
-            let previous_session_id = self.projection.snapshot().session.session_id.clone();
-            let outcome = self.projection.apply(update);
+            let projection_was_none = self.projection.is_none();
+            if projection_was_none {
+                let hydrated = match &update {
+                    desktop::runtime::DesktopRuntimeUpdate::SessionChanged { snapshot, .. }
+                    | desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
+                        snapshot,
+                        ..
+                    }
+                    | desktop::runtime::DesktopRuntimeUpdate::PromptFinished { snapshot, .. } => {
+                        Some(snapshot)
+                    }
+                    desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
+                        snapshot: Some(snapshot),
+                        ..
+                    } => Some(snapshot.as_ref()),
+                    desktop::runtime::DesktopRuntimeUpdate::Resynced {
+                        replacement:
+                            desktop::runtime::DesktopRuntimeResyncSnapshot::Hydrated(snapshot),
+                        ..
+                    } => Some(snapshot),
+                    _ => None,
+                };
+                if let Some(hydrated) = hydrated {
+                    self.project = hydrated.project.clone();
+                    match DesktopProjection::new(hydrated.clone()) {
+                        Ok(projection) => self.projection = Some(projection),
+                        Err(issue) => {
+                            self.preference_notice = Some(format!(
+                                "Session response failed projection validation ({}).",
+                                truncate_label(&issue.code, 28)
+                            ));
+                        }
+                    }
+                } else if let Some(metadata) = match &update {
+                    desktop::runtime::DesktopRuntimeUpdate::Reloaded { metadata, .. }
+                    | desktop::runtime::DesktopRuntimeUpdate::SelectionChanged {
+                        metadata, ..
+                    }
+                    | desktop::runtime::DesktopRuntimeUpdate::PromptStarted { metadata, .. } => {
+                        Some(metadata)
+                    }
+                    desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
+                        metadata,
+                        ..
+                    } => Some(metadata),
+                    _ => None,
+                } {
+                    self.project = metadata.project.clone();
+                }
+            }
+            if self.projection.is_none() {
+                let _ = projection_completions.reconcile(self, true, cx);
+                applied += 1;
+                continue;
+            }
+            // The idle branch above already consumed this update, so the
+            // remainder of the iteration owns a session projection. Every fact
+            // it needs is read here so the borrow ends before the `&mut self`
+            // reconciliation calls below.
+            let Some(projection) = self.projection.as_mut() else {
+                applied += 1;
+                continue;
+            };
+            let had_active_operation = projection.snapshot().active_operation.is_some();
+            let previous_session_id = if projection_was_none {
+                HOME_COMPOSER_SESSION_KEY.to_owned()
+            } else {
+                projection.snapshot().session.session_id.clone()
+            };
+            let outcome = projection.apply(update);
+            let project_after = projection.project().clone();
+            let session_id_after = projection.snapshot().session.session_id.clone();
+            let active_operation_after = projection.snapshot().active_operation.is_some();
+            let event_sequence_after = projection.cursor().last_event_sequence;
+            self.project = project_after;
             if outcome.is_replaced() {
-                self.reconcile_composer_session(&previous_session_id);
-                self.reconcile_conversation_session_view(&previous_session_id);
-                self.reconcile_inspector_session_section(&previous_session_id);
+                self.reconcile_composer_session(&previous_session_id, &session_id_after);
+                self.reconcile_conversation_session_view(&previous_session_id, &session_id_after);
+                self.reconcile_inspector_session_section(&previous_session_id, &session_id_after);
             }
             let dirty =
                 ProjectionDirtyRouting::for_projection(outcome.is_replaced(), outcome.delta());
@@ -1295,7 +1404,7 @@ impl NativeShell {
             if dirty.composer {
                 composer_pane_dirty = true;
             }
-            if had_active_operation != self.projection.snapshot().active_operation.is_some() {
+            if had_active_operation != active_operation_after {
                 sessions_pane_dirty = true;
             }
             let conversation_dirty = dirty.conversation;
@@ -1317,36 +1426,34 @@ impl NativeShell {
                 sessions_pane_dirty = true;
                 self.conversation_controller.apply_delta(true, 0);
             } else if conversation_dirty {
-                let last_event_sequence = self.projection.cursor().last_event_sequence;
                 self.conversation_controller
-                    .apply_delta(false, last_event_sequence);
+                    .apply_delta(false, event_sequence_after);
             }
             let file_changes_dirty = dirty.file_changes;
             if projection_completions.reconcile(self, outcome.is_replaced(), cx) {
                 sessions_pane_dirty = true;
             }
             if outcome.is_replaced() {
-                if self.projection.snapshot().active_operation.is_none()
-                    && self.composer.submitted().is_some()
-                {
-                    if let Some((live_id, durable_id)) = self
-                        .composer
-                        .reconcile_completed_submission(self.projection.conversation())
+                if !active_operation_after && self.composer.submitted().is_some() {
+                    if let Some(projection) = self.projection.as_ref()
+                        && let Some((live_id, durable_id)) = self
+                            .composer
+                            .reconcile_completed_submission(projection.conversation())
                     {
                         self.conversation_controller
                             .reconcile_live_selection(&live_id, &durable_id);
                     }
                     self.composer_needs_sync = true;
                 }
-                let content_revision = self.projection.cursor().last_event_sequence;
-                let source = ConversationSource::new(&self.projection, self.composer.submitted());
+                if let Some(projection) = self.projection.as_ref() {
+                    let source = ConversationSource::new(projection, self.composer.submitted());
+                    self.conversation_controller
+                        .reconcile_hydration(&source, event_sequence_after);
+                }
+            } else if conversation_dirty && let Some(projection) = self.projection.as_ref() {
+                let source = ConversationSource::new(projection, self.composer.submitted());
                 self.conversation_controller
-                    .reconcile_hydration(&source, content_revision);
-            } else if conversation_dirty {
-                let content_revision = self.projection.cursor().last_event_sequence;
-                let source = ConversationSource::new(&self.projection, self.composer.submitted());
-                self.conversation_controller
-                    .reconcile_content(&source, content_revision);
+                    .reconcile_content(&source, event_sequence_after);
             }
             if let Some((command_id, authorization_id, _)) = self
                 .command_ledger
@@ -1358,12 +1465,13 @@ impl NativeShell {
                         operation_id.to_owned(),
                     )
                 })
-                && !self
-                    .projection
-                    .snapshot()
-                    .pending_authorizations
-                    .iter()
-                    .any(|request| request.authorization_id == authorization_id)
+                && !self.projection.as_ref().is_some_and(|projection| {
+                    projection
+                        .snapshot()
+                        .pending_authorizations
+                        .iter()
+                        .any(|request| request.authorization_id == authorization_id)
+                })
             {
                 self.command_ledger
                     .complete_authorization(command_id, &authorization_id);
@@ -1396,6 +1504,7 @@ impl NativeShell {
         }
         if sessions_pane_dirty {
             self.notify_sessions_pane(cx);
+            self.notify_home_pane(cx);
         }
         if composer_pane_dirty {
             self.notify_composer_pane(cx);
@@ -1410,14 +1519,15 @@ impl NativeShell {
         }
         if conversation_header_dirty {
             self.notify_conversation_header(cx);
+            self.notify_home_pane(cx);
         }
         if overlay_host_dirty {
             self.notify_overlay_host(cx);
         }
-        !matches!(
-            self.projection.lifecycle(),
-            DesktopProjectionLifecycle::Stopped
-        )
+        !self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.lifecycle() == DesktopProjectionLifecycle::Stopped)
     }
 
     fn notify_sessions_pane(&self, cx: &mut Context<Self>) {
@@ -1433,17 +1543,21 @@ impl NativeShell {
     fn composer_pane_state(&self) -> (bool, bool, bool, bool) {
         (
             matches!(self.composer.admission(), ComposerAdmission::Pending { .. }),
-            self.projection.snapshot().active_operation.is_some(),
+            self.projection
+                .as_ref()
+                .is_some_and(|projection| projection.snapshot().active_operation.is_some()),
             self.composer.submitted().is_some(),
             self.composer.rejection().is_some(),
         )
     }
 
     fn active_composer_running_mode(&self) -> ComposerRunningMode {
-        composer_running_mode_for(
-            &self.composer_running_modes,
-            self.projection.snapshot().session.session_id.as_str(),
-        )
+        let session_id = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.as_str())
+            .unwrap_or(HOME_COMPOSER_SESSION_KEY);
+        composer_running_mode_for(&self.composer_running_modes, session_id)
     }
 
     fn set_active_composer_running_mode(
@@ -1451,7 +1565,11 @@ impl NativeShell {
         mode: ComposerRunningMode,
         cx: &mut Context<Self>,
     ) {
-        let session_id = self.projection.snapshot().session.session_id.clone();
+        let session_id = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.clone())
+            .unwrap_or_else(|| HOME_COMPOSER_SESSION_KEY.to_owned());
         if self.composer_running_modes.len() >= MAX_COMPOSER_SESSION_STATES
             && !self.composer_running_modes.contains_key(&session_id)
             && let Some(stale) = self.composer_running_modes.keys().next().cloned()
@@ -1462,32 +1580,47 @@ impl NativeShell {
         self.notify_composer_pane(cx);
     }
 
-    fn reconcile_composer_session(&mut self, previous_session_id: &str) {
-        let current_session_id = self.projection.snapshot().session.session_id.clone();
+    fn reconcile_composer_session(&mut self, previous_session_id: &str, current_session_id: &str) {
+        if previous_session_id == HOME_COMPOSER_SESSION_KEY && !self.composer.draft().is_empty() {
+            self.composer_session_drafts.insert(
+                current_session_id.to_owned(),
+                self.composer.draft().to_owned(),
+            );
+        }
         if reconcile_composer_session_state(
             &mut self.composer,
             &mut self.composer_session_drafts,
             previous_session_id,
-            &current_session_id,
+            current_session_id,
         ) {
             self.composer_needs_sync = true;
         }
+        if previous_session_id == HOME_COMPOSER_SESSION_KEY {
+            self.composer_session_drafts
+                .remove(HOME_COMPOSER_SESSION_KEY);
+        }
     }
 
-    fn reconcile_conversation_session_view(&mut self, previous_session_id: &str) {
-        let current_session_id = self.projection.snapshot().session.session_id.clone();
+    fn reconcile_conversation_session_view(
+        &mut self,
+        previous_session_id: &str,
+        current_session_id: &str,
+    ) {
         let _ = self
             .conversation_controller
-            .reconcile_session_view(previous_session_id, &current_session_id);
+            .reconcile_session_view(previous_session_id, current_session_id);
     }
 
-    fn reconcile_inspector_session_section(&mut self, previous_session_id: &str) {
-        let current_session_id = self.projection.snapshot().session.session_id.clone();
+    fn reconcile_inspector_session_section(
+        &mut self,
+        previous_session_id: &str,
+        current_session_id: &str,
+    ) {
         let _ = reconcile_inspector_session_section_state(
             &mut self.inspector_section,
             &mut self.inspector_session_sections,
             previous_session_id,
-            &current_session_id,
+            current_session_id,
         );
     }
 
@@ -1583,18 +1716,14 @@ impl NativeShell {
             | DesktopFileReviewState::Failed { request, .. } => request.clone(),
             DesktopFileReviewState::Ready(document) => document.request.clone(),
         };
-        let remains_current = self
-            .projection
-            .snapshot()
-            .context
-            .changes
-            .iter()
-            .any(|change| {
+        let remains_current = self.projection.as_ref().is_some_and(|projection| {
+            projection.snapshot().context.changes.iter().any(|change| {
                 change.operation_id == request.change.operation_id
                     && change.tool_call_id == request.change.tool_call_id
                     && change.path == request.change.path
                     && change.updated_sequence == request.revision.value()
-            });
+            })
+        });
         if !remains_current {
             self.command_ledger.complete_where(|intent| {
                 matches!(
@@ -1646,10 +1775,12 @@ impl NativeShell {
     }
 
     fn visible_conversation_count(&self) -> usize {
-        self.projection.conversation().blocks().len()
-            + usize::from(self.composer.submitted().is_some())
-            + self.projection.messages().len()
-            + self.projection.tools().len()
+        self.projection.as_ref().map_or(0, |projection| {
+            projection.conversation().blocks().len()
+                + usize::from(self.composer.submitted().is_some())
+                + projection.messages().len()
+                + projection.tools().len()
+        })
     }
 
     fn toggle_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1692,8 +1823,9 @@ impl NativeShell {
     }
 
     fn request_resync_if_needed(&mut self) {
-        if self.projection.lifecycle() != DesktopProjectionLifecycle::NeedsResync
-            || self.command_ledger.contains(&DesktopCommandIntent::Resync)
+        if !self.projection.as_ref().is_some_and(|projection| {
+            projection.lifecycle() == DesktopProjectionLifecycle::NeedsResync
+        }) || self.command_ledger.contains(&DesktopCommandIntent::Resync)
         {
             return;
         }
@@ -1756,7 +1888,11 @@ impl NativeShell {
     }
 
     fn submit_primary_composer(&mut self, cx: &mut Context<Self>) {
-        if self.projection.snapshot().active_operation.is_some() {
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
+        {
             self.submit_active_control(self.active_composer_running_mode().submission_kind(), cx);
         } else {
             self.submit_composer(cx);
@@ -1834,7 +1970,11 @@ impl NativeShell {
         {
             return;
         }
-        let Some(operation_id) = self.projection.snapshot().active_operation.clone() else {
+        let Some(operation_id) = self
+            .projection
+            .as_ref()
+            .and_then(|projection| projection.snapshot().active_operation.clone())
+        else {
             self.preference_notice = Some("No active operation is available to abort.".into());
             self.notify_status_bar(cx);
             cx.notify();
@@ -1873,7 +2013,10 @@ impl NativeShell {
         if self.command_ledger.contains(&intent) {
             return;
         }
-        if self.projection.snapshot().active_operation.is_some()
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self.composer.submitted().is_some()
         {
             self.preference_notice =
@@ -1921,7 +2064,10 @@ impl NativeShell {
         {
             return;
         }
-        if self.projection.snapshot().active_operation.is_some()
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self.composer.submitted().is_some()
         {
             self.preference_notice =
@@ -1976,7 +2122,7 @@ impl NativeShell {
     }
 
     fn next_model_id(&self) -> Option<String> {
-        let project = self.projection.project();
+        let project = &self.project;
         let candidates = project
             .models
             .iter()
@@ -1993,16 +2139,21 @@ impl NativeShell {
     }
 
     fn next_session_profile_id(&self) -> Option<String> {
-        let profiles = &self.projection.project().profiles;
+        let profiles = &self.project.profiles;
         if profiles.len() < 2 {
             return None;
         }
         let current_profile = self
             .projection
-            .snapshot()
-            .session
-            .default_agent_profile_id
-            .as_str();
+            .as_ref()
+            .map(|projection| {
+                projection
+                    .snapshot()
+                    .session
+                    .default_agent_profile_id
+                    .as_str()
+            })
+            .unwrap_or_else(|| self.project.default_agent_profile_id.as_str());
         let next = profiles
             .iter()
             .position(|profile| profile.id.as_str() == current_profile)
@@ -2022,7 +2173,10 @@ impl NativeShell {
         {
             return;
         }
-        if self.projection.snapshot().active_operation.is_some()
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self.composer.submitted().is_some()
         {
             self.preference_notice =
@@ -2085,13 +2239,9 @@ impl NativeShell {
 
     fn cycle_thinking_selection(&mut self, cx: &mut Context<Self>) {
         self.thinking_selection = self.thinking_selection.next();
-        let label = self.thinking_selection.label(
-            self.projection
-                .project()
-                .settings
-                .default_thinking_level
-                .as_deref(),
-        );
+        let label = self
+            .thinking_selection
+            .label(self.project.settings.default_thinking_level.as_deref());
         self.preference_notice = Some(format!("Future prompts will use thinking {label}."));
         self.notify_composer_pane(cx);
         self.notify_status_bar(cx);
@@ -2143,9 +2293,12 @@ impl NativeShell {
     }
 
     fn copy_selected_conversation(&mut self, cx: &mut Context<Self>) {
+        let Some(projection) = self.projection.as_ref() else {
+            return;
+        };
         let Some(text) = self
             .conversation_controller
-            .copy_selected(self.projection.conversation())
+            .copy_selected(projection.conversation())
         else {
             self.preference_notice =
                 Some("Select a committed conversation block before copying.".into());
@@ -2161,7 +2314,8 @@ impl NativeShell {
         &self,
         block_id: &str,
     ) -> Option<ConversationFullMessageView> {
-        if let Some(block) = self.projection.conversation().block(block_id) {
+        let projection = self.projection.as_ref()?;
+        if let Some(block) = projection.conversation().block(block_id) {
             return Some(ConversationFullMessageView {
                 block_id: block_id.to_owned(),
                 title: Arc::from(block.title.as_str()),
@@ -2172,6 +2326,7 @@ impl NativeShell {
         }
         if let Some(message) = self
             .projection
+            .as_ref()?
             .messages()
             .iter()
             .find(|message| message_conversation_block_id(message) == block_id)
@@ -2184,8 +2339,7 @@ impl NativeShell {
                     || message.text.len().saturating_add(message.thinking.len()) > MAX_COPY_BYTES,
             });
         }
-        if let Some(tool) = self
-            .projection
+        if let Some(tool) = projection
             .tools()
             .iter()
             .find(|tool| tool_conversation_block_id(tool) == block_id)
@@ -2219,14 +2373,14 @@ impl NativeShell {
     }
 
     fn tool_command(&self, block_id: &str) -> Option<String> {
-        let arguments = self
-            .projection
+        let projection = self.projection.as_ref()?;
+        let arguments = projection
             .conversation()
             .block(block_id)
             .filter(|block| block.kind == ConversationBlockKind::Tool)
             .map(|block| block.detail.as_str())
             .or_else(|| {
-                self.projection
+                projection
                     .tools()
                     .iter()
                     .find(|tool| tool_conversation_block_id(tool) == block_id)
@@ -2240,8 +2394,8 @@ impl NativeShell {
     }
 
     fn tool_output(&self, block_id: &str) -> Option<(Arc<str>, Arc<str>, bool)> {
-        if let Some(block) = self
-            .projection
+        let projection = self.projection.as_ref()?;
+        if let Some(block) = projection
             .conversation()
             .block(block_id)
             .filter(|block| block.kind == ConversationBlockKind::Tool)
@@ -2252,7 +2406,7 @@ impl NativeShell {
                 block.truncated || block.text.len() > MAX_COPY_BYTES,
             ));
         }
-        self.projection
+        projection
             .tools()
             .iter()
             .find(|tool| tool_conversation_block_id(tool) == block_id)
@@ -2372,6 +2526,9 @@ impl NativeShell {
     }
 
     fn select_adjacent_conversation(&mut self, reverse: bool, cx: &mut Context<Self>) {
+        let Some(projection) = self.projection.as_ref() else {
+            return;
+        };
         let row_count = self.conversation_controller.row_count();
         if row_count == 0 {
             self.preference_notice = Some("The conversation is empty.".into());
@@ -2392,7 +2549,7 @@ impl NativeShell {
         self.conversation_controller.select_row(
             row.item_key.row_id().to_owned(),
             row.durable,
-            self.projection.conversation(),
+            projection.conversation(),
         );
         self.conversation_controller.scroll_to_row(
             next_index,
@@ -2728,7 +2885,12 @@ impl NativeShell {
     }
 
     fn review_next_file(&mut self, cx: &mut Context<Self>) {
-        let changes = &self.projection.snapshot().context.changes;
+        let Some(projection) = self.projection.as_ref() else {
+            self.preference_notice = Some("No session is open for file review.".into());
+            cx.notify();
+            return;
+        };
+        let changes = &projection.snapshot().context.changes;
         if changes.is_empty() {
             self.preference_notice = Some("No changed file is available for review.".into());
             cx.notify();
@@ -2755,10 +2917,11 @@ impl NativeShell {
     fn submit_latest_recovery(&mut self, action: DesktopRecoveryAction, cx: &mut Context<Self>) {
         let identity = self
             .projection
-            .recoveries()
-            .iter()
-            .find(|recovery| {
-                recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative
+            .as_ref()
+            .and_then(|projection| {
+                projection.recoveries().iter().find(|recovery| {
+                    recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative
+                })
             })
             .and_then(|recovery| recovery.identity.clone());
         let Some(identity) = identity else {
@@ -2794,7 +2957,11 @@ impl NativeShell {
                 self.focus_target(FocusTarget::Context, window, cx);
             }
             DesktopPaletteCommand::SubmitPrompt => {
-                if self.projection.snapshot().active_operation.is_some() {
+                if self
+                    .projection
+                    .as_ref()
+                    .is_some_and(|projection| projection.snapshot().active_operation.is_some())
+                {
                     self.submit_active_control(ComposerSubmissionKind::Steer, cx);
                 } else {
                     self.submit_composer(cx);
@@ -2846,7 +3013,11 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.projection.snapshot().pending_authorizations.is_empty() {
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| !projection.snapshot().pending_authorizations.is_empty())
+        {
             self.preference_notice = Some("Resolve authorization before opening commands.".into());
             self.authorization_focus.focus(window, cx);
             self.notify_status_bar(cx);
@@ -3079,9 +3250,8 @@ impl NativeShell {
     ) {
         let Some(request) = self
             .projection
-            .snapshot()
-            .pending_authorizations
-            .first()
+            .as_ref()
+            .and_then(|projection| projection.snapshot().pending_authorizations.first())
             .cloned()
         else {
             return;
@@ -3135,7 +3305,10 @@ impl NativeShell {
         measurement: &ConversationRowMeasurement,
         cx: &mut Context<Self>,
     ) {
-        let source = ConversationSource::new(&self.projection, self.composer.submitted());
+        let Some(projection) = self.projection.as_ref() else {
+            return;
+        };
+        let source = ConversationSource::new(projection, self.composer.submitted());
         let outcome = self
             .conversation_controller
             .submit_row_measurement(&source, measurement);
@@ -3146,9 +3319,12 @@ impl NativeShell {
     }
 
     fn refresh_conversation_rows_at_width(&mut self, layout_width: u32, cx: &mut Context<Self>) {
+        let Some(projection) = self.projection.as_ref() else {
+            return;
+        };
         let pane_dirty = self.conversation_controller.needs_row_refresh()
             || self.conversation_controller.active_width_bucket() != Some(layout_width);
-        let source = ConversationSource::new(&self.projection, self.composer.submitted());
+        let source = ConversationSource::new(projection, self.composer.submitted());
         let refresh = self
             .conversation_controller
             .prepare_rows(&source, layout_width);
@@ -3216,13 +3392,17 @@ impl NativeShell {
     }
 
     fn sessions_pane_view_model(&self) -> SessionsPaneViewModel {
-        let snapshot = self.projection.snapshot();
-        let composer_running = snapshot.active_operation.is_some();
+        let snapshot = self.projection.as_ref().map(DesktopProjection::snapshot);
+        let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
         SessionsPaneViewModel {
             panel_width: self.preferences.sessions_panel_width,
             catalog: Arc::from(self.session_controller.catalog().to_vec()),
             omitted_sessions: self.session_controller.omitted(),
-            active_session_id: Arc::from(snapshot.session.session_id.as_str()),
+            active_session_id: Arc::from(
+                snapshot
+                    .map(|snapshot| snapshot.session.session_id.as_str())
+                    .unwrap_or_default(),
+            ),
             composer_running,
             awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
             session_pending: self.command_ledger.contains_where(|intent| {
@@ -3242,9 +3422,9 @@ impl NativeShell {
     }
 
     fn composer_pane_view_model(&self) -> ComposerPaneViewModel {
-        let snapshot = self.projection.snapshot();
-        let project = self.projection.project();
-        let composer_running = snapshot.active_operation.is_some();
+        let snapshot = self.projection.as_ref().map(DesktopProjection::snapshot);
+        let project = &self.project;
+        let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
         let thinking = self
             .thinking_selection
             .label(project.settings.default_thinking_level.as_deref());
@@ -3255,7 +3435,8 @@ impl NativeShell {
             ),
             composer_running,
             awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
-            authorization_pending: !snapshot.pending_authorizations.is_empty(),
+            authorization_pending: snapshot
+                .is_some_and(|snapshot| !snapshot.pending_authorizations.is_empty()),
             running_mode: self.active_composer_running_mode(),
             thinking: Arc::from(truncate_label(&thinking, 12)),
             rejection: self.composer.rejection().map(Arc::from),
@@ -3263,9 +3444,93 @@ impl NativeShell {
         }
     }
 
+    fn home_pane_view_model(&self) -> HomePaneViewModel {
+        let thinking = self
+            .thinking_selection
+            .label(self.project.settings.default_thinking_level.as_deref());
+        HomePaneViewModel {
+            model: Arc::from(truncate_label(&self.project.selected_model_id, 28)),
+            thinking: Arc::from(truncate_label(&thinking, 18)),
+            recent_sessions: Arc::from(self.session_controller.catalog().to_vec()),
+            omitted_sessions: self.session_controller.omitted(),
+            global_skills: Arc::clone(&self.global_skills),
+            session_pending: self.command_ledger.contains_where(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
+                )
+            }),
+            catalog_pending: self
+                .command_ledger
+                .contains(&DesktopCommandIntent::ListSessions),
+            notice: self.preference_notice.as_deref().map(Arc::from),
+        }
+    }
+
+    fn notify_home_pane(&self, cx: &mut Context<Self>) {
+        let view_model = self.home_pane_view_model();
+        self.home_pane.update(cx, |pane, cx| {
+            pane.set_view_model(view_model);
+            cx.notify();
+        });
+    }
+
     fn inspector_pane_view_model(&self) -> InspectorPaneViewModel {
-        let snapshot = self.projection.snapshot();
-        let project = self.projection.project();
+        let Some(projection) = self.projection.as_ref() else {
+            return InspectorPaneViewModel {
+                panel_width: self.preferences.context_panel_width,
+                context_is_overlay: self.narrow_context_open,
+                keyboard_focus_visible: self.keyboard_focus_visible(),
+                selected_section: self.inspector_section,
+                composer_running: false,
+                awaiting_prompt_start: self.composer.submitted().is_some(),
+                recovery_pending: false,
+                file_review_pending: false,
+                external_editor_pending: false,
+                external_editor_configured: self.preferences.external_editor.is_some(),
+                changed_files: Vec::new(),
+                change_count: 0,
+                file_review: Arc::clone(&self.file_review),
+                runtime_attention_count: self.project.diagnostics.len(),
+                task_state: "ready".into(),
+                active_operation: "—".into(),
+                operation_count: 0,
+                delegation_count: 0,
+                selected_model: truncate_label(&self.project.selected_model_id, 28),
+                profile: truncate_label(self.project.default_agent_profile_id.as_str(), 28),
+                thinking: self
+                    .thinking_selection
+                    .label(self.project.settings.default_thinking_level.as_deref()),
+                usage_input: "0".into(),
+                usage_output: "0".into(),
+                usage_cache_read: "0".into(),
+                usage_cache_write: "0".into(),
+                usage_tokens: "0".into(),
+                usage_context: "—".into(),
+                usage_cost: "—".into(),
+                reduced_motion: self.preferences.reduced_motion,
+                stream_id: "—".into(),
+                sequence: "0".into(),
+                generation: "0".into(),
+                model_count: self.project.models.len(),
+                profile_count: self.project.profiles.len(),
+                skill_count: self.global_skills.len(),
+                prompt_count: 0,
+                context_count: 0,
+                latest_recovery: None,
+                latest_diagnostic: None,
+                latest_config_diagnostic: self.project.diagnostics.last().map(|diagnostic| {
+                    (
+                        truncate_label(&diagnostic.code, 28),
+                        truncate_label(&diagnostic.summary, 120),
+                    )
+                }),
+                latest_issue: None,
+                cwd: truncate_label(&self.project.cwd.display().to_string(), 54),
+            };
+        };
+        let snapshot = projection.snapshot();
+        let project = &self.project;
         let composer_running = snapshot.active_operation.is_some();
         let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
         let changed_files = snapshot
@@ -3288,7 +3553,7 @@ impl NativeShell {
             })
             .collect();
         let latest_recovery =
-            self.projection
+            projection
                 .recoveries()
                 .front()
                 .map(|recovery| InspectorRecoveryView {
@@ -3302,7 +3567,7 @@ impl NativeShell {
                     }),
                 });
         let latest_diagnostic =
-            self.projection
+            projection
                 .diagnostics()
                 .back()
                 .map(|diagnostic| InspectorDiagnosticView {
@@ -3321,18 +3586,16 @@ impl NativeShell {
                 truncate_label(&diagnostic.summary, 120),
             )
         });
-        let latest_issue = self
-            .projection
+        let latest_issue = projection
             .issues()
             .back()
             .map(|issue| truncate_label(&issue.code, 28));
-        let runtime_attention_count = self
-            .projection
+        let runtime_attention_count = projection
             .diagnostics()
             .len()
-            .saturating_add(self.projection.recoveries().len())
+            .saturating_add(projection.recoveries().len())
             .saturating_add(project.diagnostics.len())
-            .saturating_add(self.projection.issues().len());
+            .saturating_add(projection.issues().len());
         let usage = &snapshot.context.usage;
         InspectorPaneViewModel {
             panel_width: self.preferences.context_panel_width,
@@ -3355,8 +3618,7 @@ impl NativeShell {
             change_count: snapshot.context.changes.len(),
             file_review: Arc::clone(&self.file_review),
             runtime_attention_count,
-            task_state: runtime_state_label(self.projection.lifecycle(), composer_running)
-                .to_owned(),
+            task_state: runtime_state_label(projection.lifecycle(), composer_running).to_owned(),
             active_operation: snapshot
                 .active_operation
                 .as_deref()
@@ -3397,10 +3659,10 @@ impl NativeShell {
     }
 
     fn overlay_view_model(&self) -> OverlayViewModel {
-        let snapshot = self.projection.snapshot();
-        let authorization = snapshot
-            .pending_authorizations
-            .first()
+        let authorization = self
+            .projection
+            .as_ref()
+            .and_then(|projection| projection.snapshot().pending_authorizations.first())
             .cloned()
             .map(|request| {
                 let decision_pending = self.command_ledger.authorization().is_some_and(
@@ -3425,30 +3687,50 @@ impl NativeShell {
     }
 
     fn status_bar_view_model(&self) -> StatusBarViewModel {
-        let snapshot = self.projection.snapshot();
-
         StatusBarViewModel {
             status: self.semantic_status(),
-            changed_file_count: snapshot.context.changes.len(),
+            changed_file_count: self
+                .projection
+                .as_ref()
+                .map(|projection| projection.snapshot().context.changes.len())
+                .unwrap_or_default(),
             notice: self.preference_notice.as_deref().map(Arc::from),
             keyboard_focus_visible: self.keyboard_focus_visible(),
         }
     }
 
     fn conversation_pane_view_model(&self) -> ConversationPaneViewModel {
-        let diagnostic_recovery = self.projection.recoveries().iter().find_map(|recovery| {
-            (recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative)
-                .then(|| recovery.identity.clone())
-                .flatten()
+        let diagnostic_recovery = self.projection.as_ref().and_then(|projection| {
+            projection.recoveries().iter().find_map(|recovery| {
+                (recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative)
+                    .then(|| recovery.identity.clone())
+                    .flatten()
+            })
         });
         ConversationPaneViewModel {
             render: self.conversation_controller.render_reader(),
             scroll: self.conversation_controller.scroll.clone(),
             visible_count: self.visible_conversation_count(),
-            event_count: self.projection.recent_events().len(),
-            message_count: self.projection.messages().len(),
-            tool_count: self.projection.tools().len(),
-            omitted_count: self.projection.conversation().omitted_blocks(),
+            event_count: self
+                .projection
+                .as_ref()
+                .map(|projection| projection.recent_events().len())
+                .unwrap_or_default(),
+            message_count: self
+                .projection
+                .as_ref()
+                .map(|projection| projection.messages().len())
+                .unwrap_or_default(),
+            tool_count: self
+                .projection
+                .as_ref()
+                .map(|projection| projection.tools().len())
+                .unwrap_or_default(),
+            omitted_count: self
+                .projection
+                .as_ref()
+                .map(|projection| projection.conversation().omitted_blocks())
+                .unwrap_or_default(),
             follow_latest: self.conversation_controller.follow_latest_enabled(),
             unseen_updates: self.conversation_controller.unseen_updates(),
             selected_block_id: self
@@ -3473,9 +3755,9 @@ impl NativeShell {
     }
 
     fn conversation_header_view_model(&self) -> ConversationHeaderViewModel {
-        let snapshot = self.projection.snapshot();
-        let project = self.projection.project();
-        let composer_running = snapshot.active_operation.is_some();
+        let snapshot = self.projection.as_ref().map(DesktopProjection::snapshot);
+        let project = &self.project;
+        let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
         let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
         let reload_pending = self.command_ledger.contains(&DesktopCommandIntent::Reload);
         let selection_pending = self
@@ -3509,7 +3791,9 @@ impl NativeShell {
             profile_cycle_available: project.profiles.len() > 1,
             model: Arc::from(truncate_label(&project.selected_model_id, 10)),
             profile: Arc::from(truncate_label(
-                snapshot.session.default_agent_profile_id.as_str(),
+                snapshot
+                    .map(|snapshot| snapshot.session.default_agent_profile_id.as_str())
+                    .unwrap_or_else(|| project.default_agent_profile_id.as_str()),
                 9,
             )),
             project_name: Arc::from(project_name),
@@ -3523,18 +3807,21 @@ impl NativeShell {
     }
 
     fn semantic_status(&self) -> SemanticStatus {
-        match self.projection.lifecycle() {
+        let Some(projection) = self.projection.as_ref() else {
+            return SemanticStatus::Idle;
+        };
+        match projection.lifecycle() {
             DesktopProjectionLifecycle::Failed | DesktopProjectionLifecycle::NeedsResync => {
                 SemanticStatus::Error
             }
             DesktopProjectionLifecycle::Stopped => SemanticStatus::Warning,
             DesktopProjectionLifecycle::Running
-                if !self.projection.snapshot().pending_authorizations.is_empty() =>
+                if !projection.snapshot().pending_authorizations.is_empty() =>
             {
                 SemanticStatus::Authorization
             }
             DesktopProjectionLifecycle::Running
-                if self.projection.snapshot().active_operation.is_some() =>
+                if projection.snapshot().active_operation.is_some() =>
             {
                 SemanticStatus::Running
             }
@@ -3556,28 +3843,33 @@ impl Render for NativeShell {
         let theme = SemanticTheme::GEEK_DARK;
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
-        let requested_layout_width = conversation_width_bucket(layout.workspace.width);
-        let (layout_width, width_refresh) = self
-            .conversation_controller
-            .width_for_render(requested_layout_width);
-        if let Some((requested, deadline)) = width_refresh {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(CONVERSATION_RESIZE_DEBOUNCE)
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    if this
-                        .conversation_controller
-                        .commit_pending_width(requested, deadline)
-                    {
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
+        if self.projection.is_some() {
+            let requested_layout_width = conversation_width_bucket(layout.workspace.width);
+            let (layout_width, width_refresh) = self
+                .conversation_controller
+                .width_for_render(requested_layout_width);
+            if let Some((requested, deadline)) = width_refresh {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(CONVERSATION_RESIZE_DEBOUNCE)
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this
+                            .conversation_controller
+                            .commit_pending_width(requested, deadline)
+                        {
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+            self.refresh_conversation_rows_at_width(layout_width, cx);
         }
-        self.refresh_conversation_rows_at_width(layout_width, cx);
-        let authorization_present = !self.projection.snapshot().pending_authorizations.is_empty();
+        let authorization_present = self
+            .projection
+            .as_ref()
+            .is_some_and(|projection| !projection.snapshot().pending_authorizations.is_empty());
         self.reconcile_authorization_overlay(authorization_present, window, cx);
         let sessions_panel = layout.sessions.map(|bounds| {
             div()
@@ -3629,25 +3921,47 @@ impl Render for NativeShell {
                 )
         });
 
-        let conversation = div()
-            .id("conversation-panel")
-            .role(Role::Main)
-            .aria_label("Conversation workspace")
-            .aria_description(
-                "Conversation history and message composer. Use Up and Down to select messages.",
-            )
-            .debug_selector(|| "desktop-conversation-panel".into())
-            .key_context(actions::CONVERSATION_KEY_CONTEXT)
-            .track_focus(&self.conversation_focus)
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .bg(rgb(theme.canvas.value()))
-            .child(self.conversation_header.clone())
-            .child(self.conversation_pane.clone())
-            .child(self.composer_pane.clone());
+        let workspace = if self.projection.is_some() {
+            div()
+                .id("conversation-panel")
+                .role(Role::Main)
+                .aria_label("Conversation workspace")
+                .aria_description(
+                    "Conversation history and message composer. Use Up and Down to select messages.",
+                )
+                .debug_selector(|| "desktop-conversation-panel".into())
+                .key_context(actions::CONVERSATION_KEY_CONTEXT)
+                .track_focus(&self.conversation_focus)
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .bg(rgb(theme.canvas.value()))
+                .child(self.conversation_header.clone())
+                .child(self.conversation_pane.clone())
+                .child(self.composer_pane.clone())
+        } else {
+            div()
+                .id("home-workspace")
+                .debug_selector(|| "desktop-home-workspace".into())
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .bg(rgb(theme.canvas.value()))
+                .child(self.home_pane.clone())
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(900.))
+                        .mx_auto()
+                        .px_6()
+                        .pb_8()
+                        .child(self.composer_pane.clone()),
+                )
+        };
 
         let status_bar = self.status_bar.clone();
 
@@ -3702,7 +4016,7 @@ impl Render for NativeShell {
                     .min_h_0()
                     .flex()
                     .children(sessions_panel)
-                    .child(conversation)
+                    .child(workspace)
                     .children(context_panel),
             )
             .child(status_bar)
@@ -4010,7 +4324,9 @@ mod tests {
                 NativeShell::new(
                     NativeShellInit {
                         runtime,
-                        projection,
+                        project: projection.project().clone(),
+                        projection: Some(projection),
+                        global_skills: Arc::from([]),
                         preferences: DesktopPreferences::default(),
                         preference_writer: None,
                         preference_notice: None,
@@ -4028,6 +4344,112 @@ mod tests {
             .take()
             .expect("visual shell entity was captured");
         (shell, visual_cx)
+    }
+
+    fn add_idle_visual_shell(
+        cx: &mut TestAppContext,
+    ) -> (gpui::Entity<NativeShell>, &mut gpui::VisualTestContext) {
+        let shell_slot = Rc::new(RefCell::new(None));
+        let shell_slot_for_window = Rc::clone(&shell_slot);
+        let project = visual_test_snapshot().project;
+        let (_, visual_cx) = cx.add_window_view(move |window, cx| {
+            let shell = cx.new(|cx| {
+                NativeShell::new(
+                    NativeShellInit {
+                        runtime: DesktopRuntimeBridge::disconnected_for_test(),
+                        project,
+                        projection: None,
+                        global_skills: Arc::from([CodingAgentResourceCommand {
+                            name: "review-plan".into(),
+                            command: "/review-plan".into(),
+                            description: "Review an implementation plan before coding.".into(),
+                            kind: CodingAgentResourceCommandKind::Skill,
+                            model_invocable: true,
+                        }]),
+                        preferences: DesktopPreferences::default(),
+                        preference_writer: None,
+                        preference_notice: None,
+                        initial_session_id: None,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            shell_slot_for_window.replace(Some(shell.clone()));
+            gpui_component::Root::new(shell, window, cx)
+        });
+        let shell = shell_slot
+            .borrow_mut()
+            .take()
+            .expect("idle visual shell entity was captured");
+        (shell, visual_cx)
+    }
+
+    #[gpui::test]
+    fn idle_shell_constructs_all_bounded_view_models_without_session_facts(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, _| {
+            assert!(shell.projection.is_none());
+            assert!(
+                shell
+                    .sessions_pane_view_model()
+                    .active_session_id
+                    .is_empty()
+            );
+            assert!(!shell.composer_pane_view_model().composer_running);
+            let inspector = shell.inspector_pane_view_model();
+            assert_eq!(inspector.active_operation, "—");
+            assert_eq!(inspector.stream_id, "—");
+            assert!(shell.overlay_view_model().authorization.is_none());
+            assert_eq!(shell.status_bar_view_model().changed_file_count, 0);
+            assert_eq!(shell.conversation_pane_view_model().visible_count, 0);
+            assert_eq!(
+                shell.conversation_header_view_model().profile.as_ref(),
+                "default"
+            );
+            assert_eq!(shell.home_pane_view_model().global_skills.len(), 1);
+        });
+
+        for (width, height) in [(1_300., 900.), (900., 800.), (700., 800.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.run_until_parked();
+            let home = cx
+                .debug_bounds("desktop-home-workspace")
+                .expect("idle workspace is visible");
+            assert_eq!(f32::from(home.size.width), width);
+            assert!(cx.debug_bounds("desktop-conversation-panel").is_none());
+            assert!(cx.debug_bounds("desktop-inspector-panel").is_none());
+            assert!(cx.debug_bounds("desktop-composer-panel").is_some());
+        }
+    }
+
+    #[gpui::test]
+    fn idle_home_draft_moves_into_the_first_established_session(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, _| {
+            shell.composer.edit("keep this home draft");
+            shell.projection = Some(visual_test_projection());
+            let current_session_id = shell
+                .projection
+                .as_ref()
+                .expect("the test just installed a session projection")
+                .snapshot()
+                .session
+                .session_id
+                .clone();
+            shell.reconcile_composer_session(HOME_COMPOSER_SESSION_KEY, &current_session_id);
+
+            assert_eq!(shell.composer.draft(), "keep this home draft");
+            assert!(
+                !shell
+                    .composer_session_drafts
+                    .contains_key(HOME_COMPOSER_SESSION_KEY)
+            );
+        });
     }
 
     fn desktop_region_bounds(
@@ -4853,16 +5275,25 @@ mod tests {
             visual_test_projection(),
         );
         shell.update(cx, |shell, cx| {
-            let active_session_id = shell.projection.snapshot().session.session_id.clone();
+            let active_session_id = shell
+                .projection
+                .as_ref()
+                .expect("the visual shell owns a session projection")
+                .snapshot()
+                .session
+                .session_id
+                .clone();
             shell.session_controller.replace_catalog(
                 vec![
                     desktop::runtime::DesktopSessionCatalogEntry {
                         session_id: active_session_id,
                         updated_at: "2026-07-28T09:00:00Z".into(),
+                        ..Default::default()
                     },
                     desktop::runtime::DesktopSessionCatalogEntry {
                         session_id: "recent-session-with-a-stable-action-row".into(),
                         updated_at: "2026-07-28T08:00:00Z".into(),
+                        ..Default::default()
                     },
                 ],
                 0,
@@ -6977,6 +7408,7 @@ mod conversation_header;
 mod conversation_pane;
 mod desktop_controls;
 mod desktop_style;
+mod home_pane;
 mod inspector_pane;
 mod overlay_host;
 mod session_controller;
@@ -7004,6 +7436,7 @@ use conversation_header::{
     ConversationHeader, ConversationHeaderEvent, ConversationHeaderViewModel,
 };
 use conversation_pane::{ConversationPane, ConversationPaneEvent, ConversationPaneViewModel};
+use home_pane::{HomePane, HomePaneEvent, HomePaneViewModel};
 use inspector_pane::{
     InspectorChangedFileView, InspectorDiagnosticView, InspectorPane, InspectorPaneEvent,
     InspectorPaneViewModel, InspectorRecoveryView,

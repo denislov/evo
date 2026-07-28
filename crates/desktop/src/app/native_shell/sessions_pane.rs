@@ -123,6 +123,14 @@ impl Render for SessionsPane {
             .filter(|session| {
                 search.is_empty()
                     || session.session_id.to_lowercase().contains(&search)
+                    || session
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.to_lowercase().contains(&search))
+                    || session
+                        .cwd
+                        .as_deref()
+                        .is_some_and(|cwd| cwd.to_lowercase().contains(&search))
                     || session.updated_at.to_lowercase().contains(&search)
             })
             .count();
@@ -132,17 +140,31 @@ impl Render for SessionsPane {
             .filter(|session| {
                 search.is_empty()
                     || session.session_id.to_lowercase().contains(&search)
+                    || session
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.to_lowercase().contains(&search))
+                    || session
+                        .cwd
+                        .as_deref()
+                        .is_some_and(|cwd| cwd.to_lowercase().contains(&search))
                     || session.updated_at.to_lowercase().contains(&search)
             })
             .enumerate()
             .map(|(index, session)| {
                 let target = session.session_id.clone();
                 let active = target == active_session_id;
-                let semantic_name = if active {
-                    "Current task".to_owned()
-                } else {
-                    truncate_label(&target, 24)
-                };
+                let semantic_name = session
+                    .name
+                    .as_deref()
+                    .map(|name| truncate_label(name, 24))
+                    .unwrap_or_else(|| {
+                        if active {
+                            "Current task".to_owned()
+                        } else {
+                            truncate_label(&target, 24)
+                        }
+                    });
                 let relative_time = relative_session_time(&session.updated_at, now);
                 let (status_glyph, status, status_color) = if active {
                     let label = active_semantic_status.label();
@@ -171,7 +193,14 @@ impl Render for SessionsPane {
                     })
                     .size(DesktopControlSize::Critical)
                     .leading(div().text_color(status_color).child(status_glyph))
-                    .detail(format!("{} · {status}", truncate_label(&target, 28)))
+                    .detail(format!(
+                        "{} · {status}",
+                        session
+                            .cwd
+                            .as_deref()
+                            .map(|cwd| truncate_label(cwd, 28))
+                            .unwrap_or_else(|| truncate_label(&target, 28))
+                    ))
                     .trailing(
                         div()
                             .text_token(DesignText::Metadata)

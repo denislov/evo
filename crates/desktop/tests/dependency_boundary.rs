@@ -372,7 +372,7 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
     );
 
     assert!(runtime_protocol.contains("ListSessions"));
-    assert!(runtime_driver.contains("self.context.list_sessions()?"));
+    assert!(runtime_driver.contains("self.context.session_query()?.overviews()?"));
     assert!(runtime_protocol.contains("MAX_DESKTOP_SESSION_CATALOG"));
 }
 

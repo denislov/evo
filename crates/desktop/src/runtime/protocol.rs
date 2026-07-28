@@ -191,10 +191,14 @@ pub struct DesktopRuntimeRecoverySnapshot {
     pub pending_recoveries: Vec<CodingAgentRecoveryPending>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DesktopSessionCatalogEntry {
     pub session_id: String,
+    pub name: Option<String>,
+    pub cwd: Option<String>,
+    pub created_at: String,
     pub updated_at: String,
+    pub active_leaf_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -318,7 +322,7 @@ pub enum DesktopRuntimeUpdate {
     PromptRejectedWithSession {
         command_id: u64,
         metadata: DesktopRuntimeMetadataSnapshot,
-        snapshot: Option<DesktopRuntimeHydratedSnapshot>,
+        snapshot: Option<Box<DesktopRuntimeHydratedSnapshot>>,
         error: DesktopRuntimeError,
     },
     PromptStarted {

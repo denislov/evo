@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use coding_agent::api::authorization::{
@@ -11,7 +12,8 @@ use coding_agent::api::client::{
     CodingAgentSnapshotCursor, UI_SNAPSHOT_PROTOCOL_VERSION,
 };
 use coding_agent::api::embedding::{
-    CodingAgentEmbeddingSnapshot, CodingAgentResourceSummary, CodingAgentSettingsSummary,
+    CodingAgentEmbeddingSnapshot, CodingAgentResourceCommand, CodingAgentResourceCommandKind,
+    CodingAgentResourceSummary, CodingAgentSettingsSummary,
 };
 use coding_agent::api::event::CodingAgentProductEvent;
 use coding_agent::api::view::{
@@ -54,6 +56,7 @@ pub(super) enum VisualReplayLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VisualReplayState {
     Standard,
+    Idle,
     Authorization,
     ReducedMotion,
     KeyboardFocus,
@@ -67,7 +70,9 @@ pub(super) struct VisualReplaySpec {
 
 impl VisualReplaySpec {
     fn parse(value: &str) -> Result<Self, String> {
-        let (layout, state) = if let Some(layout) = value.strip_suffix("-authorization") {
+        let (layout, state) = if let Some(layout) = value.strip_suffix("-idle") {
+            (layout, VisualReplayState::Idle)
+        } else if let Some(layout) = value.strip_suffix("-authorization") {
             (layout, VisualReplayState::Authorization)
         } else if let Some(layout) = value.strip_suffix("-reduced-motion") {
             (layout, VisualReplayState::ReducedMotion)
@@ -85,6 +90,7 @@ impl VisualReplaySpec {
     fn key(self) -> String {
         let state = match self.state {
             VisualReplayState::Standard => return self.layout.key().into(),
+            VisualReplayState::Idle => "idle",
             VisualReplayState::Authorization => "authorization",
             VisualReplayState::ReducedMotion => "reduced-motion",
             VisualReplayState::KeyboardFocus => "keyboard-focus",
@@ -332,15 +338,39 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             ..
         })
     );
+    let idle_replay = matches!(
+        request,
+        NativeReplayRequest::Visual(VisualReplaySpec {
+            state: VisualReplayState::Idle,
+            ..
+        })
+    );
+    let project = projection.project().clone();
+    let projection = (!idle_replay).then_some(projection);
+    let global_skills: Arc<[CodingAgentResourceCommand]> = Arc::from(if idle_replay {
+        vec![CodingAgentResourceCommand {
+            name: "review-plan".into(),
+            command: "/review-plan".into(),
+            description: "Review an implementation plan before coding.".into(),
+            kind: CodingAgentResourceCommandKind::Skill,
+            model_invocable: true,
+        }]
+    } else {
+        Vec::new()
+    });
     cx.open_window(options, move |window, cx| {
         window.set_window_title(&title);
-        let mut preferences = DesktopPreferences::default();
-        preferences.reduced_motion = reduced_motion_replay;
+        let preferences = DesktopPreferences {
+            reduced_motion: reduced_motion_replay,
+            ..DesktopPreferences::default()
+        };
         let shell = cx.new(|cx| {
             NativeShell::new(
                 NativeShellInit {
                     runtime: DesktopRuntimeBridge::disconnected_for_replay(),
+                    project,
                     projection,
+                    global_skills,
                     preferences,
                     preference_writer: None,
                     preference_notice: None,
@@ -787,6 +817,13 @@ mod tests {
                 state: VisualReplayState::Authorization,
             })))
         );
+        assert_eq!(
+            request_from_values(false, false, Some("narrow-idle")),
+            Ok(Some(NativeReplayRequest::Visual(VisualReplaySpec {
+                layout: VisualReplayLayout::Narrow,
+                state: VisualReplayState::Idle,
+            })))
+        );
     }
 
     #[test]
@@ -848,6 +885,9 @@ mod tests {
         assert!(script.contains("-after.png"));
         assert!(script.contains("-diff.png"));
         for fixture in [
+            "wide-idle",
+            "medium-idle",
+            "narrow-idle",
             "wide-authorization",
             "wide-reduced-motion",
             "wide-keyboard-focus",
