@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::{ConversationItemKey, render_cache::StreamingTextPhase};
+use super::{model::ConversationItemKey, render_cache::StreamingTextPhase};
 
 pub const STREAMING_ROW_HEIGHT_INTERVAL: Duration = Duration::from_millis(67);
 pub const CONVERSATION_WIDTH_BUCKET_PX: u32 = 24;

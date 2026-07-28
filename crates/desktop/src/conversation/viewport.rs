@@ -1,6 +1,6 @@
 //! Conversation selection, follow-latest, and unseen-update state.
 
-use super::{ConversationBlock, ConversationProjection};
+use super::model::{ConversationBlock, ConversationProjection};
 
 /// A reader who moves farther than this from the bottom owns the viewport.
 pub const FOLLOW_LATEST_PAUSE_THRESHOLD_PX: f32 = 48.0;
@@ -165,16 +165,16 @@ impl ConversationViewport {
     #[cfg(test)]
     pub fn home(&mut self, projection: &ConversationProjection) {
         self.follow_latest = false;
-        self.block_count = projection.blocks.len();
+        self.block_count = projection.blocks().len();
         self.first_visible = 0;
-        self.selected_block_id = projection.blocks.front().map(|block| block.id.clone());
+        self.selected_block_id = projection.blocks().front().map(|block| block.id.clone());
     }
 
     #[cfg(test)]
     pub fn end(&mut self, projection: &ConversationProjection) {
         self.follow_latest = true;
-        self.on_blocks_changed(projection.blocks.len());
-        self.selected_block_id = projection.blocks.back().map(|block| block.id.clone());
+        self.on_blocks_changed(projection.blocks().len());
+        self.selected_block_id = projection.blocks().back().map(|block| block.id.clone());
     }
 
     pub fn copy_selected(&self, projection: &ConversationProjection) -> Option<String> {

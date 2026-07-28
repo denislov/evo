@@ -1,4 +1,4 @@
-//! Bounded conversation, viewport, selection, and composer state.
+//! Bounded conversation transcript identity and projection state.
 //!
 //! These reducers remain independent of GPUI. The renderer may virtualize the
 //! resulting blocks without owning product transcript truth.
@@ -7,42 +7,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use coding_agent::api::view::{CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot};
-mod composer;
-mod copy;
-mod layout;
-mod markdown;
-mod render_cache;
-mod viewport;
 
-#[allow(unused_imports)]
-pub use composer::{
-    ComposerAdmission, ComposerState, ComposerSubmissionKind, ComposerSubmitError,
-    MAX_COMPOSER_BYTES, SubmittedPromptPreview,
-};
-pub use copy::{MAX_COPY_BYTES, conversation_copy_text};
-#[allow(unused_imports)]
-pub use layout::{
-    CONVERSATION_WIDTH_BUCKET_PX, ConversationRowHeightSource, ConversationRowLayoutInput,
-    ConversationRowLayoutResolution, ConversationRowLayoutSingleResolution,
-    ConversationRowLayoutState, ConversationRowMeasurement, STREAMING_ROW_HEIGHT_INTERVAL,
-    TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, conversation_width_bucket,
-};
-#[allow(unused_imports)]
-pub use markdown::{
-    MAX_CODE_BLOCK_PREVIEW_BYTES, MAX_MARKDOWN_LINE_BYTES, MAX_MARKDOWN_LINES,
-    MAX_MARKDOWN_MARKERS_PER_LINE, MAX_MARKDOWN_NESTING, MAX_MARKDOWN_PREVIEW_BYTES,
-    MAX_MARKDOWN_TABLE_CELLS, MAX_MARKDOWN_TABLE_ROWS, MarkdownPreview, bounded_markdown_preview,
-};
-#[allow(unused_imports)]
-pub use render_cache::{
-    ConversationRowRenderCache, ConversationRowRenderData, ConversationRowRenderSource,
-    MAX_ROW_RENDER_CACHE_BYTES, MAX_ROW_RENDER_CACHE_ENTRIES, MAX_SETTLING_MARKDOWN_BYTES,
-    STREAMING_MARKDOWN_SETTLE_DELAY, StreamingTextPhase, conversation_block_height,
-};
-#[allow(unused_imports)]
-pub use viewport::{
-    ConversationViewport, FOLLOW_LATEST_PAUSE_THRESHOLD_PX, FOLLOW_LATEST_RESUME_THRESHOLD_PX,
-};
+use super::copy::{conversation_copy_text, truncate_bytes};
 
 pub const MAX_TRANSCRIPT_BLOCKS: usize = 10_000;
 pub const MAX_TRANSCRIPT_BYTES: usize = 32 * 1024 * 1024;
@@ -129,7 +95,12 @@ impl ConversationItemKey {
         Arc::clone(&self.stable_id)
     }
 
-    fn markdown_state_key(&self, detail: bool, revision: u64, final_state: bool) -> Arc<str> {
+    pub(super) fn markdown_state_key(
+        &self,
+        detail: bool,
+        revision: u64,
+        final_state: bool,
+    ) -> Arc<str> {
         let namespace = if detail {
             "transcript-detail-markdown"
         } else {
@@ -139,7 +110,7 @@ impl ConversationItemKey {
         Arc::from(format!("{namespace}:{}:{phase}:{revision}", self.stable_id))
     }
 
-    fn retained_bytes(&self) -> usize {
+    pub(super) fn retained_bytes(&self) -> usize {
         self.session_id.len() + self.row_id.len() + self.stable_id.len()
     }
 }
@@ -502,23 +473,15 @@ fn summary_block(
     )
 }
 
-fn truncate_bytes(mut text: String, max_bytes: usize) -> (String, bool) {
-    if text.len() <= max_bytes {
-        return (text, false);
-    }
-    let mut boundary = max_bytes;
-    while boundary > 0 && !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    text.truncate(boundary);
-    (text, true)
-}
-
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
 
-    use super::*;
+    use coding_agent::api::view::{
+        CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot,
+    };
+
+    use crate::conversation::*;
 
     fn transcript(items: Vec<CodingAgentSessionTranscriptItem>) -> CodingAgentTranscriptSnapshot {
         CodingAgentTranscriptSnapshot {
@@ -922,13 +885,5 @@ mod tests {
             compact_duration(block.reasoning_duration_millis.unwrap()),
             "2.4 s"
         );
-    }
-
-    #[test]
-    fn live_row_copy_uses_the_same_bounded_utf8_safe_projection() {
-        assert_eq!(conversation_copy_text("answer", "detail"), "answer\ndetail");
-        let copied = conversation_copy_text("", &"界".repeat(MAX_COPY_BYTES));
-        assert!(copied.len() <= MAX_COPY_BYTES);
-        assert!(copied.is_char_boundary(copied.len()));
     }
 }

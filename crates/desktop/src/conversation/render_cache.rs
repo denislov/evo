@@ -7,9 +7,8 @@ use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthStr as _;
 
-use super::{
-    ConversationBlockKind, ConversationItemKey, MAX_TRANSCRIPT_BLOCKS, bounded_markdown_preview,
-};
+use super::markdown::bounded_markdown_preview;
+use super::model::{ConversationBlockKind, ConversationItemKey, MAX_TRANSCRIPT_BLOCKS};
 use crate::shell::USER_MESSAGE_WIDTH_PERCENT;
 
 pub const STREAMING_MARKDOWN_SETTLE_DELAY: Duration = Duration::from_millis(100);

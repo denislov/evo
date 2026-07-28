@@ -4,7 +4,8 @@
 //! independent of GPUI and only reads the durable conversation projection when
 //! reconciling an accepted prompt.
 
-use super::{ConversationBlockKind, ConversationProjection, MAX_BLOCK_TEXT_BYTES, truncate_bytes};
+use super::copy::truncate_bytes;
+use super::model::{ConversationBlockKind, ConversationProjection, MAX_BLOCK_TEXT_BYTES};
 
 pub const MAX_COMPOSER_BYTES: usize = 1024 * 1024;
 

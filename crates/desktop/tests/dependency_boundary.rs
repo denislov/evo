@@ -20,6 +20,12 @@ fn dependency_names(value: &toml::Value, names: &mut BTreeSet<String>) {
     }
 }
 
+fn production_source(source: &str) -> &str {
+    source
+        .split_once("\n#[cfg(test)]")
+        .map_or(source, |(production, _)| production)
+}
+
 #[test]
 fn desktop_depends_on_product_facade_without_bypassing_runtime_layers() {
     let mut names = BTreeSet::new();
@@ -140,6 +146,8 @@ fn external_desktop_performance_gates_are_cross_platform_and_fail_closed() {
         .expect("bash native gate should be readable");
     let powershell_native = fs::read_to_string(root.join("scripts/desktop-native-perf-gate.ps1"))
         .expect("PowerShell native gate should be readable");
+    let bash_headless = fs::read_to_string(root.join("scripts/desktop-perf-gate.sh"))
+        .expect("bash headless gate should be readable");
     let powershell_headless = fs::read_to_string(root.join("scripts/desktop-perf-gate.ps1"))
         .expect("PowerShell headless gate should be readable");
     let external_report =
@@ -160,8 +168,29 @@ fn external_desktop_performance_gates_are_cross_platform_and_fail_closed() {
             );
         }
     }
-    assert!(powershell_headless.contains("desktop_release_"));
-    assert!(powershell_headless.contains("desktop_release_gpui_"));
+    let release_tests = [
+        "conversation::model::tests::desktop_release_empty_conversation_baseline",
+        "conversation::model::tests::desktop_release_ten_mib_interaction_baseline",
+        "conversation::model::tests::desktop_release_scale_content_and_streaming_matrix",
+        "app::native_shell::tests::desktop_release_gpui_headless_frame_and_input_replay",
+        "app::native_shell::tests::desktop_release_gpui_markdown_parser_matrix",
+    ];
+    for gate in [&bash_headless, &powershell_headless] {
+        for release_test in release_tests {
+            assert!(
+                gate.contains(release_test),
+                "headless gate must run {release_test} by its stable full path"
+            );
+        }
+        assert!(
+            gate.contains("--exact"),
+            "headless gate must not admit another test through a prefix filter"
+        );
+        assert!(
+            gate.contains("running 1 test"),
+            "headless gate must fail when Cargo silently runs zero tests"
+        );
+    }
     assert!(external_report.contains("sample_id"));
     assert!(external_report.contains("latency_us"));
     assert!(external_report.contains("paired_app_log"));
@@ -472,6 +501,98 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
              {back_reference}"
         );
     }
+}
+
+#[test]
+fn conversation_presentation_modules_have_stable_acyclic_owners() {
+    let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    assert!(
+        !source_root.join("conversation.rs").exists(),
+        "the legacy conversation.rs owner must be replaced by conversation/mod.rs"
+    );
+    let conversation_root = source_root.join("conversation");
+    let module = fs::read_to_string(conversation_root.join("mod.rs"))
+        .expect("conversation re-export module should be readable");
+
+    for owner in [
+        "composer",
+        "copy",
+        "layout",
+        "markdown",
+        "model",
+        "render_cache",
+        "viewport",
+    ] {
+        assert!(
+            conversation_root.join(format!("{owner}.rs")).is_file(),
+            "conversation owner {owner}.rs must exist"
+        );
+        assert!(
+            module.contains(&format!("mod {owner};")),
+            "conversation/mod.rs must declare {owner}"
+        );
+    }
+    for stable_surface in [
+        "pub use composer::",
+        "pub use copy::",
+        "pub use layout::",
+        "pub use markdown::",
+        "pub use model::",
+        "pub use render_cache::",
+        "pub use viewport::",
+    ] {
+        assert!(
+            module.contains(stable_surface),
+            "conversation/mod.rs must retain {stable_surface}"
+        );
+    }
+    assert!(!module.contains("pub struct "));
+    assert!(!module.contains("pub enum "));
+    assert!(!module.contains("pub fn "));
+
+    let read_owner = |name: &str| {
+        fs::read_to_string(conversation_root.join(format!("{name}.rs"))).unwrap_or_else(|error| {
+            panic!("conversation owner {name}.rs should be readable: {error}")
+        })
+    };
+    let composer = read_owner("composer");
+    let copy = read_owner("copy");
+    let layout = read_owner("layout");
+    let markdown = read_owner("markdown");
+    let model = read_owner("model");
+    let render_cache = read_owner("render_cache");
+    let viewport = read_owner("viewport");
+    let composer = production_source(&composer);
+    let copy = production_source(&copy);
+    let layout = production_source(&layout);
+    let markdown = production_source(&markdown);
+    let model = production_source(&model);
+    let render_cache = production_source(&render_cache);
+    let viewport = production_source(&viewport);
+
+    // The production dependency graph is a DAG:
+    // model -> copy; composer -> model/copy; render_cache -> model/markdown;
+    // layout -> model/render_cache; viewport -> model.
+    assert!(model.contains("super::copy"));
+    for forbidden in ["composer", "layout", "markdown", "render_cache", "viewport"] {
+        assert!(
+            !model.contains(&format!("super::{forbidden}")),
+            "model must not depend on downstream owner {forbidden}"
+        );
+    }
+    assert!(!copy.contains("super::model"));
+    assert!(!markdown.contains("super::model"));
+    assert!(composer.contains("super::copy"));
+    assert!(composer.contains("super::model"));
+    assert!(render_cache.contains("super::markdown"));
+    assert!(render_cache.contains("super::model"));
+    assert!(!render_cache.contains("super::layout"));
+    assert!(layout.contains("model::ConversationItemKey"));
+    assert!(layout.contains("render_cache::StreamingTextPhase"));
+    assert!(!layout.contains("super::viewport"));
+    assert!(viewport.contains("super::model"));
+    assert!(!viewport.contains("super::layout"));
+    assert!(!viewport.contains("super::render_cache"));
 }
 
 #[test]
