@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103 实现完成；CAG-102 的 cwd 摘要契约待确认）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103、CAG-104 实现完成；CAG-102 的 cwd 摘要契约待确认）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-28
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -502,6 +502,23 @@ feat(coding-agent): expose global settings, auth, and model snapshots
 - 新增测试：指定 id 创建后，`session_id` 与传入值一致（经 `normalize_session_id` 规范化）；
 - 新增测试：重复 id 返回类型化错误且不产生半初始化目录；
 - 持久化关闭时该入口返回 `UnsupportedCapability`。
+
+**实现记录（2026-07-28）**
+
+- 新增 `CodingAgentEmbeddingContext::create_session_with_id()`，仅在持久化开启时把调用方
+  id 透传到 `session_options_internal()?.with_session_id(...)`，随后继续走既有
+  `CodingAgentSession::create_internal` / `SessionService::create`；现有无参数
+  `create_session()` 及其非持久化回退行为零改动；
+- 入口保持 create-only：传入 id 由既有 service/repository 两层规范化与路径字符校验，
+  不会退化为 open-or-create，也不会覆盖已有目录；持久化关闭时在任何目录写入前返回
+  `unsupported_capability`；
+- 新增 current-thread async 测试，覆盖带首尾空白的 id 规范化、manifest/events 初始化、
+  重复 id 的 `Session/session` 类型化公开错误、会话根仍只有一个完整目录，以及关闭
+  持久化时的 `Capability/unsupported_capability` 与零落盘；稳定 facade fixture 同时
+  锁定新方法可由外部消费者调用。
+- 直接相关 gate 已通过：coding-agent lib `742/742`、API boundary `14/14`、lib-only
+  Clippy `-D warnings`、Desktop `cargo check`、fmt 与 `git diff --check`；全量
+  `cargo test -p coding-agent` 仍受上文已记录的既有 product-event contract 文档缺失阻断。
 
 **建议提交**
 

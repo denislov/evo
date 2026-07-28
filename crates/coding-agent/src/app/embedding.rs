@@ -530,6 +530,20 @@ impl CodingAgentEmbeddingContext {
             .map_err(CodingAgentPublicError::from)
     }
 
+    /// Create a new persistent session with a caller-assigned product id.
+    ///
+    /// The id is normalized and validated by the product session repository.
+    /// This is create-only: an existing id returns a typed session error rather
+    /// than opening or replacing the existing session.
+    pub async fn create_session_with_id(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<CodingAgentSession, CodingAgentPublicError> {
+        self.create_session_with_id_internal(session_id)
+            .await
+            .map_err(CodingAgentPublicError::from)
+    }
+
     pub(crate) async fn create_session_internal(
         &self,
     ) -> Result<CodingAgentSession, CodingSessionError> {
@@ -539,6 +553,18 @@ impl CodingAgentEmbeddingContext {
         } else {
             CodingAgentSession::non_persistent_internal(options).await
         }
+    }
+
+    pub(crate) async fn create_session_with_id_internal(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<CodingAgentSession, CodingSessionError> {
+        self.require_persistent_sessions()?;
+        CodingAgentSession::create_internal(
+            self.session_options_internal()?
+                .with_session_id(session_id.into()),
+        )
+        .await
     }
 
     pub async fn open_session(
@@ -816,11 +842,12 @@ fn skill_resource_command(skill: &Skill) -> CodingAgentResourceCommand {
 }
 
 #[cfg(test)]
-mod global_snapshot_tests {
+mod tests {
     use super::*;
     use crate::app::auth::{CodingAgentProviderAuthKind, global_auth_snapshot};
     use crate::app::settings::global_settings_snapshot;
     use crate::config::AuthStore;
+    use crate::runtime::facade::CodingAgentErrorCategory;
 
     #[test]
     fn cwd_free_catalogs_load_global_state_without_an_embedding_context() {
@@ -880,6 +907,63 @@ mod global_snapshot_tests {
         assert!(!public_debug.contains("second-catalog-auth-secret-canary"));
         assert!(!public_debug.contains("global-body-secret-canary"));
         assert!(!public_debug.contains(&external.to_string_lossy().into_owned()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn caller_assigned_session_id_is_normalized_and_created_once() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let cwd = temp.path().join("project");
+        let sessions = temp.path().join("sessions");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        env.set_evo_dir(&global);
+        let context = CodingAgentEmbeddingContext::load(
+            CodingAgentEmbeddingOptions::new(&cwd).with_session_dir(&sessions),
+        )
+        .unwrap();
+
+        let session = context
+            .create_session_with_id("  caller_session_01  ")
+            .await
+            .unwrap();
+
+        assert_eq!(session.view().session_id, "caller_session_01");
+        assert!(sessions.join("caller_session_01/session.json").is_file());
+        assert!(sessions.join("caller_session_01/events.jsonl").is_file());
+
+        let error = context
+            .create_session_with_id("caller_session_01")
+            .await
+            .unwrap_err();
+        assert_eq!(error.category, CodingAgentErrorCategory::Session);
+        assert_eq!(error.code(), "session");
+        assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn caller_assigned_session_id_requires_persistence() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let cwd = temp.path().join("project");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        env.set_evo_dir(&global);
+        let context = CodingAgentEmbeddingContext::load(
+            CodingAgentEmbeddingOptions::new(&cwd).with_session_mode(SessionMode::Disabled),
+        )
+        .unwrap();
+
+        let error = context
+            .create_session_with_id("disabled_session")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, CodingAgentErrorCategory::Capability);
+        assert_eq!(error.code(), "unsupported_capability");
+        assert!(!global.join("sessions").exists());
     }
 }
 

@@ -82,6 +82,13 @@ fn session_queries(context: &CodingAgentEmbeddingContext) -> Result<(), CodingAg
     Ok(())
 }
 
+async fn create_assigned_session(
+    context: &CodingAgentEmbeddingContext,
+) -> Result<(), CodingAgentPublicError> {
+    touch(context.create_session_with_id("assigned-session").await?);
+    Ok(())
+}
+
 fn bind_operation_session(
     context: &CodingAgentEmbeddingContext,
     factory: &mut CodingAgentOperationFactory,
@@ -296,4 +303,5 @@ fn main() {
     support_types();
     let _ = profile_catalog;
     let _ = bind_operation_session;
+    let _ = create_assigned_session;
 }
