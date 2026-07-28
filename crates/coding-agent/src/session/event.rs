@@ -303,6 +303,13 @@ pub(crate) enum SessionEventData {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         check_output: Option<PersistedSelfHealingEditCheckOutput>,
     },
+    #[serde(rename = "model.usage.recorded")]
+    ModelUsageRecorded {
+        purpose: String,
+        model_id: String,
+        #[serde(default)]
+        usage: Usage,
+    },
     #[serde(rename = "diagnostic.emitted")]
     DiagnosticEmitted {
         level: DiagnosticLevel,

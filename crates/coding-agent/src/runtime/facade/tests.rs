@@ -194,6 +194,86 @@ mod cases {
         })
     }
 
+    fn prompt_options_with_session_naming_model(
+        api: &str,
+        prompt: &str,
+        model_id: &str,
+    ) -> PromptTurnOptions {
+        PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
+            model: model(api),
+            api_key: None,
+            auth_diagnostics: Vec::new(),
+            system_prompt: Some("system".into()),
+            max_turns: Some(2),
+            tools: Vec::new(),
+            register_builtins: false,
+            ai_client: None,
+            session: Some(SessionRunOptions::disabled(".".into())),
+            session_target: None,
+            session_name: None,
+            thinking_level: None,
+            tool_execution: None,
+            resources: AgentResources::default(),
+            settings: Some(
+                crate::config::settings::PartialSettings {
+                    session_naming_model: Some(model_id.into()),
+                    ..crate::config::settings::PartialSettings::default()
+                }
+                .resolve(),
+            ),
+            invocation: PromptInvocation::Text(prompt.into()),
+        })
+    }
+
+    fn prompt_options_with_auto_naming(api: &str, prompt: &str) -> PromptTurnOptions {
+        PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
+            model: model(api),
+            api_key: None,
+            auth_diagnostics: Vec::new(),
+            system_prompt: Some("system".into()),
+            max_turns: Some(2),
+            tools: Vec::new(),
+            register_builtins: false,
+            ai_client: None,
+            session: Some(SessionRunOptions::disabled(".".into())),
+            session_target: None,
+            session_name: None,
+            thinking_level: None,
+            tool_execution: None,
+            resources: AgentResources::default(),
+            settings: Some(crate::config::settings::PartialSettings::default().resolve()),
+            invocation: PromptInvocation::Text(prompt.into()),
+        })
+    }
+
+    async fn wait_for_session_name(options: &CodingAgentSessionOptions) -> Option<String> {
+        for _ in 0..100 {
+            let hydration = CodingAgentSession::hydrate(options.clone()).unwrap();
+            if hydration.summary.name.is_some() {
+                return hydration.summary.name;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        None
+    }
+
+    async fn wait_for_session_event(
+        root: &std::path::Path,
+        session_id: &str,
+        predicate: impl Fn(&SessionEventData) -> bool,
+    ) -> Vec<SessionEventEnvelope> {
+        for _ in 0..100 {
+            let store = crate::session::repository::SessionLogStore::new(root);
+            let handle = store.open_session_id(session_id).unwrap();
+            let events = store.read_events(&handle).unwrap();
+            if events.iter().any(|event| predicate(&event.data)) {
+                return events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for session event")
+    }
+
     #[tokio::test]
     async fn ui_snapshot_uses_session_view_capabilities_and_event_cursor() {
         let session = CodingAgentSession::non_persistent_internal(CodingAgentSessionOptions::new())
@@ -4245,6 +4325,227 @@ mod cases {
                     )
                 )
         }));
+    }
+
+    #[tokio::test]
+    async fn first_successful_exchange_auto_names_once_and_accounts_usage() {
+        let api = "coding-session-auto-name-once";
+        let provider = Arc::new(FauxProvider::with_call_queue(vec![
+            FauxProvider::text_call("first answer", StopReason::Stop),
+            FauxProvider::text_call("First concise title", StopReason::Stop),
+            FauxProvider::text_call("second answer", StopReason::Stop),
+        ]));
+        let provider_guard = crate::test_support::ProviderGuard::register(api, provider);
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = "sess_auto_name_once";
+        let options = CodingAgentSessionOptions::new()
+            .with_ai_client(provider_guard.ai_client())
+            .with_session_id(session_id)
+            .with_session_log_root(temp.path());
+        let mut session = CodingAgentSession::create_internal(options.clone())
+            .await
+            .unwrap();
+
+        let first = session
+            .run_internal(CodingAgentOperation::Prompt(
+                prompt_options_with_auto_naming(api, "first question"),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            prompt_outcome(first),
+            PromptTurnOutcome::Success { .. }
+        ));
+        assert_eq!(
+            wait_for_session_name(&options).await.as_deref(),
+            Some("First concise title")
+        );
+        let after_first = CodingAgentSession::hydrate(options.clone()).unwrap();
+        assert_eq!(after_first.usage.input, 20);
+        assert_eq!(after_first.usage.output, 40);
+
+        let second = session
+            .run_internal(CodingAgentOperation::Prompt(
+                prompt_options_with_auto_naming(api, "second question"),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            prompt_outcome(second),
+            PromptTurnOutcome::Success { .. }
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let store = crate::session::repository::SessionLogStore::new(temp.path());
+        let events = store
+            .read_events(&store.open_session_id(session_id).unwrap())
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.data, SessionEventData::ModelUsageRecorded { .. }))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            SessionEventData::ModelUsageRecorded { model_id, .. }
+                if model_id == "test-model"
+        )));
+        let after_second = CodingAgentSession::hydrate(options).unwrap();
+        assert_eq!(
+            after_second.summary.name.as_deref(),
+            Some("First concise title")
+        );
+        assert_eq!(after_second.usage.input, 30);
+        assert_eq!(after_second.usage.output, 60);
+    }
+
+    #[tokio::test]
+    async fn existing_session_name_skips_background_model_call() {
+        let api = "coding-session-auto-name-existing";
+        let provider_guard = crate::test_support::ProviderGuard::register(
+            api,
+            Arc::new(FauxProvider::with_call_queue(vec![
+                FauxProvider::text_call("answer", StopReason::Stop),
+            ])),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = "sess_auto_name_existing";
+        let options = CodingAgentSessionOptions::new()
+            .with_ai_client(provider_guard.ai_client())
+            .with_session_id(session_id)
+            .with_session_name("Manual name")
+            .with_session_log_root(temp.path());
+        let mut session = CodingAgentSession::create_internal(options.clone())
+            .await
+            .unwrap();
+
+        session
+            .run_internal(CodingAgentOperation::Prompt(
+                prompt_options_with_auto_naming(api, "question"),
+            ))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let hydration = CodingAgentSession::hydrate(options).unwrap();
+        assert_eq!(hydration.summary.name.as_deref(), Some("Manual name"));
+        assert_eq!(hydration.usage.input, 10);
+        assert_eq!(hydration.usage.output, 20);
+    }
+
+    #[tokio::test]
+    async fn failed_auto_name_persists_diagnostic_usage_and_keeps_session_usable() {
+        let api = "coding-session-auto-name-failure";
+        let provider_guard = crate::test_support::ProviderGuard::register(
+            api,
+            Arc::new(FauxProvider::with_call_queue(vec![
+                FauxProvider::text_call("first answer", StopReason::Stop),
+                FauxProvider::text_call("", StopReason::Stop),
+                FauxProvider::text_call("second answer", StopReason::Stop),
+            ])),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = "sess_auto_name_failure";
+        let options = CodingAgentSessionOptions::new()
+            .with_ai_client(provider_guard.ai_client())
+            .with_session_id(session_id)
+            .with_session_log_root(temp.path());
+        let mut session = CodingAgentSession::create_internal(options.clone())
+            .await
+            .unwrap();
+
+        session
+            .run_internal(CodingAgentOperation::Prompt(
+                prompt_options_with_auto_naming(api, "first question"),
+            ))
+            .await
+            .unwrap();
+        let events = wait_for_session_event(temp.path(), session_id, |event| {
+            matches!(
+                event,
+                SessionEventData::DiagnosticEmitted { message, .. }
+                    if message.contains("automatic session naming returned an empty name")
+            )
+        })
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.data, SessionEventData::ModelUsageRecorded { .. }))
+        );
+        let failed = CodingAgentSession::hydrate(options.clone()).unwrap();
+        assert_eq!(failed.summary.name, None);
+        assert!(failed.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("automatic session naming returned an empty name")
+        }));
+        assert_eq!(failed.usage.input, 20);
+        assert_eq!(failed.usage.output, 40);
+
+        let second = session
+            .run_internal(CodingAgentOperation::Prompt(
+                prompt_options_with_auto_naming(api, "second question"),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            prompt_outcome(second),
+            PromptTurnOutcome::Success { .. }
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let after_second = CodingAgentSession::hydrate(options).unwrap();
+        assert_eq!(after_second.summary.name, None);
+        assert_eq!(after_second.usage.input, 30);
+        assert_eq!(after_second.usage.output, 60);
+    }
+
+    #[tokio::test]
+    async fn configured_naming_model_overrides_current_model_and_default_follows_it() {
+        let configured = ai::api::model::lookup_model("claude-haiku-4-5").unwrap();
+        let current_api = "coding-session-auto-name-model-current";
+        let provider = Arc::new(FauxProvider::with_call_queue(vec![
+            FauxProvider::text_call("answer", StopReason::Stop),
+            FauxProvider::text_call("Configured title", StopReason::Stop),
+        ]));
+        let provider_guard = crate::test_support::ProviderGuard::register_many(vec![
+            (current_api.into(), provider.clone()),
+            (configured.api.clone(), provider),
+        ]);
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = "sess_auto_name_configured_model";
+        let options = CodingAgentSessionOptions::new()
+            .with_ai_client(provider_guard.ai_client())
+            .with_session_id(session_id)
+            .with_session_log_root(temp.path());
+        let mut session = CodingAgentSession::create_internal(options.clone())
+            .await
+            .unwrap();
+
+        session
+            .run_internal(CodingAgentOperation::Prompt(
+                prompt_options_with_session_naming_model(current_api, "question", &configured.id),
+            ))
+            .await
+            .unwrap();
+        let events = wait_for_session_event(temp.path(), session_id, |event| {
+            matches!(event, SessionEventData::ModelUsageRecorded { .. })
+        })
+        .await;
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            SessionEventData::ModelUsageRecorded { model_id, .. }
+                if model_id == &configured.id
+        )));
+        assert_eq!(
+            CodingAgentSession::hydrate(options)
+                .unwrap()
+                .summary
+                .name
+                .as_deref(),
+            Some("Configured title")
+        );
     }
 
     #[tokio::test]

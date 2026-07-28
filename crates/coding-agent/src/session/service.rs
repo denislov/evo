@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_core::api::transcript::{SessionEntry, SessionTreeNode, StoredAgentMessage};
-use ai::api::conversation::ContentBlock;
+use ai::api::conversation::{ContentBlock, Usage};
 
 use crate::events::CodingAgentProductEventDurability;
 use crate::events::CodingAgentSessionWriteFailureStatus;
@@ -111,6 +111,7 @@ pub(crate) struct SessionService {
     committed_session_sequence: Arc<AtomicU64>,
     startup_outbox_records: Vec<DurableOutboxRecord>,
     startup_recovery_markers: Vec<StartupRecoveryMarker>,
+    auto_name_eligible_for_active_prompt: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +119,136 @@ pub(crate) struct SessionEventWriter {
     session_id: String,
     writer: SessionTransactionWriter,
     committed_session_sequence: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SessionAutoNameWriter {
+    session_id: String,
+    writer: SessionTransactionWriter,
+    committed_session_sequence: Arc<AtomicU64>,
+}
+
+impl SessionAutoNameWriter {
+    pub(crate) fn is_unnamed(&self) -> bool {
+        self.writer.manifest_snapshot().name.is_none()
+    }
+
+    pub(crate) fn commit_generated_name(
+        &self,
+        operation_id: &str,
+        name: String,
+        model_id: String,
+        usage: Usage,
+    ) -> Result<(), CodingSessionError> {
+        let mut ids = SystemIdGenerator;
+        let updated_at = SystemClock.now_rfc3339();
+        let events = vec![
+            SessionEventEnvelope::new(
+                self.session_id.clone(),
+                ids.next_event_id(),
+                updated_at.clone(),
+                SessionEventData::OperationStarted {
+                    operation: OperationKind::Other {
+                        name: "session_naming".into(),
+                    },
+                    runtime_generation: Default::default(),
+                },
+            )
+            .with_operation_id(operation_id),
+            SessionEventEnvelope::new(
+                self.session_id.clone(),
+                ids.next_event_id(),
+                updated_at.clone(),
+                SessionEventData::ModelUsageRecorded {
+                    purpose: "session_naming".into(),
+                    model_id,
+                    usage,
+                },
+            )
+            .with_operation_id(operation_id),
+            SessionEventEnvelope::new(
+                self.session_id.clone(),
+                ids.next_event_id(),
+                updated_at.clone(),
+                SessionEventData::OperationCommitted { new_leaf_id: None },
+            )
+            .with_operation_id(operation_id),
+        ];
+        let receipt = self.writer.commit_session_name_if_unset(
+            events,
+            ManifestPatch::new().updated_at(updated_at).name(Some(name)),
+            operation_id.to_owned(),
+        )?;
+        observe_commit_receipt(&self.committed_session_sequence, receipt);
+        Ok(())
+    }
+
+    pub(crate) fn commit_failure_diagnostic(
+        &self,
+        operation_id: &str,
+        message: String,
+        model_usage: Option<(String, Usage)>,
+    ) -> Result<(), CodingSessionError> {
+        let mut ids = SystemIdGenerator;
+        let created_at = SystemClock.now_rfc3339();
+        let mut events = Vec::with_capacity(4);
+        events.push(
+            SessionEventEnvelope::new(
+                self.session_id.clone(),
+                ids.next_event_id(),
+                created_at.clone(),
+                SessionEventData::OperationStarted {
+                    operation: OperationKind::Other {
+                        name: "session_naming".into(),
+                    },
+                    runtime_generation: Default::default(),
+                },
+            )
+            .with_operation_id(operation_id),
+        );
+        if let Some((model_id, usage)) = model_usage {
+            events.push(
+                SessionEventEnvelope::new(
+                    self.session_id.clone(),
+                    ids.next_event_id(),
+                    created_at.clone(),
+                    SessionEventData::ModelUsageRecorded {
+                        purpose: "session_naming".into(),
+                        model_id,
+                        usage,
+                    },
+                )
+                .with_operation_id(operation_id),
+            );
+        }
+        events.push(
+            SessionEventEnvelope::new(
+                self.session_id.clone(),
+                ids.next_event_id(),
+                created_at,
+                SessionEventData::DiagnosticEmitted {
+                    level: crate::session::event::DiagnosticLevel::Warn,
+                    message,
+                },
+            )
+            .with_operation_id(operation_id),
+        );
+        events.push(
+            SessionEventEnvelope::new(
+                self.session_id.clone(),
+                ids.next_event_id(),
+                SystemClock.now_rfc3339(),
+                SessionEventData::OperationFailed {
+                    error_code: "session_naming".into(),
+                    message: "automatic session naming failed".into(),
+                },
+            )
+            .with_operation_id(operation_id),
+        );
+        let receipt = self.writer.append_checkpoint_events_with_receipt(events)?;
+        observe_commit_receipt(&self.committed_session_sequence, receipt);
+        Ok(())
+    }
 }
 
 impl SessionEventWriter {
@@ -225,6 +356,7 @@ impl SessionService {
             committed_session_sequence: Arc::new(AtomicU64::new(committed_session_sequence)),
             startup_outbox_records,
             startup_recovery_markers: Vec::new(),
+            auto_name_eligible_for_active_prompt: false,
         })
     }
 
@@ -1078,6 +1210,34 @@ impl SessionService {
             writer: self.transaction_writer(),
             committed_session_sequence: self.committed_session_sequence.clone(),
         }
+    }
+
+    pub(crate) fn arm_auto_name_for_prompt(&mut self, replay: &SessionReplay) {
+        let has_conversation = replay.transcript.iter().any(|item| {
+            matches!(
+                item,
+                TranscriptItem::UserInput { .. }
+                    | TranscriptItem::AssistantMessage {
+                        status: MessageStatus::Completed,
+                        ..
+                    }
+            )
+        });
+        self.auto_name_eligible_for_active_prompt =
+            !has_conversation && self.transaction_writer.manifest_snapshot().name.is_none();
+    }
+
+    pub(crate) fn take_auto_name_writer_after_prompt(&mut self) -> Option<SessionAutoNameWriter> {
+        if !std::mem::take(&mut self.auto_name_eligible_for_active_prompt)
+            || self.transaction_writer.manifest_snapshot().name.is_some()
+        {
+            return None;
+        }
+        Some(SessionAutoNameWriter {
+            session_id: self.handle.manifest().session_id.clone(),
+            writer: self.transaction_writer(),
+            committed_session_sequence: self.committed_session_sequence.clone(),
+        })
     }
 
     pub(crate) fn committed_session_sequence(&self) -> u64 {
@@ -2852,6 +3012,43 @@ mod tests {
             CodingSessionError::PartialCommit { operation_id, .. }
                 if operation_id == "op_name_failure"
         ));
+    }
+
+    #[test]
+    fn background_name_never_overwrites_a_concurrent_manual_name_but_keeps_usage() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = CodingAgentSessionOptions::new()
+            .with_session_id("sess_name_race")
+            .with_session_log_root(temp.path());
+        let mut service = SessionService::create(&options).unwrap();
+        let writer = SessionAutoNameWriter {
+            session_id: service.session_id().to_owned(),
+            writer: service.transaction_writer(),
+            committed_session_sequence: service.committed_session_sequence.clone(),
+        };
+        service
+            .set_session_name(Some("Manual name".into()), "op_manual_name")
+            .unwrap();
+        let usage = Usage {
+            input: 7,
+            output: 3,
+            total_tokens: 10,
+            ..Usage::default()
+        };
+
+        writer
+            .commit_generated_name(
+                "op_background_name",
+                "Generated name".into(),
+                "test-model".into(),
+                usage,
+            )
+            .unwrap();
+
+        assert_eq!(service.summary().name.as_deref(), Some("Manual name"));
+        let replay = service.replay().unwrap();
+        assert_eq!(replay.usage.input, 7);
+        assert_eq!(replay.usage.output, 3);
     }
 
     #[test]

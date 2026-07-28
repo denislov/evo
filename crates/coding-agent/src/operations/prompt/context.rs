@@ -488,6 +488,11 @@ impl RuntimeSnapshot {
         &self.model
     }
 
+    pub(crate) fn with_model(mut self, model: Model) -> Self {
+        self.model = model;
+        self
+    }
+
     pub(crate) fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref()
     }

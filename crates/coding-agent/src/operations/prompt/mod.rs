@@ -324,6 +324,7 @@ impl PromptOperation<'_> {
         match &mut self.persistence {
             SessionPersistence::Persistent(session_service) => {
                 let replay = session_service.replay()?;
+                session_service.arm_auto_name_for_prompt(&replay);
                 let transaction = session_service.begin_prompt_transaction_with_snapshot(snapshot);
                 let operation_id = transaction.operation_id().to_owned();
                 let turn_id = transaction.turn_id().to_owned();

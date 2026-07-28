@@ -20,6 +20,7 @@ fn runtime_settings() -> Settings {
         default_provider: None,
         default_model: None,
         default_thinking_level: None,
+        session_naming_model: None,
         steering_mode: "one-at-a-time".into(),
         follow_up_mode: "one-at-a-time".into(),
         session_dir: None,

@@ -129,6 +129,9 @@ fn settings_commands(
     let _: Option<CodingAgentDoubleEscapeAction> = None;
     let _: Option<CodingAgentPresentationMode> = None;
     let _: Option<CodingAgentTreeFilterMode> = None;
+    let _: CodingAgentSettingsCommand = CodingAgentSettingsCommand::SetSessionNamingModel(
+        "claude-haiku-4-5".into(),
+    );
     Ok(())
 }
 

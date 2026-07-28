@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、DSK-501、DSK-502 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-28
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -621,7 +621,7 @@ feat(coding-agent): persist an optional session name in the manifest
 
 **优先级：P2**
 **风险：中**
-**范围：`crates/coding-agent/src/operations/`、`src/app/settings.rs`、`src/app/operation_factory.rs`**
+**范围：`crates/coding-agent/src/operations/`、`src/runtime/dispatch.rs`、`src/session/`、`src/config/settings.rs`、`src/app/settings.rs`**
 **依赖：CAG-105**
 
 **目标**
@@ -630,8 +630,8 @@ feat(coding-agent): persist an optional session name in the manifest
 
 **工作**
 
-1. 复用 `operations/branch_summary/` 的基础设施新增一条命名 operation：
-   输入为首轮 user + assistant 内容，输出为受长度约束的单行名称。
+1. 复用 branch-summary 已验证的 scoped provider runtime 边界新增命名
+   workflow：输入为首轮 user + assistant 内容，输出为受长度约束的单行名称。
 2. 新增设置项：命名专用模型 id。**未配置时跟随会话当前选中模型**（已确认决策）。
 3. 触发时机：首轮对话终态事件之后、且 `manifest.name.is_none()` 时后台触发一次。
    不阻塞任何用户可见路径。
@@ -650,6 +650,35 @@ feat(coding-agent): persist an optional session name in the manifest
 - 新增测试：已有名称时不再触发；
 - 新增测试：命名失败时会话仍可正常使用，名称保持 `None`，且产生 diagnostic；
 - 新增测试：配置了命名模型时使用该模型，未配置时使用会话当前模型。
+
+**实现记录（2026-07-28）**
+
+- 新增 `operations/session_naming.rs`；`run_operation` 仅在主 prompt 的 durable
+  terminal outbox 持久化且 submission guard 完成后派生 Tokio 任务。派生点
+  只做 O(1) 的条件获取与 writer 句柄 clone，不追加 event-log replay、
+  不改变 prompt terminal drain 顺序，模型请求与落盘均在后台执行；
+- prompt 原本就会加载的 pre-turn replay 同时用于判定「尚无 user / completed
+  assistant」，manifest 已有名称或后续轮次都不派生。正常产品
+  operation factory 持有 settings snapshot 时启用该策略；缺少产品策略快照的
+  底层测试 / legacy 调用保持原语义；
+- 新增 `session_naming_model` 全局设置、公开 snapshot 字段与
+  `SetSessionNamingModel`。未配置时 clone 当前 prompt 已解析的 model；
+  配置时改用已注册的指定 model，仍经同一 scoped provider / model-capability
+  边界；输入按 user / assistant 各 4,000 字符有界，输出必须是
+  非空、单行且不超过 80 字符；
+- 新增 durable `model.usage.recorded` event，命名成功或已返回 usage 的失败
+  都以独立 `session_naming` operation 落盘并累加既有 session usage；该 usage
+  不伪装为 assistant transcript message，也不覆盖最后对话 context-token
+  水位。失败同时落盘 warning diagnostic 并发出 live diagnostic；
+- 后台 writer 复用会话唯一 actor；「记录 usage + 仅当 manifest.name 仍为
+  `None` 时写名称」在 actor 内原子判定，因此并发手工命名不会被覆盖，
+  但已发生的模型 usage 仍会计账；
+- 新增端到端测试覆盖首轮成功后命名且只命名一次、已有名称跳过、
+  空输出保留 `None` / durable diagnostic / usage 且第二轮仍可用、配置模型
+  覆盖与默认跟随，以及手工命名竞态下不覆盖但仍计费；
+- 直接相关 gate 已通过：coding-agent lib 串行 `758/758`、API boundary
+  `14/14`、lib-only Clippy `-D warnings`、Desktop / CLI / TUI all-target
+  `cargo check`。全量 integration 仍保留上文已记录的既有基线阻断。
 
 **建议提交**
 

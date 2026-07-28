@@ -101,6 +101,11 @@ enum SessionTransactionWriterCommand {
         manifest_patch: ManifestPatch,
         operation_id: Option<String>,
     },
+    CommitSessionNameIfUnset {
+        events: Vec<SessionEventEnvelope>,
+        manifest_patch: ManifestPatch,
+        operation_id: String,
+    },
     #[cfg(test)]
     Block {
         entered: SyncSender<()>,
@@ -261,6 +266,19 @@ impl SessionTransactionWriter {
         self.execute(SessionTransactionWriterCommand::CommitSessionMutation {
             events,
             outbox_records,
+            manifest_patch,
+            operation_id,
+        })
+    }
+
+    pub(crate) fn commit_session_name_if_unset(
+        &self,
+        events: Vec<SessionEventEnvelope>,
+        manifest_patch: ManifestPatch,
+        operation_id: String,
+    ) -> Result<SessionCommitReceipt, CodingSessionError> {
+        self.execute(SessionTransactionWriterCommand::CommitSessionNameIfUnset {
+            events,
             manifest_patch,
             operation_id,
         })
@@ -521,6 +539,34 @@ fn execute_writer_command(
                 .map_err(|error| mutation_commit_error(operation_id.as_deref(), error))?;
             refresh_writer_handle(store, handle)
                 .map_err(|error| mutation_commit_error(operation_id.as_deref(), error))?;
+            Ok(SessionCommitReceipt {
+                committed_session_sequence,
+            })
+        }
+        SessionTransactionWriterCommand::CommitSessionNameIfUnset {
+            events,
+            manifest_patch,
+            operation_id,
+        } => {
+            let committed_session_sequence = if events.is_empty() {
+                None
+            } else {
+                Some(
+                    store
+                        .append_events_with_cursor(handle, &events, write_lease)
+                        .map_err(|error| mutation_commit_error(Some(&operation_id), error))?,
+                )
+            };
+            if handle.manifest().name.is_some() {
+                return Ok(SessionCommitReceipt {
+                    committed_session_sequence,
+                });
+            }
+            store
+                .update_manifest(handle, manifest_patch)
+                .map_err(|error| mutation_commit_error(Some(&operation_id), error))?;
+            refresh_writer_handle(store, handle)
+                .map_err(|error| mutation_commit_error(Some(&operation_id), error))?;
             Ok(SessionCommitReceipt {
                 committed_session_sequence,
             })
@@ -1774,6 +1820,7 @@ mod tests {
                 }
                 SessionEventData::BranchSummaryCreated { .. } => "branch.summary.created",
                 SessionEventData::SessionTreeLabelUpdated { .. } => "session.tree_label.updated",
+                SessionEventData::ModelUsageRecorded { .. } => "model.usage.recorded",
             })
             .collect()
     }

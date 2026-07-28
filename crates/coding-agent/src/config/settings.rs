@@ -89,6 +89,8 @@ pub struct PartialSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_thinking_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_naming_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steering_mode: Option<String>,
@@ -172,6 +174,7 @@ pub struct Settings {
     pub default_provider: Option<String>,
     pub default_model: Option<String>,
     pub default_thinking_level: Option<String>,
+    pub session_naming_model: Option<String>,
     pub steering_mode: String,
     pub follow_up_mode: String,
     pub session_dir: Option<String>,
@@ -265,6 +268,7 @@ impl PartialSettings {
             default_provider: over.default_provider.or(self.default_provider),
             default_model: over.default_model.or(self.default_model),
             default_thinking_level: over.default_thinking_level.or(self.default_thinking_level),
+            session_naming_model: over.session_naming_model.or(self.session_naming_model),
             transport: over.transport.or(self.transport),
             steering_mode: over.steering_mode.or(self.steering_mode),
             follow_up_mode: over.follow_up_mode.or(self.follow_up_mode),
@@ -304,6 +308,7 @@ impl PartialSettings {
             default_provider: self.default_provider,
             default_model: self.default_model,
             default_thinking_level: self.default_thinking_level,
+            session_naming_model: self.session_naming_model,
             steering_mode: self
                 .steering_mode
                 .unwrap_or_else(|| "one-at-a-time".to_string()),

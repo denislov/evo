@@ -105,6 +105,7 @@ pub struct CodingAgentRuntimeSettingsSnapshot {
     pub block_images: bool,
     pub enable_skill_commands: bool,
     pub default_thinking_level: Option<CodingAgentThinkingLevel>,
+    pub session_naming_model: Option<String>,
     pub http_idle_timeout_ms: u64,
 }
 
@@ -118,6 +119,7 @@ impl Default for CodingAgentRuntimeSettingsSnapshot {
             block_images: false,
             enable_skill_commands: true,
             default_thinking_level: None,
+            session_naming_model: None,
             http_idle_timeout_ms: 300_000,
         }
     }
@@ -189,6 +191,7 @@ pub enum CodingAgentSettingsCommand {
     SetClearOnShrink(bool),
     SetDoubleEscapeAction(CodingAgentDoubleEscapeAction),
     SetDefaultThinkingLevel(CodingAgentThinkingLevel),
+    SetSessionNamingModel(String),
     SetHttpIdleTimeoutMs(u64),
 }
 
@@ -261,6 +264,7 @@ fn snapshot_from_settings(settings: &Settings) -> CodingAgentSettingsSnapshot {
                 .default_thinking_level
                 .as_deref()
                 .and_then(|value| value.parse().ok()),
+            session_naming_model: settings.session_naming_model.clone(),
             http_idle_timeout_ms: settings.http_idle_timeout_ms.min(MAX_HTTP_IDLE_TIMEOUT_MS),
         },
         presentation: CodingAgentPresentationSettingsSnapshot {
@@ -358,6 +362,16 @@ fn apply_command(
             let level = level.to_string();
             settings.default_thinking_level = Some(level.clone());
             delta.default_thinking_level = Some(level);
+        }
+        CodingAgentSettingsCommand::SetSessionNamingModel(model_id) => {
+            let model_id = model_id.trim();
+            if model_id.is_empty() || ai::api::model::lookup_model(model_id).is_none() {
+                return Err(invalid_settings_command(
+                    "session naming model is not available",
+                ));
+            }
+            settings.session_naming_model = Some(model_id.to_owned());
+            delta.session_naming_model = Some(model_id.to_owned());
         }
         CodingAgentSettingsCommand::SetHttpIdleTimeoutMs(timeout_ms) => {
             if timeout_ms > MAX_HTTP_IDLE_TIMEOUT_MS {
@@ -488,6 +502,39 @@ mod tests {
     }
 
     #[test]
+    fn session_naming_model_persists_and_updates_runtime_factory() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        env.set_evo_dir(temp.path());
+        let settings = PartialSettings::default().resolve();
+        let mut controller = CodingAgentSettingsController::from_internal(".", settings.clone());
+        let mut factory = operation_factory(settings);
+
+        let outcome = controller
+            .apply(
+                CodingAgentSettingsCommand::SetSessionNamingModel("claude-haiku-4-5".into()),
+                &mut factory,
+            )
+            .unwrap();
+
+        assert_eq!(
+            outcome.snapshot.runtime.session_naming_model.as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        assert!(
+            std::fs::read_to_string(temp.path().join("settings.toml"))
+                .unwrap()
+                .contains("session_naming_model = \"claude-haiku-4-5\"")
+        );
+        assert_eq!(
+            factory
+                .settings_for_tests()
+                .and_then(|settings| settings.session_naming_model.as_deref()),
+            Some("claude-haiku-4-5")
+        );
+    }
+
+    #[test]
     fn failed_persistence_does_not_commit_settings_or_factory() {
         let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
         let temp = tempfile::tempdir().unwrap();
@@ -559,6 +606,15 @@ mod tests {
             )
             .unwrap_err();
 
+        assert_eq!(error.code(), "invalid_settings_command");
+        assert!(!temp.path().join("settings.toml").exists());
+
+        let error = controller
+            .apply(
+                CodingAgentSettingsCommand::SetSessionNamingModel("missing-model".into()),
+                &mut factory,
+            )
+            .unwrap_err();
         assert_eq!(error.code(), "invalid_settings_command");
         assert!(!temp.path().join("settings.toml").exists());
     }

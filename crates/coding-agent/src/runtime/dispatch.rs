@@ -372,6 +372,14 @@ impl CodingAgentSession {
         }
         let execution = operation_permit.execution().clone();
         let snapshot = execution.capability_snapshot.clone();
+        let session_naming_seed = match &operation {
+            Operation::Prompt(options) => {
+                crate::operations::session_naming::SessionNamingSeed::from_prompt(
+                    options, &snapshot,
+                )
+            }
+            _ => None,
+        };
         let operation_cancellation = operation_permit.cancellation_token();
         let operation_cancellation_handle = operation_permit.cancellation_handle();
         if let (Some(submission), Some(cancellation)) =
@@ -647,7 +655,39 @@ impl CodingAgentSession {
         if let Some(guard) = submission.as_mut() {
             guard.finish(&decision, &commit_result)?;
         }
+        self.schedule_session_naming_after_prompt(session_naming_seed, &result);
         result
+    }
+
+    fn schedule_session_naming_after_prompt(
+        &mut self,
+        seed: Option<crate::operations::session_naming::SessionNamingSeed>,
+        result: &Result<OperationOutcome, CodingSessionError>,
+    ) {
+        let Some(seed) = seed else {
+            return;
+        };
+        let Ok(OperationOutcome::Prompt(
+            crate::operations::prompt::context::InternalPromptTurnOutcome::Success {
+                final_text,
+                ..
+            },
+        )) = result
+        else {
+            return;
+        };
+        let crate::session::service::SessionPersistence::Persistent(session_service) =
+            &mut self.runtime_host.session_coordinator.persistence
+        else {
+            return;
+        };
+        if let Some(writer) = session_service.take_auto_name_writer_after_prompt() {
+            seed.spawn_after_first_exchange(
+                writer,
+                final_text.clone(),
+                self.runtime_host.event_hub.service.clone(),
+            );
+        }
     }
 
     fn persist_operation_terminal_outbox(

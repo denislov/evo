@@ -620,6 +620,11 @@ impl ReplayBuilder {
                     ));
                 }
             }
+            SessionEventData::ModelUsageRecorded {
+                purpose: _,
+                model_id: _,
+                usage,
+            } => self.record_usage(None, usage),
             SessionEventData::MessageCancelled { message_id, .. } => {
                 self.reasoning_started_at
                     .retain(|(open_message_id, _), _| open_message_id != message_id);
@@ -748,6 +753,10 @@ impl ReplayBuilder {
     }
 
     fn record_assistant_usage(&mut self, message_id: &str, usage: &Usage) {
+        self.record_usage(Some(message_id), usage);
+    }
+
+    fn record_usage(&mut self, context_message_id: Option<&str>, usage: &Usage) {
         self.usage.input = self.usage.input.saturating_add(usage.input);
         self.usage.output = self.usage.output.saturating_add(usage.output);
         self.usage.cache_read = self.usage.cache_read.saturating_add(usage.cache_read);
@@ -762,7 +771,9 @@ impl ReplayBuilder {
         }
 
         let context_tokens = calculate_context_tokens(usage);
-        if context_tokens > 0 {
+        if context_tokens > 0
+            && let Some(message_id) = context_message_id
+        {
             self.usage.last_context_tokens = Some(context_tokens);
             self.usage.last_context_message_id = Some(message_id.to_owned());
         }
