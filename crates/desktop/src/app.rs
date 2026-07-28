@@ -54,105 +54,110 @@ impl Render for StartupFailure {
 pub(crate) fn run(options: crate::DesktopApplicationOptions) {
     let crate::DesktopApplicationOptions { cwd, session_id } = options;
     let native_replay = native_perf::request();
-    application().run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        crate::actions::bind_keys(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
+    // Bundled Lucide icons back every icon-only control. Without an asset
+    // source `Icon` renders nothing, so this registration is what makes the
+    // shared control semantics in `desktop_controls` usable at all.
+    application()
+        .with_assets(gpui_component_assets::Assets)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            crate::actions::bind_keys(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
 
-        if let Some(request) = match native_replay {
-            Ok(request) => request,
-            Err(error) => {
-                eprintln!("desktop: native replay configuration failed: {error}");
-                cx.quit();
-                return;
-            }
-        } {
-            if let Err(error) = native_perf::open(cx, request) {
-                eprintln!("desktop: native replay failed: {error}");
-                cx.quit();
-            }
-            return;
-        }
-
-        let bootstrap = DesktopRuntimeBridge::spawn(CodingAgentEmbeddingOptions::new(cwd));
-        cx.spawn(async move |cx| {
-            let mut bootstrap = match bootstrap {
-                Ok(bootstrap) => bootstrap,
+            if let Some(request) = match native_replay {
+                Ok(request) => request,
                 Err(error) => {
-                    let _ = open_failure(startup_error_message(&error), cx);
+                    eprintln!("desktop: native replay configuration failed: {error}");
+                    cx.quit();
                     return;
                 }
-            };
-            let (runtime, snapshot) = loop {
-                match bootstrap.try_ready() {
-                    Ok(Some(ready)) => break ready,
-                    Ok(None) => {
-                        cx.background_executor()
-                            .timer(BOOTSTRAP_POLL_INTERVAL)
-                            .await;
-                    }
+            } {
+                if let Err(error) = native_perf::open(cx, request) {
+                    eprintln!("desktop: native replay failed: {error}");
+                    cx.quit();
+                }
+                return;
+            }
+
+            let bootstrap = DesktopRuntimeBridge::spawn(CodingAgentEmbeddingOptions::new(cwd));
+            cx.spawn(async move |cx| {
+                let mut bootstrap = match bootstrap {
+                    Ok(bootstrap) => bootstrap,
                     Err(error) => {
                         let _ = open_failure(startup_error_message(&error), cx);
                         return;
                     }
-                }
-            };
+                };
+                let (runtime, snapshot) = loop {
+                    match bootstrap.try_ready() {
+                        Ok(Some(ready)) => break ready,
+                        Ok(None) => {
+                            cx.background_executor()
+                                .timer(BOOTSTRAP_POLL_INTERVAL)
+                                .await;
+                        }
+                        Err(error) => {
+                            let _ = open_failure(startup_error_message(&error), cx);
+                            return;
+                        }
+                    }
+                };
 
-            let store = PreferenceStore::new(&snapshot.project.global_config_dir);
-            let (loaded, mut notice) = match store.load() {
-                Ok(loaded) => {
-                    let notice = preference_notice(&loaded);
-                    (loaded, notice)
-                }
-                Err(error) => (
-                    PreferenceLoad {
-                        preferences: DesktopPreferences::default(),
-                        recovery: None,
-                    },
-                    Some(format!("Preferences could not be loaded: {error}")),
-                ),
-            };
-            let writer = match PreferenceWriter::spawn(store) {
-                Ok(writer) => Some(writer),
-                Err(error) => {
-                    notice = Some(format!("Preference writer unavailable: {error}"));
-                    None
-                }
-            };
-            let projection = match DesktopProjection::new(snapshot) {
-                Ok(projection) => projection,
-                Err(issue) => {
-                    let _ = open_failure(
-                        format!("projection initialization failed: {}", issue.message),
-                        cx,
-                    );
-                    return;
-                }
-            };
-            let options = window_options(&loaded.preferences);
-            if let Err(error) = cx.open_window(options, |window, cx| {
-                window.set_window_title("evo · native coding agent");
-                let view = cx.new(|cx| {
-                    NativeShell::new(
-                        NativeShellInit {
-                            runtime,
-                            projection,
-                            preferences: loaded.preferences,
-                            preference_writer: writer,
-                            preference_notice: notice,
-                            initial_session_id: session_id,
+                let store = PreferenceStore::new(&snapshot.project.global_config_dir);
+                let (loaded, mut notice) = match store.load() {
+                    Ok(loaded) => {
+                        let notice = preference_notice(&loaded);
+                        (loaded, notice)
+                    }
+                    Err(error) => (
+                        PreferenceLoad {
+                            preferences: DesktopPreferences::default(),
+                            recovery: None,
                         },
-                        window,
-                        cx,
-                    )
-                });
-                cx.new(|cx| Root::new(view, window, cx))
-            }) {
-                eprintln!("desktop: failed to open native window: {error}");
-            }
-        })
-        .detach();
-    });
+                        Some(format!("Preferences could not be loaded: {error}")),
+                    ),
+                };
+                let writer = match PreferenceWriter::spawn(store) {
+                    Ok(writer) => Some(writer),
+                    Err(error) => {
+                        notice = Some(format!("Preference writer unavailable: {error}"));
+                        None
+                    }
+                };
+                let projection = match DesktopProjection::new(snapshot) {
+                    Ok(projection) => projection,
+                    Err(issue) => {
+                        let _ = open_failure(
+                            format!("projection initialization failed: {}", issue.message),
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                let options = window_options(&loaded.preferences);
+                if let Err(error) = cx.open_window(options, |window, cx| {
+                    window.set_window_title("evo · native coding agent");
+                    let view = cx.new(|cx| {
+                        NativeShell::new(
+                            NativeShellInit {
+                                runtime,
+                                projection,
+                                preferences: loaded.preferences,
+                                preference_writer: writer,
+                                preference_notice: notice,
+                                initial_session_id: session_id,
+                            },
+                            window,
+                            cx,
+                        )
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                }) {
+                    eprintln!("desktop: failed to open native window: {error}");
+                }
+            })
+            .detach();
+        });
 }
 
 fn preference_notice(load: &PreferenceLoad) -> Option<String> {

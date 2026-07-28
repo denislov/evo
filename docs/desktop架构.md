@@ -18,8 +18,10 @@
 | `DSK-103` | 完成 | ComposerPane 独占 InputState、focus handle、Change subscription 与 latency probe；Root 保留 ComposerState、ledger/runtime admission 和 session-scoped draft/mode；全量、boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `DSK-104` | 完成 | InspectorPane/OverlayHost 已改为 bounded DTO + typed event，不再持有 Root；telemetry/focus/overlay lifecycle 仍由 Root 管理；全量、boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `DSK-105` | 完成 | ConversationController 已成为 transcript cache/layout/viewport/dirty-sequence 的唯一 owner；Root 只提供 bounded `ConversationSource` 并消费 ViewModel；全量、boundary、七个 visual fixture 和两组 performance gate 通过 |
-| `DSK-301` | 未开始 | 依赖已满足（`DSK-105` 完成），可与 `VUI-201` 并行评估 |
-| `VUI-101` 至 `VUI-201` | 未开始 | 等视觉基线人工 review 和对应 Pane ownership 任务 |
+| `DSK-301` | 进行中 | 第一步 `markdown.rs` 已抽出并保留 re-export；其余六步待续 |
+| `VUI-000` | 完成 | 七个 fixture 已 review；文档第二节七条问题经确认全部纳入改造范围 |
+| `VUI-101` | 完成 | 已接入 `gpui-component-assets` 的 Lucide 图标源并建立控件权重阶梯；全量、boundary、七个 visual fixture（零像素变化）通过 |
+| `VUI-102` 至 `VUI-201` | 未开始 | 前置已全部满足，按 Pane lane 顺序推进 |
 
 `DSK-000` 在 2026-07-28 记录的既有 Clippy 红灯：
 
@@ -799,6 +801,48 @@ refactor(desktop): separate runtime protocol and bridge
 - familiar tool action 不再要求用文本句点或手写 glyph 充当图标；
 - primitive 的 hover/focus/disabled/selected 状态有隔离测试；
 - primitive 本身不读取 projection、controller 或 `NativeShell`。
+
+**完成记录（2026-07-28）**
+
+盘点结论：`gpui-component` 已覆盖绝大部分需求，因此 `desktop_controls.rs` 只做
+薄语义层，不建第二套组件库。
+
+- 现成可用、不再自造：`tab/tab_bar`（已 `overflow_x_scroll`，天然不换行，直接解决
+  Inspector Tab 换行）、`kbd`、`description_list`（用于 authorization 明细对齐）、
+  `badge`、`tag`、`tooltip`、`spinner`、`list`、`combobox`；
+- `Button` 已提供 `primary`/`danger`/`ghost`/`outline`/`selected`/`disabled`/
+  `loading`/`tooltip`/`dropdown_caret`/`tab_index`，权重阶梯直接构建其上；
+- 图标源：新增 `gpui-component-assets` 依赖（rev 与 `gpui-component` 完全一致），
+  在 `app.rs` 的 `application().with_assets(...)` 注册。此前 desktop **一个图标都没用、
+  也没有 asset source**，这正是所有控件退化成文字按钮的根因；
+- 107 个 Lucide SVG 覆盖计划要求的全部图标，`IconName` 由资产目录在编译期生成，
+  命名不存在的图标无法通过编译，因此不存在手写 SVG 的路径。
+
+`desktop_controls.rs` 提供：
+
+- `DesktopIcon`：语义图标词汇，Pane 只命名意图不写资产文件名；
+- `DesktopControlSize`：28/32/36/40 px 固定高度阶梯，enabled/disabled/busy/selected
+  之间高度不变，因此状态切换不会引起宿主重排；
+- `DesktopControlWeight` 与 `DesktopCriticalTone`：Tool / Selector / Primary /
+  Critical(Neutral·Affirmative·Dangerous)，使 `Deny` 与 `Allow for operation`
+  不可能渲染成同一权重；
+- `DesktopIconButton`：**构造函数强制要求 accessible label**，同一字符串同时作为
+  tooltip，两者不可能漂移；`busy` 只换图标不换盒子；
+- `DesktopSelector`：当前值 + caret，读作"值"而非"动作"；
+- `DesktopActionRow`：整行 action surface，选中用背景 + accent 竖轨而非边框
+  （no-color 下仍可辨认，且不增加行高），trailing 工具位宽度恒定预留，
+  hover 显形不会引起行内重排。
+
+- 六项隔离测试覆盖高度阶梯、图标解析、critical 三档色彩互异、busy 保持盒子并拒绝
+  输入、行状态默认值与独立可设；另有一项断言 primitive 实现不含
+  `DesktopProjection`、`NativeShell`、`ConversationController` 或 command ledger；
+- dependency boundary 增加：icon 资产 rev 必须与 component rev 相等；asset source
+  必须注册在 bootstrap（注册在别处会导致仅图标控件渲染为空）；
+- 本任务不修改任何 Pane，因此七个 visual fixture 全部 `RMSE=0`；
+- Desktop 全量 184 通过、5 个 release fixture 忽略，boundary 14/14，
+  fmt 与 `git diff --check` 通过；Clippy 仅 `DSK-000` 两项既有红灯；
+- 计划要求的 radius 收敛留给 `VUI-201`：现有 token 为 sm=6/md=10/lg=12，
+  本任务按"不全局修改 radius、颜色或 Pane 布局"约束未动。
 
 ### VUI-102：简化 Header 与 StatusBar
 

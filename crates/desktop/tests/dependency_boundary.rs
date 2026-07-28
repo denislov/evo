@@ -48,6 +48,18 @@ fn unstable_ui_dependencies_are_exactly_pinned() {
         dependencies["gpui-component"]["git"].as_str(),
         Some("https://github.com/longbridge/gpui-component.git")
     );
+    // Icons must come from one bundled, accessible set rather than hand-drawn
+    // SVGs, and the asset crate must track the component revision exactly so an
+    // `IconName` can never outrun the assets that back it.
+    assert_eq!(
+        dependencies["gpui-component-assets"]["rev"].as_str(),
+        dependencies["gpui-component"]["rev"].as_str(),
+        "bundled icon assets must be pinned to the component revision"
+    );
+    assert_eq!(
+        dependencies["gpui-component-assets"]["git"].as_str(),
+        Some("https://github.com/longbridge/gpui-component.git")
+    );
 
     let targets = manifest["target"].as_table().expect("target table");
     for target in [
@@ -274,12 +286,16 @@ fn desktop_bootstrap_and_native_shell_have_distinct_module_owners() {
         .expect("desktop native shell owner should be readable");
 
     assert!(bootstrap.contains("mod native_shell;"));
-    assert!(bootstrap.contains("application().run"));
+    assert!(bootstrap.contains("application()"));
+    assert!(bootstrap.contains(".run(move |cx: &mut App|"));
     assert!(bootstrap.contains("DesktopRuntimeBridge::spawn"));
+    // Icon assets are an application-startup concern: registering the source
+    // anywhere else would leave icon-only controls rendering blank.
+    assert!(bootstrap.contains(".with_assets(gpui_component_assets::Assets)"));
     assert!(!bootstrap.contains("impl Render for NativeShell"));
     assert!(shell.contains("impl Render for NativeShell"));
     assert!(shell.contains("fn submit_composer"));
-    assert!(!shell.contains("application().run"));
+    assert!(!shell.contains("application()"));
     assert!(!shell.contains("DesktopRuntimeBridge::spawn"));
 }
 

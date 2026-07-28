@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "bc174a7ec4534b2a4174fddde314b38d30d69093", default-features = false }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component.git", rev = "bc174a7ec4534b2a4174fddde314b38d30d69093" }
 coding-agent = { path = "../coding-agent" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -6464,6 +6464,7 @@ mod composer_pane;
 mod conversation_controller;
 mod conversation_header;
 mod conversation_pane;
+mod desktop_controls;
 mod desktop_style;
 mod inspector_pane;
 mod overlay_host;
