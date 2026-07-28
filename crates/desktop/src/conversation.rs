@@ -13,8 +13,10 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::shell::USER_MESSAGE_WIDTH_PERCENT;
 
+mod copy;
 mod markdown;
 
+pub use copy::{MAX_COPY_BYTES, conversation_copy_text};
 #[allow(unused_imports)]
 pub use markdown::{
     MAX_CODE_BLOCK_PREVIEW_BYTES, MAX_MARKDOWN_LINE_BYTES, MAX_MARKDOWN_LINES,
@@ -27,7 +29,6 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_BLOCK_TEXT_BYTES: usize = 1024 * 1024;
 pub const MAX_THINKING_TEXT_BYTES: usize = 512 * 1024;
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
-pub const MAX_COPY_BYTES: usize = 1024 * 1024;
 pub const MAX_COMPOSER_BYTES: usize = 1024 * 1024;
 /// A reader who moves farther than this from the bottom owns the viewport.
 pub const FOLLOW_LATEST_PAUSE_THRESHOLD_PX: f32 = 48.0;
@@ -217,17 +218,6 @@ impl ConversationBlock {
     fn refresh_source_revision(&mut self) {
         self.source_revision = conversation_block_revision(self);
     }
-}
-
-pub fn conversation_copy_text(text: &str, detail: &str) -> String {
-    let mut text = text.to_owned();
-    if !detail.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(detail);
-    }
-    truncate_bytes(text, MAX_COPY_BYTES).0
 }
 
 #[derive(Debug)]
@@ -2382,26 +2372,6 @@ mod tests {
             viewport.copy_selected(&projection).as_deref(),
             Some("message 0")
         );
-    }
-
-    #[test]
-    fn tool_copy_includes_arguments_and_result_without_exceeding_the_copy_cap() {
-        let projection = ConversationProjection::hydrate(transcript(vec![
-            CodingAgentSessionTranscriptItem::Tool {
-                call_id: "call-1".into(),
-                name: "shell".into(),
-                args: serde_json::json!({"command": "x".repeat(MAX_TOOL_ARGUMENT_BYTES)}),
-                result: Some("界".repeat(MAX_BLOCK_TEXT_BYTES)),
-                is_error: false,
-                duration_millis: Some(1_240),
-            },
-        ]));
-        let block = projection.blocks().front().unwrap();
-        assert_eq!(block.title, "Tool · shell · 1.2 s");
-        let copied = block.copy_text();
-        assert!(copied.len() <= MAX_COPY_BYTES);
-        assert!(copied.is_char_boundary(copied.len()));
-        assert!(block.truncated);
     }
 
     #[test]
