@@ -22,7 +22,8 @@
 | `VUI-101` | 完成 | 已接入 `gpui-component-assets` 的 Lucide 图标源并建立控件权重阶梯；全量、boundary、七个 visual fixture（零像素变化）通过 |
 | `VUI-102` | 完成 | Header 已使用 panel/overflow icon 与唯一 model/profile selector；StatusBar 仅保留临时 thinking selector 和被动状态；全量、七个 reviewed golden 与两组 performance gate 通过 |
 | `VUI-103` | 完成 | docked 与 narrow overlay 复用同一 SessionsPane；整行 action、搜索和四类状态语义统一；全量、15/15 boundary、七个 reviewed golden 与两组 performance gate 通过 |
-| `VUI-104` 至 `VUI-106` | 未开始 | 结构与视觉 foundation 前置均已满足，按 Composer、Inspector、Conversation lane 顺序推进 |
+| `VUI-104` | 完成 | Composer 已收敛为连续 surface、紧凑 toolbar 和稳定 Submit/Busy 图标；thinking 已从 StatusBar 迁入 typed Composer 路径；全量、15/15 boundary、七个 reviewed golden 与两组 performance gate 通过 |
+| `VUI-105` 至 `VUI-106` | 未开始 | 结构与视觉 foundation 前置均已满足，按 Inspector、Conversation lane 顺序推进 |
 | `VUI-201` | 未开始 | 等 `VUI-102` 至 `VUI-106` 完成后统一全局视觉节奏和层级 |
 
 `DSK-000` 在 2026-07-28 记录的既有 Clippy 红灯：
@@ -1039,6 +1040,34 @@ owner、稳定 re-export、无业务实现的 `mod.rs` 和上述无环方向。�
 - narrow 下不遮挡输入、不换行成第二个独立 action block；
 - click-to-photon、composer latency、keyboard-focus 和视觉测试通过。
 
+**完成记录（2026-07-28）**
+
+- Composer 的 notice、输入和 action toolbar 已合并为一个连续 bordered surface；
+  固定 `176 px` action column 删除，单行 content 保持 `48–56 px`，InputState 从
+  `auto_grow(1, 8)` 起步并继续只向上增长；
+- idle 与 active-operation 均使用同一个 `36 px` Submit icon box；pending/
+  awaiting-start 只把同一 box 切换为 Busy/disabled，不改变几何；
+- running mode 使用紧凑 `DesktopSelector`，与 thinking selector、Submit 在同一行按
+  中心线对齐；`SteerNow`、`QueueNext` 和 session-scoped mode 的 Root 所有权不变；
+- thinking 作为 bounded `ComposerPaneViewModel` 字段进入 Pane，并通过
+  `ComposerPaneEvent::CycleThinking` 回到 Root；StatusBar 删除 thinking 字段、事件
+  与控件后恢复为纯被动状态；
+- rejection 与 authorization notice 成为 surface 内的全宽 inline status row；
+  authorization pending 仍可编辑，notice/mode 切换不改变 input width；
+- 新增真实点击测试，确认 Composer selector 经 typed event 修改 thinking selection，
+  且 StatusBar 不再暴露旧控件；Submit/Steer/FollowUp、command id、draft acceptance/
+  rejection、快捷键、焦点和 latency probe 契约均保持；
+- Desktop 全量单线程验证 185 项通过、5 项 release fixture 忽略，boundary 15/15；
+  `cargo check -p desktop --all-targets`、fmt 和 diff check 通过；
+- 七个 before/after/diff 已人工 review 并安装，安装后 wide、medium、narrow、
+  authorization、reduced-motion、keyboard-focus、no-color 全部 `RMSE=0`；
+- headless 10k-row CPU frame P95 `2.518 ms`、input roundtrip P95 `5.493 ms`、
+  input Change-to-render P95 `354 us`、window RSS growth `24,850,432 bytes`；
+- native GPU present P95 `5.216 ms`、input-to-post-render P95 `8.367 ms`、
+  steady RSS growth `48 KiB`、production Markdown completion P95 `128 us`；
+- Desktop Clippy 仍仅 `DSK-000` 的两项既有红灯，没有新增 lint。交互式
+  `desktop-click-to-photon.sh` 仍需人工按键采样，本任务未把它计作自动通过项。
+
 ### VUI-105：收敛 Inspector 与 Overlay 控件
 
 **优先级：P1**
@@ -1229,25 +1258,24 @@ VUI task 的评审顺序：
 
 ## 十、下一批建议
 
-结构 lane、视觉基线、共享控件 foundation 与 Sessions lane 已全部完成。下一批按
-Pane lane 推进：
+结构 lane、视觉基线、共享控件 foundation、Sessions 与 Composer lane 已全部完成。
+下一批按 Pane lane 推进：
 
-1. `VUI-104`：重做 Composer 输入与提交区；
-2. `VUI-105`：收敛 Inspector 与 Overlay 控件；
-3. `VUI-106`：降低 Conversation 永久按钮密度；
-4. `VUI-201`：统一全局视觉节奏和层级。
+1. `VUI-105`：收敛 Inspector 与 Overlay 控件；
+2. `VUI-106`：降低 Conversation 永久按钮密度；
+3. `VUI-201`：统一全局视觉节奏和层级。
 
 这些任务的结构前置和 `VUI-101` 均已满足。虽然 Pane 主文件不同，但它们共享
 `native_shell.rs` 集成和 visual golden，因此在当前工作树按上述顺序落地和验收，
-避免跨 Pane 的视觉差异互相遮蔽。三个 Pane task 完成后执行 `VUI-201`，统一全局
+避免跨 Pane 的视觉差异互相遮蔽。两个 Pane task 完成后执行 `VUI-201`，统一全局
 token、节奏和层级；`DSK-401` 仍只在主计划完成后按收益单独评估。
 
 ## 十一、当前推进状态（2026-07-28）
 
 结构 lane（`DSK-000`、`DSK-101` 至 `DSK-105`、`DSK-201`、`DSK-202`、
-`DSK-301`）已全部完成；`VUI-000`、`VUI-101`、`VUI-102` 与 `VUI-103` 也已完成。
-当前没有未满足的视觉前置。
+`DSK-301`）已全部完成；`VUI-000`、`VUI-101`、`VUI-102`、`VUI-103` 与 `VUI-104`
+也已完成。当前没有未满足的视觉前置。
 
-下一关键路径是依次完成 `VUI-104`、`VUI-105` 和 `VUI-106`，每项分别执行交互、
-accessibility、responsive、visual golden 和性能验收。之后进入 `VUI-201` 做全局
-视觉节奏与层级收敛。当前立即推进 `VUI-104`。
+下一关键路径是依次完成 `VUI-105` 和 `VUI-106`，每项分别执行交互、accessibility、
+responsive、visual golden 和性能验收。之后进入 `VUI-201` 做全局视觉节奏与层级
+收敛。当前立即推进 `VUI-105`。
