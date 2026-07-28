@@ -24,8 +24,9 @@ pub(super) fn reconcile_direct_update(
                 },
             );
             if inspector_dirty {
-                shell.file_review =
-                    DesktopFileReviewState::Ready(DesktopFileReviewDocument::from_product(review));
+                shell.file_review = Arc::new(DesktopFileReviewState::Ready(
+                    DesktopFileReviewDocument::from_product(review),
+                ));
                 shell.preference_notice = Some("Changed-file review loaded.".into());
             }
             DirectCommandUpdate::Consumed {
@@ -63,14 +64,16 @@ pub(super) fn reconcile_direct_update(
                 .command_ledger
                 .complete(command_id, &DesktopCommandIntent::ListSessions);
             if sessions_dirty {
-                shell.session_catalog = sessions;
-                shell.omitted_sessions = omitted;
+                shell.session_controller.replace_catalog(sessions, omitted);
                 shell.preference_notice = Some(if omitted == 0 {
-                    format!("Loaded {} session(s).", shell.session_catalog.len())
+                    format!(
+                        "Loaded {} session(s).",
+                        shell.session_controller.catalog().len()
+                    )
                 } else {
                     format!(
                         "Loaded {} session(s); {omitted} older session(s) omitted.",
-                        shell.session_catalog.len()
+                        shell.session_controller.catalog().len()
                     )
                 });
                 shell.schedule_session_catalog_refresh(cx);

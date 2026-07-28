@@ -1,6 +1,6 @@
-use desktop::shell::{SemanticTheme, truncate_label};
+use desktop::shell::{PanelVisibility, SemanticStatus, SemanticTheme, ShellLayout};
 use gpui::{
-    EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
+    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
     prelude::*, rgb,
 };
 use gpui_component::{
@@ -8,10 +8,12 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     menu::{DropdownMenu as _, PopupMenuItem},
 };
+use std::sync::Arc;
 
 use super::{
-    DesktopCommandIntent, NativeShell, conversation_focus_accent,
+    conversation_focus_accent,
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+    semantic_status_color,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,13 +27,40 @@ pub(super) enum ConversationHeaderEvent {
     Abort,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConversationHeaderViewModel {
+    pub(super) status: SemanticStatus,
+    pub(super) composer_running: bool,
+    pub(super) abort_pending: bool,
+    pub(super) reload_pending: bool,
+    pub(super) selector_disabled: bool,
+    pub(super) model_cycle_available: bool,
+    pub(super) profile_cycle_available: bool,
+    pub(super) model: Arc<str>,
+    pub(super) profile: Arc<str>,
+    pub(super) thinking: Arc<str>,
+    pub(super) project_name: Arc<str>,
+    pub(super) keyboard_focus_visible: bool,
+    pub(super) panel_visibility: PanelVisibility,
+    pub(super) sessions_panel_width: u32,
+    pub(super) context_panel_width: u32,
+}
+
 pub(super) struct ConversationHeader {
-    owner: WeakEntity<NativeShell>,
+    focus: FocusHandle,
+    view_model: Option<ConversationHeaderViewModel>,
 }
 
 impl ConversationHeader {
-    pub(super) fn new(owner: WeakEntity<NativeShell>) -> Self {
-        Self { owner }
+    pub(super) fn new(focus: FocusHandle) -> Self {
+        Self {
+            focus,
+            view_model: None,
+        }
+    }
+
+    pub(super) fn set_view_model(&mut self, view_model: ConversationHeaderViewModel) {
+        self.view_model = Some(view_model);
     }
 }
 
@@ -39,51 +68,27 @@ impl EventEmitter<ConversationHeaderEvent> for ConversationHeader {}
 
 impl Render for ConversationHeader {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let Some(owner) = self.owner.upgrade() else {
+        let Some(view_model) = self.view_model.clone() else {
             return div().h_12().into_any_element();
         };
-        let owner = owner.read(cx);
         let theme = SemanticTheme::GEEK_DARK;
-        let snapshot = owner.projection.snapshot();
-        let project = owner.projection.project();
-        let status = owner.semantic_status();
-        let composer_running = snapshot.active_operation.is_some();
-        let awaiting_prompt_start = owner.composer.submitted().is_some() && !composer_running;
-        let abort_pending = owner
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Abort { .. }));
-        let reload_pending = owner.command_ledger.contains(&DesktopCommandIntent::Reload);
-        let selection_pending = owner
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)));
-        let selector_disabled =
-            composer_running || awaiting_prompt_start || reload_pending || selection_pending;
-        let model_cycle_available = project
-            .models
-            .iter()
-            .filter(|model| model.supports_text && (model.configured || model.selected))
-            .take(2)
-            .count()
-            > 1;
-        let profile_cycle_available = project.profiles.len() > 1;
-        let status_model = truncate_label(&project.selected_model_id, 10);
-        let status_profile = truncate_label(snapshot.session.default_agent_profile_id.as_str(), 9);
-        let thinking = owner
-            .thinking_selection
-            .label(project.settings.default_thinking_level.as_deref());
-        let workspace_width = owner.layout(window).workspace.width;
+        let status = view_model.status;
+        let viewport = window.viewport_size();
+        let workspace_width = ShellLayout::resolve_with_panel_widths(
+            u32::from(viewport.width),
+            u32::from(viewport.height),
+            view_model.panel_visibility,
+            view_model.sessions_panel_width,
+            view_model.context_panel_width,
+        )
+        .workspace
+        .width;
         let model_profile_label = if workspace_width >= 680 {
-            format!("{status_model} / {status_profile}")
+            format!("{} / {}", view_model.model, view_model.profile)
         } else {
             "Model / profile".into()
         };
-        let project_name = project
-            .cwd
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| truncate_label(name, 18))
-            .unwrap_or_else(|| "Project".into());
-        let focused = owner.conversation_focus.is_focused(window) && owner.keyboard_focus_visible();
+        let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let focus_accent = conversation_focus_accent(focused, theme);
 
         let model_target = cx.entity().downgrade();
@@ -140,7 +145,7 @@ impl Render for ConversationHeader {
                                 div()
                                     .text_token(DesignText::Metadata)
                                     .text_color(rgb(theme.subtle_text.value()))
-                                    .child(project_name),
+                                    .child(view_model.project_name.to_string()),
                             ),
                     ),
             )
@@ -163,7 +168,7 @@ impl Render for ConversationHeader {
                             .py_token(DesignSpace::Xs)
                             .bg(rgb(theme.surface.value()))
                             .text_token(DesignText::Metadata)
-                            .text_color(owner.status_color(status))
+                            .text_color(semantic_status_color(status))
                             .child(status.glyph())
                             .child(status.label()),
                     )
@@ -178,8 +183,14 @@ impl Render for ConversationHeader {
                                 let profile_target = profile_target.clone();
                                 let thinking_target = thinking_target.clone();
                                 menu.item(
-                                    PopupMenuItem::new(format!("Next model · {status_model}"))
-                                        .disabled(selector_disabled || !model_cycle_available)
+                                    PopupMenuItem::new(format!(
+                                        "Next model · {}",
+                                        view_model.model
+                                    ))
+                                        .disabled(
+                                            view_model.selector_disabled
+                                                || !view_model.model_cycle_available,
+                                        )
                                         .on_click(move |_, _, cx| {
                                             if let Some(target) = model_target.upgrade() {
                                                 target.update(cx, |_, cx| {
@@ -190,9 +201,13 @@ impl Render for ConversationHeader {
                                 )
                                 .item(
                                     PopupMenuItem::new(format!(
-                                        "Next profile · {status_profile}"
+                                        "Next profile · {}",
+                                        view_model.profile
                                     ))
-                                    .disabled(selector_disabled || !profile_cycle_available)
+                                    .disabled(
+                                        view_model.selector_disabled
+                                            || !view_model.profile_cycle_available,
+                                    )
                                     .on_click(move |_, _, cx| {
                                         if let Some(target) = profile_target.upgrade() {
                                             target.update(cx, |_, cx| {
@@ -204,7 +219,10 @@ impl Render for ConversationHeader {
                                     }),
                                 )
                                 .item(
-                                    PopupMenuItem::new(format!("Thinking · {thinking}"))
+                                    PopupMenuItem::new(format!(
+                                        "Thinking · {}",
+                                        view_model.thinking
+                                    ))
                                         .on_click(move |_, _, cx| {
                                             if let Some(target) = thinking_target.upgrade() {
                                                 target.update(cx, |_, cx| {
@@ -225,18 +243,18 @@ impl Render for ConversationHeader {
                                 cx.emit(ConversationHeaderEvent::ToggleInspector);
                             })),
                     )
-                    .when(composer_running, |actions| {
+                    .when(view_model.composer_running, |actions| {
                         actions.child(
                             Button::new("abort-operation")
                                 .compact()
                                 .danger()
-                                .label(if abort_pending {
+                                .label(if view_model.abort_pending {
                                     "Aborting…"
                                 } else {
                                     "Abort"
                                 })
                                 .tooltip("Abort the active operation · Ctrl/Cmd+Esc")
-                                .disabled(abort_pending)
+                                .disabled(view_model.abort_pending)
                                 .on_click(cx.listener(|_, _, _, cx| {
                                     cx.emit(ConversationHeaderEvent::Abort);
                                 })),
@@ -251,12 +269,12 @@ impl Render for ConversationHeader {
                             .dropdown_menu(move |menu, _, _| {
                                 let reload_target = reload_target.clone();
                                 menu.item(
-                                    PopupMenuItem::new(if reload_pending {
+                                    PopupMenuItem::new(if view_model.reload_pending {
                                         "Reloading local resources…"
                                     } else {
                                         "Reload local resources"
                                     })
-                                    .disabled(selector_disabled)
+                                    .disabled(view_model.selector_disabled)
                                     .on_click(move |_, _, cx| {
                                         if let Some(target) = reload_target.upgrade() {
                                             target.update(cx, |_, cx| {

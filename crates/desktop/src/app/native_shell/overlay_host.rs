@@ -1,12 +1,13 @@
 use coding_agent::api::authorization::{
-    ToolAuthorizationDecision, ToolAuthorizationIdentity, ToolAuthorizationScope,
+    ToolAuthorizationDecision, ToolAuthorizationIdentity, ToolAuthorizationRequest,
+    ToolAuthorizationScope,
 };
 use desktop::shell::{
     DESKTOP_OVERLAY_SCRIM_RGBA, MONOSPACE_FONT_FAMILY, SemanticTheme, truncate_label,
 };
 use gpui::{
-    EventEmitter, IntoElement, ParentElement as _, Render, Role, SharedString, Styled as _,
-    WeakEntity, Window, div, prelude::*, px, rgb, rgba,
+    Entity, EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, SharedString,
+    Styled as _, Window, div, prelude::*, px, rgb, rgba,
 };
 use gpui_component::{
     Disableable as _, Selectable as _,
@@ -16,7 +17,7 @@ use gpui_component::{
 use std::sync::Arc;
 
 use super::{
-    DesktopCommandIntent, DesktopPaletteCommand, NativeShell, PALETTE_ENTRIES, actions,
+    ConversationFullMessageView, DesktopPaletteCommand, InspectorPane, PALETTE_ENTRIES, actions,
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 
@@ -35,13 +36,64 @@ pub(super) enum OverlayHostEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OverlaySessionView {
+    pub(super) session_id: String,
+    pub(super) updated_at: String,
+    pub(super) active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OverlayAuthorizationView {
+    pub(super) request: ToolAuthorizationRequest,
+    pub(super) decision_pending: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct OverlayViewModel {
+    pub(super) composer_running: bool,
+    pub(super) awaiting_prompt_start: bool,
+    pub(super) session_pending: bool,
+    pub(super) session_catalog_pending: bool,
+    pub(super) sessions: Vec<OverlaySessionView>,
+    pub(super) omitted_sessions: usize,
+    pub(super) palette_open: bool,
+    pub(super) palette_selected: usize,
+    pub(super) narrow_context_open: bool,
+    pub(super) narrow_sessions_open: bool,
+    pub(super) authorization: Option<OverlayAuthorizationView>,
+    pub(super) full_message: Option<ConversationFullMessageView>,
+}
+
 pub(super) struct OverlayHost {
-    owner: WeakEntity<NativeShell>,
+    inspector_pane: Entity<InspectorPane>,
+    authorization_focus: FocusHandle,
+    command_palette_focus: FocusHandle,
+    narrow_sessions_focus: FocusHandle,
+    full_message_focus: FocusHandle,
+    view_model: Option<OverlayViewModel>,
 }
 
 impl OverlayHost {
-    pub(super) fn new(owner: WeakEntity<NativeShell>) -> Self {
-        Self { owner }
+    pub(super) fn new(
+        inspector_pane: Entity<InspectorPane>,
+        authorization_focus: FocusHandle,
+        command_palette_focus: FocusHandle,
+        narrow_sessions_focus: FocusHandle,
+        full_message_focus: FocusHandle,
+    ) -> Self {
+        Self {
+            inspector_pane,
+            authorization_focus,
+            command_palette_focus,
+            narrow_sessions_focus,
+            full_message_focus,
+            view_model: None,
+        }
+    }
+
+    pub(super) fn set_view_model(&mut self, view_model: OverlayViewModel) {
+        self.view_model = Some(view_model);
     }
 }
 
@@ -49,31 +101,21 @@ impl EventEmitter<OverlayHostEvent> for OverlayHost {}
 
 impl Render for OverlayHost {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let Some(owner) = self.owner.upgrade() else {
+        let Some(view_model) = self.view_model.clone() else {
             return div().into_any_element();
         };
-        let owner = owner.read(cx);
         let theme = SemanticTheme::GEEK_DARK;
-        let snapshot = owner.projection.snapshot();
-        let composer_running = snapshot.active_operation.is_some();
-        let awaiting_prompt_start = owner.composer.submitted().is_some() && !composer_running;
-        let session_pending = owner.command_ledger.contains_where(|intent| {
-            matches!(
-                intent,
-                DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
-            )
-        });
-        let session_catalog_pending = owner
-            .command_ledger
-            .contains(&DesktopCommandIntent::ListSessions);
-        let active_session_id = snapshot.session.session_id.as_str();
-        let narrow_session_rows = owner
-            .session_catalog
+        let composer_running = view_model.composer_running;
+        let awaiting_prompt_start = view_model.awaiting_prompt_start;
+        let session_pending = view_model.session_pending;
+        let session_catalog_pending = view_model.session_catalog_pending;
+        let narrow_session_rows = view_model
+            .sessions
             .iter()
             .enumerate()
             .map(|(index, session)| {
                 let target = session.session_id.clone();
-                let active = target == active_session_id;
+                let active = session.active;
                 Button::new(("narrow-open-session", index))
                     .font_family(MONOSPACE_FONT_FAMILY)
                     .label(format!(
@@ -100,7 +142,7 @@ impl Render for OverlayHost {
             .enumerate()
             .map(|(index, entry)| {
                 let command = entry.command;
-                let selected = owner.command_palette.selected() == index;
+                let selected = view_model.palette_selected == index;
                 let label = entry.shortcut.map_or_else(
                     || entry.label.to_owned(),
                     |shortcut| format!("{}    {shortcut}", entry.label),
@@ -133,8 +175,8 @@ impl Render for OverlayHost {
             })
             .collect::<Vec<_>>();
         let max_height = px((f32::from(window.viewport_size().height) * 0.8).max(320.));
-        let command_palette_overlay = owner.command_palette.is_open().then(|| {
-            overlay_surface("command-palette-overlay", &owner.command_palette_focus)
+        let command_palette_overlay = view_model.palette_open.then(|| {
+            overlay_surface("command-palette-overlay", &self.command_palette_focus)
                 .role(Role::Dialog)
                 .aria_label("Command palette")
                 .aria_description(
@@ -176,14 +218,14 @@ impl Render for OverlayHost {
                         ),
                 )
         });
-        let omitted_sessions = owner.omitted_sessions;
+        let omitted_sessions = view_model.omitted_sessions;
         let close_sessions_target = cx.entity().downgrade();
         let refresh_sessions_target = cx.entity().downgrade();
-        let narrow_context_overlay = owner
+        let narrow_context_overlay = view_model
             .narrow_context_open
-            .then(|| owner.inspector_pane.clone());
-        let narrow_sessions_overlay = owner.narrow_sessions_open.then(|| {
-            overlay_surface("narrow-sessions-overlay", &owner.narrow_sessions_focus)
+            .then(|| self.inspector_pane.clone());
+        let narrow_sessions_overlay = view_model.narrow_sessions_open.then(|| {
+            overlay_surface("narrow-sessions-overlay", &self.narrow_sessions_focus)
                 .role(Role::Dialog)
                 .aria_label("Sessions")
                 .aria_description(
@@ -300,137 +342,128 @@ impl Render for OverlayHost {
                         }),
                 )
         });
-        let authorization_overlay =
-            snapshot
-                .pending_authorizations
-                .first()
-                .cloned()
-                .map(|request| {
-                    let decision_pending = owner.command_ledger.authorization().is_some_and(
-                        |(_, authorization_id, operation_id)| {
-                            authorization_id == request.authorization_id
-                                && operation_id == request.operation_id
-                        },
-                    );
-                    let mut details = vec![
-                        format!("operation  {}", request.operation_id),
-                        format!(
-                            "tool       {} · {}",
-                            request.tool_name, request.tool_call_id
-                        ),
-                        format!("risk       {:?}", request.risk),
-                        format!("scope      {}", authorization_scope_text(&request.scope)),
-                    ];
-                    if let Some(path) = request.preview.path.as_ref() {
-                        details.push(format!("path       {path}"));
-                    }
-                    if let Some(cwd) = request.preview.cwd.as_ref() {
-                        details.push(format!("cwd        {cwd}"));
-                    }
-                    if let Some(command) = request.preview.command.as_ref() {
-                        details.push(format!("command\n{command}"));
-                    }
-                    if let Some(content) = request.preview.content_preview.as_ref() {
-                        details.push(format!("content preview\n{content}"));
-                    }
-                    let identity = request.identity();
-                    let allow_once = identity.clone();
-                    let allow_operation = identity.clone();
-                    overlay_surface("authorization-overlay", &owner.authorization_focus)
-                        .role(Role::AlertDialog)
-                        .aria_label("Authorization required")
-                        .aria_description(request.preview.summary.clone())
-                        .key_context(actions::AUTHORIZATION_KEY_CONTEXT)
+        let authorization_overlay = view_model.authorization.map(|authorization| {
+            let request = authorization.request;
+            let decision_pending = authorization.decision_pending;
+            let mut details = vec![
+                format!("operation  {}", request.operation_id),
+                format!(
+                    "tool       {} · {}",
+                    request.tool_name, request.tool_call_id
+                ),
+                format!("risk       {:?}", request.risk),
+                format!("scope      {}", authorization_scope_text(&request.scope)),
+            ];
+            if let Some(path) = request.preview.path.as_ref() {
+                details.push(format!("path       {path}"));
+            }
+            if let Some(cwd) = request.preview.cwd.as_ref() {
+                details.push(format!("cwd        {cwd}"));
+            }
+            if let Some(command) = request.preview.command.as_ref() {
+                details.push(format!("command\n{command}"));
+            }
+            if let Some(content) = request.preview.content_preview.as_ref() {
+                details.push(format!("content preview\n{content}"));
+            }
+            let identity = request.identity();
+            let allow_once = identity.clone();
+            let allow_operation = identity.clone();
+            overlay_surface("authorization-overlay", &self.authorization_focus)
+                .role(Role::AlertDialog)
+                .aria_label("Authorization required")
+                .aria_description(request.preview.summary.clone())
+                .key_context(actions::AUTHORIZATION_KEY_CONTEXT)
+                .child(
+                    div()
+                        .id("authorization-dialog")
+                        .w_full()
+                        .max_w(px(720.))
+                        .max_h(max_height)
+                        .overflow_hidden()
+                        .rounded_token(DesignRadius::Md)
+                        .border_1()
+                        .border_color(rgb(theme.warning.value()))
+                        .bg(rgb(theme.elevated.value()))
+                        .p_token(DesignSpace::Xl)
+                        .flex()
+                        .flex_col()
+                        .gap_token(DesignSpace::Md)
                         .child(
                             div()
-                                .id("authorization-dialog")
-                                .w_full()
-                                .max_w(px(720.))
-                                .max_h(max_height)
-                                .overflow_hidden()
-                                .rounded_token(DesignRadius::Md)
-                                .border_1()
-                                .border_color(rgb(theme.warning.value()))
-                                .bg(rgb(theme.elevated.value()))
-                                .p_token(DesignSpace::Xl)
+                                .flex()
+                                .justify_between()
+                                .text_color(rgb(theme.warning.value()))
+                                .child("AUTHORIZATION REQUIRED")
+                                .child(if decision_pending {
+                                    "decision pending…"
+                                } else {
+                                    "explicit decision required"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(theme.text.value()))
+                                .whitespace_normal()
+                                .child(request.preview.summary),
+                        )
+                        .child(
+                            div()
+                                .id("authorization-details")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .font_family(MONOSPACE_FONT_FAMILY)
                                 .flex()
                                 .flex_col()
-                                .gap_token(DesignSpace::Md)
-                                .child(
+                                .gap_token(DesignSpace::Sm)
+                                .children(details.into_iter().map(|detail| {
                                     div()
-                                        .flex()
-                                        .justify_between()
-                                        .text_color(rgb(theme.warning.value()))
-                                        .child("AUTHORIZATION REQUIRED")
-                                        .child(if decision_pending {
-                                            "decision pending…"
-                                        } else {
-                                            "explicit decision required"
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(rgb(theme.text.value()))
                                         .whitespace_normal()
-                                        .child(request.preview.summary),
-                                )
-                                .child(
-                                    div()
-                                        .id("authorization-details")
-                                        .flex_1()
-                                        .min_h_0()
-                                        .overflow_y_scroll()
-                                        .font_family(MONOSPACE_FONT_FAMILY)
-                                        .flex()
-                                        .flex_col()
-                                        .gap_token(DesignSpace::Sm)
-                                        .children(details.into_iter().map(|detail| {
-                                            div()
-                                                .whitespace_normal()
-                                                .text_color(rgb(theme.muted_text.value()))
-                                                .child(detail)
-                                        })),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .justify_end()
-                                        .gap_token(DesignSpace::Sm)
-                                        .child(authorization_button(
-                                            "deny-authorization",
-                                            "1 · Deny",
-                                            "Deny this authorization request · 1",
-                                            identity,
-                                            ToolAuthorizationDecision::Deny {
-                                                reason: Some("denied from native desktop".into()),
-                                            },
-                                            decision_pending,
-                                            cx,
-                                        ))
-                                        .child(authorization_button(
-                                            "allow-authorization-once",
-                                            "2 · Allow once",
-                                            "Allow this exact request once · 2",
-                                            allow_once,
-                                            ToolAuthorizationDecision::AllowOnce,
-                                            decision_pending,
-                                            cx,
-                                        ))
-                                        .child(authorization_button(
-                                            "allow-authorization-operation",
-                                            "3 · Allow for operation",
-                                            "Allow this scope for the current operation · 3",
-                                            allow_operation,
-                                            ToolAuthorizationDecision::AllowForOperation,
-                                            decision_pending,
-                                            cx,
-                                        )),
-                                ),
+                                        .text_color(rgb(theme.muted_text.value()))
+                                        .child(detail)
+                                })),
                         )
-                });
-        let full_message_overlay = owner.conversation_full_message.as_ref().map(|message| {
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_token(DesignSpace::Sm)
+                                .child(authorization_button(
+                                    "deny-authorization",
+                                    "1 · Deny",
+                                    "Deny this authorization request · 1",
+                                    identity,
+                                    ToolAuthorizationDecision::Deny {
+                                        reason: Some("denied from native desktop".into()),
+                                    },
+                                    decision_pending,
+                                    cx,
+                                ))
+                                .child(authorization_button(
+                                    "allow-authorization-once",
+                                    "2 · Allow once",
+                                    "Allow this exact request once · 2",
+                                    allow_once,
+                                    ToolAuthorizationDecision::AllowOnce,
+                                    decision_pending,
+                                    cx,
+                                ))
+                                .child(authorization_button(
+                                    "allow-authorization-operation",
+                                    "3 · Allow for operation",
+                                    "Allow this scope for the current operation · 3",
+                                    allow_operation,
+                                    ToolAuthorizationDecision::AllowForOperation,
+                                    decision_pending,
+                                    cx,
+                                )),
+                        ),
+                )
+        });
+        let full_message_overlay = view_model.full_message.as_ref().map(|message| {
             let text = SharedString::new(Arc::clone(&message.text));
-            overlay_surface("full-message-overlay", &owner.full_message_focus)
+            overlay_surface("full-message-overlay", &self.full_message_focus)
                 .role(Role::Dialog)
                 .aria_label("Full conversation message")
                 .aria_description(

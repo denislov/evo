@@ -2,6 +2,7 @@
 name = "coding-agent"
 version.workspace = true
 edition = "2024"
+readme = "README.md"
 
 [features]
 default = []

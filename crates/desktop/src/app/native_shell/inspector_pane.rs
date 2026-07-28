@@ -1,20 +1,19 @@
 use coding_agent::api::review::CodingAgentFileReviewRequest;
-use desktop::file_review::{DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES};
+use desktop::file_review::DesktopReviewLineKind;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
 use desktop::shell::{
     CONTEXT_PANEL_WIDTH, MONOSPACE_FONT_FAMILY, SemanticColor, SemanticTheme, truncate_label,
 };
 use gpui::{
-    EventEmitter, IntoElement, ParentElement as _, Render, Role, Styled as _, WeakEntity, Window,
+    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, Styled as _, Window,
     div, prelude::*, px, rgb,
 };
 use gpui_component::{Disableable as _, Selectable as _, badge::Badge, button::Button};
+use std::sync::Arc;
 
 use super::{
-    DesktopCommandIntent, DesktopFileReviewState, DesktopRecoveryStatus, InspectorSection,
-    NativeShell, actions,
+    DesktopFileReviewState, InspectorSection, actions,
     desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
-    recovery_status_label, runtime_state_label, usage_cost_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,13 +30,91 @@ pub(super) enum InspectorPaneEvent {
     },
 }
 
+#[derive(Clone)]
+pub(super) struct InspectorChangedFileView {
+    pub(super) request: CodingAgentFileReviewRequest,
+    pub(super) label: String,
+}
+
+#[derive(Clone)]
+pub(super) struct InspectorRecoveryView {
+    pub(super) status: String,
+    pub(super) recovery_id: String,
+    pub(super) operation_id: String,
+    pub(super) detail: String,
+    pub(super) attempt_count: String,
+    pub(super) identity: Option<DesktopRecoveryIdentity>,
+}
+
+#[derive(Clone)]
+pub(super) struct InspectorDiagnosticView {
+    pub(super) sequence: String,
+    pub(super) operation: String,
+    pub(super) detail: String,
+    pub(super) truncated: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct InspectorPaneViewModel {
+    pub(super) panel_width: u32,
+    pub(super) context_is_overlay: bool,
+    pub(super) keyboard_focus_visible: bool,
+    pub(super) selected_section: InspectorSection,
+    pub(super) composer_running: bool,
+    pub(super) awaiting_prompt_start: bool,
+    pub(super) recovery_pending: bool,
+    pub(super) file_review_pending: bool,
+    pub(super) external_editor_pending: bool,
+    pub(super) external_editor_configured: bool,
+    pub(super) changed_files: Vec<InspectorChangedFileView>,
+    pub(super) change_count: usize,
+    pub(super) file_review: Arc<DesktopFileReviewState>,
+    pub(super) runtime_attention_count: usize,
+    pub(super) task_state: String,
+    pub(super) active_operation: String,
+    pub(super) operation_count: usize,
+    pub(super) delegation_count: usize,
+    pub(super) selected_model: String,
+    pub(super) profile: String,
+    pub(super) thinking: String,
+    pub(super) usage_input: String,
+    pub(super) usage_output: String,
+    pub(super) usage_cache_read: String,
+    pub(super) usage_cache_write: String,
+    pub(super) usage_tokens: String,
+    pub(super) usage_context: String,
+    pub(super) usage_cost: String,
+    pub(super) reduced_motion: bool,
+    pub(super) stream_id: String,
+    pub(super) sequence: String,
+    pub(super) generation: String,
+    pub(super) model_count: usize,
+    pub(super) profile_count: usize,
+    pub(super) skill_count: usize,
+    pub(super) prompt_count: usize,
+    pub(super) context_count: usize,
+    pub(super) latest_recovery: Option<InspectorRecoveryView>,
+    pub(super) latest_diagnostic: Option<InspectorDiagnosticView>,
+    pub(super) latest_config_diagnostic: Option<(String, String)>,
+    pub(super) latest_issue: Option<String>,
+    pub(super) cwd: String,
+}
+
 pub(super) struct InspectorPane {
-    owner: WeakEntity<NativeShell>,
+    focus: FocusHandle,
+    view_model: Option<InspectorPaneViewModel>,
 }
 
 impl InspectorPane {
-    pub(super) fn new(owner: WeakEntity<NativeShell>) -> Self {
-        Self { owner }
+    pub(super) fn new(focus: FocusHandle) -> Self {
+        Self {
+            focus,
+            view_model: None,
+        }
+    }
+
+    pub(super) fn set_view_model(&mut self, view_model: InspectorPaneViewModel) {
+        self.view_model = Some(view_model);
     }
 }
 
@@ -45,44 +122,29 @@ impl EventEmitter<InspectorPaneEvent> for InspectorPane {}
 
 impl Render for InspectorPane {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let Some(owner) = self.owner.upgrade() else {
+        let Some(view_model) = self.view_model.clone() else {
             return div()
                 .w(px(CONTEXT_PANEL_WIDTH as f32))
                 .h_full()
                 .into_any_element();
         };
-        let owner = owner.read(cx);
-        let panel_width = owner.preferences.context_panel_width;
+        let panel_width = view_model.panel_width;
         let theme = SemanticTheme::GEEK_DARK;
-        let snapshot = owner.projection.snapshot();
-        let project = owner.projection.project();
-        let composer_running = snapshot.active_operation.is_some();
-        let awaiting_prompt_start = owner.composer.submitted().is_some() && !composer_running;
-        let recovery_pending = owner
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Recovery { .. }));
-        let file_review_pending = owner
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::FileReview { .. }));
-        let external_editor_pending = owner
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::ExternalEditor { .. }));
-        let change_count = snapshot.context.changes.len();
-        let changed_file_rows = snapshot
-            .context
-            .changes
+        let composer_running = view_model.composer_running;
+        let awaiting_prompt_start = view_model.awaiting_prompt_start;
+        let recovery_pending = view_model.recovery_pending;
+        let file_review_pending = view_model.file_review_pending;
+        let external_editor_pending = view_model.external_editor_pending;
+        let change_count = view_model.change_count;
+        let changed_file_rows = view_model
+            .changed_files
             .iter()
-            .take(MAX_VISIBLE_FILE_CHANGES)
             .enumerate()
             .map(|(index, change)| {
-                let request = CodingAgentFileReviewRequest::from(change);
+                let request = change.request.clone();
                 Button::new(("changed-file-review", index))
                     .compact()
-                    .label(format!(
-                        "{}  {}",
-                        truncate_label(&change.mutation_kind, 10),
-                        truncate_label(&change.path, 24)
-                    ))
+                    .label(change.label.clone())
                     .tooltip("Load this product-authorized changed-file review")
                     .disabled(composer_running || awaiting_prompt_start || file_review_pending)
                     .on_click(cx.listener(move |_, _, _, cx| {
@@ -91,7 +153,7 @@ impl Render for InspectorPane {
             })
             .collect::<Vec<_>>();
         let omitted_changed_files = change_count.saturating_sub(changed_file_rows.len());
-        let file_review_panel = match &owner.file_review {
+        let file_review_panel = match view_model.file_review.as_ref() {
             DesktopFileReviewState::Empty => div()
                 .text_token(DesignText::Body)
                 .text_color(rgb(theme.muted_text.value()))
@@ -221,7 +283,7 @@ impl Render for InspectorPane {
                                         "Revalidate and open this file in the configured editor",
                                     )
                                     .disabled(
-                                        owner.preferences.external_editor.is_none()
+                                        !view_model.external_editor_configured
                                             || external_editor_pending
                                             || composer_running
                                             || awaiting_prompt_start,
@@ -244,66 +306,22 @@ impl Render for InspectorPane {
                     )
             }
         };
-        let usage = &snapshot.context.usage;
-        let latest_recovery = owner.projection.recoveries().front().map(|recovery| {
-            (
-                recovery_status_label(recovery.status),
-                truncate_label(&recovery.recovery_id, 22),
-                truncate_label(&recovery.operation_id, 22),
-                truncate_label(&recovery.reason, 120),
-                recovery.attempt_count,
-                recovery.identity.clone().filter(|_| {
-                    recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative
-                }),
-            )
-        });
-        let latest_diagnostic = owner.projection.diagnostics().back().map(|diagnostic| {
-            (
-                diagnostic.sequence,
-                diagnostic
-                    .operation_id
-                    .as_deref()
-                    .map(|id| truncate_label(id, 22))
-                    .unwrap_or_else(|| "global".into()),
-                truncate_label(&diagnostic.message, 120),
-                diagnostic.truncated,
-            )
-        });
-        let latest_config_diagnostic = project.diagnostics.last().map(|diagnostic| {
-            (
-                truncate_label(&diagnostic.code, 28),
-                truncate_label(&diagnostic.summary, 120),
-            )
-        });
-        let latest_issue = owner
-            .projection
-            .issues()
-            .back()
-            .map(|issue| truncate_label(&issue.code, 28));
-        let runtime_attention_count = owner
-            .projection
-            .diagnostics()
-            .len()
-            .saturating_add(owner.projection.recoveries().len())
-            .saturating_add(project.diagnostics.len())
-            .saturating_add(owner.projection.issues().len());
-        let active_operation = snapshot
-            .active_operation
-            .as_deref()
-            .map(|id| truncate_label(id, 24))
-            .unwrap_or_else(|| "—".into());
-        let context_is_overlay = owner.narrow_context_open;
-        let focused = owner.context_focus.is_focused(window) && owner.keyboard_focus_visible();
-        let selected_section = owner.inspector_section;
+        let latest_recovery = view_model.latest_recovery;
+        let latest_diagnostic = view_model.latest_diagnostic;
+        let latest_config_diagnostic = view_model.latest_config_diagnostic;
+        let latest_issue = view_model.latest_issue;
+        let runtime_attention_count = view_model.runtime_attention_count;
+        let active_operation = view_model.active_operation;
+        let context_is_overlay = view_model.context_is_overlay;
+        let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
+        let selected_section = view_model.selected_section;
         let selected_section_label = match selected_section {
             InspectorSection::Changes => "Changes",
             InspectorSection::Task => "Task",
             InspectorSection::Usage => "Usage",
             InspectorSection::Runtime => "Runtime",
         };
-        let thinking = owner
-            .thinking_selection
-            .label(project.settings.default_thinking_level.as_deref());
+        let thinking = view_model.thinking;
 
         div()
             .id("inspector-panel")
@@ -322,7 +340,7 @@ impl Render for InspectorPane {
                     .bottom_0()
                     .occlude()
             })
-            .track_focus(&owner.context_focus)
+            .track_focus(&self.focus)
             .w(px(panel_width as f32))
             .h_full()
             .flex()
@@ -440,101 +458,53 @@ impl Render for InspectorPane {
                     .when(selected_section == InspectorSection::Task, |panel| {
                         panel
                             .child(section("TASK", theme))
-                            .child(format!(
-                                "state       {}",
-                                runtime_state_label(owner.projection.lifecycle(), composer_running)
-                            ))
+                            .child(format!("state       {}", view_model.task_state))
                             .child(format!("active op   {active_operation}"))
-                            .child(format!(
-                                "operations  {:>4}",
-                                snapshot.context.operations.len()
-                            ))
-                            .child(format!(
-                                "delegations {:>4}",
-                                snapshot.context.delegations.len()
-                            ))
+                            .child(format!("operations  {:>4}", view_model.operation_count))
+                            .child(format!("delegations {:>4}", view_model.delegation_count))
                             .child(section("CONFIGURATION", theme))
-                            .child(format!(
-                                "model       {}",
-                                truncate_label(&project.selected_model_id, 28)
-                            ))
-                            .child(format!(
-                                "profile     {}",
-                                truncate_label(
-                                    snapshot.session.default_agent_profile_id.as_str(),
-                                    28
-                                )
-                            ))
+                            .child(format!("model       {}", view_model.selected_model))
+                            .child(format!("profile     {}", view_model.profile))
                             .child(format!("thinking    {thinking}"))
                     })
                     .when(selected_section == InspectorSection::Usage, |panel| {
                         panel
                             .child(section("USAGE", theme))
-                            .child(format!("input       {}", usage.input))
-                            .child(format!("output      {}", usage.output))
-                            .child(format!("cache read  {}", usage.cache_read))
-                            .child(format!("cache write {}", usage.cache_write))
-                            .child(format!(
-                                "tokens      {}",
-                                usage.input.saturating_add(usage.output)
-                            ))
-                            .child(format!(
-                                "context     {}",
-                                usage
-                                    .context_window
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| "—".into())
-                            ))
-                            .child(format!("cost        {}", usage_cost_label(usage.cost)))
+                            .child(format!("input       {}", view_model.usage_input))
+                            .child(format!("output      {}", view_model.usage_output))
+                            .child(format!("cache read  {}", view_model.usage_cache_read))
+                            .child(format!("cache write {}", view_model.usage_cache_write))
+                            .child(format!("tokens      {}", view_model.usage_tokens))
+                            .child(format!("context     {}", view_model.usage_context))
+                            .child(format!("cost        {}", view_model.usage_cost))
                     })
                     .when(selected_section == InspectorSection::Runtime, |panel| {
                         panel
                             .child(section("RUNTIME", theme))
-                            .child(format!(
-                                "state       {}",
-                                runtime_state_label(owner.projection.lifecycle(), composer_running)
-                            ))
-                            .child(if owner.preferences.reduced_motion {
+                            .child(format!("state       {}", view_model.task_state))
+                            .child(if view_model.reduced_motion {
                                 "motion reduced"
                             } else {
                                 "motion static"
                             })
-                            .child(format!(
-                                "stream      {}",
-                                truncate_label(&snapshot.cursor.stream_id, 18)
-                            ))
-                            .child(format!(
-                                "sequence    {}",
-                                snapshot.cursor.last_event_sequence
-                            ))
-                            .child(format!(
-                                "generation  {}",
-                                snapshot.cursor.capability_generation
-                            ))
+                            .child(format!("stream      {}", view_model.stream_id))
+                            .child(format!("sequence    {}", view_model.sequence))
+                            .child(format!("generation  {}", view_model.generation))
                             .child(section("LOCAL RESOURCES", theme))
-                            .child(format!("models      {}", project.models.len()))
-                            .child(format!("profiles    {}", project.profiles.len()))
-                            .child(format!(
-                                "skills      {}",
-                                project.resources.skill_names.len()
-                            ))
-                            .child(format!(
-                                "prompts     {}",
-                                project.resources.prompt_template_names.len()
-                            ))
-                            .child(format!(
-                                "context     {}",
-                                project.resources.context_files.len()
-                            ))
+                            .child(format!("models      {}", view_model.model_count))
+                            .child(format!("profiles    {}", view_model.profile_count))
+                            .child(format!("skills      {}", view_model.skill_count))
+                            .child(format!("prompts     {}", view_model.prompt_count))
+                            .child(format!("context     {}", view_model.context_count))
                             .when_some(latest_recovery, |panel, recovery| {
                                 panel
                                     .child(colored_section("LATEST RECOVERY", theme.warning))
-                                    .child(format!("status      {}", recovery.0))
-                                    .child(format!("recovery    {}", recovery.1))
-                                    .child(format!("operation   {}", recovery.2))
-                                    .child(format!("attempts    {}", recovery.4))
-                                    .child(format!("detail      {}", recovery.3))
-                                    .when_some(recovery.5, |panel, identity| {
+                                    .child(format!("status      {}", recovery.status))
+                                    .child(format!("recovery    {}", recovery.recovery_id))
+                                    .child(format!("operation   {}", recovery.operation_id))
+                                    .child(format!("attempts    {}", recovery.attempt_count))
+                                    .child(format!("detail      {}", recovery.detail))
+                                    .when_some(recovery.identity, |panel, identity| {
                                         let retry = identity.clone();
                                         let failed = identity.clone();
                                         panel.child(
@@ -572,10 +542,10 @@ impl Render for InspectorPane {
                             .when_some(latest_diagnostic, |panel, diagnostic| {
                                 panel
                                     .child(colored_section("LATEST DIAGNOSTIC", theme.warning))
-                                    .child(format!("sequence    {}", diagnostic.0))
-                                    .child(format!("operation   {}", diagnostic.1))
-                                    .child(format!("detail      {}", diagnostic.2))
-                                    .when(diagnostic.3, |panel| {
+                                    .child(format!("sequence    {}", diagnostic.sequence))
+                                    .child(format!("operation   {}", diagnostic.operation))
+                                    .child(format!("detail      {}", diagnostic.detail))
+                                    .when(diagnostic.truncated, |panel| {
                                         panel.child("detail      [truncated]")
                                     })
                             })
@@ -598,7 +568,7 @@ impl Render for InspectorPane {
                                     .mt_token(DesignSpace::Md)
                                     .text_token(DesignText::Body)
                                     .text_color(rgb(theme.muted_text.value()))
-                                    .child(truncate_label(&project.cwd.display().to_string(), 54)),
+                                    .child(view_model.cwd),
                             )
                     }),
             )

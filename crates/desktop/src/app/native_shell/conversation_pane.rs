@@ -1,18 +1,19 @@
 use gpui::{
     ElementId, EventEmitter, IntoElement, ParentElement as _, Render, Role, SharedString,
-    Styled as _, WeakEntity, Window, div, prelude::*, px, relative, rgb,
+    Styled as _, Window, div, prelude::*, px, relative, rgb,
 };
-use gpui_component::{ElementExt as _, button::Button, v_virtual_list};
+use gpui_component::{ElementExt as _, VirtualListScrollHandle, button::Button, v_virtual_list};
+use std::{collections::HashSet, rc::Rc};
 
 use super::{
-    ConversationBlockKind, NativeShell, conversation_block_visual,
+    ConversationBlockKind, conversation_block_visual,
+    conversation_controller::ConversationRenderReader,
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
     streaming_text::StreamingText,
 };
 use desktop::conversation::{
     ConversationRowMeasurement, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, compact_duration,
 };
-use desktop::projection::DesktopRecoveryStatus;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
 use desktop::shell::{
     ASSISTANT_MESSAGE_MAX_WIDTH, CONVERSATION_ROW_VERTICAL_PADDING_PX, MONOSPACE_FONT_FAMILY,
@@ -53,13 +54,34 @@ pub(super) enum ConversationPaneEvent {
     FollowLatest,
 }
 
+#[derive(Clone)]
+pub(super) struct ConversationPaneViewModel {
+    pub(super) render: ConversationRenderReader,
+    pub(super) scroll: VirtualListScrollHandle,
+    pub(super) visible_count: usize,
+    pub(super) event_count: usize,
+    pub(super) message_count: usize,
+    pub(super) tool_count: usize,
+    pub(super) omitted_count: usize,
+    pub(super) follow_latest: bool,
+    pub(super) unseen_updates: usize,
+    pub(super) selected_block_id: Option<String>,
+    pub(super) expanded_details: Rc<HashSet<String>>,
+    pub(super) full_view_block_id: Option<String>,
+    pub(super) diagnostic_recovery: Option<DesktopRecoveryIdentity>,
+}
+
 pub(super) struct ConversationPane {
-    owner: WeakEntity<NativeShell>,
+    view_model: Option<ConversationPaneViewModel>,
 }
 
 impl ConversationPane {
-    pub(super) fn new(owner: WeakEntity<NativeShell>) -> Self {
-        Self { owner }
+    pub(super) fn new() -> Self {
+        Self { view_model: None }
+    }
+
+    pub(super) fn set_view_model(&mut self, view_model: ConversationPaneViewModel) {
+        self.view_model = Some(view_model);
     }
 }
 
@@ -67,96 +89,46 @@ impl EventEmitter<ConversationPaneEvent> for ConversationPane {}
 
 impl Render for ConversationPane {
     fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let Some(owner) = self.owner.upgrade() else {
+        let Some(view_model) = self.view_model.clone() else {
             return div()
                 .id("conversation-log")
                 .role(Role::Log)
                 .aria_label("Conversation messages")
                 .flex_1();
         };
-        let (
-            transcript_rows,
-            scroll_handle,
-            visible_count,
-            event_count,
-            message_count,
-            tool_count,
-            omitted_count,
-            follow_latest,
-            unseen_updates,
-        ) = {
-            let owner = owner.read(cx);
-            (
-                owner.conversation_row_sizes.clone(),
-                owner.conversation_scroll.clone(),
-                owner.visible_conversation_count(),
-                owner.projection.recent_events().len(),
-                owner.projection.messages().len(),
-                owner.projection.tools().len(),
-                owner.projection.conversation().omitted_blocks(),
-                owner.conversation_viewport.follow_latest(),
-                owner.conversation_viewport.unseen_updates(),
-            )
-        };
+        let transcript_rows = view_model.render.row_sizes();
+        let scroll_handle = view_model.scroll;
+        let visible_count = view_model.visible_count;
+        let event_count = view_model.event_count;
+        let message_count = view_model.message_count;
+        let tool_count = view_model.tool_count;
+        let omitted_count = view_model.omitted_count;
+        let follow_latest = view_model.follow_latest;
+        let unseen_updates = view_model.unseen_updates;
+        let selected_block_id = view_model.selected_block_id;
+        let expanded_details = view_model.expanded_details;
+        let full_view_block_id = view_model.full_view_block_id;
+        let diagnostic_recovery = view_model.diagnostic_recovery;
+        let render = view_model.render;
         let transcript_list = v_virtual_list(
             cx.entity(),
             "conversation-transcript",
             transcript_rows,
-            |this, visible_range, window, cx| {
-                let Some(owner) = this.owner.upgrade() else {
-                    return Vec::new();
-                };
+            move |_, visible_range, window, cx| {
                 visible_range
                     .filter_map(|index| {
-                        let (
-                            block,
-                            row_height,
-                            selected,
-                            detail_expanded,
-                            full_view_open,
-                            diagnostic_recovery,
-                            row_count,
-                        ) = {
-                            let owner = owner.read(cx);
-                            let block = owner.conversation_render_rows.get(index)?.clone();
-                            let height = owner
-                                .conversation_render_heights
-                                .get(index)
-                                .copied()
-                                .unwrap_or(block.estimated_height);
-                            let selected = owner.conversation_viewport.selected_block_id()
-                                == Some(block.item_key.row_id());
-                            let detail_expanded = owner
-                                .conversation_expanded_details
-                                .contains(block.item_key.row_id());
-                            let full_view_open = owner
-                                .conversation_full_message
-                                .as_ref()
-                                .is_some_and(|message| {
-                                    message.block_id == block.item_key.row_id()
-                                });
-                            let diagnostic_recovery = (block.kind
-                                == ConversationBlockKind::Diagnostic)
-                                .then(|| {
-                                    owner.projection.recoveries().iter().find_map(|recovery| {
-                                        (recovery.status == DesktopRecoveryStatus::Pending
-                                            && recovery.authoritative)
-                                            .then(|| recovery.identity.clone())
-                                            .flatten()
-                                    })
-                                })
+                        let (block, row_height) = render.row(index)?;
+                        let selected =
+                            selected_block_id.as_deref() == Some(block.item_key.row_id());
+                        let detail_expanded =
+                            expanded_details.contains(block.item_key.row_id());
+                        let full_view_open =
+                            full_view_block_id.as_deref() == Some(block.item_key.row_id());
+                        let diagnostic_recovery =
+                            (block.kind == ConversationBlockKind::Diagnostic)
+                                .then(|| diagnostic_recovery.clone())
                                 .flatten();
-                            let row_count = owner.conversation_render_rows.len();
-                            (
-                                block,
-                                height,
-                                selected,
-                                detail_expanded,
-                                full_view_open,
-                                diagnostic_recovery,
-                                row_count,
-                            )
-                        };
+                        let row_count = render.len();
                         let block_id = block.item_key.row_id().to_owned();
                         let select_block_id = block_id.clone();
                         let copy_block_id = block_id.clone();
@@ -205,7 +177,7 @@ impl Render for ConversationPane {
                             .map(compact_duration);
                         let is_tool = block.kind == ConversationBlockKind::Tool;
                         let tool_command = is_tool
-                            .then(|| owner.read(cx).tool_command(&block_id))
+                            .then(|| structured_tool_command(&block.detail, &block.text))
                             .flatten();
                         let tool_exit_code = is_tool.then(|| {
                             tool_exit_code_label(
@@ -988,6 +960,16 @@ impl Render for ConversationPane {
                     })
             })
     }
+}
+
+fn structured_tool_command(detail: &str, text: &str) -> Option<String> {
+    [detail, text].into_iter().find_map(|arguments| {
+        serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()?
+            .get("command")?
+            .as_str()
+            .map(str::to_owned)
+    })
 }
 
 fn tool_exit_code_label(title: &str, output: &str, done: bool, is_error: bool) -> String {

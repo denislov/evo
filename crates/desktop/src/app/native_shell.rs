@@ -4,14 +4,11 @@ use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
 use desktop::conversation::{
     ComposerAdmission, ComposerState, ComposerSubmissionKind, ConversationBlockKind,
-    ConversationItemKey, ConversationItemKind, ConversationRowLayoutState,
-    ConversationRowMeasurement, ConversationRowRenderCache, ConversationRowRenderData,
-    ConversationRowRenderSource, ConversationViewport, MAX_COPY_BYTES, conversation_copy_text,
-    conversation_width_bucket,
+    ConversationRowMeasurement, MAX_COPY_BYTES, conversation_copy_text, conversation_width_bucket,
 };
 #[cfg(test)]
 use desktop::conversation::{TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, conversation_block_height};
-use desktop::file_review::DesktopFileReviewDocument;
+use desktop::file_review::{DesktopFileReviewDocument, MAX_VISIBLE_FILE_CHANGES};
 use desktop::preferences::{DesktopPreferences, PreferenceWriter};
 use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
 use desktop::runtime::{
@@ -25,17 +22,11 @@ use desktop::shell::{
     truncate_label,
 };
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, Role, ScrollStrategy,
-    Styled as _, Subscription, Window, WindowBounds, div, prelude::*, px, rgb, size,
+    ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, Role, ScrollStrategy, Styled as _,
+    Subscription, Window, WindowBounds, div, prelude::*, px, rgb,
 };
-use gpui_component::{
-    VirtualListScrollHandle,
-    input::{InputEvent, InputState},
-};
-use std::borrow::Cow;
-use std::cell::Cell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,46 +43,10 @@ use crate::actions::{
 use crate::command_ledger::{DesktopCommandIntent, DesktopCommandLedger};
 
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
-const MAX_DIRTY_CONVERSATION_SEQUENCES: usize = 256;
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
-const MAX_EXPANDED_CONVERSATION_DETAILS: usize = 256;
 const MAX_COMPOSER_SESSION_STATES: usize = 256;
 const MAX_INSPECTOR_SESSION_STATES: usize = 256;
 const CONVERSATION_ANNOUNCEMENT_DURATION: Duration = Duration::from_secs(2);
-
-#[derive(Debug, Default)]
-struct InputRenderLatencyProbe {
-    pending_change: Cell<Option<Instant>>,
-    #[cfg(test)]
-    last_observed: Cell<Option<Duration>>,
-}
-
-impl InputRenderLatencyProbe {
-    fn mark_changed(&self) {
-        self.mark_changed_at(Instant::now());
-    }
-
-    fn mark_changed_at(&self, now: Instant) {
-        self.pending_change.set(Some(now));
-    }
-
-    fn observe_render(&self) {
-        let _ = self.observe_render_at(Instant::now());
-    }
-
-    fn observe_render_at(&self, now: Instant) -> Option<Duration> {
-        let latency = now.saturating_duration_since(self.pending_change.take()?);
-        tracing::trace!(
-            target: "desktop",
-            latency_micros = u64::try_from(latency.as_micros()).unwrap_or(u64::MAX),
-            "desktop.input.to_render"
-        );
-        #[cfg(test)]
-        self.last_observed.set(Some(latency));
-        Some(latency)
-    }
-}
-const SESSION_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
@@ -103,6 +58,16 @@ struct ConversationBlockVisual {
 
 fn conversation_focus_accent(focused: bool, theme: SemanticTheme) -> SemanticColor {
     if focused { theme.accent } else { theme.divider }
+}
+
+fn semantic_status_color(status: SemanticStatus) -> gpui::Rgba {
+    let theme = SemanticTheme::GEEK_DARK;
+    rgb(match status {
+        SemanticStatus::Idle => theme.muted_text.value(),
+        SemanticStatus::Running => theme.accent.value(),
+        SemanticStatus::Warning | SemanticStatus::Authorization => theme.warning.value(),
+        SemanticStatus::Error => theme.danger.value(),
+    })
 }
 
 fn inspector_telemetry_refresh_delay(last_refresh: Option<Instant>, now: Instant) -> Duration {
@@ -315,7 +280,7 @@ impl DesktopThinkingSelection {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 enum DesktopFileReviewState {
     #[default]
     Empty,
@@ -351,25 +316,7 @@ pub(super) struct NativeShell {
     preferences: DesktopPreferences,
     preference_writer: Option<PreferenceWriter>,
     preference_notice: Option<String>,
-    conversation_viewport: ConversationViewport,
-    conversation_scroll: VirtualListScrollHandle,
-    conversation_session_views: HashMap<String, ConversationSessionViewState>,
-    conversation_pending_scroll_restore: Option<f32>,
-    conversation_layout: ConversationRowLayoutState,
-    conversation_live_layout: ConversationRowLayoutState,
-    conversation_render_cache: ConversationRowRenderCache,
-    conversation_render_rows: Vec<ConversationRowRenderData>,
-    conversation_render_heights: Vec<f32>,
-    conversation_row_sizes: Rc<Vec<gpui::Size<gpui::Pixels>>>,
-    conversation_render_full_dirty: bool,
-    conversation_render_live_dirty: bool,
-    conversation_render_dirty_sequences: VecDeque<u64>,
-    conversation_render_sequence_overflow: bool,
-    conversation_render_width_bucket: Option<u32>,
-    conversation_width_pending: Option<(u32, Instant)>,
-    conversation_height_refresh_deadline: Option<Instant>,
-    conversation_height_refresh_full: bool,
-    conversation_expanded_details: HashSet<String>,
+    conversation_controller: ConversationController,
     inspector_telemetry_last_refresh: Option<Instant>,
     inspector_telemetry_refresh_deadline: Option<Instant>,
     conversation_pane: gpui::Entity<ConversationPane>,
@@ -382,9 +329,6 @@ pub(super) struct NativeShell {
     status_bar: gpui::Entity<StatusBar>,
     overlay_host: gpui::Entity<OverlayHost>,
     composer: ComposerState,
-    composer_input_latency: InputRenderLatencyProbe,
-    composer_input: gpui::Entity<InputState>,
-    sessions_search_input: gpui::Entity<InputState>,
     composer_needs_sync: bool,
     composer_session_drafts: HashMap<String, String>,
     composer_running_modes: HashMap<String, ComposerRunningMode>,
@@ -399,7 +343,7 @@ pub(super) struct NativeShell {
     narrow_sessions_focus: FocusHandle,
     full_message_focus: FocusHandle,
     thinking_selection: DesktopThinkingSelection,
-    file_review: DesktopFileReviewState,
+    file_review: Arc<DesktopFileReviewState>,
     command_palette: DesktopCommandPalette,
     active_overlay: Option<DesktopOverlayKind>,
     conversation_full_message: Option<ConversationFullMessageView>,
@@ -407,9 +351,7 @@ pub(super) struct NativeShell {
     conversation_announcement_sequence: u64,
     narrow_sessions_open: bool,
     narrow_context_open: bool,
-    session_catalog: Vec<desktop::runtime::DesktopSessionCatalogEntry>,
-    omitted_sessions: usize,
-    session_catalog_refresh_deadline: Option<Instant>,
+    session_controller: SessionController,
     panel_resize: Option<PanelResizeState>,
     focus_input_modality: FocusInputModality,
     _subscriptions: Vec<Subscription>,
@@ -458,21 +400,21 @@ impl NativeShell {
         let command_palette_focus = cx.focus_handle().tab_stop(true).tab_index(3);
         let narrow_sessions_focus = cx.focus_handle().tab_stop(true).tab_index(3);
         let full_message_focus = cx.focus_handle().tab_stop(true).tab_index(3);
-        let composer_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .auto_grow(2, 8)
-                .placeholder("Describe the change you want to make…")
+        let conversation_pane = cx.new(|_| ConversationPane::new());
+        let conversation_header = cx.new(|_| ConversationHeader::new(conversation_focus.clone()));
+        let sessions_pane = cx.new(|cx| SessionsPane::new(sessions_focus.clone(), window, cx));
+        let composer_pane = cx.new(|cx| ComposerPane::new(window, cx));
+        let inspector_pane = cx.new(|_| InspectorPane::new(context_focus.clone()));
+        let status_bar = cx.new(|_| StatusBar::new(status_focus.clone()));
+        let overlay_host = cx.new(|_| {
+            OverlayHost::new(
+                inspector_pane.clone(),
+                authorization_focus.clone(),
+                command_palette_focus.clone(),
+                narrow_sessions_focus.clone(),
+                full_message_focus.clone(),
+            )
         });
-        let sessions_search_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
-        let owner = cx.weak_entity();
-        let conversation_pane = cx.new(|_| ConversationPane::new(owner.clone()));
-        let conversation_header = cx.new(|_| ConversationHeader::new(owner.clone()));
-        let sessions_pane = cx.new(|_| SessionsPane::new(owner.clone()));
-        let composer_pane = cx.new(|_| ComposerPane::new(owner.clone()));
-        let inspector_pane = cx.new(|_| InspectorPane::new(owner.clone()));
-        let status_bar = cx.new(|_| StatusBar::new(owner.clone()));
-        let overlay_host = cx.new(|_| OverlayHost::new(owner));
 
         let subscriptions = vec![
             cx.on_focus(&sessions_focus, window, |this, window, cx| {
@@ -488,53 +430,17 @@ impl NativeShell {
                 this.record_focus(FocusTarget::Status, window, cx);
             }),
             cx.subscribe_in(
-                &composer_input,
-                window,
-                |this, input, event: &InputEvent, window, cx| match event {
-                    InputEvent::Change => {
-                        let _span = tracing::trace_span!("desktop.input.change").entered();
-                        this.composer_input_latency.mark_changed();
-                        this.composer.edit(input.read(cx).value().to_string());
-                        this.notify_composer_pane(cx);
-                    }
-                    InputEvent::Focus => {
-                        this.record_focus(FocusTarget::Composer, window, cx);
-                    }
-                    InputEvent::PressEnter {
-                        secondary: true, ..
-                    } => {
-                        if !this.root_action_blocked_by_overlay(window, cx) {
-                            this.submit_primary_composer(cx);
-                        }
-                    }
-                    InputEvent::Blur => this.notify_composer_pane(cx),
-                    InputEvent::PressEnter {
-                        secondary: false, ..
-                    } => {}
-                },
-            ),
-            cx.subscribe_in(
-                &sessions_search_input,
-                window,
-                |this, _, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.notify_sessions_pane(cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
                 &conversation_pane,
                 window,
-                |this, pane, event: &ConversationPaneEvent, window, cx| match event {
+                |this, _, event: &ConversationPaneEvent, window, cx| match event {
                     ConversationPaneEvent::Select { block_id, durable } => {
                         this.record_focus(FocusTarget::Conversation, window, cx);
-                        if *durable {
-                            this.conversation_viewport
-                                .select(block_id.clone(), this.projection.conversation());
-                        } else {
-                            this.conversation_viewport.select_live(block_id.clone());
-                        }
-                        pane.update(cx, |_, cx| cx.notify());
+                        this.conversation_controller.select_row(
+                            block_id.clone(),
+                            *durable,
+                            this.projection.conversation(),
+                        );
+                        this.notify_conversation_pane(cx);
                         this.notify_conversation_header(cx);
                     }
                     ConversationPaneEvent::Scrolled => {
@@ -601,7 +507,19 @@ impl NativeShell {
             cx.subscribe_in(
                 &composer_pane,
                 window,
-                |this, _, event: &ComposerPaneEvent, _, cx| match event {
+                |this, _, event: &ComposerPaneEvent, window, cx| match event {
+                    ComposerPaneEvent::InputChanged(value) => {
+                        this.composer.edit(value.clone());
+                        this.notify_composer_pane(cx);
+                    }
+                    ComposerPaneEvent::Focused => {
+                        this.record_focus(FocusTarget::Composer, window, cx);
+                    }
+                    ComposerPaneEvent::SubmitPrimary => {
+                        if !this.root_action_blocked_by_overlay(window, cx) {
+                            this.submit_primary_composer(cx);
+                        }
+                    }
                     ComposerPaneEvent::Submit => this.submit_composer(cx),
                     ComposerPaneEvent::SubmitRunning => {
                         this.submit_active_control(
@@ -687,7 +605,8 @@ impl NativeShell {
             cx.observe_window_bounds(window, Self::window_bounds_changed),
         ];
 
-        composer_input.focus_handle(cx).focus(window, cx);
+        let composer_focus = composer_pane.read(cx).focus_handle().clone();
+        composer_focus.focus(window, cx);
         cx.spawn(async move |this, cx| {
             let runtime_shutdown = runtime_shutdown;
             while let Some(updates) = runtime_events.next_update_batch().await {
@@ -707,32 +626,14 @@ impl NativeShell {
         })
         .detach();
 
-        Self {
+        let shell = Self {
             runtime: Some(runtime_commands),
             runtime_updates: VecDeque::new(),
             projection,
             preferences,
             preference_writer,
             preference_notice,
-            conversation_viewport: ConversationViewport::new(8),
-            conversation_scroll: VirtualListScrollHandle::new(),
-            conversation_session_views: HashMap::new(),
-            conversation_pending_scroll_restore: None,
-            conversation_layout: ConversationRowLayoutState::default(),
-            conversation_live_layout: ConversationRowLayoutState::default(),
-            conversation_render_cache: ConversationRowRenderCache::default(),
-            conversation_render_rows: Vec::new(),
-            conversation_render_heights: Vec::new(),
-            conversation_row_sizes: Rc::new(Vec::new()),
-            conversation_render_full_dirty: true,
-            conversation_render_live_dirty: true,
-            conversation_render_dirty_sequences: VecDeque::new(),
-            conversation_render_sequence_overflow: false,
-            conversation_render_width_bucket: None,
-            conversation_width_pending: None,
-            conversation_height_refresh_deadline: None,
-            conversation_height_refresh_full: false,
-            conversation_expanded_details: HashSet::new(),
+            conversation_controller: ConversationController::default(),
             inspector_telemetry_last_refresh: None,
             inspector_telemetry_refresh_deadline: None,
             conversation_pane,
@@ -745,9 +646,6 @@ impl NativeShell {
             status_bar,
             overlay_host,
             composer: ComposerState::default(),
-            composer_input_latency: InputRenderLatencyProbe::default(),
-            composer_input,
-            sessions_search_input,
             composer_needs_sync: false,
             composer_session_drafts: HashMap::new(),
             composer_running_modes: HashMap::new(),
@@ -762,7 +660,7 @@ impl NativeShell {
             narrow_sessions_focus,
             full_message_focus,
             thinking_selection: DesktopThinkingSelection::Default,
-            file_review: DesktopFileReviewState::default(),
+            file_review: Arc::new(DesktopFileReviewState::default()),
             command_palette: DesktopCommandPalette::default(),
             active_overlay: None,
             conversation_full_message: None,
@@ -770,13 +668,42 @@ impl NativeShell {
             conversation_announcement_sequence: 0,
             narrow_sessions_open: false,
             narrow_context_open: false,
-            session_catalog: Vec::new(),
-            omitted_sessions: 0,
-            session_catalog_refresh_deadline: None,
+            session_controller: SessionController::default(),
             panel_resize: None,
             focus_input_modality: FocusInputModality::default(),
             _subscriptions: subscriptions,
-        }
+        };
+        let status_bar_view_model = shell.status_bar_view_model();
+        shell.status_bar.update(cx, |status_bar, _| {
+            status_bar.set_view_model(status_bar_view_model);
+        });
+        let conversation_header_view_model = shell.conversation_header_view_model();
+        shell
+            .conversation_header
+            .update(cx, |conversation_header, _| {
+                conversation_header.set_view_model(conversation_header_view_model);
+            });
+        let sessions_pane_view_model = shell.sessions_pane_view_model();
+        shell.sessions_pane.update(cx, |sessions_pane, _| {
+            sessions_pane.set_view_model(sessions_pane_view_model);
+        });
+        let composer_pane_view_model = shell.composer_pane_view_model();
+        shell.composer_pane.update(cx, |composer_pane, _| {
+            composer_pane.set_view_model(composer_pane_view_model);
+        });
+        let conversation_pane_view_model = shell.conversation_pane_view_model();
+        shell.conversation_pane.update(cx, |conversation_pane, _| {
+            conversation_pane.set_view_model(conversation_pane_view_model);
+        });
+        let inspector_pane_view_model = shell.inspector_pane_view_model();
+        shell.inspector_pane.update(cx, |inspector_pane, _| {
+            inspector_pane.set_view_model(inspector_pane_view_model);
+        });
+        let overlay_view_model = shell.overlay_view_model();
+        shell.overlay_host.update(cx, |overlay_host, _| {
+            overlay_host.set_view_model(overlay_view_model);
+        });
+        shell
     }
 
     fn visibility(&self) -> PanelVisibility {
@@ -817,10 +744,12 @@ impl NativeShell {
                 ResizablePanel::Sessions => {
                     self.preferences.sessions_panel_width = SESSION_PANEL_WIDTH;
                     self.notify_sessions_pane(cx);
+                    self.notify_conversation_header(cx);
                 }
                 ResizablePanel::Context => {
                     self.preferences.context_panel_width = CONTEXT_PANEL_WIDTH;
                     self.notify_inspector_pane(cx);
+                    self.notify_conversation_header(cx);
                 }
             }
             self.schedule_preferences();
@@ -878,11 +807,13 @@ impl NativeShell {
             ResizablePanel::Sessions if self.preferences.sessions_panel_width != width => {
                 self.preferences.sessions_panel_width = width;
                 self.notify_sessions_pane(cx);
+                self.notify_conversation_header(cx);
                 cx.notify();
             }
             ResizablePanel::Context if self.preferences.context_panel_width != width => {
                 self.preferences.context_panel_width = width;
                 self.notify_inspector_pane(cx);
+                self.notify_conversation_header(cx);
                 cx.notify();
             }
             _ => {}
@@ -978,10 +909,11 @@ impl NativeShell {
         let previous_focus = self.focus.active();
         self.focus.reconcile_layout(layout);
         if self.focus.active() != previous_focus {
-            self.composer_input.focus_handle(cx).focus(window, cx);
+            self.focus_composer_input(window, cx);
         }
         self.schedule_preferences();
         self.notify_inspector_pane(cx);
+        self.notify_conversation_header(cx);
         self.notify_overlay_host(cx);
         cx.notify();
     }
@@ -1034,7 +966,7 @@ impl NativeShell {
                         && self.composer.accepted(*command_id).is_ok()
                     {
                         self.composer_needs_sync = true;
-                        self.conversation_render_live_dirty = true;
+                        self.conversation_controller.mark_live_dirty();
                     }
                 }
                 desktop::runtime::DesktopRuntimeUpdate::PromptStarted { command_id, .. } => {
@@ -1260,10 +1192,10 @@ impl NativeShell {
                             desktop::runtime::DesktopRuntimeCommandKind::ReviewChangedFile,
                         )
                     {
-                        self.file_review = DesktopFileReviewState::Failed {
+                        self.file_review = Arc::new(DesktopFileReviewState::Failed {
                             request,
                             code: code.clone(),
-                        };
+                        });
                         self.preference_notice = Some(format!(
                             "File review unavailable ({}).",
                             truncate_label(code, 32)
@@ -1374,23 +1306,11 @@ impl NativeShell {
             }
             if dirty.sessions {
                 sessions_pane_dirty = true;
-                self.conversation_render_full_dirty = true;
-                self.conversation_render_live_dirty = true;
-                self.conversation_render_dirty_sequences.clear();
-                self.conversation_render_sequence_overflow = false;
+                self.conversation_controller.apply_delta(true, 0);
             } else if conversation_dirty {
-                self.conversation_render_live_dirty = true;
-                if self.conversation_render_sequence_overflow {
-                    // A bounded tail reconcile is already required.
-                } else if self.conversation_render_dirty_sequences.len()
-                    == MAX_DIRTY_CONVERSATION_SEQUENCES
-                {
-                    self.conversation_render_dirty_sequences.clear();
-                    self.conversation_render_sequence_overflow = true;
-                } else {
-                    self.conversation_render_dirty_sequences
-                        .push_back(self.projection.cursor().last_event_sequence);
-                }
+                let last_event_sequence = self.projection.cursor().last_event_sequence;
+                self.conversation_controller
+                    .apply_delta(false, last_event_sequence);
             }
             let file_changes_dirty = dirty.file_changes;
             if projection_completions.reconcile(self, outcome.is_replaced(), cx) {
@@ -1404,31 +1324,20 @@ impl NativeShell {
                         .composer
                         .reconcile_completed_submission(self.projection.conversation())
                     {
-                        self.conversation_viewport
+                        self.conversation_controller
                             .reconcile_live_selection(&live_id, &durable_id);
                     }
                     self.composer_needs_sync = true;
                 }
-                let visible_blocks = self.visible_conversation_count();
                 let content_revision = self.projection.cursor().last_event_sequence;
-                self.conversation_viewport.reconcile_hydration(
-                    self.projection.conversation(),
-                    visible_blocks,
-                    content_revision,
-                );
-                if self.conversation_viewport.follow_latest() && visible_blocks > 0 {
-                    self.conversation_scroll
-                        .scroll_to_item(visible_blocks - 1, ScrollStrategy::Bottom);
-                }
+                let source = ConversationSource::new(&self.projection, self.composer.submitted());
+                self.conversation_controller
+                    .reconcile_hydration(&source, content_revision);
             } else if conversation_dirty {
-                let visible_blocks = self.visible_conversation_count();
                 let content_revision = self.projection.cursor().last_event_sequence;
-                self.conversation_viewport
-                    .on_content_changed(visible_blocks, content_revision);
-                if self.conversation_viewport.follow_latest() && visible_blocks > 0 {
-                    self.conversation_scroll
-                        .scroll_to_item(visible_blocks - 1, ScrollStrategy::Bottom);
-                }
+                let source = ConversationSource::new(&self.projection, self.composer.submitted());
+                self.conversation_controller
+                    .reconcile_content(&source, content_revision);
             }
             if let Some((command_id, authorization_id, _)) = self
                 .command_ledger
@@ -1469,8 +1378,7 @@ impl NativeShell {
             self.preference_notice = Some(error);
             status_bar_dirty = true;
         }
-        let conversation_needs_refresh =
-            self.conversation_render_full_dirty || self.conversation_render_live_dirty;
+        let conversation_needs_refresh = self.conversation_controller.needs_row_refresh();
         if conversation_needs_refresh && !self.refresh_conversation_rows_at_current_width(cx) {
             root_dirty = true;
         }
@@ -1504,7 +1412,11 @@ impl NativeShell {
     }
 
     fn notify_sessions_pane(&self, cx: &mut Context<Self>) {
-        self.sessions_pane.update(cx, |_, cx| cx.notify());
+        let view_model = self.sessions_pane_view_model();
+        self.sessions_pane.update(cx, |pane, cx| {
+            pane.set_view_model(view_model);
+            cx.notify();
+        });
         self.notify_status_bar(cx);
         self.notify_overlay_host(cx);
     }
@@ -1555,16 +1467,9 @@ impl NativeShell {
 
     fn reconcile_conversation_session_view(&mut self, previous_session_id: &str) {
         let current_session_id = self.projection.snapshot().session.session_id.clone();
-        let scroll_top = (-f32::from(self.conversation_scroll.offset().y)).max(0.);
-        let _ = reconcile_conversation_session_view_state(
-            &mut self.conversation_viewport,
-            &mut self.conversation_expanded_details,
-            &mut self.conversation_session_views,
-            &mut self.conversation_pending_scroll_restore,
-            previous_session_id,
-            &current_session_id,
-            scroll_top,
-        );
+        let _ = self
+            .conversation_controller
+            .reconcile_session_view(previous_session_id, &current_session_id);
     }
 
     fn reconcile_inspector_session_section(&mut self, previous_session_id: &str) {
@@ -1578,14 +1483,26 @@ impl NativeShell {
     }
 
     fn notify_composer_pane(&self, cx: &mut Context<Self>) {
-        self.composer_pane.update(cx, |_, cx| cx.notify());
+        let view_model = self.composer_pane_view_model();
+        self.composer_pane.update(cx, |pane, cx| {
+            pane.set_view_model(view_model);
+            cx.notify();
+        });
     }
 
     fn notify_inspector_pane(&mut self, cx: &mut Context<Self>) {
         self.inspector_telemetry_last_refresh = Some(Instant::now());
         self.inspector_telemetry_refresh_deadline = None;
-        self.inspector_pane.update(cx, |_, cx| cx.notify());
+        self.push_inspector_pane_view_model(cx);
         self.notify_status_bar(cx);
+    }
+
+    fn push_inspector_pane_view_model(&self, cx: &mut Context<Self>) {
+        let view_model = self.inspector_pane_view_model();
+        self.inspector_pane.update(cx, |pane, cx| {
+            pane.set_view_model(view_model);
+            cx.notify();
+        });
     }
 
     fn schedule_inspector_telemetry_refresh(&mut self, cx: &mut Context<Self>) {
@@ -1594,7 +1511,7 @@ impl NativeShell {
         if delay.is_zero() {
             self.inspector_telemetry_last_refresh = Some(now);
             self.inspector_telemetry_refresh_deadline = None;
-            self.inspector_pane.update(cx, |_, cx| cx.notify());
+            self.push_inspector_pane_view_model(cx);
             return;
         }
 
@@ -1612,7 +1529,7 @@ impl NativeShell {
                 if this.inspector_telemetry_refresh_deadline == Some(deadline) {
                     this.inspector_telemetry_refresh_deadline = None;
                     this.inspector_telemetry_last_refresh = Some(Instant::now());
-                    this.inspector_pane.update(cx, |_, cx| cx.notify());
+                    this.push_inspector_pane_view_model(cx);
                 }
             });
         })
@@ -1620,15 +1537,28 @@ impl NativeShell {
     }
 
     fn notify_status_bar(&self, cx: &mut Context<Self>) {
-        self.status_bar.update(cx, |_, cx| cx.notify());
+        let view_model = self.status_bar_view_model();
+        self.status_bar.update(cx, |status_bar, cx| {
+            status_bar.set_view_model(view_model);
+            cx.notify();
+        });
     }
 
     fn notify_conversation_header(&self, cx: &mut Context<Self>) {
-        self.conversation_header.update(cx, |_, cx| cx.notify());
+        let view_model = self.conversation_header_view_model();
+        self.conversation_header
+            .update(cx, |conversation_header, cx| {
+                conversation_header.set_view_model(view_model);
+                cx.notify();
+            });
     }
 
     fn notify_overlay_host(&self, cx: &mut Context<Self>) {
-        self.overlay_host.update(cx, |_, cx| cx.notify());
+        let view_model = self.overlay_view_model();
+        self.overlay_host.update(cx, |host, cx| {
+            host.set_view_model(view_model);
+            cx.notify();
+        });
     }
 
     fn schedule_preferences(&mut self) {
@@ -1638,7 +1568,7 @@ impl NativeShell {
     }
 
     fn reconcile_file_review(&mut self) {
-        let request = match &self.file_review {
+        let request = match self.file_review.as_ref() {
             DesktopFileReviewState::Empty => return,
             DesktopFileReviewState::Loading(request)
             | DesktopFileReviewState::Failed { request, .. } => request.clone(),
@@ -1665,7 +1595,7 @@ impl NativeShell {
                     } if pending_request == &request
                 )
             });
-            self.file_review = DesktopFileReviewState::Empty;
+            self.file_review = Arc::new(DesktopFileReviewState::Empty);
         }
     }
 
@@ -1698,10 +1628,11 @@ impl NativeShell {
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
         if self.focus.active() == FocusTarget::Composer {
-            self.composer_input.focus_handle(cx).focus(window, cx);
+            self.focus_composer_input(window, cx);
         }
         self.schedule_preferences();
         self.notify_inspector_pane(cx);
+        self.notify_conversation_header(cx);
         cx.notify();
     }
 
@@ -1740,9 +1671,10 @@ impl NativeShell {
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
         if self.focus.active() == FocusTarget::Composer {
-            self.composer_input.focus_handle(cx).focus(window, cx);
+            self.focus_composer_input(window, cx);
         }
         self.schedule_preferences();
+        self.notify_conversation_header(cx);
         cx.notify();
     }
 
@@ -1772,173 +1704,6 @@ impl NativeShell {
             self.command_ledger.complete(command_id, &intent);
             self.preference_notice = Some(message);
         }
-    }
-
-    fn create_session(&mut self, cx: &mut Context<Self>) {
-        if self.projection.snapshot().active_operation.is_some()
-            || self.composer.submitted().is_some()
-            || self.command_ledger.contains_where(|intent| {
-                matches!(
-                    intent,
-                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
-                )
-            })
-        {
-            return;
-        }
-        let intent = DesktopCommandIntent::CreateSession;
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
-            cx.notify();
-            return;
-        };
-        let admission = self.runtime.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                runtime
-                    .try_create_session(command_id)
-                    .map_err(|error| error.to_string())
-            },
-        );
-        match admission {
-            Ok(()) => self.preference_notice = Some("Creating a new session…".into()),
-            Err(message) => {
-                self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
-            }
-        }
-        self.notify_sessions_pane(cx);
-        cx.notify();
-    }
-
-    fn request_session_catalog(&mut self, cx: &mut Context<Self>) {
-        if self
-            .command_ledger
-            .contains(&DesktopCommandIntent::ListSessions)
-        {
-            return;
-        }
-        let intent = DesktopCommandIntent::ListSessions;
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
-            cx.notify();
-            return;
-        };
-        let admission = self.runtime.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                runtime
-                    .try_list_sessions(command_id)
-                    .map_err(|error| error.to_string())
-            },
-        );
-        if let Err(message) = admission {
-            self.command_ledger.complete(command_id, &intent);
-            self.preference_notice = Some(message);
-            self.schedule_session_catalog_refresh(cx);
-        }
-        self.notify_sessions_pane(cx);
-        cx.notify();
-    }
-
-    fn schedule_session_catalog_refresh(&mut self, cx: &mut Context<Self>) {
-        let deadline = Instant::now() + SESSION_CATALOG_REFRESH_INTERVAL;
-        if self
-            .session_catalog_refresh_deadline
-            .is_some_and(|scheduled| scheduled <= deadline)
-        {
-            return;
-        }
-        self.session_catalog_refresh_deadline = Some(deadline);
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(SESSION_CATALOG_REFRESH_INTERVAL)
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.session_catalog_refresh_deadline == Some(deadline) {
-                    this.session_catalog_refresh_deadline = None;
-                    if this.projection.snapshot().active_operation.is_none() {
-                        this.request_session_catalog(cx);
-                    } else {
-                        this.schedule_session_catalog_refresh(cx);
-                    }
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn open_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        if self.projection.snapshot().active_operation.is_some()
-            || self.composer.submitted().is_some()
-            || self.command_ledger.contains_where(|intent| {
-                matches!(
-                    intent,
-                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
-                )
-            })
-        {
-            self.preference_notice =
-                Some("Session switching is available only while the runtime is idle.".into());
-            cx.notify();
-            return;
-        }
-        if session_id == self.projection.snapshot().session.session_id {
-            self.preference_notice = Some("The requested session is already active.".into());
-            cx.notify();
-            return;
-        }
-        let intent = DesktopCommandIntent::OpenSession {
-            session_id: session_id.clone(),
-        };
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            cx.notify();
-            return;
-        };
-        let admission = self.runtime.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                runtime
-                    .try_open_session(command_id, &session_id)
-                    .map_err(|error| error.to_string())
-            },
-        );
-        match admission {
-            Ok(()) => {
-                self.preference_notice = Some(format!(
-                    "Opening session {}…",
-                    truncate_label(&session_id, 32)
-                ));
-            }
-            Err(message) => {
-                self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
-            }
-        }
-        self.notify_sessions_pane(cx);
-        cx.notify();
-    }
-
-    fn switch_next_session(&mut self, cx: &mut Context<Self>) {
-        if self.session_catalog.is_empty() {
-            self.preference_notice = Some("Loading the session catalog…".into());
-            self.request_session_catalog(cx);
-            return;
-        }
-        let active = self.projection.snapshot().session.session_id.as_str();
-        let current = self
-            .session_catalog
-            .iter()
-            .position(|session| session.session_id == active);
-        let next = current.map_or(0, |index| (index + 1) % self.session_catalog.len());
-        let session_id = self.session_catalog[next].session_id.clone();
-        if session_id == active {
-            self.preference_notice = Some("No other project session is available.".into());
-            self.notify_status_bar(cx);
-            cx.notify();
-            return;
-        }
-        self.open_session(session_id, cx);
     }
 
     fn submit_composer(&mut self, cx: &mut Context<Self>) {
@@ -2320,6 +2085,7 @@ impl NativeShell {
         );
         self.preference_notice = Some(format!("Future prompts will use thinking {label}."));
         self.notify_status_bar(cx);
+        self.notify_conversation_header(cx);
         cx.notify();
     }
 
@@ -2368,7 +2134,7 @@ impl NativeShell {
 
     fn copy_selected_conversation(&mut self, cx: &mut Context<Self>) {
         let Some(text) = self
-            .conversation_viewport
+            .conversation_controller
             .copy_selected(self.projection.conversation())
         else {
             self.preference_notice =
@@ -2422,9 +2188,8 @@ impl NativeShell {
                     || tool.detail.len().saturating_add(tool.arguments.len()) > MAX_COPY_BYTES,
             });
         }
-        self.conversation_render_rows
-            .iter()
-            .find(|row| row.item_key.row_id() == block_id)
+        self.conversation_controller
+            .row_for_block(block_id)
             .map(|row| ConversationFullMessageView {
                 block_id: block_id.to_owned(),
                 title: Arc::clone(&row.title),
@@ -2590,45 +2355,36 @@ impl NativeShell {
     }
 
     fn toggle_conversation_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
-        if !self.conversation_expanded_details.remove(block_id) {
-            if self.conversation_expanded_details.len() >= MAX_EXPANDED_CONVERSATION_DETAILS {
-                self.conversation_expanded_details.clear();
-            }
-            self.conversation_expanded_details
-                .insert(block_id.to_owned());
-        }
-        self.conversation_render_full_dirty = true;
+        self.conversation_controller.toggle_details(block_id);
         if !self.refresh_conversation_rows_at_current_width(cx) {
             cx.notify();
         }
     }
 
     fn select_adjacent_conversation(&mut self, reverse: bool, cx: &mut Context<Self>) {
-        let row_count = self.conversation_render_rows.len();
+        let row_count = self.conversation_controller.row_count();
         if row_count == 0 {
             self.preference_notice = Some("The conversation is empty.".into());
             self.notify_status_bar(cx);
             return;
         }
-        let current = self.conversation_viewport.selected_block_id();
-        let current_index = current.and_then(|selected| {
-            self.conversation_render_rows
-                .iter()
-                .position(|row| row.item_key.row_id() == selected)
-        });
+        let current_index = self
+            .conversation_controller
+            .selected_block_id()
+            .map(str::to_owned)
+            .and_then(|selected| self.conversation_controller.row_index(&selected));
         let next_index = adjacent_conversation_index(row_count, current_index, reverse)
             .expect("non-empty conversation has an adjacent selection");
-        let row = &self.conversation_render_rows[next_index];
-        if row.durable {
-            self.conversation_viewport.select(
-                row.item_key.row_id().to_owned(),
-                self.projection.conversation(),
-            );
-        } else {
-            self.conversation_viewport
-                .select_live(row.item_key.row_id().to_owned());
-        }
-        self.conversation_scroll.scroll_to_item(
+        let row = self
+            .conversation_controller
+            .row_at(next_index)
+            .expect("adjacent index is inside the rendered rows");
+        self.conversation_controller.select_row(
+            row.item_key.row_id().to_owned(),
+            row.durable,
+            self.projection.conversation(),
+        );
+        self.conversation_controller.scroll_to_row(
             next_index,
             if reverse {
                 ScrollStrategy::Top
@@ -2636,13 +2392,13 @@ impl NativeShell {
                 ScrollStrategy::Bottom
             },
         );
-        self.conversation_pane.update(cx, |_, cx| cx.notify());
+        self.notify_conversation_pane(cx);
         self.notify_conversation_header(cx);
     }
 
     fn copy_keyboard_selected_conversation(&mut self, cx: &mut Context<Self>) {
         let Some(block_id) = self
-            .conversation_viewport
+            .conversation_controller
             .selected_block_id()
             .map(str::to_owned)
         else {
@@ -2655,16 +2411,15 @@ impl NativeShell {
 
     fn toggle_keyboard_selected_conversation_details(&mut self, cx: &mut Context<Self>) {
         let Some(block_id) = self
-            .conversation_viewport
+            .conversation_controller
             .selected_block_id()
             .map(str::to_owned)
         else {
             return;
         };
         let has_details = self
-            .conversation_render_rows
-            .iter()
-            .find(|row| row.item_key.row_id() == block_id)
+            .conversation_controller
+            .row_for_block(&block_id)
             .is_some_and(|row| !row.detail.is_empty());
         if has_details {
             self.toggle_conversation_details(&block_id, cx);
@@ -2708,7 +2463,7 @@ impl NativeShell {
             });
         match admission {
             Ok(()) => {
-                self.file_review = DesktopFileReviewState::Loading(request);
+                self.file_review = Arc::new(DesktopFileReviewState::Loading(request));
                 self.preference_notice = Some("Loading changed-file review…".into());
             }
             Err(message) => {
@@ -2721,7 +2476,7 @@ impl NativeShell {
     }
 
     fn copy_review_path(&mut self, cx: &mut Context<Self>) {
-        let DesktopFileReviewState::Ready(document) = &self.file_review else {
+        let DesktopFileReviewState::Ready(document) = self.file_review.as_ref() else {
             self.preference_notice =
                 Some("Load a changed-file review before copying its path.".into());
             self.notify_status_bar(cx);
@@ -2740,7 +2495,7 @@ impl NativeShell {
     }
 
     fn copy_file_review(&mut self, cx: &mut Context<Self>) {
-        let DesktopFileReviewState::Ready(document) = &self.file_review else {
+        let DesktopFileReviewState::Ready(document) = self.file_review.as_ref() else {
             self.preference_notice = Some("Load a changed-file review before copying it.".into());
             self.notify_status_bar(cx);
             cx.notify();
@@ -2766,7 +2521,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let DesktopFileReviewState::Ready(document) = &self.file_review else {
+        let DesktopFileReviewState::Ready(document) = self.file_review.as_ref() else {
             self.preference_notice = Some("Load a changed-file review before opening it.".into());
             self.notify_status_bar(cx);
             cx.notify();
@@ -2822,6 +2577,9 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let inspector_overlay_changed = self.active_overlay
+            == Some(DesktopOverlayKind::NarrowContext)
+            || overlay == DesktopOverlayKind::NarrowContext;
         if self.active_overlay.is_none() {
             self.focus.open_overlay();
         }
@@ -2833,14 +2591,22 @@ impl NativeShell {
             DesktopOverlayKind::NarrowContext => self.context_focus.focus(window, cx),
             DesktopOverlayKind::FullMessage => self.full_message_focus.focus(window, cx),
         }
+        if inspector_overlay_changed {
+            self.notify_inspector_pane(cx);
+        }
         self.notify_overlay_host(cx);
         cx.notify();
     }
 
     fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let inspector_overlay_changed =
+            self.active_overlay == Some(DesktopOverlayKind::NarrowContext);
         self.active_overlay = None;
         self.focus.close_overlay(self.layout(window));
         self.focus_active_target(window, cx);
+        if inspector_overlay_changed {
+            self.notify_inspector_pane(cx);
+        }
         self.notify_overlay_host(cx);
         cx.notify();
     }
@@ -2936,15 +2702,17 @@ impl NativeShell {
     }
 
     fn follow_latest(&mut self, cx: &mut Context<Self>) {
-        conversation_controller::follow_latest(self, cx);
-    }
-
-    fn align_conversation_scroll_to_bottom(&mut self) {
-        conversation_controller::align_scroll_to_bottom(self);
+        let visible_count = self.visible_conversation_count();
+        self.conversation_controller.follow_latest(visible_count);
+        self.notify_conversation_pane(cx);
+        self.notify_conversation_header(cx);
     }
 
     fn reconcile_conversation_scroll(&mut self, cx: &mut Context<Self>) {
-        conversation_controller::reconcile_scroll(self, cx);
+        if self.conversation_controller.reconcile_scroll() {
+            self.notify_conversation_pane(cx);
+            self.notify_conversation_header(cx);
+        }
     }
 
     fn review_next_file(&mut self, cx: &mut Context<Self>) {
@@ -2954,7 +2722,7 @@ impl NativeShell {
             cx.notify();
             return;
         }
-        let current = match &self.file_review {
+        let current = match self.file_review.as_ref() {
             DesktopFileReviewState::Empty => None,
             DesktopFileReviewState::Loading(request)
             | DesktopFileReviewState::Failed { request, .. } => Some(&request.change),
@@ -3165,8 +2933,8 @@ impl NativeShell {
             Some(DesktopOverlayKind::FullMessage) => {
                 self.close_full_conversation_message(window, cx);
             }
-            None if !matches!(self.file_review, DesktopFileReviewState::Empty) => {
-                self.file_review = DesktopFileReviewState::Empty;
+            None if !matches!(self.file_review.as_ref(), DesktopFileReviewState::Empty) => {
+                self.file_review = Arc::new(DesktopFileReviewState::Empty);
                 self.preference_notice = Some("Closed the changed-file review.".into());
                 cx.notify();
             }
@@ -3350,640 +3118,36 @@ impl NativeShell {
         self.focus_active_target(window, cx);
     }
 
-    fn rebuild_conversation_render_rows(&mut self, panel_width: u32) {
-        let conversation = self.projection.conversation();
-        let session_id = conversation.session_id.as_str();
-        let expected_count = conversation.blocks().len()
-            + usize::from(self.composer.submitted().is_some())
-            + self.projection.messages().len()
-            + self.projection.tools().len();
-        let mut rows = Vec::with_capacity(expected_count);
-        self.conversation_render_cache.begin_frame();
-
-        for block in conversation.blocks() {
-            let promote_detail = block.kind != ConversationBlockKind::Assistant
-                && block.text.is_empty()
-                && !block.detail.is_empty();
-            rows.push(self.conversation_render_cache.resolve(
-                ConversationRowRenderSource {
-                    item_key: ConversationItemKey::new(
-                        session_id,
-                        ConversationItemKind::Durable(block.kind),
-                        &block.id,
-                    ),
-                    source_revision: block.source_revision,
-                    title: Cow::Borrowed(&block.title),
-                    text: if promote_detail {
-                        &block.detail
-                    } else {
-                        &block.text
-                    },
-                    detail: if promote_detail { "" } else { &block.detail },
-                    kind: block.kind,
-                    done: block.done,
-                    is_error: block.is_error,
-                    image_count: block.image_count,
-                    reasoning_duration_millis: block.reasoning_duration_millis,
-                    truncated: block.truncated,
-                    durable: true,
-                },
-                panel_width,
-            ));
-        }
-
-        if let Some(submitted) = self.composer.submitted() {
-            let row_id = submitted.block_id();
-            rows.push(self.conversation_render_cache.resolve(
-                ConversationRowRenderSource {
-                    item_key: ConversationItemKey::new(
-                        session_id,
-                        ConversationItemKind::Submitted,
-                        &row_id,
-                    ),
-                    source_revision: submitted.command_id,
-                    title: Cow::Borrowed("You · submitted"),
-                    text: &submitted.payload,
-                    detail: "",
-                    kind: ConversationBlockKind::User,
-                    done: false,
-                    is_error: false,
-                    image_count: 0,
-                    reasoning_duration_millis: None,
-                    truncated: false,
-                    durable: false,
-                },
-                panel_width,
-            ));
-        }
-
-        for message in self.projection.messages() {
-            let row_id = message_conversation_block_id(message);
-            rows.push(self.conversation_render_cache.resolve(
-                ConversationRowRenderSource {
-                    item_key: ConversationItemKey::new(
-                        session_id,
-                        ConversationItemKind::LiveMessage,
-                        &row_id,
-                    ),
-                    source_revision: message.updated_sequence,
-                    title: Cow::Borrowed("Assistant · live"),
-                    text: &message.text,
-                    detail: &message.thinking,
-                    kind: ConversationBlockKind::Assistant,
-                    done: matches!(
-                        message.status,
-                        desktop::projection::DesktopMessageStatus::Completed
-                    ),
-                    is_error: false,
-                    image_count: 0,
-                    reasoning_duration_millis: message.reasoning_duration_millis,
-                    truncated: message.truncated,
-                    durable: false,
-                },
-                panel_width,
-            ));
-        }
-
-        for tool in self.projection.tools() {
-            let row_id = tool_conversation_block_id(tool);
-            rows.push(self.conversation_render_cache.resolve(
-                ConversationRowRenderSource {
-                    item_key: ConversationItemKey::new(
-                        session_id,
-                        ConversationItemKind::LiveTool,
-                        &row_id,
-                    ),
-                    source_revision: tool.updated_sequence,
-                    title: Cow::Owned(format!("Tool · {}", tool.name)),
-                    text: &tool.detail,
-                    detail: &tool.arguments,
-                    kind: ConversationBlockKind::Tool,
-                    done: !matches!(tool.status, desktop::projection::DesktopToolStatus::Running),
-                    is_error: matches!(tool.status, desktop::projection::DesktopToolStatus::Failed),
-                    image_count: 0,
-                    reasoning_duration_millis: None,
-                    truncated: tool.truncated,
-                    durable: false,
-                },
-                panel_width,
-            ));
-        }
-
-        self.conversation_render_cache.finish_frame();
-        debug_assert_eq!(rows.len(), expected_count);
-        self.conversation_render_rows = rows;
-        self.conversation_render_dirty_sequences.clear();
-        self.conversation_render_sequence_overflow = false;
-    }
-
-    fn rebuild_live_conversation_render_rows(&mut self, panel_width: u32) {
-        let durable_count = self.projection.conversation().blocks().len();
-        if self.conversation_render_rows.len() < durable_count
-            || self.conversation_render_rows[..durable_count]
-                .iter()
-                .any(|row| !row.durable)
-        {
-            self.rebuild_conversation_render_rows(panel_width);
-            self.conversation_render_full_dirty = false;
-            return;
-        }
-
-        let session_id = self.projection.conversation().session_id.clone();
-        self.conversation_render_rows.truncate(durable_count);
-        self.conversation_render_cache.begin_frame();
-
-        if let Some(submitted) = self.composer.submitted() {
-            let row_id = submitted.block_id();
-            self.conversation_render_rows
-                .push(self.conversation_render_cache.resolve(
-                    ConversationRowRenderSource {
-                        item_key: ConversationItemKey::new(
-                            &session_id,
-                            ConversationItemKind::Submitted,
-                            &row_id,
-                        ),
-                        source_revision: submitted.command_id,
-                        title: Cow::Borrowed("You · submitted"),
-                        text: &submitted.payload,
-                        detail: "",
-                        kind: ConversationBlockKind::User,
-                        done: false,
-                        is_error: false,
-                        image_count: 0,
-                        reasoning_duration_millis: None,
-                        truncated: false,
-                        durable: false,
-                    },
-                    panel_width,
-                ));
-        }
-
-        for message in self.projection.messages() {
-            let row_id = message_conversation_block_id(message);
-            self.conversation_render_rows
-                .push(self.conversation_render_cache.resolve(
-                    ConversationRowRenderSource {
-                        item_key: ConversationItemKey::new(
-                            &session_id,
-                            ConversationItemKind::LiveMessage,
-                            &row_id,
-                        ),
-                        source_revision: message.updated_sequence,
-                        title: Cow::Borrowed("Assistant · live"),
-                        text: &message.text,
-                        detail: &message.thinking,
-                        kind: ConversationBlockKind::Assistant,
-                        done: matches!(
-                            message.status,
-                            desktop::projection::DesktopMessageStatus::Completed
-                        ),
-                        is_error: false,
-                        image_count: 0,
-                        reasoning_duration_millis: message.reasoning_duration_millis,
-                        truncated: message.truncated,
-                        durable: false,
-                    },
-                    panel_width,
-                ));
-        }
-
-        for tool in self.projection.tools() {
-            let row_id = tool_conversation_block_id(tool);
-            self.conversation_render_rows
-                .push(self.conversation_render_cache.resolve(
-                    ConversationRowRenderSource {
-                        item_key: ConversationItemKey::new(
-                            &session_id,
-                            ConversationItemKind::LiveTool,
-                            &row_id,
-                        ),
-                        source_revision: tool.updated_sequence,
-                        title: Cow::Owned(format!("Tool · {}", tool.name)),
-                        text: &tool.detail,
-                        detail: &tool.arguments,
-                        kind: ConversationBlockKind::Tool,
-                        done: !matches!(
-                            tool.status,
-                            desktop::projection::DesktopToolStatus::Running
-                        ),
-                        is_error: matches!(
-                            tool.status,
-                            desktop::projection::DesktopToolStatus::Failed
-                        ),
-                        image_count: 0,
-                        reasoning_duration_millis: None,
-                        truncated: tool.truncated,
-                        durable: false,
-                    },
-                    panel_width,
-                ));
-        }
-        self.conversation_render_cache.finish_incremental();
-        self.conversation_render_dirty_sequences.clear();
-        self.conversation_render_sequence_overflow = false;
-    }
-
-    fn update_conversation_rows_by_sequence(
-        &mut self,
-        panel_width: u32,
-    ) -> Result<Option<std::time::Duration>, ()> {
-        if self.conversation_render_sequence_overflow
-            || self.conversation_render_dirty_sequences.is_empty()
-        {
-            return Err(());
-        }
-
-        let durable_count = self.projection.conversation().blocks().len();
-        let submitted_count = usize::from(self.composer.submitted().is_some());
-        let session_id = self.projection.conversation().session_id.clone();
-        let sequences = std::mem::take(&mut self.conversation_render_dirty_sequences);
-        let now = Instant::now();
-        let mut next_refresh_after = None;
-        self.conversation_render_cache.begin_frame();
-
-        for sequence in sequences {
-            if let Some((position, message)) = self
-                .projection
-                .messages()
-                .iter()
-                .enumerate()
-                .find(|(_, message)| message.updated_sequence == sequence)
-            {
-                let row_id = message_conversation_block_id(message);
-                let row = self.conversation_render_cache.resolve(
-                    ConversationRowRenderSource {
-                        item_key: ConversationItemKey::new(
-                            &session_id,
-                            ConversationItemKind::LiveMessage,
-                            &row_id,
-                        ),
-                        source_revision: message.updated_sequence,
-                        title: Cow::Borrowed("Assistant · live"),
-                        text: &message.text,
-                        detail: &message.thinking,
-                        kind: ConversationBlockKind::Assistant,
-                        done: matches!(
-                            message.status,
-                            desktop::projection::DesktopMessageStatus::Completed
-                        ),
-                        is_error: false,
-                        image_count: 0,
-                        reasoning_duration_millis: message.reasoning_duration_millis,
-                        truncated: message.truncated,
-                        durable: false,
-                    },
-                    panel_width,
-                );
-                let desired_index = durable_count + submitted_count + position;
-                let refresh = self.upsert_conversation_render_row(
-                    durable_count,
-                    desired_index,
-                    row,
-                    panel_width,
-                    now,
-                );
-                next_refresh_after = minimum_duration(next_refresh_after, refresh);
-            }
-
-            if let Some((position, tool)) = self
-                .projection
-                .tools()
-                .iter()
-                .enumerate()
-                .find(|(_, tool)| tool.updated_sequence == sequence)
-            {
-                let row_id = tool_conversation_block_id(tool);
-                let row = self.conversation_render_cache.resolve(
-                    ConversationRowRenderSource {
-                        item_key: ConversationItemKey::new(
-                            &session_id,
-                            ConversationItemKind::LiveTool,
-                            &row_id,
-                        ),
-                        source_revision: tool.updated_sequence,
-                        title: Cow::Owned(format!("Tool · {}", tool.name)),
-                        text: &tool.detail,
-                        detail: &tool.arguments,
-                        kind: ConversationBlockKind::Tool,
-                        done: !matches!(
-                            tool.status,
-                            desktop::projection::DesktopToolStatus::Running
-                        ),
-                        is_error: matches!(
-                            tool.status,
-                            desktop::projection::DesktopToolStatus::Failed
-                        ),
-                        image_count: 0,
-                        reasoning_duration_millis: None,
-                        truncated: tool.truncated,
-                        durable: false,
-                    },
-                    panel_width,
-                );
-                let desired_index =
-                    durable_count + submitted_count + self.projection.messages().len() + position;
-                let refresh = self.upsert_conversation_render_row(
-                    durable_count,
-                    desired_index,
-                    row,
-                    panel_width,
-                    now,
-                );
-                next_refresh_after = minimum_duration(next_refresh_after, refresh);
-            }
-        }
-        self.conversation_render_cache.finish_incremental();
-        self.live_conversation_rows_match_projection()
-            .then_some(next_refresh_after)
-            .ok_or(())
-    }
-
-    fn upsert_conversation_render_row(
-        &mut self,
-        durable_count: usize,
-        desired_index: usize,
-        row: ConversationRowRenderData,
-        panel_width: u32,
-        now: Instant,
-    ) -> Option<std::time::Duration> {
-        let layout = self.conversation_live_layout.resolve_one(
-            conversation_row_layout_input(&row, &self.conversation_expanded_details, panel_width),
-            panel_width,
-            now,
-        );
-        let existing_index = self.conversation_render_rows[durable_count..]
-            .iter()
-            .position(|candidate| candidate.item_key == row.item_key)
-            .map(|index| durable_count + index);
-        let row_index = upsert_indexed_item(
-            &mut self.conversation_render_rows,
-            existing_index,
-            desired_index,
-            row,
-        );
-        let height_index = upsert_indexed_item(
-            &mut self.conversation_render_heights,
-            existing_index,
-            desired_index,
-            layout.height,
-        );
-        let size_index = upsert_indexed_item(
-            Rc::make_mut(&mut self.conversation_row_sizes),
-            existing_index,
-            desired_index,
-            size(px(0.), px(layout.height)),
-        );
-        debug_assert_eq!(row_index, height_index);
-        debug_assert_eq!(row_index, size_index);
-        layout.next_refresh_after
-    }
-
     fn submit_conversation_row_measurement(
         &mut self,
         measurement: &ConversationRowMeasurement,
         cx: &mut Context<Self>,
     ) {
-        conversation_controller::submit_row_measurement(self, measurement, cx);
-    }
-
-    fn live_conversation_rows_match_projection(&self) -> bool {
-        let durable_count = self.projection.conversation().blocks().len();
-        if self.conversation_render_rows.len() != self.visible_conversation_count() {
-            return false;
+        let source = ConversationSource::new(&self.projection, self.composer.submitted());
+        let outcome = self
+            .conversation_controller
+            .submit_row_measurement(&source, measurement);
+        self.schedule_conversation_height_refresh(outcome.refresh, cx);
+        if outcome.pane_dirty {
+            self.notify_conversation_pane(cx);
         }
-        let mut index = durable_count;
-        if let Some(submitted) = self.composer.submitted() {
-            let Some(row) = self.conversation_render_rows.get(index) else {
-                return false;
-            };
-            if row.item_key.row_id() != submitted.block_id()
-                || row.source_revision != submitted.command_id
-            {
-                return false;
-            }
-            index += 1;
-        }
-        for message in self.projection.messages() {
-            let Some(row) = self.conversation_render_rows.get(index) else {
-                return false;
-            };
-            if row.item_key.row_id() != message_conversation_block_id(message)
-                || row.source_revision != message.updated_sequence
-            {
-                return false;
-            }
-            index += 1;
-        }
-        for tool in self.projection.tools() {
-            let Some(row) = self.conversation_render_rows.get(index) else {
-                return false;
-            };
-            if row.item_key.row_id() != tool_conversation_block_id(tool)
-                || row.source_revision != tool.updated_sequence
-            {
-                return false;
-            }
-            index += 1;
-        }
-        index == self.conversation_render_rows.len()
-    }
-
-    fn conversation_width_for_render(&mut self, requested: u32) -> (u32, Option<(u32, Instant)>) {
-        let Some(active) = self.conversation_render_width_bucket else {
-            self.conversation_width_pending = None;
-            return (requested, None);
-        };
-        if active == requested {
-            self.conversation_width_pending = None;
-            return (active, None);
-        }
-
-        let now = Instant::now();
-        if let Some((pending, deadline)) = self.conversation_width_pending
-            && pending == requested
-        {
-            if now >= deadline {
-                self.conversation_width_pending = None;
-                self.conversation_render_full_dirty = true;
-                return (requested, None);
-            }
-            return (active, None);
-        }
-
-        let deadline = now + CONVERSATION_RESIZE_DEBOUNCE;
-        self.conversation_width_pending = Some((requested, deadline));
-        (active, Some((requested, deadline)))
-    }
-
-    fn prepare_conversation_rows(
-        &mut self,
-        layout_width: u32,
-    ) -> Option<(std::time::Duration, bool)> {
-        let _span = tracing::trace_span!(
-            "desktop.render.prepare_rows",
-            layout_width,
-            visible_rows = self.visible_conversation_count()
-        )
-        .entered();
-        let visible_conversation_count = self.visible_conversation_count();
-        let session_scroll_restore = self.conversation_pending_scroll_restore.take();
-        let previous_scroll_top = (session_scroll_restore.is_none()
-            && !self.conversation_viewport.follow_latest())
-        .then(|| (-f32::from(self.conversation_scroll.offset().y)).max(0.0));
-        let full_render_update = self.conversation_render_full_dirty
-            || self.conversation_render_width_bucket != Some(layout_width);
-        let mut paused_scroll_top = None;
-        let mut next_refresh_after = None;
-        let mut refresh_requires_full = false;
-        if full_render_update {
-            self.rebuild_conversation_render_rows(layout_width);
-            let row_layout_inputs = self
-                .conversation_render_rows
-                .iter()
-                .map(|row| {
-                    conversation_row_layout_input(
-                        row,
-                        &self.conversation_expanded_details,
-                        layout_width,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let row_layout = self.conversation_layout.resolve(
-                row_layout_inputs,
-                layout_width,
-                Instant::now(),
-                previous_scroll_top,
-            );
-            paused_scroll_top = row_layout.paused_scroll_top;
-            next_refresh_after = row_layout.next_refresh_after;
-            refresh_requires_full = next_refresh_after.is_some();
-            self.conversation_render_heights = row_layout.heights;
-            self.conversation_row_sizes = Rc::new(
-                self.conversation_render_heights
-                    .iter()
-                    .map(|height| size(px(0.), px(*height)))
-                    .collect(),
-            );
-
-            let durable_count = self.projection.conversation().blocks().len();
-            let live_inputs = self.conversation_render_rows[durable_count..]
-                .iter()
-                .map(|row| {
-                    conversation_row_layout_input(
-                        row,
-                        &self.conversation_expanded_details,
-                        layout_width,
-                    )
-                })
-                .collect();
-            let _ = self.conversation_live_layout.resolve(
-                live_inputs,
-                layout_width,
-                Instant::now(),
-                None,
-            );
-            self.conversation_render_width_bucket = Some(layout_width);
-            self.conversation_render_full_dirty = false;
-            self.conversation_render_live_dirty = false;
-        } else if self.conversation_render_live_dirty {
-            let durable_count = self.projection.conversation().blocks().len();
-            match self.update_conversation_rows_by_sequence(layout_width) {
-                Ok(refresh) => {
-                    next_refresh_after = refresh;
-                    self.conversation_render_sequence_overflow = false;
-                }
-                Err(()) => {
-                    self.rebuild_live_conversation_render_rows(layout_width);
-                    let live_inputs = self.conversation_render_rows[durable_count..]
-                        .iter()
-                        .map(|row| {
-                            conversation_row_layout_input(
-                                row,
-                                &self.conversation_expanded_details,
-                                layout_width,
-                            )
-                        })
-                        .collect();
-                    let live_layout = self.conversation_live_layout.resolve(
-                        live_inputs,
-                        layout_width,
-                        Instant::now(),
-                        None,
-                    );
-                    next_refresh_after = live_layout.next_refresh_after;
-                    self.conversation_render_heights.truncate(durable_count);
-                    self.conversation_render_heights
-                        .extend(live_layout.heights.iter().copied());
-                    let sizes = Rc::make_mut(&mut self.conversation_row_sizes);
-                    sizes.truncate(durable_count);
-                    sizes.extend(
-                        live_layout
-                            .heights
-                            .into_iter()
-                            .map(|height| size(px(0.), px(height))),
-                    );
-                }
-            }
-            self.conversation_render_live_dirty = false;
-        }
-        let mut text_phase_requires_full = false;
-        let text_phase_refresh = self
-            .conversation_render_rows
-            .iter()
-            .filter_map(|row| {
-                let delay = row.next_text_phase_after?;
-                text_phase_requires_full |= row.durable;
-                Some(delay)
-            })
-            .min();
-        next_refresh_after = minimum_duration(next_refresh_after, text_phase_refresh);
-        refresh_requires_full |= text_phase_requires_full;
-        debug_assert_eq!(
-            self.conversation_render_rows.len(),
-            visible_conversation_count
-        );
-        debug_assert_eq!(
-            self.conversation_render_heights.len(),
-            visible_conversation_count
-        );
-        if let Some(restored_scroll_top) = session_scroll_restore
-            && !self.conversation_viewport.follow_latest()
-        {
-            let mut offset = self.conversation_scroll.offset();
-            offset.y = px(-restored_scroll_top);
-            self.conversation_scroll.set_offset(offset);
-            tracing::trace!(
-                target: "desktop",
-                event = "session_scroll_restore",
-                scroll_top = restored_scroll_top,
-            );
-        } else if let (Some(previous_scroll_top), Some(adjusted_scroll_top)) =
-            (previous_scroll_top, paused_scroll_top)
-            && (previous_scroll_top - adjusted_scroll_top).abs() > 0.5
-        {
-            let mut offset = self.conversation_scroll.offset();
-            offset.y = px(-adjusted_scroll_top);
-            self.conversation_scroll.set_offset(offset);
-        }
-        if self.conversation_viewport.follow_latest() {
-            self.align_conversation_scroll_to_bottom();
-        }
-        next_refresh_after.map(|delay| (delay, refresh_requires_full))
     }
 
     fn refresh_conversation_rows_at_width(&mut self, layout_width: u32, cx: &mut Context<Self>) {
-        let pane_dirty = self.conversation_render_full_dirty
-            || self.conversation_render_live_dirty
-            || self.conversation_render_width_bucket != Some(layout_width);
-        let refresh = self.prepare_conversation_rows(layout_width);
+        let pane_dirty = self.conversation_controller.needs_row_refresh()
+            || self.conversation_controller.active_width_bucket() != Some(layout_width);
+        let source = ConversationSource::new(&self.projection, self.composer.submitted());
+        let refresh = self
+            .conversation_controller
+            .prepare_rows(&source, layout_width);
         if pane_dirty {
-            self.conversation_pane.update(cx, |_, cx| cx.notify());
+            self.notify_conversation_pane(cx);
         }
         self.schedule_conversation_height_refresh(refresh, cx);
     }
 
     fn refresh_conversation_rows_at_current_width(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(layout_width) = self.conversation_render_width_bucket else {
+        let Some(layout_width) = self.conversation_controller.active_width_bucket() else {
             return false;
         };
         self.refresh_conversation_rows_at_width(layout_width, cx);
@@ -3992,45 +3156,34 @@ impl NativeShell {
 
     fn schedule_conversation_height_refresh(
         &mut self,
-        refresh: Option<(std::time::Duration, bool)>,
+        refresh: ConversationRefresh,
         cx: &mut Context<Self>,
     ) {
-        let Some((delay, requires_full)) = refresh else {
+        let Some((delay, deadline)) = self.conversation_controller.arm_height_refresh(refresh)
+        else {
             return;
         };
-        let deadline = Instant::now() + delay;
-        if self
-            .conversation_height_refresh_deadline
-            .is_none_or(|scheduled| scheduled > deadline)
-        {
-            self.conversation_height_refresh_deadline = Some(deadline);
-            self.conversation_height_refresh_full = requires_full;
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(delay).await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.conversation_height_refresh_deadline == Some(deadline) {
-                        this.conversation_height_refresh_deadline = None;
-                        if this.conversation_height_refresh_full {
-                            this.conversation_render_full_dirty = true;
-                        } else {
-                            this.conversation_render_live_dirty = true;
-                        }
-                        this.conversation_height_refresh_full = false;
-                        let _ = this.refresh_conversation_rows_at_current_width(cx);
-                    }
-                });
-            })
-            .detach();
-        } else if requires_full {
-            self.conversation_height_refresh_full = true;
-        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.conversation_controller.fire_height_refresh(deadline) {
+                    let _ = this.refresh_conversation_rows_at_current_width(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn focus_composer_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self.composer_pane.read(cx).focus_handle().clone();
+        focus.focus(window, cx);
     }
 
     fn focus_active_target(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.focus.active() {
             FocusTarget::Sessions => self.sessions_focus.focus(window, cx),
             FocusTarget::Conversation => self.conversation_focus.focus(window, cx),
-            FocusTarget::Composer => self.composer_input.focus_handle(cx).focus(window, cx),
+            FocusTarget::Composer => self.focus_composer_input(window, cx),
             FocusTarget::Context => self.context_focus.focus(window, cx),
             FocusTarget::Status => self.status_focus.focus(window, cx),
             FocusTarget::Overlay => match self.active_overlay {
@@ -4045,8 +3198,359 @@ impl NativeShell {
                 }
                 Some(DesktopOverlayKind::NarrowContext) => self.context_focus.focus(window, cx),
                 Some(DesktopOverlayKind::FullMessage) => self.full_message_focus.focus(window, cx),
-                None => self.composer_input.focus_handle(cx).focus(window, cx),
+                None => self.focus_composer_input(window, cx),
             },
+        }
+    }
+
+    fn sessions_pane_view_model(&self) -> SessionsPaneViewModel {
+        let snapshot = self.projection.snapshot();
+        let composer_running = snapshot.active_operation.is_some();
+        SessionsPaneViewModel {
+            panel_width: self.preferences.sessions_panel_width,
+            catalog: Arc::from(self.session_controller.catalog().to_vec()),
+            omitted_sessions: self.session_controller.omitted(),
+            active_session_id: Arc::from(snapshot.session.session_id.as_str()),
+            composer_running,
+            awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
+            session_pending: self.command_ledger.contains_where(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
+                )
+            }),
+            session_catalog_pending: self
+                .command_ledger
+                .contains(&DesktopCommandIntent::ListSessions),
+            active_status: self.semantic_status(),
+            notice: self.preference_notice.as_deref().map(Arc::from),
+            keyboard_focus_visible: self.keyboard_focus_visible(),
+        }
+    }
+
+    fn composer_pane_view_model(&self) -> ComposerPaneViewModel {
+        let snapshot = self.projection.snapshot();
+        let composer_running = snapshot.active_operation.is_some();
+        ComposerPaneViewModel {
+            composer_pending: matches!(
+                self.composer.admission(),
+                ComposerAdmission::Pending { .. }
+            ),
+            composer_running,
+            awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
+            authorization_pending: !snapshot.pending_authorizations.is_empty(),
+            running_mode: self.active_composer_running_mode(),
+            rejection: self.composer.rejection().map(Arc::from),
+            keyboard_focus_visible: self.keyboard_focus_visible(),
+        }
+    }
+
+    fn inspector_pane_view_model(&self) -> InspectorPaneViewModel {
+        let snapshot = self.projection.snapshot();
+        let project = self.projection.project();
+        let composer_running = snapshot.active_operation.is_some();
+        let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
+        let changed_files = snapshot
+            .context
+            .changes
+            .iter()
+            .take(MAX_VISIBLE_FILE_CHANGES)
+            .map(|change| InspectorChangedFileView {
+                request: CodingAgentFileReviewRequest::from(change),
+                label: format!(
+                    "{}  {}",
+                    truncate_label(&change.mutation_kind, 10),
+                    truncate_label(&change.path, 24)
+                ),
+            })
+            .collect();
+        let latest_recovery =
+            self.projection
+                .recoveries()
+                .front()
+                .map(|recovery| InspectorRecoveryView {
+                    status: recovery_status_label(recovery.status).to_owned(),
+                    recovery_id: truncate_label(&recovery.recovery_id, 22),
+                    operation_id: truncate_label(&recovery.operation_id, 22),
+                    detail: truncate_label(&recovery.reason, 120),
+                    attempt_count: recovery.attempt_count.to_string(),
+                    identity: recovery.identity.clone().filter(|_| {
+                        recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative
+                    }),
+                });
+        let latest_diagnostic =
+            self.projection
+                .diagnostics()
+                .back()
+                .map(|diagnostic| InspectorDiagnosticView {
+                    sequence: diagnostic.sequence.to_string(),
+                    operation: diagnostic
+                        .operation_id
+                        .as_deref()
+                        .map(|id| truncate_label(id, 22))
+                        .unwrap_or_else(|| "global".into()),
+                    detail: truncate_label(&diagnostic.message, 120),
+                    truncated: diagnostic.truncated,
+                });
+        let latest_config_diagnostic = project.diagnostics.last().map(|diagnostic| {
+            (
+                truncate_label(&diagnostic.code, 28),
+                truncate_label(&diagnostic.summary, 120),
+            )
+        });
+        let latest_issue = self
+            .projection
+            .issues()
+            .back()
+            .map(|issue| truncate_label(&issue.code, 28));
+        let runtime_attention_count = self
+            .projection
+            .diagnostics()
+            .len()
+            .saturating_add(self.projection.recoveries().len())
+            .saturating_add(project.diagnostics.len())
+            .saturating_add(self.projection.issues().len());
+        let usage = &snapshot.context.usage;
+        InspectorPaneViewModel {
+            panel_width: self.preferences.context_panel_width,
+            context_is_overlay: self.narrow_context_open,
+            keyboard_focus_visible: self.keyboard_focus_visible(),
+            selected_section: self.inspector_section,
+            composer_running,
+            awaiting_prompt_start,
+            recovery_pending: self
+                .command_ledger
+                .contains_where(|intent| matches!(intent, DesktopCommandIntent::Recovery { .. })),
+            file_review_pending: self
+                .command_ledger
+                .contains_where(|intent| matches!(intent, DesktopCommandIntent::FileReview { .. })),
+            external_editor_pending: self.command_ledger.contains_where(|intent| {
+                matches!(intent, DesktopCommandIntent::ExternalEditor { .. })
+            }),
+            external_editor_configured: self.preferences.external_editor.is_some(),
+            changed_files,
+            change_count: snapshot.context.changes.len(),
+            file_review: Arc::clone(&self.file_review),
+            runtime_attention_count,
+            task_state: runtime_state_label(self.projection.lifecycle(), composer_running)
+                .to_owned(),
+            active_operation: snapshot
+                .active_operation
+                .as_deref()
+                .map(|id| truncate_label(id, 24))
+                .unwrap_or_else(|| "—".into()),
+            operation_count: snapshot.context.operations.len(),
+            delegation_count: snapshot.context.delegations.len(),
+            selected_model: truncate_label(&project.selected_model_id, 28),
+            profile: truncate_label(snapshot.session.default_agent_profile_id.as_str(), 28),
+            thinking: self
+                .thinking_selection
+                .label(project.settings.default_thinking_level.as_deref()),
+            usage_input: usage.input.to_string(),
+            usage_output: usage.output.to_string(),
+            usage_cache_read: usage.cache_read.to_string(),
+            usage_cache_write: usage.cache_write.to_string(),
+            usage_tokens: usage.input.saturating_add(usage.output).to_string(),
+            usage_context: usage
+                .context_window
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "—".into()),
+            usage_cost: usage_cost_label(usage.cost),
+            reduced_motion: self.preferences.reduced_motion,
+            stream_id: truncate_label(&snapshot.cursor.stream_id, 18),
+            sequence: snapshot.cursor.last_event_sequence.to_string(),
+            generation: snapshot.cursor.capability_generation.to_string(),
+            model_count: project.models.len(),
+            profile_count: project.profiles.len(),
+            skill_count: project.resources.skill_names.len(),
+            prompt_count: project.resources.prompt_template_names.len(),
+            context_count: project.resources.context_files.len(),
+            latest_recovery,
+            latest_diagnostic,
+            latest_config_diagnostic,
+            latest_issue,
+            cwd: truncate_label(&project.cwd.display().to_string(), 54),
+        }
+    }
+
+    fn overlay_view_model(&self) -> OverlayViewModel {
+        let snapshot = self.projection.snapshot();
+        let composer_running = snapshot.active_operation.is_some();
+        let active_session_id = snapshot.session.session_id.as_str();
+        let sessions = self
+            .session_controller
+            .catalog()
+            .iter()
+            .map(|session| OverlaySessionView {
+                session_id: session.session_id.clone(),
+                updated_at: session.updated_at.clone(),
+                active: session.session_id == active_session_id,
+            })
+            .collect();
+        let authorization = snapshot
+            .pending_authorizations
+            .first()
+            .cloned()
+            .map(|request| {
+                let decision_pending = self.command_ledger.authorization().is_some_and(
+                    |(_, authorization_id, operation_id)| {
+                        authorization_id == request.authorization_id
+                            && operation_id == request.operation_id
+                    },
+                );
+                OverlayAuthorizationView {
+                    request,
+                    decision_pending,
+                }
+            });
+        OverlayViewModel {
+            composer_running,
+            awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
+            session_pending: self.command_ledger.contains_where(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
+                )
+            }),
+            session_catalog_pending: self
+                .command_ledger
+                .contains(&DesktopCommandIntent::ListSessions),
+            sessions,
+            omitted_sessions: self.session_controller.omitted(),
+            palette_open: self.command_palette.is_open(),
+            palette_selected: self.command_palette.selected(),
+            narrow_context_open: self.narrow_context_open,
+            narrow_sessions_open: self.narrow_sessions_open,
+            authorization,
+            full_message: self.conversation_full_message.clone(),
+        }
+    }
+
+    fn status_bar_view_model(&self) -> StatusBarViewModel {
+        let snapshot = self.projection.snapshot();
+        let project = self.projection.project();
+        let composer_running = snapshot.active_operation.is_some();
+        let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
+        let reload_pending = self.command_ledger.contains(&DesktopCommandIntent::Reload);
+        let selection_pending = self
+            .command_ledger
+            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)));
+        let thinking = self
+            .thinking_selection
+            .label(project.settings.default_thinking_level.as_deref());
+
+        StatusBarViewModel {
+            status: self.semantic_status(),
+            selector_disabled: composer_running
+                || awaiting_prompt_start
+                || reload_pending
+                || selection_pending,
+            model_cycle_available: project
+                .models
+                .iter()
+                .filter(|model| model.supports_text && (model.configured || model.selected))
+                .take(2)
+                .count()
+                > 1,
+            profile_cycle_available: project.profiles.len() > 1,
+            model: Arc::from(truncate_label(&project.selected_model_id, 14)),
+            profile: Arc::from(truncate_label(
+                snapshot.session.default_agent_profile_id.as_str(),
+                12,
+            )),
+            thinking: Arc::from(truncate_label(&thinking, 12)),
+            changed_file_count: snapshot.context.changes.len(),
+            notice: self.preference_notice.as_deref().map(Arc::from),
+            keyboard_focus_visible: self.keyboard_focus_visible(),
+        }
+    }
+
+    fn conversation_pane_view_model(&self) -> ConversationPaneViewModel {
+        let diagnostic_recovery = self.projection.recoveries().iter().find_map(|recovery| {
+            (recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative)
+                .then(|| recovery.identity.clone())
+                .flatten()
+        });
+        ConversationPaneViewModel {
+            render: self.conversation_controller.render_reader(),
+            scroll: self.conversation_controller.scroll.clone(),
+            visible_count: self.visible_conversation_count(),
+            event_count: self.projection.recent_events().len(),
+            message_count: self.projection.messages().len(),
+            tool_count: self.projection.tools().len(),
+            omitted_count: self.projection.conversation().omitted_blocks(),
+            follow_latest: self.conversation_controller.follow_latest_enabled(),
+            unseen_updates: self.conversation_controller.unseen_updates(),
+            selected_block_id: self
+                .conversation_controller
+                .selected_block_id()
+                .map(str::to_owned),
+            expanded_details: Rc::new(self.conversation_controller.expanded_details().clone()),
+            full_view_block_id: self
+                .conversation_full_message
+                .as_ref()
+                .map(|message| message.block_id.clone()),
+            diagnostic_recovery,
+        }
+    }
+
+    fn notify_conversation_pane(&self, cx: &mut Context<Self>) {
+        let view_model = self.conversation_pane_view_model();
+        self.conversation_pane.update(cx, |pane, cx| {
+            pane.set_view_model(view_model);
+            cx.notify();
+        });
+    }
+
+    fn conversation_header_view_model(&self) -> ConversationHeaderViewModel {
+        let snapshot = self.projection.snapshot();
+        let project = self.projection.project();
+        let composer_running = snapshot.active_operation.is_some();
+        let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
+        let reload_pending = self.command_ledger.contains(&DesktopCommandIntent::Reload);
+        let selection_pending = self
+            .command_ledger
+            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)));
+        let project_name = project
+            .cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| truncate_label(name, 18))
+            .unwrap_or_else(|| "Project".into());
+
+        ConversationHeaderViewModel {
+            status: self.semantic_status(),
+            composer_running,
+            abort_pending: self
+                .command_ledger
+                .contains_where(|intent| matches!(intent, DesktopCommandIntent::Abort { .. })),
+            reload_pending,
+            selector_disabled: composer_running
+                || awaiting_prompt_start
+                || reload_pending
+                || selection_pending,
+            model_cycle_available: project
+                .models
+                .iter()
+                .filter(|model| model.supports_text && (model.configured || model.selected))
+                .take(2)
+                .count()
+                > 1,
+            profile_cycle_available: project.profiles.len() > 1,
+            model: Arc::from(truncate_label(&project.selected_model_id, 10)),
+            profile: Arc::from(truncate_label(
+                snapshot.session.default_agent_profile_id.as_str(),
+                9,
+            )),
+            thinking: Arc::from(
+                self.thinking_selection
+                    .label(project.settings.default_thinking_level.as_deref()),
+            ),
+            project_name: Arc::from(project_name),
+            keyboard_focus_visible: self.keyboard_focus_visible(),
+            panel_visibility: self.visibility(),
+            sessions_panel_width: self.preferences.sessions_panel_width,
+            context_panel_width: self.preferences.context_panel_width,
         }
     }
 
@@ -4069,16 +3573,6 @@ impl NativeShell {
             DesktopProjectionLifecycle::Running => SemanticStatus::Idle,
         }
     }
-
-    fn status_color(&self, status: SemanticStatus) -> gpui::Rgba {
-        let theme = SemanticTheme::GEEK_DARK;
-        match status {
-            SemanticStatus::Idle => rgb(theme.muted_text.value()),
-            SemanticStatus::Running => rgb(theme.accent.value()),
-            SemanticStatus::Warning | SemanticStatus::Authorization => rgb(theme.warning.value()),
-            SemanticStatus::Error => rgb(theme.danger.value()),
-        }
-    }
 }
 
 impl Render for NativeShell {
@@ -4086,8 +3580,8 @@ impl Render for NativeShell {
         let _span = tracing::trace_span!("desktop.render").entered();
         if self.composer_needs_sync {
             let draft = self.composer.draft().to_owned();
-            self.composer_input.update(cx, |input, cx| {
-                input.set_value(draft, window, cx);
+            self.composer_pane.update(cx, |pane, cx| {
+                pane.set_input_value(draft, window, cx);
             });
             self.composer_needs_sync = false;
         }
@@ -4095,16 +3589,19 @@ impl Render for NativeShell {
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
         let requested_layout_width = conversation_width_bucket(layout.workspace.width);
-        let (layout_width, width_refresh) =
-            self.conversation_width_for_render(requested_layout_width);
+        let (layout_width, width_refresh) = self
+            .conversation_controller
+            .width_for_render(requested_layout_width);
         if let Some((requested, deadline)) = width_refresh {
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(CONVERSATION_RESIZE_DEBOUNCE)
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.conversation_width_pending == Some((requested, deadline)) {
-                        this.conversation_render_full_dirty = true;
+                    if this
+                        .conversation_controller
+                        .commit_pending_width(requested, deadline)
+                    {
                         cx.notify();
                     }
                 });
@@ -4337,7 +3834,15 @@ fn safe_runtime_rejection_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
     use std::cell::RefCell;
+    use std::collections::HashSet;
+
+    use desktop::conversation::{
+        ConversationItemKey, ConversationItemKind, ConversationRowRenderCache,
+        ConversationRowRenderSource,
+    };
+    use gpui::size;
 
     use coding_agent::api::authorization::{
         ToolAuthorizationPreview, ToolAuthorizationRequest, ToolAuthorizationRisk,
@@ -4717,7 +4222,8 @@ mod tests {
         let medium_row = cx
             .debug_bounds("conversation-last-row")
             .expect("medium conversation row remains mounted");
-        let medium_scroll = shell.read_with(cx, |shell, _| shell.conversation_scroll.offset());
+        let medium_scroll =
+            shell.read_with(cx, |shell, _| shell.conversation_controller.scroll.offset());
 
         cx.dispatch_action(ToggleInspectorPanel);
         cx.run_until_parked();
@@ -4733,7 +4239,7 @@ mod tests {
         );
         assert_eq!(cx.debug_bounds("conversation-last-row"), Some(medium_row));
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.conversation_scroll.offset()),
+            shell.read_with(cx, |shell, _| shell.conversation_controller.scroll.offset()),
             medium_scroll
         );
 
@@ -4753,7 +4259,8 @@ mod tests {
         let narrow_row = cx
             .debug_bounds("conversation-last-row")
             .expect("narrow conversation row remains mounted");
-        let narrow_scroll = shell.read_with(cx, |shell, _| shell.conversation_scroll.offset());
+        let narrow_scroll =
+            shell.read_with(cx, |shell, _| shell.conversation_controller.scroll.offset());
         let sessions_toggle = cx
             .debug_bounds("desktop-hit-toggle-sessions")
             .expect("narrow layout retains the Sessions drawer toggle");
@@ -4772,7 +4279,7 @@ mod tests {
         );
         assert_eq!(cx.debug_bounds("conversation-last-row"), Some(narrow_row));
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.conversation_scroll.offset()),
+            shell.read_with(cx, |shell, _| shell.conversation_controller.scroll.offset()),
             narrow_scroll
         );
 
@@ -4805,9 +4312,9 @@ mod tests {
             let shell_state = cx.update(|_, app| {
                 let shell = shell.read(app);
                 (
-                    shell.conversation_render_rows.len(),
-                    shell.conversation_render_heights.clone(),
-                    shell.conversation_scroll.offset(),
+                    shell.conversation_controller.row_count(),
+                    shell.conversation_controller.render_heights_for_tests(),
+                    shell.conversation_controller.scroll.offset(),
                 )
             });
             let row = cx.debug_bounds("conversation-last-row").unwrap_or_else(|| {
@@ -4930,12 +4437,9 @@ mod tests {
 
         let block_id = shell.read_with(cx, |shell, _| {
             shell
-                .conversation_render_rows
-                .last()
+                .conversation_controller
+                .last_row_id_for_tests()
                 .expect("Tool row exists")
-                .item_key
-                .row_id()
-                .to_owned()
         });
         shell.update(cx, |shell, cx| {
             shell.toggle_conversation_details(&block_id, cx);
@@ -4974,12 +4478,9 @@ mod tests {
         );
         let block_id = shell.read_with(cx, |shell, _| {
             shell
-                .conversation_render_rows
-                .last()
+                .conversation_controller
+                .last_row_id_for_tests()
                 .expect("Tool row exists")
-                .item_key
-                .row_id()
-                .to_owned()
         });
         shell.update(cx, |shell, cx| {
             shell.toggle_conversation_details(&block_id, cx);
@@ -5050,12 +4551,9 @@ mod tests {
 
         let block_id = shell.read_with(cx, |shell, _| {
             shell
-                .conversation_render_rows
-                .last()
+                .conversation_controller
+                .last_row_id_for_tests()
                 .expect("Assistant row exists")
-                .item_key
-                .row_id()
-                .to_owned()
         });
         shell.update(cx, |shell, cx| {
             shell.toggle_conversation_details(&block_id, cx);
@@ -5124,7 +4622,7 @@ mod tests {
                 && open.bottom() <= row.bottom()
                 && open.bottom() <= composer.top(),
             "full-message action must be reachable inside its row and above the Composer: open={open:?}, row={row:?}, composer={composer:?}, offset={:?}",
-            shell.read_with(cx, |shell, _| shell.conversation_scroll.offset())
+            shell.read_with(cx, |shell, _| shell.conversation_controller.scroll.offset())
         );
         cx.update(|window, app| {
             shell.update(app, |shell, cx| {
@@ -5216,7 +4714,7 @@ mod tests {
             probe.observe_render_at(started + Duration::from_millis(8)),
             Some(Duration::from_millis(5))
         );
-        assert_eq!(probe.last_observed.get(), Some(Duration::from_millis(5)));
+        assert_eq!(probe.last_observed(), Some(Duration::from_millis(5)));
         assert_eq!(
             probe.observe_render_at(started + Duration::from_millis(9)),
             None
@@ -5235,17 +4733,19 @@ mod tests {
 
         let changed_at = Instant::now();
         shell.update(cx, |shell, cx| {
-            shell.composer_input_latency.mark_changed_at(changed_at);
-            shell.notify_composer_pane(cx);
+            shell.composer_pane.update(cx, |pane, cx| {
+                pane.latency_probe().mark_changed_at(changed_at);
+                cx.notify();
+            });
         });
         cx.run_until_parked();
 
-        assert!(shell.read_with(cx, |shell, _| {
-            shell.composer_input_latency.pending_change.get().is_none()
-                && shell
-                    .composer_input_latency
-                    .last_observed
-                    .get()
+        assert!(shell.read_with(cx, |shell, cx| {
+            let pane = shell.composer_pane.read(cx);
+            pane.latency_probe().pending_is_empty()
+                && pane
+                    .latency_probe()
+                    .last_observed()
                     .is_some_and(|latency| latency <= changed_at.elapsed())
         }));
     }
@@ -5473,8 +4973,12 @@ mod tests {
         let keystroke = gpui::Keystroke::parse("a")
             .expect("the headless composer input keystroke remains valid");
         for _ in 0..SAMPLE_COUNT {
-            shell.read_with(cx, |shell, _| {
-                shell.composer_input_latency.last_observed.set(None);
+            shell.read_with(cx, |shell, cx| {
+                shell
+                    .composer_pane
+                    .read(cx)
+                    .latency_probe()
+                    .clear_last_observed();
             });
             let started = Instant::now();
             let dispatched =
@@ -5488,8 +4992,8 @@ mod tests {
             cx.run_until_parked();
             input_roundtrip_samples.push(started.elapsed().as_micros());
             let observed = shell
-                .read_with(cx, |shell, _| {
-                    shell.composer_input_latency.last_observed.get()
+                .read_with(cx, |shell, cx| {
+                    shell.composer_pane.read(cx).latency_probe().last_observed()
                 })
                 .expect("InputEvent::Change reaches the next ComposerPane render");
             input_to_render_samples.push(observed.as_micros());
@@ -5824,7 +5328,7 @@ mod tests {
         );
         assert!(shell.read_with(cx, |shell, _| {
             matches!(
-                &shell.file_review,
+                shell.file_review.as_ref(),
                 DesktopFileReviewState::Loading(request) if request == &review_request
             )
         }));
@@ -6002,86 +5506,73 @@ mod tests {
 
     #[test]
     fn conversation_scroll_selection_and_expansion_are_scoped_to_the_session() {
-        let mut viewport = ConversationViewport::new(8);
-        viewport.on_content_changed(40, 1);
-        viewport.pause_follow_latest();
-        viewport.select_live("tool:session-a");
-        let mut expanded_details = HashSet::from(["tool:session-a".to_owned()]);
-        let mut session_views = HashMap::new();
-        let mut pending_scroll_restore = None;
+        let mut controller = ConversationController::default();
+        controller.viewport_for_tests().on_content_changed(40, 1);
+        controller.viewport_for_tests().pause_follow_latest();
+        controller
+            .viewport_for_tests()
+            .select_live("tool:session-a");
+        controller
+            .expanded_details_for_tests()
+            .insert("tool:session-a".to_owned());
+        controller.set_scroll_top_for_tests(410.5);
 
-        assert!(reconcile_conversation_session_view_state(
-            &mut viewport,
-            &mut expanded_details,
-            &mut session_views,
-            &mut pending_scroll_restore,
-            "session-a",
-            "session-b",
-            410.5,
-        ));
-        assert!(viewport.follow_latest());
-        assert_eq!(viewport.selected_block_id(), None);
-        assert!(expanded_details.is_empty());
-        assert_eq!(pending_scroll_restore, Some(0.));
+        assert!(controller.reconcile_session_view("session-a", "session-b"));
+        assert!(controller.follow_latest_enabled());
+        assert_eq!(controller.selected_block_id(), None);
+        assert!(controller.expanded_details().is_empty());
+        assert_eq!(controller.pending_scroll_restore_for_tests(), Some(0.));
 
-        viewport.on_content_changed(12, 2);
-        viewport.pause_follow_latest();
-        viewport.select_live("assistant:session-b");
-        expanded_details.insert("assistant:session-b".into());
-        assert!(reconcile_conversation_session_view_state(
-            &mut viewport,
-            &mut expanded_details,
-            &mut session_views,
-            &mut pending_scroll_restore,
-            "session-b",
-            "session-a",
-            95.,
-        ));
+        controller.viewport_for_tests().on_content_changed(12, 2);
+        controller.viewport_for_tests().pause_follow_latest();
+        controller
+            .viewport_for_tests()
+            .select_live("assistant:session-b");
+        controller
+            .expanded_details_for_tests()
+            .insert("assistant:session-b".into());
+        controller.set_scroll_top_for_tests(95.);
+        assert!(controller.reconcile_session_view("session-b", "session-a"));
 
-        assert!(!viewport.follow_latest());
-        assert_eq!(viewport.selected_block_id(), Some("tool:session-a"));
+        assert!(!controller.follow_latest_enabled());
+        assert_eq!(controller.selected_block_id(), Some("tool:session-a"));
         assert_eq!(
-            expanded_details,
+            controller.expanded_details().clone(),
             HashSet::from(["tool:session-a".to_owned()])
         );
-        assert_eq!(pending_scroll_restore, Some(410.5));
+        assert_eq!(controller.pending_scroll_restore_for_tests(), Some(410.5));
 
-        let session_b = session_views
-            .get("session-b")
+        let session_b = controller
+            .session_view_for_tests("session-b")
             .expect("the outgoing session view should remain restorable");
-        assert_eq!(session_b.scroll_top, 95.);
+        assert_eq!(session_b.scroll_top(), 95.);
         assert_eq!(
-            session_b.viewport.selected_block_id(),
+            session_b.viewport().selected_block_id(),
             Some("assistant:session-b")
         );
     }
 
     #[test]
     fn same_session_projection_replacement_keeps_conversation_view_untouched() {
-        let mut viewport = ConversationViewport::new(8);
-        viewport.pause_follow_latest();
-        viewport.select_live("assistant:current");
-        let mut expanded_details = HashSet::from(["assistant:current".to_owned()]);
-        let mut session_views = HashMap::new();
-        let mut pending_scroll_restore = None;
+        let mut controller = ConversationController::default();
+        controller.viewport_for_tests().pause_follow_latest();
+        controller
+            .viewport_for_tests()
+            .select_live("assistant:current");
+        controller
+            .expanded_details_for_tests()
+            .insert("assistant:current".to_owned());
+        controller.set_scroll_top_for_tests(123.);
 
-        assert!(!reconcile_conversation_session_view_state(
-            &mut viewport,
-            &mut expanded_details,
-            &mut session_views,
-            &mut pending_scroll_restore,
-            "session-a",
-            "session-a",
-            123.,
-        ));
-        assert!(!viewport.follow_latest());
-        assert_eq!(viewport.selected_block_id(), Some("assistant:current"));
+        assert!(!controller.reconcile_session_view("session-a", "session-a"));
+        assert!(!controller.follow_latest_enabled());
+        assert_eq!(controller.selected_block_id(), Some("assistant:current"));
         assert_eq!(
-            expanded_details,
+            controller.expanded_details().clone(),
             HashSet::from(["assistant:current".to_owned()])
         );
-        assert!(session_views.is_empty());
-        assert_eq!(pending_scroll_restore, None);
+        assert!(controller.session_view_for_tests("session-a").is_none());
+        assert_eq!(controller.pending_scroll_restore_for_tests(), None);
     }
 
     #[test]
@@ -6311,14 +5802,16 @@ mod tests {
 
         // Every modal role is attached to the same element that owns focus,
         // so assistive technology receives focus inside the active dialog.
-        assert!(overlays.contains(
-            "overlay_surface(\"command-palette-overlay\", &owner.command_palette_focus)"
-        ));
+        assert!(
+            overlays.contains(
+                "overlay_surface(\"command-palette-overlay\", &self.command_palette_focus)"
+            )
+        );
         assert!(
             overlays
-                .contains("overlay_surface(\"authorization-overlay\", &owner.authorization_focus)")
+                .contains("overlay_surface(\"authorization-overlay\", &self.authorization_focus)")
         );
-        assert!(inspector.contains(".track_focus(&owner.context_focus)"));
+        assert!(inspector.contains(".track_focus(&self.focus)"));
     }
 
     #[test]
@@ -6471,29 +5964,56 @@ mod tests {
 
     #[test]
     fn conversation_list_sizes_persist_and_full_history_work_is_dirty_gated() {
-        let source = include_str!("native_shell.rs");
-        assert!(source.contains("conversation_row_sizes: Rc<Vec<gpui::Size<gpui::Pixels>>>"));
-        assert!(source.contains("let transcript_rows = self.conversation_row_sizes.clone()"));
-        assert!(source.contains("else if self.conversation_render_live_dirty"));
-        assert!(source.contains("self.conversation_render_rows.truncate(durable_count)"));
-        assert!(source.contains("Rc::make_mut(&mut self.conversation_row_sizes)"));
-        assert!(source.contains("CONVERSATION_RESIZE_DEBOUNCE"));
-        assert!(source.contains("Duration::from_millis(67)"));
-        assert!(source.contains("update_conversation_rows_by_sequence(layout_width)"));
-        assert!(source.contains("message.updated_sequence == sequence"));
-        assert!(source.contains("tool.updated_sequence == sequence"));
+        let shell = include_str!("native_shell.rs");
+        let controller = include_str!("native_shell/conversation_controller.rs");
 
-        let render = source
+        // Row sizes, dirty gating and the resize debounce belong to the
+        // conversation controller; the composition root must not re-own them.
+        let row_sizes_field = [
+            "row_sizes: Rc<RefCell<Rc<Vec<gpui::",
+            "Size<gpui::Pixels>>>>>",
+        ]
+        .concat();
+        let live_dirty_branch = ["else if self.render_", "live_dirty"].concat();
+        let live_truncate = ["render_rows.truncate(", "durable_count)"].concat();
+        let row_sizes_make_mut = ["Rc::make_mut(&mut ", "row_sizes)"].concat();
+        let debounce_const = ["RESIZE_DEBOUNCE: Duration = ", "Duration::from_millis(67)"].concat();
+        let sequence_update = ["fn update_rows_by_", "sequence("].concat();
+        let message_sequence = ["message.updated_sequence == ", "sequence"].concat();
+        let tool_sequence = ["tool.updated_sequence == ", "sequence"].concat();
+        for owned in [
+            &row_sizes_field,
+            &live_dirty_branch,
+            &live_truncate,
+            &row_sizes_make_mut,
+            &debounce_const,
+            &sequence_update,
+            &message_sequence,
+            &tool_sequence,
+        ] {
+            assert!(
+                controller.contains(owned.as_str()),
+                "conversation controller must own {owned}"
+            );
+            assert!(
+                !shell.contains(owned.as_str()),
+                "native shell composition must not own {owned}"
+            );
+        }
+
+        // The root prepares rows exactly once per frame, outside Render, and
+        // never reaches for the legacy full-history rebuild.
+        let render = shell
             .split_once("impl Render for NativeShell")
             .expect("native render implementation remains present")
             .1;
-        let prepare_call = ["prepare_conversation_", "rows("].concat();
+        let prepare_call = ["prepare_", "rows(&source, layout_width)"].concat();
         let refresh_call = ["refresh_conversation_rows_", "at_width(layout_width, cx)"].concat();
         let legacy_rebuild_call = ["rebuild_conversation_", "render_rows("].concat();
-        assert_eq!(source.matches(&prepare_call).count(), 2);
+        assert_eq!(shell.matches(&prepare_call).count(), 1);
         assert_eq!(render.matches(&prepare_call).count(), 0);
         assert_eq!(render.matches(&refresh_call).count(), 1);
-        assert_eq!(render.matches(&legacy_rebuild_call).count(), 0);
+        assert_eq!(shell.matches(&legacy_rebuild_call).count(), 0);
     }
 
     #[test]
@@ -6509,7 +6029,13 @@ mod tests {
         assert!(shell.contains("let conversation_pane = cx.new("));
         assert!(shell.contains(".child(self.conversation_pane.clone())"));
         assert!(pane.contains("impl EventEmitter<ConversationPaneEvent>"));
-        assert!(pane.contains("WeakEntity<NativeShell>"));
+        assert!(pane.contains("struct ConversationPaneViewModel"));
+        assert!(pane.contains("view_model: Option<ConversationPaneViewModel>"));
+        assert!(!pane.contains("WeakEntity<NativeShell>"));
+        assert!(!pane.contains("owner.read(cx)"));
+        assert!(!pane.contains("DesktopProjection"));
+        assert!(shell.contains("fn notify_conversation_pane("));
+        assert!(shell.contains("fn conversation_pane_view_model("));
         assert!(shell.contains("if pane_dirty"));
         assert!(shell.contains("self.conversation_pane.update(cx, |_, cx| cx.notify())"));
         assert!(!shell.contains(&scroll_region_id));
@@ -6548,6 +6074,7 @@ mod tests {
         let shell = include_str!("native_shell.rs");
         let pane = include_str!("native_shell/sessions_pane.rs");
         let sessions_panel_id = [".id(\"sessions-", "panel\")"].concat();
+        let root_search_field = ["sessions_search_", "input:"].concat();
 
         assert!(!shell.contains(&sessions_panel_id));
         assert!(pane.contains(&sessions_panel_id));
@@ -6555,10 +6082,18 @@ mod tests {
         assert!(shell.contains("let sessions_pane = cx.new("));
         assert!(shell.contains(".child(self.sessions_pane.clone())"));
         assert!(pane.contains("impl EventEmitter<SessionsPaneEvent>"));
-        assert!(pane.contains("WeakEntity<NativeShell>"));
+        assert!(pane.contains("struct SessionsPaneViewModel"));
+        assert!(pane.contains("view_model: Option<SessionsPaneViewModel>"));
+        assert!(pane.contains("search_input: gpui::Entity<InputState>"));
+        assert!(pane.contains("InputState::new(window, cx).placeholder(\"Search sessions…\")"));
+        assert!(!pane.contains("WeakEntity<NativeShell>"));
+        assert!(!pane.contains("owner.read(cx)"));
+        assert!(!pane.contains("DesktopProjection"));
         assert!(shell.contains("fn notify_sessions_pane("));
-        assert!(!pane.contains("conversation_render_rows"));
-        assert!(!pane.contains("conversation_render_dirty_sequences"));
+        assert!(shell.contains("fn sessions_pane_view_model("));
+        assert!(!shell.contains(&root_search_field));
+        assert!(!pane.contains("conversation_controller.render_rows"));
+        assert!(!pane.contains("conversation_controller.render_dirty_sequences"));
     }
 
     #[test]
@@ -6567,14 +6102,31 @@ mod tests {
         let pane = include_str!("native_shell/composer_pane.rs");
         let composer_panel_id = [".id(\"composer-", "panel\")"].concat();
         let input_constructor = ["Input", "::new(&input)"].concat();
+        let root_input_field = ["composer_", "input:"].concat();
+        let root_latency_field = ["composer_", "input_latency:"].concat();
+        let weak_root_owner = ["WeakEntity", "<NativeShell>"].concat();
 
         assert!(!shell.contains(&composer_panel_id));
         assert!(pane.contains(&composer_panel_id));
         assert!(shell.contains("composer_pane: gpui::Entity<ComposerPane>"));
         assert!(shell.contains(".child(self.composer_pane.clone())"));
+        assert!(pane.contains("struct ComposerPaneViewModel"));
+        assert!(pane.contains("input: gpui::Entity<InputState>"));
+        assert!(pane.contains("focus: FocusHandle"));
+        assert!(pane.contains("latency: InputRenderLatencyProbe"));
         assert!(pane.contains("impl EventEmitter<ComposerPaneEvent>"));
         assert!(pane.contains(&input_constructor));
-        assert!(shell.contains("InputEvent::Change =>"));
+        assert!(pane.contains("InputEvent::Change =>"));
+        assert!(pane.contains("ComposerPaneEvent::InputChanged"));
+        assert!(pane.contains("ComposerPaneEvent::Focused"));
+        assert!(pane.contains("ComposerPaneEvent::SubmitPrimary"));
+        assert!(!pane.contains(&weak_root_owner));
+        assert!(!pane.contains("owner.read(cx)"));
+        assert!(!pane.contains("DesktopProjection"));
+        assert!(!shell.contains(&root_input_field));
+        assert!(!shell.contains(&root_latency_field));
+        assert!(shell.contains("fn composer_pane_view_model(&self) -> ComposerPaneViewModel"));
+        assert!(shell.contains("composer: ComposerState"));
         assert!(shell.contains("this.notify_composer_pane(cx)"));
         assert!(shell.contains("ComposerPaneEvent::SubmitRunning"));
         assert!(shell.contains("ComposerSubmissionKind::Steer"));
@@ -6593,7 +6145,7 @@ mod tests {
         assert!(!pane.contains(&legacy_follow_up_button));
         assert!(shell.contains("composer_session_drafts: HashMap<String, String>"));
         assert!(shell.contains("composer_running_modes: HashMap<String, ComposerRunningMode>"));
-        assert!(!pane.contains("conversation_render_dirty_sequences"));
+        assert!(!pane.contains("conversation_controller.render_dirty_sequences"));
     }
 
     #[test]
@@ -6606,12 +6158,25 @@ mod tests {
         assert!(pane.contains(&inspector_panel_id));
         assert!(shell.contains("inspector_pane: gpui::Entity<InspectorPane>"));
         assert!(shell.contains(".child(self.inspector_pane.clone())"));
+        assert!(pane.contains("struct InspectorPaneViewModel"));
+        assert!(pane.contains("view_model: Option<InspectorPaneViewModel>"));
+        assert!(pane.contains("focus: FocusHandle"));
+        assert!(pane.contains("file_review: Arc<DesktopFileReviewState>"));
         assert!(pane.contains("impl EventEmitter<InspectorPaneEvent>"));
         assert!(pane.contains("RequestFileReview(CodingAgentFileReviewRequest)"));
         assert!(pane.contains("identity: DesktopRecoveryIdentity"));
+        assert!(!pane.contains("WeakEntity<NativeShell>"));
+        assert!(!pane.contains("owner.read(cx)"));
+        assert!(!pane.contains("DesktopProjection"));
+        assert!(!pane.contains("command_ledger"));
+        assert!(!pane.contains("preferences."));
+        assert!(shell.contains("fn inspector_pane_view_model(&self) -> InspectorPaneViewModel"));
+        assert!(shell.contains("file_review: Arc<DesktopFileReviewState>"));
+        assert!(shell.contains("inspector_telemetry_refresh_deadline: Option<Instant>"));
+        assert!(shell.contains("inspector_session_sections: HashMap<String, InspectorSection>"));
         assert!(shell.contains("this.submit_recovery_action(identity.clone(), *action, cx)"));
         assert!(shell.contains("fn notify_inspector_pane("));
-        assert!(!pane.contains("conversation_render_dirty_sequences"));
+        assert!(!pane.contains("conversation_controller.render_dirty_sequences"));
     }
 
     #[test]
@@ -6633,17 +6198,22 @@ mod tests {
     fn sessions_navigation_is_searchable_recent_and_automatically_refreshed() {
         let shell = include_str!("native_shell.rs");
         let pane = include_str!("native_shell/sessions_pane.rs");
+        let controller = include_str!("native_shell/session_controller.rs");
         let search_placeholder = ["placeholder(\"Search ", "sessions…\")"].concat();
         let refresh_interval = ["Duration::from_secs(", "15)"].concat();
         let active_duplicate = ["current_session_", "label"].concat();
+        let root_refresh_deadline = ["session_catalog_refresh_", "deadline"].concat();
 
-        assert!(shell.contains(&search_placeholder));
-        assert!(shell.contains("schedule_session_catalog_refresh"));
-        assert!(shell.contains(&refresh_interval));
+        assert!(pane.contains(&search_placeholder));
+        assert!(controller.contains("schedule_session_catalog_refresh"));
+        assert!(controller.contains(&refresh_interval));
+        assert!(controller.contains("struct SessionController"));
+        assert!(controller.contains("refresh_deadline: Option<Instant>"));
+        assert!(!shell.contains(&root_refresh_deadline));
         assert!(pane.contains("relative_session_time"));
         assert!(pane.contains("Current task"));
         assert!(pane.contains("Recent task"));
-        assert!(pane.contains("session_catalog.iter()"));
+        assert!(pane.contains("view_model.catalog"));
         assert!(pane.contains("sessions-overflow"));
         assert!(pane.contains("PopupMenuItem::new(if session_catalog_pending"));
         assert!(!pane.contains("refresh-session-catalog"));
@@ -6735,12 +6305,18 @@ mod tests {
         assert!(shell.contains("ConversationHeaderEvent::SelectNextSessionProfile"));
         assert!(shell.contains("ConversationHeaderEvent::CycleThinking"));
         assert!(shell.contains("ConversationHeaderEvent::Abort"));
+        assert!(header.contains("ConversationHeaderViewModel"));
+        assert!(shell.contains("conversation_header_view_model"));
+        assert!(!header.contains("WeakEntity"));
+        assert!(!header.contains("NativeShell"));
+        assert!(!header.contains("owner.read(cx)"));
+        assert!(!header.contains("DesktopProjection"));
         assert!(!header.contains("copy-conversation-block"));
         assert!(!header.contains("reload-local-resources"));
         assert!(header.contains("header-overflow"));
         assert!(header.contains("Reload local resources"));
         assert!(header.contains("Inspector"));
-        assert!(!header.contains("conversation_render_dirty_sequences"));
+        assert!(!header.contains("conversation_controller.render_dirty_sequences"));
     }
 
     #[test]
@@ -6774,13 +6350,19 @@ mod tests {
         assert!(shell.contains("this.select_next_session_profile(cx)"));
         assert!(shell.contains("StatusBarEvent::CycleThinking"));
         assert!(shell.contains("this.cycle_thinking_selection(cx)"));
+        assert!(bar.contains("StatusBarViewModel"));
+        assert!(shell.contains("status_bar_view_model"));
+        assert!(!bar.contains("WeakEntity"));
+        assert!(!bar.contains("NativeShell"));
+        assert!(!bar.contains("owner.read(cx)"));
+        assert!(!bar.contains("DesktopProjection"));
         assert!(!bar.contains("seq {}"));
         assert!(!bar.contains("motion static"));
         assert!(!bar.contains("messages ↑/↓"));
         assert!(!bar.contains("truncate_label(&notice, 28)"));
         assert!(bar.contains("status-details"));
         assert!(bar.contains("Commands Ctrl/Cmd+K"));
-        assert!(!bar.contains("conversation_render_dirty_sequences"));
+        assert!(!bar.contains("conversation_controller.render_dirty_sequences"));
     }
 
     #[test]
@@ -6814,10 +6396,20 @@ mod tests {
         assert!(shell.contains("overlay_host: gpui::Entity<OverlayHost>"));
         assert!(shell.contains(".child(overlay_host)"));
         assert!(host.contains("impl EventEmitter<OverlayHostEvent>"));
+        assert!(host.contains("struct OverlayViewModel"));
+        assert!(host.contains("view_model: Option<OverlayViewModel>"));
         assert!(host.contains("DecideAuthorization"));
         assert!(shell.contains("this.decide_tool_authorization("));
         assert!(shell.contains("Self::on_trap_overlay_focus"));
-        assert!(host.contains("owner.inspector_pane.clone()"));
+        assert!(host.contains("self.inspector_pane.clone()"));
+        assert!(!host.contains("WeakEntity<NativeShell>"));
+        assert!(!host.contains("owner.read(cx)"));
+        assert!(!host.contains("DesktopProjection"));
+        assert!(!host.contains("command_ledger"));
+        assert!(!host.contains("session_controller"));
+        assert!(shell.contains("fn overlay_view_model(&self) -> OverlayViewModel"));
+        assert!(shell.contains("authorization_focus: FocusHandle"));
+        assert!(shell.contains("active_overlay: Option<DesktopOverlayKind>"));
         assert!(!host.contains("try_decide_tool_authorization"));
         assert!(!host.contains("command_ledger.reserve"));
     }
@@ -6875,32 +6467,41 @@ mod conversation_pane;
 mod desktop_style;
 mod inspector_pane;
 mod overlay_host;
+mod session_controller;
 mod sessions_pane;
 mod status_bar;
 mod streaming_text;
 mod update;
 
 use commands::{DirectCommandUpdate, ProjectionCommandCompletions};
-use composer_pane::{ComposerPane, ComposerPaneEvent};
+#[cfg(test)]
+use composer_pane::InputRenderLatencyProbe;
+use composer_pane::{ComposerPane, ComposerPaneEvent, ComposerPaneViewModel};
 use conversation_controller::{
-    ConversationSessionViewState, RESIZE_DEBOUNCE as CONVERSATION_RESIZE_DEBOUNCE,
-    message_block_id as message_conversation_block_id, minimum_duration,
-    reconcile_session_view_state as reconcile_conversation_session_view_state,
-    row_layout_input as conversation_row_layout_input, tool_block_id as tool_conversation_block_id,
-    upsert_indexed_item,
+    ConversationController, ConversationRefresh, ConversationSource,
+    RESIZE_DEBOUNCE as CONVERSATION_RESIZE_DEBOUNCE,
+    message_block_id as message_conversation_block_id, tool_block_id as tool_conversation_block_id,
 };
 #[cfg(test)]
 use conversation_controller::{
     compensate_scroll_top_for_single_row_height,
     distance_to_bottom as conversation_distance_to_bottom,
-    row_target_height as conversation_row_target_height,
+    row_target_height as conversation_row_target_height, upsert_indexed_item,
 };
-use conversation_header::{ConversationHeader, ConversationHeaderEvent};
-use conversation_pane::{ConversationPane, ConversationPaneEvent};
-use inspector_pane::{InspectorPane, InspectorPaneEvent};
-use overlay_host::{OverlayHost, OverlayHostEvent};
-use sessions_pane::{SessionsPane, SessionsPaneEvent};
-use status_bar::{StatusBar, StatusBarEvent};
+use conversation_header::{
+    ConversationHeader, ConversationHeaderEvent, ConversationHeaderViewModel,
+};
+use conversation_pane::{ConversationPane, ConversationPaneEvent, ConversationPaneViewModel};
+use inspector_pane::{
+    InspectorChangedFileView, InspectorDiagnosticView, InspectorPane, InspectorPaneEvent,
+    InspectorPaneViewModel, InspectorRecoveryView,
+};
+use overlay_host::{
+    OverlayAuthorizationView, OverlayHost, OverlayHostEvent, OverlaySessionView, OverlayViewModel,
+};
+use session_controller::SessionController;
+use sessions_pane::{SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
+use status_bar::{StatusBar, StatusBarEvent, StatusBarViewModel};
 use update::ProjectionDirtyRouting;
 #[cfg(test)]
 use update::{

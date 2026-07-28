@@ -1,0 +1,2105 @@
+use std::collections::VecDeque;
+use std::ffi::OsString;
+use std::sync::{Mutex, MutexGuard};
+use std::thread;
+use std::time::Duration;
+
+use coding_agent::api::authorization::{
+    ToolAuthorizationDecision, ToolAuthorizationIdentity, ToolAuthorizationPreview,
+    ToolAuthorizationRequest, ToolAuthorizationRisk, ToolAuthorizationScope,
+};
+use coding_agent::api::client::{
+    CodingAgentClientBootstrap, CodingAgentClientId, CodingAgentClientProjection,
+    CodingAgentClientProjectionApply, CodingAgentFreshSnapshotRecovery,
+    CodingAgentReconnectDelivery, CodingAgentRecoveryPending, CodingAgentRecoveryReason,
+};
+use coding_agent::api::embedding::{CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions};
+use coding_agent::api::error::{
+    CodingAgentErrorCategory, CodingAgentErrorContext, CodingAgentPublicError,
+};
+use coding_agent::api::event::{
+    CodingAgentProductEvent, CodingAgentProductEventDeliveryClass, CodingAgentRecoveryResolution,
+};
+use coding_agent::api::review::CodingAgentFileReviewRequest;
+use coding_agent::api::view::CodingAgentSessionTranscriptItem;
+use tokio::sync::{mpsc, watch};
+use tokio::task;
+
+use crate::conversation::{MAX_TRANSCRIPT_BLOCKS, MAX_TRANSCRIPT_BYTES};
+use crate::projection::{
+    ContextDirtyFlags, DesktopMessageStatus, DesktopProjection, DesktopProjectionApply,
+    DesktopProjectionLifecycle, DesktopToolStatus, MAX_AUTHORIZATION_TEXT_BYTES,
+    MAX_DESKTOP_MESSAGE_OVERLAYS,
+};
+
+use super::bridge::build_desktop_runtime;
+use super::dispatch::dispatch_active_command;
+use super::driver::*;
+use super::protocol::*;
+use super::*;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct ProcessEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<OsString>)>,
+}
+
+impl ProcessEnvGuard {
+    fn isolated(evo_dir: &std::path::Path) -> Self {
+        const NAMES: &[&str] = &[
+            "EVO_DIR",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_API_KEY",
+            "ANTHROPIC_KEY",
+        ];
+        let lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let saved = NAMES
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect();
+        unsafe {
+            std::env::set_var("EVO_DIR", evo_dir);
+            for name in &NAMES[1..] {
+                std::env::remove_var(name);
+            }
+        }
+        Self { _lock: lock, saved }
+    }
+}
+
+impl Drop for ProcessEnvGuard {
+    fn drop(&mut self) {
+        for (name, previous) in self.saved.iter().rev() {
+            unsafe {
+                match previous {
+                    Some(previous) => std::env::set_var(name, previous),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
+
+fn isolated_options(temp: &tempfile::TempDir) -> (ProcessEnvGuard, CodingAgentEmbeddingOptions) {
+    let global = temp.path().join("global");
+    let project = temp.path().join("project");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let env = ProcessEnvGuard::isolated(&global);
+    let options = CodingAgentEmbeddingOptions::new(&project)
+        .with_session_dir(&sessions)
+        .with_model_id("claude-sonnet-4-5");
+    (env, options)
+}
+
+fn start_runtime(
+    options: CodingAgentEmbeddingOptions,
+) -> (DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot) {
+    DesktopRuntimeBridge::spawn(options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap()
+}
+
+#[test]
+fn desktop_runtime_enables_tcp_io() {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = std::net::TcpStream::connect(address).unwrap();
+    let (_server, _) = listener.accept().unwrap();
+    client.set_nonblocking(true).unwrap();
+
+    build_desktop_runtime().unwrap().block_on(async move {
+        let stream = tokio::net::TcpStream::from_std(client).unwrap();
+        stream.writable().await.unwrap();
+    });
+}
+
+#[tokio::test]
+async fn bootstrap_can_be_polled_without_waiting_on_runtime_initialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let mut bootstrap = DesktopRuntimeBridge::spawn(options).unwrap();
+
+    let (bridge, snapshot) = loop {
+        if let Some(ready) = bootstrap.try_ready().unwrap() {
+            break ready;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert!(!snapshot.session.session.session_id.is_empty());
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, initial) = start_runtime(options);
+    assert_eq!(
+        initial.transcript.session_id,
+        initial.session.session.session_id
+    );
+    let initial_session_id = initial.session.session.session_id.clone();
+
+    bridge.try_create_session(1).unwrap();
+    let DesktopRuntimeUpdate::SessionChanged {
+        command_id,
+        snapshot,
+    } = bridge.next_update().await.unwrap()
+    else {
+        panic!("create session should publish a replacement snapshot");
+    };
+    assert_eq!(command_id, 1);
+    assert_ne!(snapshot.session.session.session_id, initial_session_id);
+
+    bridge.try_open_session(2, &initial_session_id).unwrap();
+    let DesktopRuntimeUpdate::SessionChanged {
+        command_id,
+        snapshot,
+    } = bridge.next_update().await.unwrap()
+    else {
+        panic!("open session should publish a replacement snapshot");
+    };
+    assert_eq!(command_id, 2);
+    assert_eq!(snapshot.session.session.session_id, initial_session_id);
+
+    bridge.try_open_session(3, "missing-session").unwrap();
+    let DesktopRuntimeUpdate::CommandRejected {
+        command_id,
+        command,
+        ..
+    } = bridge.next_update().await.unwrap()
+    else {
+        panic!("missing session should be rejected");
+    };
+    assert_eq!(command_id, 3);
+    assert_eq!(command, DesktopRuntimeCommandKind::OpenSession);
+
+    bridge.try_reload(4).unwrap();
+    let DesktopRuntimeUpdate::Reloaded {
+        command_id,
+        metadata,
+    } = bridge.next_update().await.unwrap()
+    else {
+        panic!("reload should publish the retained current session");
+    };
+    assert_eq!(command_id, 4);
+    assert_eq!(metadata.session.session.session_id, initial_session_id);
+
+    bridge.try_resync(5).unwrap();
+    let DesktopRuntimeUpdate::Resynced {
+        command_id,
+        replacement,
+    } = bridge.next_update().await.unwrap()
+    else {
+        panic!("idle resync should publish a consistent runtime snapshot");
+    };
+    assert_eq!(command_id, 5);
+    let DesktopRuntimeResyncSnapshot::Hydrated(snapshot) = replacement else {
+        panic!("idle resync must hydrate durable state");
+    };
+    assert_eq!(snapshot.session.session.session_id, initial_session_id);
+
+    bridge.try_list_sessions(6).unwrap();
+    let DesktopRuntimeUpdate::SessionsListed {
+        command_id,
+        sessions,
+        omitted,
+    } = bridge.next_update().await.unwrap()
+    else {
+        panic!("session catalog should use a typed bounded update");
+    };
+    assert_eq!(command_id, 6);
+    assert_eq!(omitted, 0);
+    assert!(sessions.len() >= 2);
+    assert!(sessions.len() <= MAX_DESKTOP_SESSION_CATALOG);
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.session_id == initial_session_id)
+    );
+
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn changed_file_review_command_is_typed_and_preserves_product_error_codes() {
+    use coding_agent::api::review::{CodingAgentFileChangeIdentity, CodingAgentFileRevision};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (bridge, _) = start_runtime(options);
+    let (commands, mut events, shutdown) = bridge.into_parts();
+    let request = CodingAgentFileReviewRequest::new(
+        CodingAgentFileChangeIdentity {
+            operation_id: "operation-review".into(),
+            tool_call_id: Some("call-review".into()),
+            path: "src/lib.rs".into(),
+        },
+        CodingAgentFileRevision::new(7),
+    );
+
+    commands.try_review_changed_file(41, &request).unwrap();
+    let update = events.next_update().await.unwrap();
+    assert!(matches!(
+        update,
+        DesktopRuntimeUpdate::CommandRejected {
+            command_id: 41,
+            command: DesktopRuntimeCommandKind::ReviewChangedFile,
+            code,
+            ..
+        } if code == "file_review_change_unauthorized"
+    ));
+
+    let mut oversized = request;
+    oversized.change.path = "x".repeat(MAX_FILE_REVIEW_PATH_BYTES + 1);
+    assert!(matches!(
+        commands.try_review_changed_file(42, &oversized),
+        Err(DesktopCommandAdmissionError::InvalidFileReview { .. })
+    ));
+
+    drop(commands);
+    shutdown.shutdown(&mut events).await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_reload_retains_the_previous_runtime_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, _) = isolated_options(&temp);
+    let options = CodingAgentEmbeddingOptions::new(temp.path().join("project"))
+        .with_session_dir(temp.path().join("sessions"));
+    let (mut bridge, initial) = start_runtime(options);
+    std::fs::write(
+        temp.path().join("global").join("settings.toml"),
+        "default_model = \"missing-desktop-reload-model\"\n",
+    )
+    .unwrap();
+
+    bridge.try_reload(6).unwrap();
+    let reload_update = bridge.next_update().await;
+    assert!(
+        matches!(
+            &reload_update,
+            Some(DesktopRuntimeUpdate::CommandRejected {
+                command_id: 6,
+                command: DesktopRuntimeCommandKind::Reload,
+                code,
+                ..
+            }) if code == "config"
+        ),
+        "unexpected reload result: {reload_update:?}"
+    );
+
+    bridge.try_resync(7).unwrap();
+    let Some(DesktopRuntimeUpdate::Resynced {
+        command_id: 7,
+        replacement,
+    }) = bridge.next_update().await
+    else {
+        panic!("resync after a failed reload must return the retained context");
+    };
+    let DesktopRuntimeResyncSnapshot::Hydrated(snapshot) = replacement else {
+        panic!("idle resync must hydrate durable state");
+    };
+    assert_eq!(snapshot.project, initial.project);
+    assert_eq!(
+        snapshot.session.session.session_id,
+        initial.session.session.session_id
+    );
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn idle_model_and_session_profile_selection_are_typed_and_transactional() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, initial) = start_runtime(options);
+    let session_id = initial.session.session.session_id.clone();
+    let mut projection = DesktopProjection::new(initial).unwrap();
+    let conversation = projection.conversation().clone();
+
+    bridge.try_select_model(8, "claude-haiku-4-5").unwrap();
+    let update = bridge.next_update().await.unwrap();
+    let DesktopRuntimeUpdate::SelectionChanged {
+        command_id: 8,
+        selection: DesktopRuntimeSelectionKind::Model,
+        metadata,
+    } = &update
+    else {
+        panic!("idle model selection must return a typed replacement snapshot");
+    };
+    assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
+    assert_eq!(metadata.session.session.session_id, session_id);
+    assert!(projection.apply(update).is_replaced());
+    assert_eq!(projection.conversation(), &conversation);
+
+    bridge.try_select_session_profile(9, "review").unwrap();
+    let update = bridge.next_update().await.unwrap();
+    let DesktopRuntimeUpdate::SelectionChanged {
+        command_id: 9,
+        selection: DesktopRuntimeSelectionKind::SessionProfile,
+        metadata,
+    } = &update
+    else {
+        panic!("idle profile selection must return a typed replacement snapshot");
+    };
+    assert_eq!(
+        metadata.session.session.default_agent_profile_id.as_str(),
+        "review"
+    );
+    assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
+    assert!(projection.apply(update).is_replaced());
+    assert_eq!(projection.conversation(), &conversation);
+
+    bridge
+        .try_select_model(10, "missing-desktop-model")
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 10,
+            command: DesktopRuntimeCommandKind::SelectModel,
+            ..
+        })
+    ));
+    bridge
+        .try_select_session_profile(11, "missing-profile")
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 11,
+            command: DesktopRuntimeCommandKind::SelectSessionProfile,
+            ..
+        })
+    ));
+
+    bridge.try_resync(12).unwrap();
+    let Some(DesktopRuntimeUpdate::Resynced { replacement, .. }) = bridge.next_update().await
+    else {
+        panic!("resync must expose the last successful selector state");
+    };
+    let DesktopRuntimeResyncSnapshot::Hydrated(snapshot) = replacement else {
+        panic!("idle resync must hydrate durable state");
+    };
+    assert_eq!(snapshot.project.selected_model_id, "claude-haiku-4-5");
+    assert_eq!(
+        snapshot.session.session.default_agent_profile_id.as_str(),
+        "review"
+    );
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ten_mib_transcript_stays_single_hydration_across_metadata_commands() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (bridge, mut initial) = start_runtime(options);
+    let payload = "x".repeat(1_280);
+    initial.transcript.items = (0..MAX_TRANSCRIPT_BLOCKS)
+        .map(|index| CodingAgentSessionTranscriptItem::User {
+            text: format!("{index}:{payload}"),
+        })
+        .collect();
+    let fixture_bytes = initial
+        .transcript
+        .items
+        .iter()
+        .map(|item| match item {
+            CodingAgentSessionTranscriptItem::User { text } => text.len(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    assert!(fixture_bytes >= 10 * 1024 * 1024);
+    let metadata = DesktopRuntimeMetadataSnapshot {
+        project: initial.project.clone(),
+        session: initial.session.clone(),
+    };
+    let recovery = DesktopRuntimeRecoverySnapshot {
+        project: initial.project.clone(),
+        session: initial.session.clone(),
+        pending_recoveries: Vec::new(),
+    };
+    let mut projection = DesktopProjection::new(initial).unwrap();
+    let initial_counters = projection.counters();
+    assert_eq!(initial_counters.full_transcript_hydrations, 1);
+    assert_eq!(
+        initial_counters.transcript_items_hydrated,
+        MAX_TRANSCRIPT_BLOCKS as u64
+    );
+    assert_eq!(
+        initial_counters.conversation_blocks_allocated,
+        MAX_TRANSCRIPT_BLOCKS as u64
+    );
+    assert!(projection.conversation().retained_bytes() <= MAX_TRANSCRIPT_BYTES);
+
+    for command_id in 100..164 {
+        let update = match command_id % 4 {
+            0 => DesktopRuntimeUpdate::Reloaded {
+                command_id,
+                metadata: metadata.clone(),
+            },
+            1 => DesktopRuntimeUpdate::SelectionChanged {
+                command_id,
+                selection: DesktopRuntimeSelectionKind::Model,
+                metadata: metadata.clone(),
+            },
+            2 => DesktopRuntimeUpdate::SelectionChanged {
+                command_id,
+                selection: DesktopRuntimeSelectionKind::SessionProfile,
+                metadata: metadata.clone(),
+            },
+            _ => DesktopRuntimeUpdate::PromptStarted {
+                command_id,
+                operation_id: format!("metadata-operation-{command_id}"),
+                metadata: metadata.clone(),
+            },
+        };
+        assert!(projection.apply(update).is_replaced());
+    }
+    for command_id in 164..180 {
+        assert!(
+            projection
+                .apply(DesktopRuntimeUpdate::RecoveryChanged {
+                    command_id,
+                    action: DesktopRecoveryAction::Retry,
+                    recovery_id: format!("recovery-{command_id}"),
+                    recovery: recovery.clone(),
+                })
+                .is_replaced()
+        );
+    }
+
+    let counters = projection.counters();
+    assert_eq!(counters.full_transcript_hydrations, 1);
+    assert_eq!(
+        counters.transcript_items_hydrated,
+        MAX_TRANSCRIPT_BLOCKS as u64
+    );
+    assert_eq!(
+        counters.conversation_blocks_allocated,
+        MAX_TRANSCRIPT_BLOCKS as u64
+    );
+    assert_eq!(counters.metadata_replacements, 64);
+    assert_eq!(counters.recovery_replacements, 16);
+    assert_eq!(
+        projection.conversation().blocks().len(),
+        MAX_TRANSCRIPT_BLOCKS
+    );
+    assert!(
+        projection
+            .conversation()
+            .blocks()
+            .front()
+            .unwrap()
+            .text
+            .starts_with("0:")
+    );
+    assert!(
+        projection
+            .conversation()
+            .blocks()
+            .back()
+            .unwrap()
+            .text
+            .starts_with("9999:")
+    );
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn prompt_submission_forwards_product_events_and_returns_the_session_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, initial) = start_runtime(options);
+    let session_id = initial.session.session.session_id;
+
+    bridge
+        .try_submit_prompt(10, "offline desktop prompt", None)
+        .unwrap();
+    let mut started_operation_id = None;
+    let mut saw_product_event = false;
+    let mut last_product_event_sequence = None;
+    let finished = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match bridge.next_update().await.unwrap() {
+                DesktopRuntimeUpdate::PromptAccepted { command_id } => {
+                    assert_eq!(command_id, 10);
+                }
+                DesktopRuntimeUpdate::PromptStarted {
+                    command_id,
+                    operation_id,
+                    ..
+                } => {
+                    assert_eq!(command_id, 10);
+                    started_operation_id = Some(operation_id);
+                }
+                DesktopRuntimeUpdate::ProductEvent { event } => {
+                    saw_product_event = true;
+                    if let Some(previous) = last_product_event_sequence {
+                        assert!(
+                            event.sequence() > previous,
+                            "desktop bridge reordered product event {} after {previous}",
+                            event.sequence()
+                        );
+                    }
+                    last_product_event_sequence = Some(event.sequence());
+                    if let Some(started) = started_operation_id.as_deref()
+                        && let Some(event_operation_id) = event.operation_id()
+                    {
+                        assert_eq!(event_operation_id, started);
+                    }
+                }
+                DesktopRuntimeUpdate::PromptFinished {
+                    command_id,
+                    operation_id,
+                    snapshot,
+                    ..
+                } => {
+                    assert_eq!(command_id, 10);
+                    assert_eq!(Some(operation_id.as_str()), started_operation_id.as_deref());
+                    assert_eq!(snapshot.session.session.session_id, session_id);
+                    let transcript = &snapshot.transcript;
+                    assert_eq!(transcript.session_id, session_id);
+                    assert!(transcript.items.iter().any(|item| matches!(
+                        item,
+                        coding_agent::api::view::CodingAgentSessionTranscriptItem::User {
+                            text
+                        } if text == "offline desktop prompt"
+                    )));
+                    break;
+                }
+                DesktopRuntimeUpdate::ResyncRequired { .. } => {}
+                update => panic!("unexpected prompt update: {update:?}"),
+            }
+        }
+    })
+    .await;
+    assert!(finished.is_ok(), "offline prompt did not finish promptly");
+    assert!(saw_product_event);
+
+    bridge.try_create_session(11).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::SessionChanged { command_id: 11, .. })
+    ));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, initial) = start_runtime(options);
+    let mut wrong_transcript = initial.clone();
+    wrong_transcript.transcript.session_id = "wrong-session".into();
+    assert_eq!(
+        DesktopProjection::new(wrong_transcript).unwrap_err().code,
+        "transcript_session_mismatch"
+    );
+    let mut projection = DesktopProjection::new(initial).unwrap();
+    bridge
+        .try_submit_prompt(40, "projection cursor fixture", None)
+        .unwrap();
+
+    let mut exercised_strict_reducer = false;
+    let mut requested_active_resync = false;
+    let mut saw_active_resync = false;
+    let mut saw_finished = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let update = bridge.next_update().await.unwrap();
+            if matches!(update, DesktopRuntimeUpdate::PromptStarted { .. })
+                && !requested_active_resync
+            {
+                bridge.try_resync(41).unwrap();
+                requested_active_resync = true;
+            }
+            if let DesktopRuntimeUpdate::Resynced { command_id: 41, .. } = &update {
+                saw_active_resync = true;
+            }
+            if let DesktopRuntimeUpdate::ProductEvent { event } = &update
+                && !exercised_strict_reducer
+            {
+                let mut baseline = projection.clone();
+                let expected = baseline.cursor().last_event_sequence + 1;
+                let submitted_operation = baseline
+                    .snapshot()
+                    .submitted_operation
+                    .as_ref()
+                    .map(|operation| operation.operation_id.clone());
+
+                let valid = rewritten_event(
+                    event,
+                    expected,
+                    baseline.cursor().stream_id.as_str(),
+                    Some(baseline.snapshot().session.session_id.as_str()),
+                    submitted_operation.as_deref(),
+                );
+                assert!(
+                    baseline
+                        .apply(DesktopRuntimeUpdate::ProductEvent {
+                            event: valid.clone(),
+                        })
+                        .is_applied()
+                );
+                assert_eq!(
+                    baseline.apply(DesktopRuntimeUpdate::ProductEvent { event: valid }),
+                    DesktopProjectionApply::IgnoredDuplicate
+                );
+
+                let mut gap_projection = projection.clone();
+                let original_cursor = gap_projection.cursor().clone();
+                let gap = rewritten_event(
+                    event,
+                    expected + 1,
+                    gap_projection.cursor().stream_id.as_str(),
+                    Some(gap_projection.snapshot().session.session_id.as_str()),
+                    submitted_operation.as_deref(),
+                );
+                assert_eq!(
+                    gap_projection.apply(DesktopRuntimeUpdate::ProductEvent { event: gap }),
+                    DesktopProjectionApply::NeedsResync
+                );
+                assert_eq!(gap_projection.cursor(), &original_cursor);
+                assert_eq!(
+                    gap_projection.lifecycle(),
+                    DesktopProjectionLifecycle::NeedsResync
+                );
+                assert!(
+                    gap_projection
+                        .apply(DesktopRuntimeUpdate::ResyncRequired {
+                            reason: DesktopRuntimeError {
+                                code: "test_resync".into(),
+                                message: "replace after an injected cursor gap".into(),
+                            },
+                            snapshot: projection.snapshot().clone(),
+                        })
+                        .is_replaced()
+                );
+                assert_eq!(
+                    gap_projection.lifecycle(),
+                    DesktopProjectionLifecycle::Running
+                );
+                assert!(gap_projection.recent_events().is_empty());
+
+                let mut wrong_session = projection.clone();
+                let mismatched = rewritten_event(
+                    event,
+                    expected,
+                    wrong_session.cursor().stream_id.as_str(),
+                    Some("another-session"),
+                    submitted_operation.as_deref(),
+                );
+                assert_eq!(
+                    wrong_session.apply(DesktopRuntimeUpdate::ProductEvent { event: mismatched }),
+                    DesktopProjectionApply::NeedsResync
+                );
+                assert_eq!(
+                    wrong_session.issues().back().unwrap().code,
+                    "product_event_session_mismatch"
+                );
+
+                let mut wrong_stream = projection.clone();
+                let mismatched = rewritten_event(
+                    event,
+                    expected,
+                    "another-stream",
+                    Some(wrong_stream.snapshot().session.session_id.as_str()),
+                    submitted_operation.as_deref(),
+                );
+                assert_eq!(
+                    wrong_stream.apply(DesktopRuntimeUpdate::ProductEvent { event: mismatched }),
+                    DesktopProjectionApply::NeedsResync
+                );
+                assert_eq!(
+                    wrong_stream.issues().back().unwrap().code,
+                    "product_event_stream_mismatch"
+                );
+
+                let mut wrong_generation = projection.clone();
+                let mut value = serde_json::to_value(rewritten_event(
+                    event,
+                    expected,
+                    wrong_generation.cursor().stream_id.as_str(),
+                    Some(wrong_generation.snapshot().session.session_id.as_str()),
+                    submitted_operation.as_deref(),
+                ))
+                .unwrap();
+                value["capability_generation"] = serde_json::json!(
+                    wrong_generation
+                        .cursor()
+                        .capability_generation
+                        .saturating_add(2)
+                );
+                let mismatched = serde_json::from_value(value).unwrap();
+                assert_eq!(
+                    wrong_generation
+                        .apply(DesktopRuntimeUpdate::ProductEvent { event: mismatched }),
+                    DesktopProjectionApply::NeedsResync
+                );
+                assert_eq!(
+                    wrong_generation.issues().back().unwrap().code,
+                    "product_event_capability_generation_mismatch"
+                );
+
+                if submitted_operation.is_some() {
+                    let mut wrong_operation = projection.clone();
+                    let mismatched = rewritten_event(
+                        event,
+                        expected,
+                        wrong_operation.cursor().stream_id.as_str(),
+                        Some(wrong_operation.snapshot().session.session_id.as_str()),
+                        Some("unrelated-operation"),
+                    );
+                    assert_eq!(
+                        wrong_operation
+                            .apply(DesktopRuntimeUpdate::ProductEvent { event: mismatched }),
+                        DesktopProjectionApply::NeedsResync
+                    );
+                    assert_eq!(
+                        wrong_operation.issues().back().unwrap().code,
+                        "product_event_operation_mismatch"
+                    );
+                }
+                assert_bounded_streaming_overlays(
+                    &projection,
+                    event,
+                    submitted_operation.as_deref(),
+                );
+                exercised_strict_reducer = true;
+            }
+
+            saw_finished |= matches!(update, DesktopRuntimeUpdate::PromptFinished { .. });
+            let outcome = projection.apply(update);
+            assert_ne!(
+                outcome,
+                DesktopProjectionApply::NeedsResync,
+                "real runtime updates must satisfy the desktop projection contract: {:?}",
+                projection.issues().back()
+            );
+            if saw_finished && saw_active_resync {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("projection fixture prompt must finish");
+    assert!(exercised_strict_reducer);
+    assert!(saw_active_resync);
+    assert_eq!(projection.lifecycle(), DesktopProjectionLifecycle::Running);
+    assert!(
+        projection
+            .conversation()
+            .blocks()
+            .iter()
+            .any(|block| block.text == "projection cursor fixture")
+    );
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_cross_adapter_fixture_matches_desktop_product_state_exactly() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (bridge, initial) = start_runtime(options);
+    let transcript = initial.transcript.clone();
+    let mut shared = CodingAgentClientProjection::from_bootstrap(CodingAgentClientBootstrap {
+        snapshot: initial.session.clone(),
+        transcript,
+        pending_recoveries: initial.pending_recoveries.clone(),
+    })
+    .unwrap();
+    let mut desktop = DesktopProjection::new(initial).unwrap();
+    let base_sequence = desktop.cursor().last_event_sequence;
+    let stream_id = desktop.cursor().stream_id.clone();
+    let session_id = desktop.snapshot().session.session_id.clone();
+
+    for fixture in cross_adapter_fixture_events() {
+        let event = rewritten_event(
+            &fixture,
+            base_sequence + fixture.sequence(),
+            &stream_id,
+            Some(&session_id),
+            fixture.operation_id(),
+        );
+        assert!(matches!(
+            shared.apply(&event),
+            CodingAgentClientProjectionApply::Applied(_)
+        ));
+        let terminal = event.terminal_operation().is_some();
+        let outcome = desktop.apply(DesktopRuntimeUpdate::ProductEvent { event });
+        assert!(outcome.is_applied());
+        assert_eq!(outcome.delta().unwrap().terminal, terminal);
+    }
+
+    assert_eq!(desktop.product_for_tests(), &shared);
+    assert_eq!(
+        desktop
+            .messages()
+            .front()
+            .map(|message| message.text.as_str()),
+        Some("hello world")
+    );
+    assert_eq!(
+        desktop.tools().front().map(|tool| tool.detail.as_str()),
+        Some("read complete")
+    );
+    assert_eq!(
+        desktop.snapshot().context.delegations[0].status,
+        "completed"
+    );
+    assert_eq!(
+        desktop.snapshot().session.default_agent_profile_id.as_str(),
+        "reviewer"
+    );
+    bridge.shutdown().await.unwrap();
+}
+
+fn rewritten_event(
+    event: &CodingAgentProductEvent,
+    sequence: u64,
+    stream_id: &str,
+    session_id: Option<&str>,
+    operation_id: Option<&str>,
+) -> CodingAgentProductEvent {
+    let mut value = serde_json::to_value(event).unwrap();
+    value["sequence"] = serde_json::json!(sequence);
+    value["stream_id"] = serde_json::json!(stream_id);
+    value["session_id"] = session_id.map_or(serde_json::Value::Null, |session_id| {
+        serde_json::json!(session_id)
+    });
+    value["operation_id"] = operation_id.map_or(serde_json::Value::Null, |operation_id| {
+        serde_json::json!(operation_id)
+    });
+    value["parent_operation_id"] = serde_json::Value::Null;
+    value["root_operation_id"] = serde_json::Value::Null;
+    serde_json::from_value(value).unwrap()
+}
+
+fn cross_adapter_fixture_events() -> Vec<CodingAgentProductEvent> {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../coding-agent/tests/fixtures/client_projection/cross-adapter-events.json"
+    )))
+    .expect("the shared client-projection fixture must deserialize")
+}
+
+fn rewritten_event_kind(
+    event: &CodingAgentProductEvent,
+    sequence: u64,
+    stream_id: &str,
+    session_id: &str,
+    operation_id: &str,
+    kind: serde_json::Value,
+) -> CodingAgentProductEvent {
+    let rewritten = rewritten_event(
+        event,
+        sequence,
+        stream_id,
+        Some(session_id),
+        Some(operation_id),
+    );
+    let mut value = serde_json::to_value(rewritten).unwrap();
+    value["event"] = kind;
+    value["terminal_status"] = serde_json::Value::Null;
+    value["terminal_operation"] = serde_json::Value::Null;
+    serde_json::from_value(value).unwrap()
+}
+
+fn assert_bounded_streaming_overlays(
+    projection: &DesktopProjection,
+    base_event: &CodingAgentProductEvent,
+    submitted_operation: Option<&str>,
+) {
+    let Some(operation_id) = submitted_operation else {
+        return;
+    };
+    let mut overlays = projection.clone();
+    let stream_id = overlays.cursor().stream_id.clone();
+    let session_id = overlays.snapshot().session.session_id.clone();
+    let initial_usage_input = overlays.snapshot().context.usage.input;
+    let initial_usage_output = overlays.snapshot().context.usage.output;
+    let initial_view_rebuilds = overlays.counters().product_view_rebuilds;
+    let mut sequence = overlays.cursor().last_event_sequence;
+
+    sequence += 1;
+    let started = rewritten_event_kind(
+        base_event,
+        sequence,
+        &stream_id,
+        &session_id,
+        operation_id,
+        serde_json::json!({
+            "family": "message",
+            "payload": {
+                "kind": "started",
+                "operation_id": operation_id,
+                "turn_id": "turn-overlay",
+                "message_id": "message-overlay"
+            }
+        }),
+    );
+    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: started });
+    assert!(outcome.is_applied());
+    let delta = outcome.delta().unwrap();
+    assert!(delta.cursor);
+    assert!(delta.conversation);
+    assert!(!delta.tools);
+    assert!(!delta.context.contains(ContextDirtyFlags::USAGE));
+
+    sequence += 1;
+    let delta = rewritten_event_kind(
+        base_event,
+        sequence,
+        &stream_id,
+        &session_id,
+        operation_id,
+        serde_json::json!({
+            "family": "message",
+            "payload": {
+                "kind": "delta",
+                "operation_id": operation_id,
+                "turn_id": "turn-overlay",
+                "message_id": "message-overlay",
+                "text": "streaming text"
+            }
+        }),
+    );
+    assert!(
+        overlays
+            .apply(DesktopRuntimeUpdate::ProductEvent { event: delta })
+            .is_applied()
+    );
+
+    sequence += 1;
+    let completed = rewritten_event_kind(
+        base_event,
+        sequence,
+        &stream_id,
+        &session_id,
+        operation_id,
+        serde_json::json!({
+            "family": "message",
+            "payload": {
+                "kind": "completed",
+                "operation_id": operation_id,
+                "turn_id": "turn-overlay",
+                "message_id": "message-overlay",
+                "final_text": "final text",
+                "images": [],
+                "usage": {
+                    "input": 1,
+                    "output": 2,
+                    "cache_read": 0,
+                    "cache_write": 0,
+                    "total_tokens": 3,
+                    "cost_known": false,
+                    "input_cost": 0.0,
+                    "output_cost": 0.0,
+                    "cache_read_cost": 0.0,
+                    "cache_write_cost": 0.0
+                }
+            }
+        }),
+    );
+    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: completed });
+    assert!(outcome.is_applied());
+    let delta = outcome.delta().unwrap();
+    assert!(delta.conversation);
+    assert!(delta.context.contains(ContextDirtyFlags::USAGE));
+    let message = overlays.messages().back().unwrap();
+    assert_eq!(message.text, "final text");
+    assert_eq!(message.status, DesktopMessageStatus::Completed);
+    assert_eq!(
+        overlays.snapshot().context.usage.input,
+        initial_usage_input + 1
+    );
+    assert_eq!(
+        overlays.snapshot().context.usage.output,
+        initial_usage_output + 2
+    );
+
+    for index in 0..=MAX_DESKTOP_MESSAGE_OVERLAYS {
+        sequence += 1;
+        let completed = rewritten_event_kind(
+            base_event,
+            sequence,
+            &stream_id,
+            &session_id,
+            operation_id,
+            serde_json::json!({
+                "family": "message",
+                "payload": {
+                    "kind": "completed",
+                    "operation_id": operation_id,
+                    "turn_id": format!("turn-{index}"),
+                    "message_id": format!("message-{index}"),
+                    "final_text": "bounded",
+                    "images": [],
+                    "usage": {
+                        "input": 0,
+                        "output": 0,
+                        "cache_read": 0,
+                        "cache_write": 0,
+                        "total_tokens": 0,
+                        "cost_known": false,
+                        "input_cost": 0.0,
+                        "output_cost": 0.0,
+                        "cache_read_cost": 0.0,
+                        "cache_write_cost": 0.0
+                    }
+                }
+            }),
+        );
+        assert!(
+            overlays
+                .apply(DesktopRuntimeUpdate::ProductEvent { event: completed })
+                .is_applied()
+        );
+    }
+    assert_eq!(overlays.messages().len(), MAX_DESKTOP_MESSAGE_OVERLAYS);
+
+    sequence += 1;
+    let tool_started = rewritten_event_kind(
+        base_event,
+        sequence,
+        &stream_id,
+        &session_id,
+        operation_id,
+        serde_json::json!({
+            "family": "tool",
+            "payload": {
+                "kind": "started",
+                "operation_id": operation_id,
+                "turn_id": "turn-tool",
+                "tool_call_id": "tool-overlay",
+                "name": "edit",
+                "arguments_json": "{\"path\":\"README.md\"}"
+            }
+        }),
+    );
+    assert!(
+        overlays
+            .apply(DesktopRuntimeUpdate::ProductEvent {
+                event: tool_started,
+            })
+            .is_applied()
+    );
+    sequence += 1;
+    let tool_completed = rewritten_event_kind(
+        base_event,
+        sequence,
+        &stream_id,
+        &session_id,
+        operation_id,
+        serde_json::json!({
+            "family": "tool",
+            "payload": {
+                "kind": "completed",
+                "operation_id": operation_id,
+                "turn_id": "turn-tool",
+                "tool_call_id": "tool-overlay",
+                "name": "edit",
+                "summary": "edited README.md"
+            }
+        }),
+    );
+    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent {
+        event: tool_completed,
+    });
+    assert!(outcome.is_applied());
+    let delta = outcome.delta().unwrap();
+    assert!(delta.tools);
+    assert!(delta.context.contains(ContextDirtyFlags::CHANGES));
+    assert!(!delta.conversation);
+    assert_eq!(
+        overlays.tools().back().unwrap().status,
+        DesktopToolStatus::Completed
+    );
+    assert_eq!(
+        overlays.snapshot().context.changes.first().unwrap().path,
+        "README.md"
+    );
+
+    sequence += 1;
+    let delegation = rewritten_event_kind(
+        base_event,
+        sequence,
+        &stream_id,
+        &session_id,
+        operation_id,
+        serde_json::json!({
+            "family": "delegation",
+            "payload": {
+                "kind": "started",
+                "context": {
+                    "operation_id": operation_id,
+                    "turn_id": "turn-delegation",
+                    "tool_call_id": "delegation-overlay",
+                    "requesting_profile_id": "default",
+                    "target_kind": "agent",
+                    "target_id": "reviewer",
+                    "task": "review projection"
+                },
+                "child_operation_id": "child-overlay"
+            }
+        }),
+    );
+    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: delegation });
+    assert!(outcome.is_applied());
+    let delta = outcome.delta().unwrap();
+    assert!(delta.context.contains(ContextDirtyFlags::DELEGATIONS));
+    assert!(!delta.conversation);
+    assert!(!delta.tools);
+    assert_eq!(
+        overlays
+            .snapshot()
+            .context
+            .delegations
+            .first()
+            .unwrap()
+            .status,
+        "running"
+    );
+
+    sequence += 1;
+    let recovery = rewritten_event_kind(
+        base_event,
+        sequence,
+        &stream_id,
+        &session_id,
+        operation_id,
+        serde_json::json!({
+            "family": "workflow",
+            "payload": {
+                "kind": "operation_recovery_pending",
+                "operation_id": operation_id,
+                "recovery_id": "recovery-overlay",
+                "reason": "injected recovery",
+                "record_version": 1,
+                "descriptor_revision": 1,
+                "capability_generation": null,
+                "attempt_count": 0,
+                "last_attempt_at": null,
+                "next_attempt_at": null
+            }
+        }),
+    );
+    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: recovery });
+    assert!(outcome.is_applied());
+    assert!(outcome.delta().unwrap().recoveries);
+    assert_eq!(
+        overlays.recoveries().front().unwrap().status,
+        crate::projection::DesktopRecoveryStatus::Pending
+    );
+
+    sequence += 1;
+    let diagnostic = rewritten_event_kind(
+        base_event,
+        sequence,
+        &stream_id,
+        &session_id,
+        operation_id,
+        serde_json::json!({
+            "family": "diagnostic",
+            "payload": {
+                "kind": "diagnostic",
+                "diagnostic": {
+                    "severity": "warning",
+                    "code": "projection_diagnostic",
+                    "summary": "projection diagnostic",
+                    "origin": "runtime",
+                    "operation_id": operation_id
+                }
+            }
+        }),
+    );
+    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: diagnostic });
+    assert!(outcome.is_applied());
+    assert!(outcome.delta().unwrap().diagnostics);
+    assert_eq!(
+        overlays.diagnostics().back().unwrap().message,
+        "projection diagnostic"
+    );
+    let incremental_counters = overlays.counters();
+    assert_eq!(
+        incremental_counters.product_view_rebuilds, initial_view_rebuilds,
+        "product events must not rebuild every compatibility view"
+    );
+    assert!(incremental_counters.incremental_message_updates > 1);
+    assert_eq!(incremental_counters.incremental_tool_updates, 2);
+    assert_eq!(incremental_counters.incremental_recovery_updates, 1);
+    assert_eq!(incremental_counters.incremental_diagnostic_updates, 1);
+
+    let mut fresh = overlays.snapshot().clone();
+    fresh.cursor = overlays.cursor().clone();
+    assert!(
+        overlays
+            .apply(DesktopRuntimeUpdate::ResyncRequired {
+                reason: DesktopRuntimeError {
+                    code: "overlay_resync".into(),
+                    message: "discard incomplete live overlays".into(),
+                },
+                snapshot: fresh,
+            })
+            .is_replaced()
+    );
+    assert!(overlays.messages().is_empty());
+    assert!(overlays.tools().is_empty());
+    assert_eq!(
+        overlays.counters().product_view_rebuilds,
+        initial_view_rebuilds + 1
+    );
+    assert_eq!(
+        overlays
+            .recoveries()
+            .front()
+            .map(|recovery| recovery.recovery_id.as_str()),
+        Some("recovery-overlay")
+    );
+    assert!(!overlays.recoveries().front().unwrap().authoritative);
+    assert!(overlays.diagnostics().is_empty());
+}
+
+#[tokio::test]
+async fn command_queue_full_and_closed_are_typed_without_runtime_timing() {
+    let (commands, _command_rx) = mpsc::channel(DESKTOP_COMMAND_QUEUE_CAPACITY);
+    let (shutdown, _shutdown_rx) = watch::channel(false);
+    let (_priority_updates_tx, priority_updates) =
+        mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
+    let (_data_updates_tx, data_updates) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
+    let bridge = DesktopRuntimeBridge {
+        shutdown: DesktopRuntimeShutdownGuard {
+            shutdown,
+            runtime_thread: None,
+        },
+        commands: Some(commands),
+        events: DesktopRuntimeEventStream {
+            priority_updates,
+            data_updates,
+            pending_priority_update: None,
+            pending_data_update: None,
+        },
+    };
+
+    for command_id in 0..DESKTOP_COMMAND_QUEUE_CAPACITY as u64 {
+        bridge.try_reload(command_id).unwrap();
+    }
+    assert_eq!(
+        bridge.try_reload(u64::MAX),
+        Err(DesktopCommandAdmissionError::QueueFull)
+    );
+    drop(_command_rx);
+    assert_eq!(
+        bridge.try_reload(u64::MAX),
+        Err(DesktopCommandAdmissionError::RuntimeClosed)
+    );
+}
+
+#[tokio::test]
+async fn streaming_batch_waits_only_for_data_and_flushes_on_priority_delivery() {
+    let (commands, _command_rx) = mpsc::channel(DESKTOP_COMMAND_QUEUE_CAPACITY);
+    let (shutdown, _shutdown_rx) = watch::channel(false);
+    let (priority_tx, priority_updates) = mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
+    let (data_tx, data_updates) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
+    let mut bridge = DesktopRuntimeBridge {
+        shutdown: DesktopRuntimeShutdownGuard {
+            shutdown,
+            runtime_thread: None,
+        },
+        commands: Some(commands),
+        events: DesktopRuntimeEventStream {
+            priority_updates,
+            data_updates,
+            pending_priority_update: None,
+            pending_data_update: None,
+        },
+    };
+    let fixture = cross_adapter_fixture_events();
+    let data = fixture
+        .iter()
+        .find(|event| event.delivery_class() == CodingAgentProductEventDeliveryClass::Data)
+        .cloned()
+        .expect("fixture must contain a coalescible data event");
+    let priority = fixture
+        .iter()
+        .find(|event| event.delivery_class() != CodingAgentProductEventDeliveryClass::Data)
+        .cloned()
+        .expect("fixture must contain an immediate event");
+
+    data_tx
+        .send(DesktopRuntimeUpdate::ProductEvent {
+            event: data.clone(),
+        })
+        .await
+        .unwrap();
+    let priority_task = tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        priority_tx
+            .send(DesktopRuntimeUpdate::ProductEvent {
+                event: priority.clone(),
+            })
+            .await
+            .unwrap();
+        priority
+    });
+    let batch = bridge.next_update_batch().await.unwrap();
+    let priority = priority_task.await.unwrap();
+
+    assert_eq!(batch.len(), 2);
+    assert!(matches!(
+        &batch[0],
+        DesktopRuntimeUpdate::ProductEvent { event } if event == &data
+    ));
+    assert!(matches!(
+        &batch[1],
+        DesktopRuntimeUpdate::ProductEvent { event } if event == &priority
+    ));
+}
+
+#[test]
+fn streaming_batch_timer_does_not_require_a_tokio_reactor() {
+    let (_priority_tx, priority_updates) = mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
+    let (data_tx, data_updates) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
+    let data = cross_adapter_fixture_events()
+        .into_iter()
+        .find(|event| event.delivery_class() == CodingAgentProductEventDeliveryClass::Data)
+        .expect("fixture must contain a coalescible data event");
+    data_tx
+        .try_send(DesktopRuntimeUpdate::ProductEvent { event: data })
+        .unwrap();
+    let mut events = DesktopRuntimeEventStream {
+        priority_updates,
+        data_updates,
+        pending_priority_update: None,
+        pending_data_update: None,
+    };
+
+    let mut future = std::pin::pin!(events.next_update_batch());
+    let waker = std::task::Waker::noop();
+    let mut context = std::task::Context::from_waker(waker);
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let batch = loop {
+        match std::future::Future::poll(future.as_mut(), &mut context) {
+            std::task::Poll::Ready(batch) => break batch.expect("data update should be ready"),
+            std::task::Poll::Pending => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "executor-neutral coalescing timer did not complete"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    };
+
+    assert_eq!(batch.len(), 1);
+}
+
+#[tokio::test]
+async fn data_queue_overflow_emits_a_priority_resync_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (bridge, initial) = start_runtime(options);
+    let (priority_updates, mut priority_rx) = mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
+    let (data_updates, _data_rx) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
+    for command_id in 0..DESKTOP_UPDATE_QUEUE_CAPACITY as u64 {
+        data_updates
+            .try_send(DesktopRuntimeUpdate::PromptAccepted { command_id })
+            .unwrap();
+    }
+
+    assert!(
+        publish_data_update(
+            DesktopRuntimeUpdate::PromptAccepted {
+                command_id: u64::MAX,
+            },
+            || Ok::<_, DesktopBridgeError>(initial.session.clone()),
+            &priority_updates,
+            &data_updates,
+        )
+        .await
+    );
+    let DesktopRuntimeUpdate::ResyncRequired { reason, snapshot } =
+        priority_rx.recv().await.unwrap()
+    else {
+        panic!("data overflow must publish a priority resync request");
+    };
+    assert_eq!(reason.code, "desktop_data_queue_full");
+    assert_eq!(
+        snapshot.session.session_id,
+        initial.session.session.session_id
+    );
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn typed_recovery_reasons_replace_the_projection_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (bridge, initial) = start_runtime(options);
+    let mut projection = DesktopProjection::new(initial.clone()).unwrap();
+    let cursor = initial.session.cursor.clone();
+
+    let live_lag = recovery_update(CodingAgentFreshSnapshotRecovery {
+        requested_sequence: cursor.last_event_sequence.saturating_sub(1),
+        oldest_available_sequence: cursor.last_event_sequence,
+        fresh_cursor: cursor.clone(),
+        reason: CodingAgentRecoveryReason::LiveReceiverLag,
+        snapshot: Box::new(initial.session.clone()),
+    });
+    let DesktopRuntimeUpdate::ResyncRequired { reason, .. } = &live_lag else {
+        panic!("live lag must become a typed resync update");
+    };
+    assert_eq!(reason.code, "product_event_live_receiver_lag");
+    assert!(projection.apply(live_lag).is_replaced());
+    assert_eq!(
+        projection
+            .last_resync_reason()
+            .expect("live lag reason should be retained")
+            .code,
+        "product_event_live_receiver_lag"
+    );
+
+    let retained_gap = recovery_update(CodingAgentFreshSnapshotRecovery {
+        requested_sequence: 0,
+        oldest_available_sequence: cursor.last_event_sequence.saturating_add(1),
+        fresh_cursor: cursor,
+        reason: CodingAgentRecoveryReason::RetainedHistoryGap,
+        snapshot: Box::new(initial.session),
+    });
+    let DesktopRuntimeUpdate::ResyncRequired { reason, .. } = &retained_gap else {
+        panic!("retained gap must become a typed resync update");
+    };
+    assert_eq!(reason.code, "product_event_retained_history_gap");
+    assert!(projection.apply(retained_gap).is_replaced());
+    assert!(projection.recent_events().is_empty());
+    assert_eq!(
+        projection.apply(DesktopRuntimeUpdate::Stopped),
+        DesktopProjectionApply::NoChange
+    );
+    assert_eq!(projection.lifecycle(), DesktopProjectionLifecycle::Stopped);
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_state_machine_handles_gap_lag_and_exhaustion_deterministically() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (bridge, initial) = start_runtime(options);
+    let cursor = initial.session.cursor.clone();
+
+    let retained = CodingAgentFreshSnapshotRecovery {
+        requested_sequence: 0,
+        oldest_available_sequence: cursor.last_event_sequence.saturating_add(1),
+        fresh_cursor: cursor.clone(),
+        reason: CodingAgentRecoveryReason::RetainedHistoryGap,
+        snapshot: Box::new(initial.session.clone()),
+    };
+    let mut attempts = VecDeque::from([
+        DesktopReconnectAttempt::FreshSnapshotRequired(retained),
+        DesktopReconnectAttempt::Replayed {
+            events: Vec::new(),
+            receiver: (),
+        },
+    ]);
+    let mut requested = Vec::new();
+    let (events, (), recovery) = establish_reconnect(0, |sequence| {
+        requested.push(sequence);
+        Ok(attempts
+            .pop_front()
+            .expect("two reconnect attempts should be consumed"))
+    })
+    .unwrap();
+    assert!(events.is_empty());
+    assert_eq!(
+        requested,
+        vec![0, cursor.last_event_sequence],
+        "fresh snapshot cursor must anchor the second reconnect"
+    );
+    assert_eq!(
+        recovery.unwrap().reason,
+        CodingAgentRecoveryReason::RetainedHistoryGap
+    );
+
+    let first = CodingAgentFreshSnapshotRecovery {
+        requested_sequence: 0,
+        oldest_available_sequence: 1,
+        fresh_cursor: cursor.clone(),
+        reason: CodingAgentRecoveryReason::RetainedHistoryGap,
+        snapshot: Box::new(initial.session.clone()),
+    };
+    let second = CodingAgentFreshSnapshotRecovery {
+        requested_sequence: cursor.last_event_sequence,
+        oldest_available_sequence: cursor.last_event_sequence.saturating_add(1),
+        fresh_cursor: cursor.clone(),
+        reason: CodingAgentRecoveryReason::RetainedHistoryGap,
+        snapshot: Box::new(initial.session.clone()),
+    };
+    let mut attempts = VecDeque::from([
+        DesktopReconnectAttempt::<()>::FreshSnapshotRequired(first),
+        DesktopReconnectAttempt::<()>::FreshSnapshotRequired(second),
+    ]);
+    let error = establish_reconnect(0, |_| {
+        Ok(attempts
+            .pop_front()
+            .expect("exhaustion should consume two fresh snapshots"))
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("reconnect exhausted"));
+
+    let live_lag = CodingAgentFreshSnapshotRecovery {
+        requested_sequence: cursor.last_event_sequence.saturating_sub(1),
+        oldest_available_sequence: cursor.last_event_sequence,
+        fresh_cursor: cursor,
+        reason: CodingAgentRecoveryReason::LiveReceiverLag,
+        snapshot: Box::new(initial.session),
+    };
+    let (delivery_tx, delivery_rx) = mpsc::channel(1);
+    let mut source = DesktopProductEventSource {
+        replay: VecDeque::new(),
+        receiver: DesktopProductEventReceiver::Injected(delivery_rx),
+    };
+    delivery_tx
+        .send(Ok(CodingAgentReconnectDelivery::FreshSnapshotRequired(
+            live_lag,
+        )))
+        .await
+        .unwrap();
+    let CodingAgentReconnectDelivery::FreshSnapshotRequired(recovery) =
+        source.recv().await.unwrap()
+    else {
+        panic!("injected live lag must reach the desktop recovery branch");
+    };
+    let DesktopRuntimeUpdate::ResyncRequired { reason, .. } = recovery_update(recovery) else {
+        panic!("live lag delivery must become a typed resync update");
+    };
+    assert_eq!(reason.code, "product_event_live_receiver_lag");
+
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn command_sender_loss_stops_and_joins_the_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, _) = start_runtime(options);
+    drop(bridge.commands.take());
+
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(update) = bridge.next_update().await {
+            if matches!(update, DesktopRuntimeUpdate::Stopped) {
+                return;
+            }
+        }
+        panic!("runtime closed without publishing Stopped");
+    })
+    .await;
+    assert!(stopped.is_ok(), "command sender loss did not stop runtime");
+    bridge.join_runtime_thread().unwrap();
+}
+
+#[tokio::test]
+async fn split_runtime_owners_deliver_commands_then_shutdown_and_join() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (bridge, initial) = start_runtime(options);
+    let initial_session_id = initial.session.session.session_id;
+    let (commands, mut events, shutdown) = bridge.into_parts();
+
+    commands.try_reload(60).unwrap();
+    let DesktopRuntimeUpdate::Reloaded {
+        command_id,
+        metadata,
+    } = events.next_update().await.unwrap()
+    else {
+        panic!("the split event owner must deliver the command result");
+    };
+    assert_eq!(command_id, 60);
+    assert_eq!(metadata.session.session.session_id, initial_session_id);
+
+    shutdown.shutdown(&mut events).await.unwrap();
+    assert_eq!(
+        commands.try_reload(61),
+        Err(DesktopCommandAdmissionError::RuntimeClosed),
+        "a successful shutdown join must close the independently held command sender"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let context = CodingAgentEmbeddingContext::load(options).unwrap();
+    let mut session = context.create_session().await.unwrap();
+    let connection = session
+        .connect(CodingAgentClientId::new(DESKTOP_CLIENT_ID))
+        .unwrap();
+    let requested_after = connection.state().unwrap().cursor.last_event_sequence;
+    let (events, pending_recovery) = reconnect_event_source(&connection, requested_after).unwrap();
+    let task = task::spawn(std::future::pending::<PromptTaskOutput>());
+    let active = ActivePrompt {
+        command_id: 30,
+        operation_id: Some("stuck-operation".into()),
+        project: context.snapshot().clone(),
+        connection,
+        events,
+        pending_recovery,
+        last_forwarded_sequence: requested_after,
+        task,
+    };
+    let switch = dispatch_active_command(
+        &active,
+        DesktopRuntimeCommand::CreateSession { command_id: 31 },
+    );
+    assert!(matches!(
+        switch,
+        DesktopRuntimeUpdate::CommandRejected {
+            command_id: 31,
+            command: DesktopRuntimeCommandKind::CreateSession,
+            ref code,
+            ..
+        } if code == "busy"
+    ));
+    for (command, expected_kind) in [
+        (
+            DesktopRuntimeCommand::SelectModel {
+                command_id: 32,
+                model_id: "claude-haiku-4-5".into(),
+            },
+            DesktopRuntimeCommandKind::SelectModel,
+        ),
+        (
+            DesktopRuntimeCommand::SelectSessionProfile {
+                command_id: 33,
+                profile_id: "review".into(),
+            },
+            DesktopRuntimeCommandKind::SelectSessionProfile,
+        ),
+    ] {
+        assert!(matches!(
+            dispatch_active_command(&active, command),
+            DesktopRuntimeUpdate::CommandRejected {
+                command,
+                ref code,
+                ..
+            } if command == expected_kind && code == "busy"
+        ));
+    }
+    let stale_authorization = dispatch_active_command(
+        &active,
+        DesktopRuntimeCommand::DecideToolAuthorization {
+            command_id: 34,
+            identity: ToolAuthorizationIdentity {
+                authorization_id: "already-resolved".into(),
+                operation_id: "stuck-operation".into(),
+                turn_id: "turn-34".into(),
+                tool_call_id: "tool-call-34".into(),
+                capability_generation: 1,
+            },
+            decision: ToolAuthorizationDecision::Deny { reason: None },
+        },
+    );
+    assert!(matches!(
+        stale_authorization,
+        DesktopRuntimeUpdate::CommandRejected {
+            command_id: 34,
+            command: DesktopRuntimeCommandKind::DecideToolAuthorization,
+            ref code,
+            ..
+        } if code == "input"
+    ));
+    let (priority_updates, mut priority_rx) = mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
+
+    shutdown_active_prompt_with_deadline(Some(active), &priority_updates, Duration::ZERO).await;
+    let DesktopRuntimeUpdate::RuntimeFailed { error } = priority_rx.recv().await.unwrap() else {
+        panic!("deadline expiry must publish a runtime failure");
+    };
+    assert_eq!(error.code, "shutdown_deadline_exceeded");
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn runtime_thread_panic_is_reported_during_join() {
+    let (commands, command_rx) = mpsc::channel(DESKTOP_COMMAND_QUEUE_CAPACITY);
+    drop(command_rx);
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    drop(shutdown_rx);
+    let (priority_updates_tx, priority_updates) =
+        mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
+    drop(priority_updates_tx);
+    let (data_updates_tx, data_updates) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
+    drop(data_updates_tx);
+    let runtime_thread = thread::spawn(|| panic!("injected desktop runtime panic"));
+    let bridge = DesktopRuntimeBridge {
+        shutdown: DesktopRuntimeShutdownGuard {
+            shutdown,
+            runtime_thread: Some(runtime_thread),
+        },
+        commands: Some(commands),
+        events: DesktopRuntimeEventStream {
+            priority_updates,
+            data_updates,
+            pending_priority_update: None,
+            pending_data_update: None,
+        },
+    };
+
+    assert!(matches!(
+        bridge.shutdown().await,
+        Err(DesktopRuntimeShutdownError::RuntimePanicked)
+    ));
+}
+
+#[tokio::test]
+async fn abort_race_is_typed_and_window_close_is_non_blocking() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, _) = start_runtime(options);
+    bridge.try_submit_prompt(20, "abort race", None).unwrap();
+
+    let mut saw_control_result = false;
+    let mut saw_prompt_finished = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match bridge.next_update().await.unwrap() {
+                DesktopRuntimeUpdate::PromptStarted { .. } => {
+                    bridge.try_abort(21).unwrap();
+                }
+                DesktopRuntimeUpdate::ControlAccepted { command_id: 21, .. }
+                | DesktopRuntimeUpdate::CommandRejected { command_id: 21, .. } => {
+                    saw_control_result = true
+                }
+                DesktopRuntimeUpdate::PromptFinished { command_id: 20, .. } => {
+                    saw_prompt_finished = true
+                }
+                _ => {}
+            }
+            if saw_control_result && saw_prompt_finished {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("abort race must converge to a prompt terminal");
+    assert!(
+        saw_control_result,
+        "abort command must receive a typed result"
+    );
+    assert!(saw_prompt_finished);
+
+    bridge.try_abort(24).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 24,
+            command: DesktopRuntimeCommandKind::Abort,
+            ..
+        })
+    ));
+
+    bridge
+        .try_submit_prompt(22, "close during prompt", None)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                bridge.next_update().await,
+                Some(DesktopRuntimeUpdate::PromptAccepted { command_id: 22 })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("terminal ProductEvent acknowledgement must release the next submission slot");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || drop(bridge)),
+    )
+    .await
+    .expect("dropping the desktop window bridge must return promptly")
+    .unwrap();
+}
+
+#[tokio::test]
+async fn steer_and_follow_up_races_keep_typed_command_association() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, _) = start_runtime(options);
+    bridge
+        .try_submit_prompt(25, "control association race", None)
+        .unwrap();
+
+    let mut controls_sent = false;
+    let mut steer_result = false;
+    let mut follow_up_result = false;
+    let mut prompt_finished = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match bridge.next_update().await.unwrap() {
+                DesktopRuntimeUpdate::PromptStarted { .. } if !controls_sent => {
+                    bridge.try_steer(26, "steer exactly").unwrap();
+                    bridge.try_follow_up(27, "follow up exactly").unwrap();
+                    controls_sent = true;
+                }
+                DesktopRuntimeUpdate::ControlAccepted {
+                    command_id: 26,
+                    command: DesktopRuntimeCommandKind::Steer,
+                    ..
+                }
+                | DesktopRuntimeUpdate::CommandRejected {
+                    command_id: 26,
+                    command: DesktopRuntimeCommandKind::Steer,
+                    ..
+                } => steer_result = true,
+                DesktopRuntimeUpdate::ControlAccepted {
+                    command_id: 27,
+                    command: DesktopRuntimeCommandKind::FollowUp,
+                    ..
+                }
+                | DesktopRuntimeUpdate::CommandRejected {
+                    command_id: 27,
+                    command: DesktopRuntimeCommandKind::FollowUp,
+                    ..
+                } => follow_up_result = true,
+                DesktopRuntimeUpdate::PromptFinished { command_id: 25, .. } => {
+                    prompt_finished = true
+                }
+                _ => {}
+            }
+            if steer_result && follow_up_result && prompt_finished {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("control races must converge to typed results and a prompt terminal");
+
+    assert!(controls_sent, "controls must be sent after PromptStarted");
+    assert!(steer_result, "steer must receive its typed command result");
+    assert!(
+        follow_up_result,
+        "follow-up must receive its typed command result"
+    );
+    assert!(prompt_finished);
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn authorization_decision_is_typed_and_rejected_without_an_active_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, _) = start_runtime(options);
+    let identity = ToolAuthorizationIdentity {
+        authorization_id: "authorization-31".into(),
+        operation_id: "operation-31".into(),
+        turn_id: "turn-31".into(),
+        tool_call_id: "tool-call-31".into(),
+        capability_generation: 1,
+    };
+    bridge
+        .try_decide_tool_authorization(
+            31,
+            &identity,
+            ToolAuthorizationDecision::Deny {
+                reason: Some("test denial".into()),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 31,
+            command: DesktopRuntimeCommandKind::DecideToolAuthorization,
+            ..
+        })
+    ));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_actions_are_identity_bound_and_stale_facts_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, initial) = start_runtime(options);
+    let pending = CodingAgentRecoveryPending {
+        operation_id: "operation-recovery".into(),
+        recovery_id: "recovery-id".into(),
+        operation_kind: Some("prompt".into()),
+        record_version: 3,
+        descriptor_revision: 2,
+        capability_generation: Some(initial.session.cursor.capability_generation),
+        attempt_count: 1,
+        last_attempt_at: Some("2026-07-24T00:00:00Z".into()),
+        next_attempt_at: None,
+    };
+    let identity = DesktopRecoveryIdentity::from(&pending);
+    let mut projected = initial;
+    projected.pending_recoveries = vec![pending];
+    let projection = DesktopProjection::new(projected).unwrap();
+    let recovery = projection.recoveries().front().unwrap();
+    assert!(recovery.authoritative);
+    assert_eq!(recovery.identity.as_ref(), Some(&identity));
+    assert_eq!(recovery.attempt_count, 1);
+
+    bridge.try_retry_recovery(32, &identity).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 32,
+            command: DesktopRuntimeCommandKind::RetryRecovery,
+            ..
+        })
+    ));
+    bridge
+        .try_resolve_recovery(33, &identity, CodingAgentRecoveryResolution::Aborted)
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 33,
+            command: DesktopRuntimeCommandKind::ResolveRecovery,
+            ..
+        })
+    ));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn authorization_projection_preserves_identity_and_bounds_display_payloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (bridge, initial) = start_runtime(options);
+    let request = ToolAuthorizationRequest {
+        authorization_id: "authorization-exact".into(),
+        operation_id: "operation-exact".into(),
+        turn_id: "turn-exact".into(),
+        tool_call_id: "tool-call-exact".into(),
+        tool_name: "bash".into(),
+        risk: ToolAuthorizationRisk::ShellExecution,
+        scope: ToolAuthorizationScope::Shell {
+            cwd: "x".repeat(MAX_AUTHORIZATION_TEXT_BYTES + 100),
+            command_fingerprint: "fingerprint".into(),
+        },
+        preview: ToolAuthorizationPreview {
+            summary: "x".repeat(MAX_AUTHORIZATION_TEXT_BYTES + 100),
+            path: None,
+            command: Some("x".repeat(MAX_AUTHORIZATION_TEXT_BYTES + 100)),
+            cwd: Some("x".repeat(MAX_AUTHORIZATION_TEXT_BYTES + 100)),
+            content_preview: None,
+        },
+        capability_generation: initial.session.cursor.capability_generation,
+        requested_at: "2026-07-24T00:00:00Z".into(),
+    };
+
+    let mut bounded = initial.clone();
+    bounded.session.pending_authorizations.push(request.clone());
+    let projection = DesktopProjection::new(bounded).unwrap();
+    let retained = projection
+        .snapshot()
+        .pending_authorizations
+        .first()
+        .unwrap();
+    assert_eq!(retained.authorization_id, "authorization-exact");
+    assert_eq!(retained.operation_id, "operation-exact");
+    assert!(retained.preview.summary.len() <= MAX_AUTHORIZATION_TEXT_BYTES);
+    assert!(retained.preview.command.as_ref().unwrap().len() <= MAX_AUTHORIZATION_TEXT_BYTES);
+
+    let mut invalid = initial.clone();
+    let mut invalid_request = request.clone();
+    invalid_request.authorization_id = "x".repeat(MAX_AUTHORIZATION_ID_BYTES + 1);
+    invalid.session.pending_authorizations.push(invalid_request);
+    assert_eq!(
+        DesktopProjection::new(invalid).unwrap_err().code,
+        "authorization_identity_invalid"
+    );
+
+    let mut stale = initial;
+    let mut stale_request = request.clone();
+    stale_request.capability_generation =
+        stale_request.capability_generation.checked_add(1).unwrap();
+    stale.session.pending_authorizations.push(stale_request);
+    assert_eq!(
+        DesktopProjection::new(stale).unwrap_err().code,
+        "authorization_capability_generation_mismatch"
+    );
+
+    let identity = request.identity();
+    assert_eq!(request.identity(), identity);
+    let mut stale_identity = identity.clone();
+    stale_identity.capability_generation =
+        stale_identity.capability_generation.checked_add(1).unwrap();
+    assert_ne!(request.identity(), stale_identity);
+    stale_identity = identity;
+    stale_identity.operation_id = "another-operation".into();
+    assert_ne!(request.identity(), stale_identity);
+    bridge.shutdown().await.unwrap();
+}
+
+#[test]
+fn command_inputs_and_queue_capacities_are_bounded() {
+    assert!((1..=128).contains(&DESKTOP_COMMAND_QUEUE_CAPACITY));
+    assert!((1..=256).contains(&DESKTOP_UPDATE_QUEUE_CAPACITY));
+    assert!((1..=128).contains(&DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY));
+    assert!(validate_session_id("").is_err());
+    assert!(validate_session_id(&"x".repeat(MAX_SESSION_ID_BYTES + 1)).is_err());
+    assert!(validate_session_id("session-ok").is_ok());
+    assert!(validate_prompt("").is_err());
+    assert!(validate_prompt(&"x".repeat(MAX_PROMPT_BYTES + 1)).is_err());
+    assert!(validate_prompt("prompt").is_ok());
+    assert!(validate_control_text("").is_err());
+    assert!(validate_control_text(&"x".repeat(MAX_CONTROL_TEXT_BYTES + 1)).is_err());
+    assert!(validate_control_text("steer").is_ok());
+    let mut identity = ToolAuthorizationIdentity {
+        authorization_id: "authorization-ok".into(),
+        operation_id: "operation-ok".into(),
+        turn_id: "turn-ok".into(),
+        tool_call_id: "tool-call-ok".into(),
+        capability_generation: 1,
+    };
+    assert!(validate_authorization_identity(&identity).is_ok());
+    identity.authorization_id.clear();
+    assert!(validate_authorization_identity(&identity).is_err());
+    identity.authorization_id = "authorization-ok".into();
+    identity.tool_call_id = "x".repeat(MAX_AUTHORIZATION_ID_BYTES + 1);
+    assert!(validate_authorization_identity(&identity).is_err());
+    let mut recovery = DesktopRecoveryIdentity {
+        operation_id: "operation-ok".into(),
+        recovery_id: "recovery-ok".into(),
+        record_version: 1,
+        descriptor_revision: 1,
+        capability_generation: Some(1),
+        attempt_count: 0,
+    };
+    assert!(validate_recovery_identity(&recovery).is_ok());
+    recovery.recovery_id.clear();
+    assert!(validate_recovery_identity(&recovery).is_err());
+    recovery.recovery_id = "x".repeat(MAX_RECOVERY_ID_BYTES + 1);
+    assert!(validate_recovery_identity(&recovery).is_err());
+    assert!(validate_selection_id("model", "").is_err());
+    assert!(validate_selection_id("profile", &"x".repeat(MAX_SELECTION_ID_BYTES + 1)).is_err());
+    assert!(validate_selection_id("model", "claude-haiku-4-5").is_ok());
+}
+
+#[test]
+fn runtime_error_preserves_only_the_product_safe_error_projection() {
+    let product_error = CodingAgentPublicError {
+        category: CodingAgentErrorCategory::Provider,
+        code: "provider".into(),
+        retryable: true,
+        summary: "The model provider request failed.".into(),
+        context: CodingAgentErrorContext::None,
+    };
+    let error = runtime_error(&product_error);
+    let rendered = format!("{}: {}", error.code, error.message);
+
+    assert_eq!(error.code, "provider");
+    assert_eq!(error.message, "The model provider request failed.");
+    assert_eq!(rendered, "provider: The model provider request failed.");
+}
