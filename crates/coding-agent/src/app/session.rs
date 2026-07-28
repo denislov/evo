@@ -215,11 +215,14 @@ impl CodingAgentSessionBootstrap {
         }
 
         let session_root = headless_session_root(session_options)?;
-        let options = CodingAgentSessionOptions::new()
+        let mut options = CodingAgentSessionOptions::new()
             .with_cwd(session_options.cwd.clone())
             .with_session_log_root(session_root)
             .with_default_agent_profile_id(self.default_agent_profile_id.clone())
             .with_tool_authorization_mode(ToolAuthorizationMode::Interactive);
+        if let Some(name) = self.initial_session_name.as_deref() {
+            options = options.with_session_name(name);
+        }
         match self.target.as_ref().unwrap_or(&ResolvedSessionTarget::New) {
             ResolvedSessionTarget::New => CodingAgentSession::create_internal(options).await,
             ResolvedSessionTarget::OpenOrCreateId(session_id) => {
@@ -281,6 +284,7 @@ impl CodingAgentSessionBootstrap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingAgentSessionChoice {
     pub id: String,
+    pub name: Option<String>,
     pub cwd: String,
     pub created_at: String,
     pub updated_at: String,
@@ -296,13 +300,17 @@ pub enum CodingAgentSessionChoiceKind {
 
 impl CodingAgentSessionChoice {
     pub fn display_name(&self) -> &str {
-        &self.id
+        self.name.as_deref().unwrap_or(&self.id)
     }
 
     pub fn searchable_text(&self) -> String {
         format!(
-            "{} {} {} {}",
-            self.id, self.cwd, self.created_at, self.updated_at
+            "{} {} {} {} {}",
+            self.id,
+            self.name.as_deref().unwrap_or_default(),
+            self.cwd,
+            self.created_at,
+            self.updated_at
         )
     }
 
@@ -569,6 +577,7 @@ pub(crate) fn session_snapshot_from_hydration(
     CodingAgentSessionSnapshot {
         choice: CodingAgentSessionChoice {
             id: hydration.summary.session_id,
+            name: hydration.summary.name,
             cwd: hydration.cwd.unwrap_or_default(),
             created_at: hydration.summary.created_at,
             updated_at: hydration.summary.updated_at,
@@ -1222,6 +1231,27 @@ mod tests {
     use super::*;
     use agent_core::api::transcript::StoredAgentMessage;
     use ai::api::conversation::ContentBlock;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bootstrap_initial_session_name_is_persisted_for_new_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("project");
+        let sessions = temp.path().join("sessions");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut run_options = SessionRunOptions::enabled(cwd);
+        run_options.session_dir = Some(sessions);
+        let bootstrap = CodingAgentSessionBootstrap::from_internal(
+            Some(run_options),
+            Some(ResolvedSessionTarget::New),
+            Some(" Initial session ".into()),
+            ProfileId::from("default"),
+        );
+
+        let session = bootstrap.open_internal().await.unwrap();
+        let snapshot = session.current_session_snapshot().unwrap().unwrap();
+
+        assert_eq!(snapshot.choice.name.as_deref(), Some("Initial session"));
+    }
 
     async fn create_query_fixture(root: &Path, session_id: &str) {
         let session = CodingAgentSession::create_internal(

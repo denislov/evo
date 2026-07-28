@@ -4945,6 +4945,42 @@ mod cases {
     }
 
     #[tokio::test]
+    async fn canonical_session_name_operation_persists_and_hydrates() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = CodingAgentSessionOptions::new()
+            .with_session_id("sess_name_operation")
+            .with_session_name(" Initial name ")
+            .with_session_log_root(temp.path());
+        let mut session = CodingAgentSession::create_internal(options.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            session
+                .current_session_snapshot()
+                .unwrap()
+                .unwrap()
+                .choice
+                .name
+                .as_deref(),
+            Some("Initial name")
+        );
+
+        let requested_name = format!("  {}  ", "会".repeat(240));
+        let outcome = session
+            .run_internal(CodingAgentOperation::SetSessionName {
+                name: Some(requested_name),
+            })
+            .await
+            .unwrap();
+        let (name, _) = outcome.into_session_name_changed().unwrap();
+        assert_eq!(name.as_deref().unwrap().chars().count(), 200);
+
+        drop(session);
+        let hydration = CodingAgentSession::hydrate(options).unwrap();
+        assert_eq!(hydration.summary.name, name);
+    }
+
+    #[tokio::test]
     async fn canonical_run_preserves_profile_and_delegation_contracts() {
         let api = "coding-session-canonical-delegation-decision";
         let _provider_guard = crate::test_support::ProviderGuard::register(

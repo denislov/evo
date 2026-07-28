@@ -1371,6 +1371,7 @@ mod tests {
                 | OperationKind::ForkSession
                 | OperationKind::SwitchActiveLeaf
                 | OperationKind::SetSessionTreeLabel
+                | OperationKind::SetSessionName
                 | OperationKind::SetDefaultAgentProfile
                 | OperationKind::SelfHealingEdit => SessionCapabilityAccess::Write,
                 OperationKind::DelegationConfirmation

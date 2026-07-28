@@ -85,6 +85,7 @@ fn session_queries(context: &CodingAgentEmbeddingContext) -> Result<(), CodingAg
 async fn create_assigned_session(
     context: &CodingAgentEmbeddingContext,
 ) -> Result<(), CodingAgentPublicError> {
+    touch(CodingAgentSessionOptions::new().with_session_name("named session"));
     touch(context.create_session_with_id("assigned-session").await?);
     Ok(())
 }
@@ -169,7 +170,7 @@ fn product_projection(
     Ok(())
 }
 
-fn operations() -> [CodingAgentOperation; 14] {
+fn operations() -> [CodingAgentOperation; 15] {
     [
         CodingAgentOperation::Prompt(prompt()),
         CodingAgentOperation::Compact(prompt()),
@@ -208,6 +209,9 @@ fn operations() -> [CodingAgentOperation; 14] {
             entry_id: "leaf".into(),
             label: Some("checkpoint".into()),
         },
+        CodingAgentOperation::SetSessionName {
+            name: Some("planning".into()),
+        },
         CodingAgentOperation::ExportCurrent,
         CodingAgentOperation::ExportCurrentHtml("session.html".into()),
     ]
@@ -231,6 +235,9 @@ fn outcomes(outcome: CodingAgentOperationOutcome) {
             label,
             updated_at,
         } => touch((entry_id, label, updated_at)),
+        CodingAgentOperationOutcome::SessionNameChanged { name, updated_at } => {
+            touch((name, updated_at))
+        }
         CodingAgentOperationOutcome::Export(value) => touch(value),
         CodingAgentOperationOutcome::ExportHtml(value) => touch(value),
     }

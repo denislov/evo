@@ -147,6 +147,18 @@ impl SessionWriterCommand {
         }
     }
 
+    pub(super) fn set_session_name(
+        operation_id: impl Into<String>,
+        capability_generation: CapabilityGeneration,
+        name: Option<String>,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            capability_generation,
+            mutation: SessionMutation::SetSessionName { name },
+        }
+    }
+
     pub(super) fn fork_session(
         operation_id: impl Into<String>,
         capability_generation: CapabilityGeneration,
@@ -254,6 +266,9 @@ pub(crate) enum SessionMutation {
         entry_id: String,
         label: Option<String>,
     },
+    SetSessionName {
+        name: Option<String>,
+    },
     ForkSession {
         target_leaf_id: Option<String>,
     },
@@ -354,6 +369,10 @@ pub(crate) enum SessionWriterReply {
         label: Option<String>,
         updated_at: String,
     },
+    SessionName {
+        name: Option<String>,
+        updated_at: String,
+    },
     ForkedSession {
         session_id: String,
     },
@@ -437,6 +456,18 @@ impl SessionCoordinator {
                 Ok(SessionWriterReply::SessionTreeLabel {
                     entry_id: update.entry_id,
                     label: update.label,
+                    updated_at: update.updated_at,
+                })
+            }
+            SessionMutation::SetSessionName { name } => {
+                let SessionPersistence::Persistent(session_service) = &mut self.persistence else {
+                    return Err(CodingSessionError::UnsupportedCapability {
+                        capability: "session names require a persistent Rust-native session".into(),
+                    });
+                };
+                let update = session_service.set_session_name(name, &command.operation_id)?;
+                Ok(SessionWriterReply::SessionName {
+                    name: update.name,
                     updated_at: update.updated_at,
                 })
             }

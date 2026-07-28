@@ -318,6 +318,7 @@ impl SessionLogStore {
             ))
         })?;
         let manifest = SessionManifest::new(session_id.clone(), options.created_at)
+            .with_name(options.name)
             .with_default_agent_profile_id(options.default_agent_profile_id);
         let initialization = (|| -> Result<(), CodingSessionError> {
             #[cfg(test)]
@@ -879,6 +880,7 @@ impl SessionLogStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CreateSessionOptions {
     pub(crate) session_id: String,
+    pub(crate) name: Option<String>,
     pub(crate) created_at: String,
     pub(crate) default_agent_profile_id: ProfileId,
 }
@@ -887,6 +889,7 @@ impl CreateSessionOptions {
     pub(crate) fn new(session_id: impl Into<String>, created_at: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
+            name: None,
             created_at: created_at.into(),
             default_agent_profile_id: default_agent_profile_id(),
         }
@@ -894,6 +897,11 @@ impl CreateSessionOptions {
 
     pub(crate) fn default_agent_profile_id(mut self, profile_id: ProfileId) -> Self {
         self.default_agent_profile_id = profile_id;
+        self
+    }
+
+    pub(crate) fn name(mut self, name: Option<String>) -> Self {
+        self.name = name;
         self
     }
 }
@@ -922,6 +930,7 @@ impl SessionHandle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionSummary {
     pub(crate) session_id: String,
+    pub(crate) name: Option<String>,
     pub(crate) session_dir: PathBuf,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
@@ -932,6 +941,7 @@ impl SessionSummary {
     fn from_handle(handle: &SessionHandle) -> Self {
         Self {
             session_id: handle.manifest.session_id.clone(),
+            name: handle.manifest.name.clone(),
             session_dir: handle.session_dir.clone(),
             created_at: handle.manifest.created_at.clone(),
             updated_at: handle.manifest.updated_at.clone(),
@@ -943,6 +953,7 @@ impl SessionSummary {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ManifestPatch {
     updated_at: Option<String>,
+    name: Option<Option<String>>,
     active_branch_id: Option<Option<String>>,
     active_leaf_id: Option<Option<String>>,
     default_agent_profile_id: Option<ProfileId>,
@@ -955,6 +966,11 @@ impl ManifestPatch {
 
     pub(crate) fn updated_at(mut self, updated_at: impl Into<String>) -> Self {
         self.updated_at = Some(updated_at.into());
+        self
+    }
+
+    pub(crate) fn name(mut self, name: Option<String>) -> Self {
+        self.name = Some(name);
         self
     }
 
@@ -977,6 +993,9 @@ impl ManifestPatch {
     fn apply(self, manifest: &mut SessionManifest) {
         if let Some(updated_at) = self.updated_at {
             manifest.updated_at = updated_at;
+        }
+        if let Some(name) = self.name {
+            manifest.name = name;
         }
         if let Some(active_branch_id) = self.active_branch_id {
             manifest.active_branch_id = active_branch_id;

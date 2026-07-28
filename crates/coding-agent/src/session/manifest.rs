@@ -15,6 +15,8 @@ pub(crate) struct SessionManifest {
     pub schema: String,
     pub version: u32,
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,6 +37,7 @@ impl SessionManifest {
             schema: SESSION_SCHEMA.into(),
             version: SESSION_VERSION,
             session_id: session_id.into(),
+            name: None,
             updated_at: created_at.clone(),
             created_at,
             active_branch_id: None,
@@ -47,6 +50,11 @@ impl SessionManifest {
 
     pub(crate) fn with_default_agent_profile_id(mut self, profile_id: ProfileId) -> Self {
         self.default_agent_profile_id = profile_id;
+        self
+    }
+
+    pub(crate) fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name;
         self
     }
 
@@ -85,6 +93,7 @@ mod tests {
         assert_eq!(value["schema"], SESSION_SCHEMA);
         assert_eq!(value["version"], SESSION_VERSION);
         assert_eq!(value["session_id"], "sess_1");
+        assert!(value.get("name").is_none());
         assert_eq!(value["created_at"], "2026-06-29T00:00:00Z");
         assert_eq!(value["updated_at"], "2026-06-29T00:00:01Z");
         assert_eq!(value["active_leaf_id"], "leaf_1");
@@ -99,5 +108,24 @@ mod tests {
 
         let decoded: SessionManifest = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn manifest_without_name_deserializes_as_unnamed_v1_session() {
+        let value = serde_json::json!({
+            "schema": SESSION_SCHEMA,
+            "version": SESSION_VERSION,
+            "session_id": "sess_legacy",
+            "created_at": "2026-06-29T00:00:00Z",
+            "updated_at": "2026-06-29T00:00:00Z",
+            "default_agent_profile_id": "default",
+            "event_log": SESSION_EVENT_LOG_FILE,
+            "outbox_log": SESSION_OUTBOX_LOG_FILE
+        });
+
+        let decoded: SessionManifest = serde_json::from_value(value).unwrap();
+
+        assert_eq!(decoded.version, SESSION_VERSION);
+        assert_eq!(decoded.name, None);
     }
 }

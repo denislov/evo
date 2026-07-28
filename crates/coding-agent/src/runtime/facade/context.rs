@@ -12,6 +12,7 @@ use crate::runtime::control::{OperationActivity, OperationKind};
 pub struct CodingAgentSessionOptions {
     cwd: Option<PathBuf>,
     session_id: Option<String>,
+    session_name: Option<String>,
     session_log_root: Option<PathBuf>,
     session_path: Option<PathBuf>,
     default_agent_profile_id: Option<ProfileId>,
@@ -24,6 +25,7 @@ impl std::fmt::Debug for CodingAgentSessionOptions {
         f.debug_struct("CodingAgentSessionOptions")
             .field("cwd", &self.cwd)
             .field("session_id", &self.session_id)
+            .field("has_session_name", &self.session_name.is_some())
             .field("session_log_root", &self.session_log_root)
             .field("session_path", &self.session_path)
             .field("default_agent_profile_id", &self.default_agent_profile_id)
@@ -40,6 +42,11 @@ impl CodingAgentSessionOptions {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_session_name(mut self, name: impl Into<String>) -> Self {
+        self.session_name = Some(name.into());
         self
     }
 
@@ -75,6 +82,10 @@ impl CodingAgentSessionOptions {
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    pub fn session_name(&self) -> Option<&str> {
+        self.session_name.as_deref()
     }
 
     pub fn cwd(&self) -> Option<&Path> {
@@ -209,6 +220,7 @@ pub struct CodingAgentRecoveryRetryResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingAgentSessionSummary {
     pub session_id: String,
+    pub name: Option<String>,
     pub session_dir: PathBuf,
     pub created_at: String,
     pub updated_at: String,

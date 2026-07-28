@@ -73,6 +73,10 @@ pub enum CodingAgentOperation {
         entry_id: String,
         label: Option<String>,
     },
+    /// Set or clear the durable presentation name of the current session.
+    SetSessionName {
+        name: Option<String>,
+    },
     ExportCurrent,
     ExportCurrentHtml(PathBuf),
 }
@@ -95,6 +99,10 @@ pub enum CodingAgentOperationOutcome {
     SessionTreeLabelChanged {
         entry_id: String,
         label: Option<String>,
+        updated_at: String,
+    },
+    SessionNameChanged {
+        name: Option<String>,
         updated_at: String,
     },
     Export(CodingAgentSessionExport),
@@ -202,6 +210,7 @@ pub(crate) enum OperationOutcomeFamily {
     SessionForked,
     ActiveLeafSwitched,
     SessionTreeLabelChanged,
+    SessionNameChanged,
     Export,
     ExportHtml,
 }
@@ -486,6 +495,7 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::ForkSession
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
+        | OperationKind::SetSessionName
         | OperationKind::SetDefaultAgentProfile
         | OperationKind::Export => return None,
     };
@@ -507,6 +517,7 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::ForkSession
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
+        | OperationKind::SetSessionName
         | OperationKind::SetDefaultAgentProfile
         | OperationKind::Export => unreachable!("non-terminal operation kind filtered above"),
     };
@@ -531,6 +542,7 @@ pub(crate) fn terminal_operation_kind(
         | OperationKind::ForkSession
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
+        | OperationKind::SetSessionName
         | OperationKind::SetDefaultAgentProfile
         | OperationKind::Export => None,
     }
@@ -580,6 +592,7 @@ fn recovery_terminal_operation_kind(
         | OperationKind::ForkSession
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
+        | OperationKind::SetSessionName
         | OperationKind::SetDefaultAgentProfile => return None,
     })
 }
@@ -602,6 +615,7 @@ enum OperationContract {
     ForkSession,
     SwitchActiveLeaf,
     SetSessionTreeLabel,
+    SetSessionName,
     ExportCurrent,
     ExportCurrentHtml,
 }
@@ -619,6 +633,7 @@ pub(crate) fn descriptor_for_internal_operation(operation: &Operation) -> Operat
         Operation::ForkSession { .. } => OperationContract::ForkSession,
         Operation::SwitchActiveLeaf { .. } => OperationContract::SwitchActiveLeaf,
         Operation::SetSessionTreeLabel { .. } => OperationContract::SetSessionTreeLabel,
+        Operation::SetSessionName { .. } => OperationContract::SetSessionName,
         Operation::SetDefaultAgentProfile { .. } => OperationContract::SetDefaultAgentProfile,
         Operation::Export(options) if options.writes_html() => OperationContract::ExportCurrentHtml,
         Operation::Export(_) => OperationContract::ExportCurrent,
@@ -638,6 +653,7 @@ pub(crate) fn descriptor_for_child_kind(kind: OperationKind) -> Option<Operation
         | OperationKind::ForkSession
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
+        | OperationKind::SetSessionName
         | OperationKind::SetDefaultAgentProfile
         | OperationKind::Export => return None,
     };
@@ -776,6 +792,14 @@ impl OperationContract {
                 OperationTerminalPolicy::OutcomeAcknowledgement,
                 &[][..],
             ),
+            Self::SetSessionName => (
+                OperationKind::SetSessionName,
+                OperationClass::SessionWriteRoot,
+                OperationDispatchMode::SyncMutable,
+                OperationOutcomeFamily::SessionNameChanged,
+                OperationTerminalPolicy::OutcomeAcknowledgement,
+                &[][..],
+            ),
             Self::ExportCurrent => (
                 OperationKind::Export,
                 OperationClass::ReadOnly,
@@ -874,6 +898,7 @@ impl CodingAgentOperation {
             Self::ForkSession { .. } => OperationContract::ForkSession,
             Self::SwitchActiveLeaf { .. } => OperationContract::SwitchActiveLeaf,
             Self::SetSessionTreeLabel { .. } => OperationContract::SetSessionTreeLabel,
+            Self::SetSessionName { .. } => OperationContract::SetSessionName,
             Self::ExportCurrent => OperationContract::ExportCurrent,
             Self::ExportCurrentHtml(_) => OperationContract::ExportCurrentHtml,
         }
@@ -949,6 +974,7 @@ impl CodingAgentOperation {
             Self::SetSessionTreeLabel { entry_id, label } => {
                 Operation::SetSessionTreeLabel { entry_id, label }
             }
+            Self::SetSessionName { name } => Operation::SetSessionName { name },
             Self::ExportCurrent => Operation::Export(ExportOptions::view()),
             Self::ExportCurrentHtml(path) => Operation::Export(ExportOptions::html(path)),
         }
@@ -996,6 +1022,9 @@ impl CodingAgentOperationOutcome {
                 label,
                 updated_at,
             },
+            OperationOutcome::SessionNameChanged { name, updated_at } => {
+                Self::SessionNameChanged { name, updated_at }
+            }
             OperationOutcome::Export(outcome) => match outcome.path {
                 Some(path) => Self::ExportHtml(path),
                 None => Self::Export(outcome.export),
@@ -1099,6 +1128,13 @@ impl CodingAgentOperationOutcome {
             other => Err(other),
         }
     }
+
+    pub fn into_session_name_changed(self) -> Result<(Option<String>, String), Self> {
+        match self {
+            Self::SessionNameChanged { name, updated_at } => Ok((name, updated_at)),
+            other => Err(other),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1127,6 +1163,7 @@ mod tests {
         ForkSession,
         SwitchActiveLeaf,
         SetSessionTreeLabel,
+        SetSessionName,
         ExportView,
         ExportHtml,
     }
@@ -1145,6 +1182,7 @@ mod tests {
         SessionForked,
         ActiveLeafSwitched,
         SessionTreeLabelChanged,
+        SessionNameChanged,
         Export,
         ExportHtml,
     }
@@ -1170,7 +1208,7 @@ mod tests {
         PromptTurnOptions::new(PromptInvocation::Text("contract".into()))
     }
 
-    fn operation_contract_cases() -> [OperationContractCase; 14] {
+    fn operation_contract_cases() -> [OperationContractCase; 15] {
         [
             OperationContractCase {
                 public_variant: "Prompt",
@@ -1351,6 +1389,18 @@ mod tests {
                 expected_root_evidence: &[],
             },
             OperationContractCase {
+                public_variant: "SetSessionName",
+                build_operation: || CodingAgentOperation::SetSessionName {
+                    name: Some("planning".into()),
+                },
+                expected_internal: ExpectedInternalOperationVariant::SetSessionName,
+                expected_dispatch: OperationDispatchMode::SyncMutable,
+                expected_outcome: ExpectedPublicOutcomeFamily::SessionNameChanged,
+                expected_submitted_kind: OperationKind::SetSessionName,
+                expected_terminal_policy: OperationTerminalPolicy::OutcomeAcknowledgement,
+                expected_root_evidence: &[],
+            },
+            OperationContractCase {
                 public_variant: "ExportCurrent",
                 build_operation: || CodingAgentOperation::ExportCurrent,
                 expected_internal: ExpectedInternalOperationVariant::ExportView,
@@ -1425,6 +1475,7 @@ mod tests {
         CodingAgentSessionExport {
             summary: CodingAgentSessionSummary {
                 session_id: "sess_export".into(),
+                name: None,
                 session_dir: PathBuf::from("sessions/sess_export"),
                 created_at: "2026-07-10T00:00:00Z".into(),
                 updated_at: "2026-07-10T00:00:00Z".into(),
@@ -1436,7 +1487,7 @@ mod tests {
         }
     }
 
-    fn operation_outcome_projection_cases() -> [OutcomeProjectionCase; 14] {
+    fn operation_outcome_projection_cases() -> [OutcomeProjectionCase; 15] {
         [
             OutcomeProjectionCase {
                 internal_outcome: "Prompt",
@@ -1507,6 +1558,14 @@ mod tests {
                 expected_outcome: ExpectedPublicOutcomeFamily::SessionTreeLabelChanged,
             },
             OutcomeProjectionCase {
+                internal_outcome: "SessionNameChanged",
+                build_outcome: || OperationOutcome::SessionNameChanged {
+                    name: Some("planning".into()),
+                    updated_at: "2026-07-16T00:00:00Z".into(),
+                },
+                expected_outcome: ExpectedPublicOutcomeFamily::SessionNameChanged,
+            },
+            OutcomeProjectionCase {
                 internal_outcome: "Export(view)",
                 build_outcome: || {
                     OperationOutcome::Export(ExportOutcome {
@@ -1550,6 +1609,7 @@ mod tests {
             Operation::SetSessionTreeLabel { .. } => {
                 ExpectedInternalOperationVariant::SetSessionTreeLabel
             }
+            Operation::SetSessionName { .. } => ExpectedInternalOperationVariant::SetSessionName,
             Operation::SetDefaultAgentProfile { .. } => {
                 ExpectedInternalOperationVariant::SetDefaultAgentProfile
             }
@@ -1597,6 +1657,9 @@ mod tests {
             CodingAgentOperationOutcome::SessionTreeLabelChanged { .. } => {
                 ExpectedPublicOutcomeFamily::SessionTreeLabelChanged
             }
+            CodingAgentOperationOutcome::SessionNameChanged { .. } => {
+                ExpectedPublicOutcomeFamily::SessionNameChanged
+            }
             CodingAgentOperationOutcome::Export(_) => ExpectedPublicOutcomeFamily::Export,
             CodingAgentOperationOutcome::ExportHtml(_) => ExpectedPublicOutcomeFamily::ExportHtml,
         }
@@ -1625,6 +1688,9 @@ mod tests {
             }
             ExpectedPublicOutcomeFamily::SessionTreeLabelChanged => {
                 OperationOutcomeFamily::SessionTreeLabelChanged
+            }
+            ExpectedPublicOutcomeFamily::SessionNameChanged => {
+                OperationOutcomeFamily::SessionNameChanged
             }
             ExpectedPublicOutcomeFamily::Export => OperationOutcomeFamily::Export,
             ExpectedPublicOutcomeFamily::ExportHtml => OperationOutcomeFamily::ExportHtml,
@@ -1661,14 +1727,14 @@ mod tests {
     fn operation_contract_covers_all_public_variants() {
         let cases = operation_contract_cases();
 
-        assert_eq!(cases.len(), 14);
+        assert_eq!(cases.len(), 15);
         assert_eq!(
             cases
                 .iter()
                 .map(|case| case.expected_outcome)
                 .collect::<HashSet<_>>()
                 .len(),
-            14
+            15
         );
         for case in &cases {
             let operation = (case.build_operation)().into_internal();
@@ -1732,10 +1798,10 @@ mod tests {
             }
         }
 
-        assert_eq!(cases.len(), 14);
-        assert_eq!(public_variants.len(), 14);
+        assert_eq!(cases.len(), 15);
+        assert_eq!(public_variants.len(), 15);
         assert_eq!(terminal_associated, 5);
-        assert_eq!(outcome_only, 9);
+        assert_eq!(outcome_only, 10);
     }
 
     #[test]
@@ -1745,7 +1811,7 @@ mod tests {
             .map(|case| (case.build_operation)().descriptor())
             .collect::<Vec<_>>();
 
-        assert_eq!(descriptors.len(), 14);
+        assert_eq!(descriptors.len(), 15);
         assert!(
             descriptors
                 .iter()
@@ -1758,7 +1824,7 @@ mod tests {
                     descriptor.admission_class() == OperationClass::SessionWriteRoot
                 })
                 .count(),
-            9
+            10
         );
         assert_eq!(
             descriptors
@@ -1809,7 +1875,7 @@ mod tests {
                 .iter()
                 .filter(|descriptor| descriptor.durability.session_if_persistent)
                 .count(),
-            10
+            11
         );
         assert_eq!(
             descriptors
@@ -1975,6 +2041,7 @@ mod tests {
         let export = CodingAgentSessionExport {
             summary: CodingAgentSessionSummary {
                 session_id: "sess_export".into(),
+                name: None,
                 session_dir: PathBuf::from("sessions/sess_export"),
                 created_at: "2026-07-10T00:00:00Z".into(),
                 updated_at: "2026-07-10T00:00:00Z".into(),
@@ -2009,7 +2076,7 @@ mod tests {
             .map(|case| case.expected_outcome)
             .collect::<HashSet<_>>();
 
-        assert_eq!(cases.len(), 14);
+        assert_eq!(cases.len(), 15);
         assert_eq!(projection_outcomes, contract_outcomes);
         for case in cases {
             let projected = CodingAgentOperationOutcome::from_internal((case.build_outcome)());

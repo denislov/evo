@@ -51,6 +51,7 @@ use crate::session::transaction::{
 
 const RECOVERY_RECORD_VERSION: u64 = crate::events::recovery::RECOVERY_RECORD_VERSION;
 const MAX_RECOVERY_RETRY_ATTEMPTS: u32 = 3;
+const MAX_SESSION_NAME_CHARS: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartupRecoveryMarker {
@@ -242,6 +243,7 @@ impl SessionService {
             &clock,
             option_cwd_string(options),
             option_default_agent_profile_id(options),
+            normalize_session_name(options.session_name().map(str::to_owned)),
             None,
         )
     }
@@ -289,6 +291,7 @@ impl SessionService {
             &clock,
             option_cwd_string(options),
             option_default_agent_profile_id(options),
+            normalize_session_name(options.session_name().map(str::to_owned)),
             None,
         )
     }
@@ -441,6 +444,23 @@ impl SessionService {
 
     pub(crate) fn current_active_leaf_id(&self) -> Option<String> {
         self.transaction_writer.manifest_snapshot().active_leaf_id
+    }
+
+    pub(crate) fn set_session_name(
+        &mut self,
+        name: Option<String>,
+        operation_id: &str,
+    ) -> Result<SessionNameUpdate, CodingSessionError> {
+        let name = normalize_session_name(name);
+        let updated_at = SystemClock.now_rfc3339();
+        self.commit_writer_mutation(
+            Vec::new(),
+            ManifestPatch::new()
+                .updated_at(updated_at.clone())
+                .name(name.clone()),
+            Some(operation_id.to_owned()),
+        )?;
+        Ok(SessionNameUpdate { name, updated_at })
     }
 
     pub(crate) fn current_default_agent_profile_id(&self) -> ProfileId {
@@ -1864,12 +1884,14 @@ impl SessionService {
     }
 
     fn summary(&self) -> CodingAgentSessionSummary {
+        let manifest = self.transaction_writer.manifest_snapshot();
         CodingAgentSessionSummary {
-            session_id: self.handle.manifest().session_id.clone(),
+            session_id: manifest.session_id,
+            name: manifest.name,
             session_dir: self.handle.session_dir().to_path_buf(),
-            created_at: self.handle.manifest().created_at.clone(),
-            updated_at: self.handle.manifest().updated_at.clone(),
-            active_leaf_id: self.current_active_leaf_id(),
+            created_at: manifest.created_at,
+            updated_at: manifest.updated_at,
+            active_leaf_id: manifest.active_leaf_id,
         }
     }
 
@@ -1902,6 +1924,7 @@ impl SessionService {
             &clock,
             replay.cwd,
             self.current_default_agent_profile_id(),
+            writer_manifest.name,
             Some(&operation_id),
         )?;
 
@@ -1966,6 +1989,10 @@ impl SessionService {
         Ok(target)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "session creation atomically carries identity, presentation, persistence, and copy-recovery facts"
+    )]
     fn create_with_id(
         store: SessionLogStore,
         session_id: String,
@@ -1973,11 +2000,13 @@ impl SessionService {
         clock: &impl Clock,
         cwd: Option<String>,
         default_agent_profile_id: ProfileId,
+        name: Option<String>,
         copy_operation_id: Option<&str>,
     ) -> Result<Self, CodingSessionError> {
         let created_at = clock.now_rfc3339();
         let handle = match store.create_session(
             CreateSessionOptions::new(session_id, created_at.clone())
+                .name(name)
                 .default_agent_profile_id(default_agent_profile_id),
         ) {
             Ok(handle) => handle,
@@ -2355,6 +2384,12 @@ pub(crate) struct SessionTreeLabelUpdate {
     pub(crate) updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionNameUpdate {
+    pub(crate) name: Option<String>,
+    pub(crate) updated_at: String,
+}
+
 fn build_leaf_tree(
     events: &[SessionEventEnvelope],
     active_leaf_id: Option<String>,
@@ -2499,6 +2534,17 @@ fn normalize_tree_label(label: Option<String>) -> Option<String> {
     })
 }
 
+fn normalize_session_name(name: Option<String>) -> Option<String> {
+    name.and_then(|name| {
+        let name = name.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.chars().take(MAX_SESSION_NAME_CHARS).collect())
+        }
+    })
+}
+
 pub(crate) fn coding_transcript_item_from_replay(
     item: TranscriptItem,
 ) -> CodingAgentSessionTranscriptItem {
@@ -2630,6 +2676,7 @@ impl From<SessionSummary> for CodingAgentSessionSummary {
     fn from(summary: SessionSummary) -> Self {
         Self {
             session_id: summary.session_id,
+            name: summary.name,
             session_dir: summary.session_dir,
             created_at: summary.created_at,
             updated_at: summary.updated_at,
@@ -2702,6 +2749,55 @@ mod tests {
     use crate::session::event::PersistedContentBlock;
     use crate::session::replay::OperationReplayStatus;
     use crate::session::repository::StoreFailurePoint;
+
+    #[test]
+    fn session_name_persists_in_manifest_and_lists_without_decoding_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = CodingAgentSessionOptions::new()
+            .with_session_id("sess_named_summary")
+            .with_session_name(" Initial name ")
+            .with_session_log_root(temp.path());
+        let mut service = SessionService::create(&options).unwrap();
+
+        assert_eq!(service.summary().name.as_deref(), Some("Initial name"));
+        let update = service
+            .set_session_name(Some(" Renamed session ".into()), "op_rename")
+            .unwrap();
+        assert_eq!(update.name.as_deref(), Some("Renamed session"));
+        assert_eq!(service.summary().name, update.name);
+
+        std::fs::write(
+            service.handle.event_log_path().unwrap(),
+            "this is deliberately not valid event json\n",
+        )
+        .unwrap();
+        let summaries = SessionService::list(&options).unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name.as_deref(), Some("Renamed session"));
+    }
+
+    #[test]
+    fn session_name_manifest_failure_preserves_operation_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = CodingAgentSessionOptions::new()
+            .with_session_id("sess_name_failure")
+            .with_session_log_root(temp.path());
+        let mut service = SessionService::create(&options).unwrap();
+        service
+            .store
+            .fail_after(StoreFailurePoint::UpdateManifest, 0);
+
+        let error = service
+            .set_session_name(Some("Renamed".into()), "op_name_failure")
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CodingSessionError::PartialCommit { operation_id, .. }
+                if operation_id == "op_name_failure"
+        ));
+    }
 
     #[test]
     fn transaction_writer_shutdown_is_idempotent_and_rejects_new_checkpoints() {

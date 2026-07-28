@@ -507,6 +507,9 @@ impl CodingAgentEmbeddingContext {
         {
             options = options.with_session_log_root(root);
         }
+        if let Some(name) = self.resolved.session_name.as_deref() {
+            options = options.with_session_name(name);
+        }
         Ok(options)
     }
 

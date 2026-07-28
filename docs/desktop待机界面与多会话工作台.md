@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103、CAG-104 实现完成；CAG-102 的 cwd 摘要契约待确认）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103、CAG-104、CAG-105 实现完成；CAG-102 的 cwd 摘要契约待确认）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-28
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -564,6 +564,29 @@ feat(coding-agent): allow caller-assigned session identifiers
 - 新增测试：设置名称后重新 hydrate 可读回；
 - 新增测试：摘要查询无需读 event log 即可返回名称；
 - 名称写入走既有 session write 路径，遵守 recovery/outbox 语义。
+
+**实现记录（2026-07-28）**
+
+- 前置审计确认 `initial_session_name` 原先只进入 operation factory / prompt 元数据，未参与
+  `SessionService` 创建或 manifest 写入；现已由 bootstrap 与 embedding context 传入
+  `CodingAgentSessionOptions`，并在新会话创建时与其余 manifest 字段原子落盘；open 路径
+  不会用调用方的初始名称覆盖已有会话；
+- `SessionManifest` 新增可选 `name`，创建、clone/fork、manifest patch、repository summary、
+  `CodingAgentSessionSummary` 与 `CodingAgentSessionChoice` 全链路读取该字段；未提升
+  `SESSION_VERSION`，因为字段带 serde 默认且 `None` 不序列化，旧 v1 manifest 可直接读为
+  未命名会话；choice 的 `display_name()` 优先返回名称、无名称时仍降级到 session id；
+- 新增独立的 `SetSessionName` 同步可变 operation 及类型化 outcome，不复用
+  `SetSessionTreeLabel`；名称会 trim、空值清除，并以 Unicode 字符边界截断到 200 字符。
+  写入继续通过单 writer 的 `commit_session_mutation`，携带 admitted operation id，因此失败
+  保持既有 partial-commit 与 finalization/recovery 判定，同时没有新增 event log 或
+  outbox 序列化格式；
+- 新增测试覆盖：无 `name` 的旧 v1 manifest、初始名称落盘、重命名后重新 hydrate、Unicode
+  长名称截断、manifest 写入失败保留 operation identity，以及把 `events.jsonl` 故意写成
+  非法内容后，cwd-free 列表仍仅从 manifest 返回名称；CAG-102 后续摘要 DTO 可直接复用该
+  repository summary 字段，cwd 契约仍按上文保持待确认；
+- 直接相关 gate 已通过：coding-agent lib `747/747`、API boundary `14/14`、lib-only
+  Clippy `-D warnings`、Desktop / CLI / TUI `cargo check`。全量
+  `cargo test -p coding-agent` 仍受上文已记录的既有 product-event contract 文档缺失阻断。
 
 **建议提交**
 

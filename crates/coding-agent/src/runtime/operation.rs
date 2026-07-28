@@ -47,6 +47,9 @@ pub(crate) enum Operation {
         entry_id: String,
         label: Option<String>,
     },
+    SetSessionName {
+        name: Option<String>,
+    },
     SetDefaultAgentProfile {
         profile_id: ProfileId,
     },
@@ -69,6 +72,7 @@ impl Operation {
             | Self::ForkSession { .. }
             | Self::SwitchActiveLeaf { .. }
             | Self::SetSessionTreeLabel { .. }
+            | Self::SetSessionName { .. }
             | Self::SetDefaultAgentProfile { .. }
             | Self::Export(_) => None,
         }
@@ -98,6 +102,7 @@ impl Operation {
             | Self::ForkSession { .. }
             | Self::SwitchActiveLeaf { .. }
             | Self::SetSessionTreeLabel { .. }
+            | Self::SetSessionName { .. }
             | Self::SetDefaultAgentProfile { .. }
             | Self::Export(_) => None,
         }
@@ -296,6 +301,10 @@ pub(crate) enum OperationOutcome {
     SessionTreeLabelChanged {
         entry_id: String,
         label: Option<String>,
+        updated_at: String,
+    },
+    SessionNameChanged {
+        name: Option<String>,
         updated_at: String,
     },
     Export(ExportOutcome),

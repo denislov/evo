@@ -53,6 +53,7 @@ impl CodingAgentSession {
             | Operation::ForkSession { .. }
             | Operation::SwitchActiveLeaf { .. }
             | Operation::SetSessionTreeLabel { .. }
+            | Operation::SetSessionName { .. }
             | Operation::SetDefaultAgentProfile { .. } => {
                 Err(IntentRouter::unsupported_dispatch(&admission))
             }
@@ -233,6 +234,33 @@ impl CodingAgentSession {
                     label,
                     updated_at,
                 })
+            }
+            Operation::SetSessionName { name } => {
+                SessionWriteCapability::require(
+                    operation_permit
+                        .capability_snapshot()
+                        .session_write
+                        .as_ref(),
+                )?;
+                let reply = self
+                    .runtime_host
+                    .session_coordinator
+                    .execute_writer_command(
+                        crate::runtime::session_coordinator::SessionWriterCommand::set_session_name(
+                            operation_permit.execution().operation_id.clone(),
+                            operation_permit.execution().capability_generation,
+                            name,
+                        ),
+                    )?;
+                self.refresh_snapshot_projection();
+                let crate::runtime::session_coordinator::SessionWriterReply::SessionName {
+                    name,
+                    updated_at,
+                } = reply
+                else {
+                    unreachable!("session-name writer command returns its typed reply")
+                };
+                Ok(OperationOutcome::SessionNameChanged { name, updated_at })
             }
             Operation::SetDefaultAgentProfile { profile_id } => {
                 SessionWriteCapability::require(
@@ -577,6 +605,7 @@ impl CodingAgentSession {
                     | Operation::ForkSession { .. }
                     | Operation::SwitchActiveLeaf { .. }
                     | Operation::SetSessionTreeLabel { .. }
+                    | Operation::SetSessionName { .. }
                     | Operation::SetDefaultAgentProfile { .. } => {
                         Err(IntentRouter::unsupported_dispatch(&admission))
                     }
