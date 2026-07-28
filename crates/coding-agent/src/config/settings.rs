@@ -564,6 +564,16 @@ pub fn load_settings(paths: &ConfigPaths, diags: &mut Vec<ConfigDiagnostic>) -> 
     merged.resolve()
 }
 
+/// Load only the user-global settings file, without consulting project state.
+pub(crate) fn load_global_settings(
+    paths: &ConfigPaths,
+    diags: &mut Vec<ConfigDiagnostic>,
+) -> Settings {
+    let mut global = load_partial(&paths.global_settings(), diags);
+    validate_compaction_settings(&mut global, None, true, diags);
+    global.resolve()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

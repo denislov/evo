@@ -31,14 +31,14 @@ pub mod api {
         pub use crate::app::auth::{
             CodingAgentAuthCommand, CodingAgentAuthController, CodingAgentAuthMutation,
             CodingAgentAuthMutationOutcome, CodingAgentAuthSnapshot, CodingAgentProviderAuthKind,
-            CodingAgentProviderAuthState,
+            CodingAgentProviderAuthState, global_auth_snapshot,
         };
         pub use crate::app::embedding::{
             CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentEmbeddingSnapshot,
             CodingAgentModelCatalogEntry, CodingAgentModelChoice, CodingAgentProfileChoice,
             CodingAgentResourceCommand, CodingAgentResourceCommandKind, CodingAgentResourceSummary,
-            CodingAgentSettingsSummary, CodingAgentThinkingLevel, model_catalog,
-            model_catalog_entry_by_id,
+            CodingAgentSettingsSummary, CodingAgentThinkingLevel, configured_model_catalog,
+            global_skill_catalog, model_catalog, model_catalog_entry_by_id,
         };
         pub use crate::app::interactive::{
             CodingAgentApplicationStartup, CodingAgentInteractiveStartup,
@@ -61,7 +61,7 @@ pub mod api {
             CodingAgentPresentationSettingsSnapshot, CodingAgentQueueMode,
             CodingAgentRuntimeSettingsSnapshot, CodingAgentSettingsCommand,
             CodingAgentSettingsController, CodingAgentSettingsMutationOutcome,
-            CodingAgentSettingsSnapshot, CodingAgentTreeFilterMode,
+            CodingAgentSettingsSnapshot, CodingAgentTreeFilterMode, global_settings_snapshot,
         };
         pub use crate::app::theme::{
             CodingAgentResolvedColor, CodingAgentThemeBackground, CodingAgentThemeController,

@@ -45,6 +45,20 @@ impl CodingAgentAuthSnapshot {
     }
 }
 
+/// Return a safe status projection of user-global provider credentials.
+///
+/// Credential values and the backing auth store remain private.
+pub fn global_auth_snapshot() -> CodingAgentAuthSnapshot {
+    let auth = load_global_auth_store();
+    CodingAgentAuthController::from_internal(".", None, auth).snapshot()
+}
+
+pub(crate) fn load_global_auth_store() -> AuthStore {
+    let paths = crate::config::resolve_paths(Path::new("."));
+    let mut diagnostics = Vec::new();
+    AuthStore::load(&paths.global_auth(), &mut diagnostics)
+}
+
 pub enum CodingAgentAuthCommand {
     StoreApiKey { provider: String, api_key: String },
     RemoveProvider { provider: String },
@@ -401,5 +415,27 @@ mod tests {
                 .iter()
                 .all(|state| state.provider.chars().count() <= MAX_PROVIDER_ID_CHARS)
         );
+    }
+
+    #[test]
+    fn global_snapshot_exposes_status_without_plaintext_credentials() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        env.set_evo_dir(temp.path());
+        let mut auth = AuthStore::default();
+        auth.set_api_key("anthropic", "global-auth-secret-canary");
+        auth.save(&temp.path().join("auth.toml")).unwrap();
+
+        let snapshot = global_auth_snapshot();
+        let debug = format!("{snapshot:?}");
+
+        assert_eq!(
+            snapshot.providers,
+            vec![CodingAgentProviderAuthState {
+                provider: "anthropic".into(),
+                kind: CodingAgentProviderAuthKind::ApiKey,
+            }]
+        );
+        assert!(!debug.contains("global-auth-secret-canary"), "{debug}");
     }
 }

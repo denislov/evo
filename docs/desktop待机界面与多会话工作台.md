@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101 实现完成、全量基线 gate 待修复，下一项 CAG-102）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103 实现完成；CAG-102 的 cwd 摘要契约待确认）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-28
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -444,6 +444,32 @@ feat(coding-agent): add a manifest-only session summary query
 - 新增测试：全局设置快照与「global + project 合并结果」在存在项目覆盖时确实不同，
   并以此固定语义；
 - 公开 API 中无任何新的凭证明文暴露。
+
+**实现记录（2026-07-28）**
+
+- 新增 `configured_model_catalog()`：内部按 `EVO_DIR > ~/.evo` 解析全局
+  `auth.toml`，复用 `configured_model_choices` 过滤已配置 provider，公开结果仍是
+  `CodingAgentModelCatalogEntry`，不携带 API key、OAuth token、provider headers、
+  compatibility 或 transport 配置；有效的全局 default provider/model 继续沿用既有
+  selection 规则并排在目录首位，配置无效时安全回退到产品默认模型参与排序；
+- 新增 `global_settings_snapshot()`：通过专用的 `load_global_settings` 只加载全局
+  `settings.toml` 并投影既有 `CodingAgentSettingsSnapshot`。它不会读取当前目录，
+  也不会合并任何项目 `.evo/settings.toml`；`CodingAgentSettingsController::apply`
+  仍使用原有 Global scope 与写入路径，零改动；
+- 新增 `global_auth_snapshot()`：全局 `AuthStore` 仅在 crate 内部存在，公开结果复用
+  `CodingAgentAuthController::snapshot()`，只包含有界的 provider id、认证材料类型与
+  `truncated` 标志；
+- 新增 `global_skill_catalog()`：只把 `<global-config>/skills` 交给既有 skill loader，
+  明确不解析项目 `.evo/skills`、全局/项目设置中的 `skills`（`skills_dirs`）或调用方
+  路径；结果只公开名称、命令、截断后的描述与 model-invocable 标志，不公开正文和路径；
+- 新增无 `CodingAgentEmbeddingContext` 的组合测试，覆盖设置、认证、模型与技能四个入口；
+  另有 global/project 冲突测试锁定设置隔离语义，以及 credential/skill-body canary
+  断言锁定公开 DTO 不泄漏明文。稳定 facade compile-pass fixture 同时锁定四个入口；
+- 直接相关 gate 已通过：coding-agent lib `740/740`、API boundary `14/14`、lib-only
+  Clippy `-D warnings`、Desktop `cargo check`、CLI/TUI all-target `cargo check`、fmt 与
+  `git diff --check`；仓库既有的 `docs/product-event-contract.md` 缺失仍使
+  `cargo test -p coding-agent` 在编译 `events_snapshot` integration target 时失败，
+  与 CAG-101 记录的全量基线红灯相同，本任务未改该 target。
 
 **建议提交**
 

@@ -3,18 +3,18 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use agent_core::api::agent::ThinkingLevel;
-use agent_core::api::resources::AgentResources;
+use agent_core::api::resources::{AgentResources, Skill, load_skills};
 use ai::api::model::{Model, ModelInput};
 
-use crate::app::auth::CodingAgentAuthController;
-use crate::app::bootstrap::{PromptInvocation, SessionMode};
+use crate::app::auth::{CodingAgentAuthController, load_global_auth_store};
+use crate::app::bootstrap::{DEFAULT_MODEL_ID, PromptInvocation, SessionMode, select_model};
 use crate::app::invocation::CodingAgentInvocationOptions;
 use crate::app::operation_factory::CodingAgentOperationFactory;
 use crate::app::profile_catalog::CodingAgentProfileCatalog;
 use crate::app::session::{
     CodingAgentSessionBootstrap, CodingAgentSessionQuery, runtime_session_root,
 };
-use crate::app::settings::CodingAgentSettingsController;
+use crate::app::settings::{CodingAgentSettingsController, load_global_settings_state};
 use crate::app::startup::{
     ApplicationDiagnostic, ApplicationDiagnosticSeverity, ResolvedApplicationContext,
     configured_model_choices, resolve_application_context_from_options, resolve_profile_registry,
@@ -157,6 +157,30 @@ pub fn model_catalog_entry_by_id(model_id: &str) -> Option<CodingAgentModelCatal
         .map(model_catalog_entry)
 }
 
+/// Return models whose providers have credentials in the user-global auth
+/// configuration (or the provider's supported environment variables).
+///
+/// The global auth store is consumed internally. Returned entries contain no
+/// credential material, provider headers, or transport configuration.
+pub fn configured_model_catalog() -> Vec<CodingAgentModelCatalogEntry> {
+    let settings = load_global_settings_state();
+    let current_model = select_model(
+        &CodingAgentInvocationOptions::default(),
+        settings.default_provider.as_deref(),
+        settings.default_model.as_deref(),
+        None,
+    )
+    .ok()
+    .or_else(|| ai::api::model::lookup_model(DEFAULT_MODEL_ID));
+    let Some(current_model) = current_model else {
+        return Vec::new();
+    };
+    configured_model_choices(&current_model, None, &load_global_auth_store())
+        .iter()
+        .map(model_catalog_entry)
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingAgentProfileChoice {
     pub id: ProfileId,
@@ -212,6 +236,24 @@ impl CodingAgentResourceCommand {
             },
         }
     }
+}
+
+/// Return the safe command catalog for user-global skills only.
+///
+/// This reads `<global-config>/skills` and intentionally ignores the current
+/// project, project `.evo/skills`, and every configured `skills_dirs` path.
+/// Skill bodies and filesystem locations are not exposed.
+pub fn global_skill_catalog() -> Vec<CodingAgentResourceCommand> {
+    let global_skills = crate::config::resolve_paths(Path::new("."))
+        .global_dir
+        .join("skills");
+    let (skills, _) = load_skills(&[global_skills]);
+    let mut catalog = skills
+        .iter()
+        .map(skill_resource_command)
+        .collect::<Vec<_>>();
+    catalog.sort_by(|left, right| left.name.cmp(&right.name));
+    catalog
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -759,19 +801,86 @@ pub(crate) fn resource_command_catalog(
             kind: CodingAgentResourceCommandKind::PromptTemplate,
             model_invocable: false,
         })
-        .chain(
-            resources
-                .skills
-                .iter()
-                .map(|skill| CodingAgentResourceCommand {
-                    name: skill.name.clone(),
-                    command: format!("skill:{}", skill.name),
-                    description: safe_public_summary(&skill.description),
-                    kind: CodingAgentResourceCommandKind::Skill,
-                    model_invocable: !skill.disable_model_invocation,
-                }),
-        )
+        .chain(resources.skills.iter().map(skill_resource_command))
         .collect()
+}
+
+fn skill_resource_command(skill: &Skill) -> CodingAgentResourceCommand {
+    CodingAgentResourceCommand {
+        name: skill.name.clone(),
+        command: format!("skill:{}", skill.name),
+        description: safe_public_summary(&skill.description),
+        kind: CodingAgentResourceCommandKind::Skill,
+        model_invocable: !skill.disable_model_invocation,
+    }
+}
+
+#[cfg(test)]
+mod global_snapshot_tests {
+    use super::*;
+    use crate::app::auth::{CodingAgentProviderAuthKind, global_auth_snapshot};
+    use crate::app::settings::global_settings_snapshot;
+    use crate::config::AuthStore;
+
+    #[test]
+    fn cwd_free_catalogs_load_global_state_without_an_embedding_context() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let external = temp.path().join("external-skills");
+        std::fs::create_dir_all(global.join("skills/global-skill")).unwrap();
+        std::fs::create_dir_all(external.join("configured-skill")).unwrap();
+        std::fs::write(
+            global.join("settings.toml"),
+            format!(
+                "default_provider = \"openai\"\ntheme = \"global-home\"\nskills = [{}]\n",
+                toml::Value::String(external.to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            global.join("skills/global-skill/SKILL.md"),
+            "---\nname: global-skill\ndescription: Globally visible\n---\nglobal-body-secret-canary\n",
+        )
+        .unwrap();
+        std::fs::write(
+            external.join("configured-skill/SKILL.md"),
+            "---\nname: configured-skill\ndescription: Must stay excluded\n---\nexternal\n",
+        )
+        .unwrap();
+        let mut auth = AuthStore::default();
+        auth.set_api_key("anthropic", "catalog-auth-secret-canary");
+        auth.set_api_key("openai", "second-catalog-auth-secret-canary");
+        auth.save(&global.join("auth.toml")).unwrap();
+        env.set_evo_dir(&global);
+
+        let settings = global_settings_snapshot();
+        let auth = global_auth_snapshot();
+        let models = configured_model_catalog();
+        let skills = global_skill_catalog();
+
+        assert_eq!(settings.presentation.theme.as_deref(), Some("global-home"));
+        assert!(auth.providers.iter().any(|provider| {
+            provider.provider == "anthropic" && provider.kind == CodingAgentProviderAuthKind::ApiKey
+        }));
+        assert!(models.iter().any(|model| model.provider == "anthropic"));
+        assert_eq!(
+            models.first().map(|model| model.provider.as_str()),
+            Some("openai")
+        );
+        assert_eq!(
+            skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["global-skill"]
+        );
+        let public_debug = format!("{settings:?}{auth:?}{models:?}{skills:?}");
+        assert!(!public_debug.contains("catalog-auth-secret-canary"));
+        assert!(!public_debug.contains("second-catalog-auth-secret-canary"));
+        assert!(!public_debug.contains("global-body-secret-canary"));
+        assert!(!public_debug.contains(&external.to_string_lossy().into_owned()));
+    }
 }
 
 pub(crate) fn model_catalog_entry(model: &Model) -> CodingAgentModelCatalogEntry {

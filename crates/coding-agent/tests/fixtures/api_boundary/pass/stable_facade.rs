@@ -20,7 +20,8 @@ use coding_agent::api::embedding::{
     CodingAgentProviderAuthKind, CodingAgentProviderAuthState, CodingAgentResourceCommand,
     CodingAgentResourceCommandKind, CodingAgentSessionQuery, CodingAgentSessionSelection,
     CodingAgentTeamProfileCatalogEntry, CodingAgentThinkingLevel, CodingAgentToolExecutionMode,
-    model_catalog, model_catalog_entry_by_id,
+    configured_model_catalog, global_auth_snapshot, global_skill_catalog, model_catalog,
+    model_catalog_entry_by_id,
 };
 use coding_agent::api::error::{CodingAgentPublicDiagnostic, CodingAgentPublicError};
 use coding_agent::api::event::PRODUCT_EVENT_PROTOCOL_VERSION;
@@ -47,6 +48,7 @@ use coding_agent::api::settings::{
     CodingAgentSettingsMutationOutcome, CodingAgentSettingsSnapshot, CodingAgentThemeBackground,
     CodingAgentThemeController, CodingAgentThemeForeground, CodingAgentThemeReloadReceiver,
     CodingAgentThemeSnapshot, CodingAgentThemeWatcher, CodingAgentTreeFilterMode,
+    global_settings_snapshot,
 };
 use coding_agent::api::view::{
     CodingAgentAgentProfileSummary, CodingAgentSessionCatalog, CodingAgentSessionChoice,
@@ -270,6 +272,10 @@ fn support_types() {
     touch::<Option<CodingAgentModelChoice>>(None);
     touch(model_catalog());
     touch(model_catalog_entry_by_id("gpt-5"));
+    touch(configured_model_catalog());
+    touch(global_auth_snapshot());
+    touch(global_skill_catalog());
+    touch(global_settings_snapshot());
     touch(CodingAgentEmbeddingOptions::new("."));
     touch(CodingAgentThinkingLevel::High);
     touch(PRODUCT_EVENT_PROTOCOL_VERSION);

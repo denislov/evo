@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::app::embedding::CodingAgentThinkingLevel;
 use crate::app::operation_factory::CodingAgentOperationFactory;
 use crate::config::settings::{
-    PartialCompaction, PartialSettings, PartialTerminal, Settings, TuiMode,
+    PartialCompaction, PartialSettings, PartialTerminal, Settings, TuiMode, load_global_settings,
     try_merge_and_save_settings,
 };
 use crate::config::{SettingsScope, resolve_paths};
@@ -158,6 +158,20 @@ impl Default for CodingAgentPresentationSettingsSnapshot {
 pub struct CodingAgentSettingsSnapshot {
     pub runtime: CodingAgentRuntimeSettingsSnapshot,
     pub presentation: CodingAgentPresentationSettingsSnapshot,
+}
+
+/// Return the bounded user-global settings projection.
+///
+/// This reads only the global `settings.toml`. It deliberately does not merge
+/// `.evo/settings.toml` from the current working directory or any project.
+pub fn global_settings_snapshot() -> CodingAgentSettingsSnapshot {
+    snapshot_from_settings(&load_global_settings_state())
+}
+
+pub(crate) fn load_global_settings_state() -> Settings {
+    let paths = resolve_paths(std::path::Path::new("."));
+    let mut diagnostics = Vec::new();
+    load_global_settings(&paths, &mut diagnostics)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -547,5 +561,44 @@ mod tests {
 
         assert_eq!(error.code(), "invalid_settings_command");
         assert!(!temp.path().join("settings.toml").exists());
+    }
+
+    #[test]
+    fn global_snapshot_never_merges_project_overrides() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(project.join(".evo")).unwrap();
+        std::fs::write(
+            global.join("settings.toml"),
+            "theme = \"global-theme\"\n[terminal]\nshow_progress = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".evo/settings.toml"),
+            "theme = \"project-theme\"\n[terminal]\nshow_progress = false\n",
+        )
+        .unwrap();
+        env.set_evo_dir(&global);
+
+        let global_snapshot = global_settings_snapshot();
+        let (merged, diagnostics) = crate::config::load_config(&project);
+        let merged_snapshot =
+            CodingAgentSettingsController::from_internal(&project, merged.settings).snapshot();
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            global_snapshot.presentation.theme.as_deref(),
+            Some("global-theme")
+        );
+        assert!(global_snapshot.presentation.show_progress);
+        assert_eq!(
+            merged_snapshot.presentation.theme.as_deref(),
+            Some("project-theme")
+        );
+        assert!(!merged_snapshot.presentation.show_progress);
+        assert_ne!(global_snapshot, merged_snapshot);
     }
 }
