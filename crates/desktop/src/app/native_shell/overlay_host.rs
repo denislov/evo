@@ -2,18 +2,12 @@ use coding_agent::api::authorization::{
     ToolAuthorizationDecision, ToolAuthorizationIdentity, ToolAuthorizationRequest,
     ToolAuthorizationScope,
 };
-use desktop::shell::{
-    DESKTOP_OVERLAY_SCRIM_RGBA, MONOSPACE_FONT_FAMILY, SemanticTheme, truncate_label,
-};
+use desktop::shell::{DESKTOP_OVERLAY_SCRIM_RGBA, MONOSPACE_FONT_FAMILY, SemanticTheme};
 use gpui::{
     Entity, EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, SharedString,
     Styled as _, Window, div, prelude::*, px, rgb, rgba,
 };
-use gpui_component::{
-    Disableable as _, Selectable as _,
-    button::Button,
-    menu::{DropdownMenu as _, PopupMenuItem},
-};
+use gpui_component::{Disableable as _, Selectable as _, button::Button};
 use std::sync::Arc;
 
 use super::{
@@ -24,23 +18,12 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OverlayHostEvent {
     ExecutePalette(DesktopPaletteCommand),
-    CreateSession,
-    CloseNarrowSessions,
-    RefreshSessions,
-    OpenSession(String),
     CopyFullMessage,
     CloseFullMessage,
     DecideAuthorization {
         identity: ToolAuthorizationIdentity,
         decision: ToolAuthorizationDecision,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct OverlaySessionView {
-    pub(super) session_id: String,
-    pub(super) updated_at: String,
-    pub(super) active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,12 +34,6 @@ pub(super) struct OverlayAuthorizationView {
 
 #[derive(Debug, Clone)]
 pub(super) struct OverlayViewModel {
-    pub(super) composer_running: bool,
-    pub(super) awaiting_prompt_start: bool,
-    pub(super) session_pending: bool,
-    pub(super) session_catalog_pending: bool,
-    pub(super) sessions: Vec<OverlaySessionView>,
-    pub(super) omitted_sessions: usize,
     pub(super) palette_open: bool,
     pub(super) palette_selected: usize,
     pub(super) narrow_context_open: bool,
@@ -67,6 +44,7 @@ pub(super) struct OverlayViewModel {
 
 pub(super) struct OverlayHost {
     inspector_pane: Entity<InspectorPane>,
+    sessions_pane: Entity<super::SessionsPane>,
     authorization_focus: FocusHandle,
     command_palette_focus: FocusHandle,
     narrow_sessions_focus: FocusHandle,
@@ -77,6 +55,7 @@ pub(super) struct OverlayHost {
 impl OverlayHost {
     pub(super) fn new(
         inspector_pane: Entity<InspectorPane>,
+        sessions_pane: Entity<super::SessionsPane>,
         authorization_focus: FocusHandle,
         command_palette_focus: FocusHandle,
         narrow_sessions_focus: FocusHandle,
@@ -84,6 +63,7 @@ impl OverlayHost {
     ) -> Self {
         Self {
             inspector_pane,
+            sessions_pane,
             authorization_focus,
             command_palette_focus,
             narrow_sessions_focus,
@@ -105,38 +85,6 @@ impl Render for OverlayHost {
             return div().into_any_element();
         };
         let theme = SemanticTheme::GEEK_DARK;
-        let composer_running = view_model.composer_running;
-        let awaiting_prompt_start = view_model.awaiting_prompt_start;
-        let session_pending = view_model.session_pending;
-        let session_catalog_pending = view_model.session_catalog_pending;
-        let narrow_session_rows = view_model
-            .sessions
-            .iter()
-            .enumerate()
-            .map(|(index, session)| {
-                let target = session.session_id.clone();
-                let active = session.active;
-                Button::new(("narrow-open-session", index))
-                    .font_family(MONOSPACE_FONT_FAMILY)
-                    .label(format!(
-                        "{} {} · {}",
-                        if active { "●" } else { "○" },
-                        truncate_label(&target, 32),
-                        truncate_label(&session.updated_at, 20)
-                    ))
-                    .tooltip(if active {
-                        "Active coding-agent session"
-                    } else {
-                        "Open this coding-agent session"
-                    })
-                    .disabled(
-                        active || composer_running || awaiting_prompt_start || session_pending,
-                    )
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(OverlayHostEvent::OpenSession(target.clone()));
-                    }))
-            })
-            .collect::<Vec<_>>();
         let palette_rows = PALETTE_ENTRIES
             .iter()
             .enumerate()
@@ -218,9 +166,6 @@ impl Render for OverlayHost {
                         ),
                 )
         });
-        let omitted_sessions = view_model.omitted_sessions;
-        let close_sessions_target = cx.entity().downgrade();
-        let refresh_sessions_target = cx.entity().downgrade();
         let narrow_context_overlay = view_model
             .narrow_context_open
             .then(|| self.inspector_pane.clone());
@@ -238,108 +183,14 @@ impl Render for OverlayHost {
                         .w_full()
                         .max_w(px(520.))
                         .max_h(max_height)
-                        .overflow_y_scroll()
+                        .overflow_hidden()
                         .rounded_token(DesignRadius::Md)
                         .border_1()
                         .border_color(rgb(theme.focus_ring.value()))
                         .bg(rgb(theme.elevated.value()))
-                        .p_token(DesignSpace::Lg)
                         .flex()
                         .flex_col()
-                        .gap_token(DesignSpace::Sm)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .text_color(rgb(theme.accent.value()))
-                                .child("SESSIONS")
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_token(DesignSpace::Xs)
-                                        .child(
-                                            Button::new("narrow-sessions-overflow")
-                                                .debug_selector(|| {
-                                                    "desktop-hit-narrow-sessions-overflow".into()
-                                                })
-                                                .compact()
-                                                .label("...")
-                                                .tooltip("More Sessions actions")
-                                                .dropdown_menu(move |menu, _, _| {
-                                                    let refresh_target =
-                                                        refresh_sessions_target.clone();
-                                                    menu.item(
-                                                        PopupMenuItem::new(
-                                                            if session_catalog_pending {
-                                                                "Loading sessions…"
-                                                            } else {
-                                                                "Refresh sessions"
-                                                            },
-                                                        )
-                                                        .disabled(
-                                                            session_catalog_pending
-                                                                || composer_running,
-                                                        )
-                                                        .on_click(move |_, _, cx| {
-                                                            if let Some(target) =
-                                                                refresh_target.upgrade()
-                                                            {
-                                                                target.update(cx, |_, cx| {
-                                                                    cx.emit(
-                                                                        OverlayHostEvent::RefreshSessions,
-                                                                    );
-                                                                });
-                                                            }
-                                                        }),
-                                                    )
-                                                }),
-                                        )
-                                        .child(
-                                            Button::new("close-narrow-sessions")
-                                                .debug_selector(|| {
-                                                    "desktop-hit-close-narrow-sessions".into()
-                                                })
-                                                .compact()
-                                                .label("Close")
-                                                .tooltip("Close Sessions")
-                                                .on_click({
-                                                    let close_target =
-                                                        close_sessions_target.clone();
-                                                    move |_, _, cx| {
-                                                        if let Some(target) =
-                                                            close_target.upgrade()
-                                                        {
-                                                            target.update(cx, |_, cx| {
-                                                                cx.emit(
-                                                                    OverlayHostEvent::CloseNarrowSessions,
-                                                                );
-                                                            });
-                                                        }
-                                                    }
-                                                }),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            Button::new("narrow-create-session")
-                                .label("New session")
-                                .tooltip("Create a new coding-agent session")
-                                .disabled(
-                                    composer_running || awaiting_prompt_start || session_pending,
-                                )
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(OverlayHostEvent::CreateSession);
-                                })),
-                        )
-                        .children(narrow_session_rows)
-                        .when(omitted_sessions > 0, |dialog| {
-                            dialog
-                                .child(div().text_color(rgb(theme.warning.value())).child(format!(
-                                "{omitted_sessions} older session(s) omitted at the desktop limit"
-                            )))
-                        }),
+                        .child(self.sessions_pane.clone()),
                 )
         });
         let authorization_overlay = view_model.authorization.map(|authorization| {

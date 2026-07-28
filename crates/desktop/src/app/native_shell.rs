@@ -409,6 +409,7 @@ impl NativeShell {
         let overlay_host = cx.new(|_| {
             OverlayHost::new(
                 inspector_pane.clone(),
+                sessions_pane.clone(),
                 authorization_focus.clone(),
                 command_palette_focus.clone(),
                 narrow_sessions_focus.clone(),
@@ -495,11 +496,15 @@ impl NativeShell {
             cx.subscribe_in(
                 &sessions_pane,
                 window,
-                |this, _, event: &SessionsPaneEvent, _, cx| match event {
+                |this, _, event: &SessionsPaneEvent, window, cx| match event {
                     SessionsPaneEvent::Create => this.create_session(cx),
                     SessionsPaneEvent::Refresh => this.request_session_catalog(cx),
                     SessionsPaneEvent::Open(session_id) => {
                         this.open_session(session_id.clone(), cx);
+                    }
+                    SessionsPaneEvent::Close => {
+                        this.narrow_sessions_open = false;
+                        this.dismiss_overlay(window, cx);
                     }
                 },
             ),
@@ -571,15 +576,6 @@ impl NativeShell {
                         this.command_palette.close();
                         this.dismiss_overlay(window, cx);
                         this.execute_palette_command(*command, window, cx);
-                    }
-                    OverlayHostEvent::CreateSession => this.create_session(cx),
-                    OverlayHostEvent::CloseNarrowSessions => {
-                        this.narrow_sessions_open = false;
-                        this.dismiss_overlay(window, cx);
-                    }
-                    OverlayHostEvent::RefreshSessions => this.request_session_catalog(cx),
-                    OverlayHostEvent::OpenSession(session_id) => {
-                        this.open_session(session_id.clone(), cx);
                     }
                     OverlayHostEvent::DecideAuthorization { identity, decision } => {
                         this.decide_tool_authorization(identity.clone(), decision.clone(), cx);
@@ -3222,6 +3218,7 @@ impl NativeShell {
             active_status: self.semantic_status(),
             notice: self.preference_notice.as_deref().map(Arc::from),
             keyboard_focus_visible: self.keyboard_focus_visible(),
+            context_is_overlay: self.narrow_sessions_open,
         }
     }
 
@@ -3372,18 +3369,6 @@ impl NativeShell {
 
     fn overlay_view_model(&self) -> OverlayViewModel {
         let snapshot = self.projection.snapshot();
-        let composer_running = snapshot.active_operation.is_some();
-        let active_session_id = snapshot.session.session_id.as_str();
-        let sessions = self
-            .session_controller
-            .catalog()
-            .iter()
-            .map(|session| OverlaySessionView {
-                session_id: session.session_id.clone(),
-                updated_at: session.updated_at.clone(),
-                active: session.session_id == active_session_id,
-            })
-            .collect();
         let authorization = snapshot
             .pending_authorizations
             .first()
@@ -3401,19 +3386,6 @@ impl NativeShell {
                 }
             });
         OverlayViewModel {
-            composer_running,
-            awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
-            session_pending: self.command_ledger.contains_where(|intent| {
-                matches!(
-                    intent,
-                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
-                )
-            }),
-            session_catalog_pending: self
-                .command_ledger
-                .contains(&DesktopCommandIntent::ListSessions),
-            sessions,
-            omitted_sessions: self.session_controller.omitted(),
             palette_open: self.command_palette.is_open(),
             palette_selected: self.command_palette.selected(),
             narrow_context_open: self.narrow_context_open,
@@ -4246,8 +4218,12 @@ mod tests {
             shell.read_with(cx, |shell, _| shell.active_overlay),
             Some(DesktopOverlayKind::NarrowSessions)
         );
-        assert_minimum_hit_target(cx, "desktop-hit-narrow-sessions-overflow");
+        assert_minimum_hit_target(cx, "desktop-hit-sessions-overflow");
         assert_minimum_hit_target(cx, "desktop-hit-close-narrow-sessions");
+        assert!(
+            cx.debug_bounds("sessions-search").is_some(),
+            "narrow overlay reuses the searchable SessionsPane"
+        );
         assert_eq!(
             cx.debug_bounds("desktop-conversation-panel"),
             Some(narrow_conversation)
@@ -4653,11 +4629,28 @@ mod tests {
     #[gpui::test]
     fn native_shell_primary_controls_keep_minimum_hit_targets(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
-        let (_, cx) = add_visual_shell(
+        let (shell, cx) = add_visual_shell(
             cx,
             DesktopRuntimeBridge::disconnected_for_test(),
             visual_test_projection(),
         );
+        shell.update(cx, |shell, cx| {
+            let active_session_id = shell.projection.snapshot().session.session_id.clone();
+            shell.session_controller.replace_catalog(
+                vec![
+                    desktop::runtime::DesktopSessionCatalogEntry {
+                        session_id: active_session_id,
+                        updated_at: "2026-07-28T09:00:00Z".into(),
+                    },
+                    desktop::runtime::DesktopSessionCatalogEntry {
+                        session_id: "recent-session-with-a-stable-action-row".into(),
+                        updated_at: "2026-07-28T08:00:00Z".into(),
+                    },
+                ],
+                0,
+            );
+            shell.notify_sessions_pane(cx);
+        });
 
         for width in [1_300., 700.] {
             cx.simulate_resize(size(px(width), px(900.)));
@@ -4676,6 +4669,7 @@ mod tests {
         cx.simulate_resize(size(px(1_300.), px(900.)));
         cx.run_until_parked();
         assert_minimum_hit_target(cx, "desktop-hit-create-session");
+        assert_minimum_hit_target(cx, "desktop-session-row-1");
     }
 
     #[test]
@@ -5752,6 +5746,7 @@ mod tests {
     #[test]
     fn desktop_accessibility_contract_covers_regions_items_and_modal_focus() {
         let shell = include_str!("native_shell.rs");
+        let controls = include_str!("native_shell/desktop_controls.rs");
         let sessions = include_str!("native_shell/sessions_pane.rs");
         let conversation = include_str!("native_shell/conversation_pane.rs");
         let composer = include_str!("native_shell/composer_pane.rs");
@@ -5763,7 +5758,10 @@ mod tests {
         assert!(shell.contains(".role(Role::Main)"));
         assert!(sessions.contains(".role(Role::Navigation)"));
         assert!(sessions.contains(".role(Role::SearchInput)"));
-        assert!(sessions.contains(".role(Role::ListItem)"));
+        assert!(sessions.contains("DesktopActionRow::new("));
+        assert!(controls.contains("pub(super) struct DesktopActionRow"));
+        assert!(controls.contains("Button::new(self.id)"));
+        assert!(controls.contains(".label(self.title)"));
         assert!(conversation.contains(".role(Role::Log)"));
         assert!(conversation.contains(".role(Role::ListItem)"));
         assert!(conversation.contains("row.aria_active_descendant()"));
@@ -5828,6 +5826,7 @@ mod tests {
     #[test]
     fn desktop_typography_uses_system_ui_with_local_monospace_data_regions() {
         let shell = include_str!("native_shell.rs");
+        let controls = include_str!("native_shell/desktop_controls.rs");
         let conversation = include_str!("native_shell/conversation_pane.rs");
         let sessions = include_str!("native_shell/sessions_pane.rs");
         let inspector = include_str!("native_shell/inspector_pane.rs");
@@ -5835,9 +5834,12 @@ mod tests {
         let overlays = include_str!("native_shell/overlay_host.rs");
 
         assert!(shell.contains(".font_family(UI_FONT_FAMILY)"));
-        for local_data_surface in [conversation, sessions, inspector, status, overlays] {
+        for local_data_surface in [conversation, inspector, status, overlays] {
             assert!(local_data_surface.contains("MONOSPACE_FONT_FAMILY"));
         }
+        assert!(sessions.contains("DesktopActionRow::new("));
+        assert!(controls.contains(".text_token(DesignText::Body)"));
+        assert!(controls.contains(".text_token(DesignText::Metadata)"));
         assert!(conversation.contains("theme.reasoning.value()"));
         assert!(!conversation.contains("border_color(rgb(visual.accent.value()))"));
     }
@@ -6187,10 +6189,19 @@ mod tests {
         assert!(!shell.contains(&root_refresh_deadline));
         assert!(pane.contains("relative_session_time"));
         assert!(pane.contains("Current task"));
-        assert!(pane.contains("Recent task"));
         assert!(pane.contains("view_model.catalog"));
         assert!(pane.contains("sessions-overflow"));
         assert!(pane.contains("PopupMenuItem::new(if session_catalog_pending"));
+        assert!(pane.contains("DesktopActionRow::new("));
+        assert!(pane.contains("DesktopIcon::Plus"));
+        assert!(pane.contains("DesktopIcon::Search"));
+        assert!(pane.contains("DesktopIcon::Clear"));
+        assert!(pane.contains("DesktopIcon::Overflow"));
+        assert!(pane.contains("No recent sessions yet."));
+        assert!(pane.contains("No sessions match"));
+        assert!(pane.contains("Loading sessions"));
+        assert!(pane.contains("context_is_overlay"));
+        assert!(!pane.contains(".label(\"Open\")"));
         assert!(!pane.contains("refresh-session-catalog"));
         assert!(!pane.contains(&active_duplicate));
     }
@@ -6389,6 +6400,10 @@ mod tests {
         assert!(shell.contains("this.decide_tool_authorization("));
         assert!(shell.contains("Self::on_trap_overlay_focus"));
         assert!(host.contains("self.inspector_pane.clone()"));
+        assert!(host.contains("self.sessions_pane.clone()"));
+        assert!(!host.contains("OverlaySessionView"));
+        assert!(!host.contains("session_catalog_pending"));
+        assert!(!host.contains("OpenSession"));
         assert!(!host.contains("WeakEntity<NativeShell>"));
         assert!(!host.contains("owner.read(cx)"));
         assert!(!host.contains("DesktopProjection"));
@@ -6484,9 +6499,7 @@ use inspector_pane::{
     InspectorChangedFileView, InspectorDiagnosticView, InspectorPane, InspectorPaneEvent,
     InspectorPaneViewModel, InspectorRecoveryView,
 };
-use overlay_host::{
-    OverlayAuthorizationView, OverlayHost, OverlayHostEvent, OverlaySessionView, OverlayViewModel,
-};
+use overlay_host::{OverlayAuthorizationView, OverlayHost, OverlayHostEvent, OverlayViewModel};
 use session_controller::SessionController;
 use sessions_pane::{SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
 use status_bar::{StatusBar, StatusBarEvent, StatusBarViewModel};

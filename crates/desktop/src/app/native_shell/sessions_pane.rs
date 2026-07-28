@@ -1,20 +1,22 @@
 use desktop::runtime::DesktopSessionCatalogEntry;
-use desktop::shell::{MONOSPACE_FONT_FAMILY, SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
+use desktop::shell::{SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
 use gpui::{
     EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, Styled as _,
     Subscription, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{
-    Disableable as _,
-    button::Button,
+    Disableable as _, Icon, Sizable as _,
     menu::{DropdownMenu as _, PopupMenuItem},
 };
 use std::sync::Arc;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{
-    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+    desktop_controls::{
+        DesktopActionRow, DesktopControlSize, DesktopIcon, DesktopIconButton, DesktopRowState,
+    },
+    desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
     semantic_status_color,
 };
 
@@ -23,6 +25,7 @@ pub(super) enum SessionsPaneEvent {
     Create,
     Refresh,
     Open(String),
+    Close,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +41,7 @@ pub(super) struct SessionsPaneViewModel {
     pub(super) active_status: desktop::shell::SemanticStatus,
     pub(super) notice: Option<Arc<str>>,
     pub(super) keyboard_focus_visible: bool,
+    pub(super) context_is_overlay: bool,
 }
 
 pub(super) struct SessionsPane {
@@ -104,7 +108,9 @@ impl Render for SessionsPane {
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
         let session_pending = view_model.session_pending;
         let session_catalog_pending = view_model.session_catalog_pending;
+        let context_is_overlay = view_model.context_is_overlay;
         let search_input = self.search_input.clone();
+        let clear_search_input = search_input.clone();
         let search = search_input.read(cx).value().trim().to_lowercase();
         let omitted_sessions = view_model.omitted_sessions;
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
@@ -135,7 +141,7 @@ impl Render for SessionsPane {
                 let semantic_name = if active {
                     "Current task".to_owned()
                 } else {
-                    format!("Recent task {}", index + 1)
+                    truncate_label(&target, 24)
                 };
                 let relative_time = relative_session_time(&session.updated_at, now);
                 let (status_glyph, status, status_color) = if active {
@@ -154,63 +160,44 @@ impl Render for SessionsPane {
                 };
                 let accessible_label =
                     format!("{semantic_name}, {status}, updated {relative_time}");
-                div()
-                    .id(("session-row", index))
-                    .role(Role::ListItem)
-                    .aria_label(accessible_label)
-                    .aria_selected(active)
-                    .aria_position_in_set(index + 1)
-                    .aria_size_of_set(visible_session_count)
-                    .rounded_token(DesignRadius::Md)
-                    .p_token(DesignSpace::Sm)
-                    .flex()
-                    .flex_col()
-                    .gap_token(DesignSpace::Xs)
-                    .bg(rgb(if active {
-                        theme.elevated.value()
-                    } else {
-                        theme.canvas.value()
-                    }))
-                    .child(
+                DesktopActionRow::new(("session-row", index), semantic_name, accessible_label)
+                    .state(DesktopRowState {
+                        selected: active,
+                        disabled: active
+                            || composer_running
+                            || awaiting_prompt_start
+                            || session_pending,
+                        focus_visible: false,
+                    })
+                    .size(DesktopControlSize::Critical)
+                    .leading(div().text_color(status_color).child(status_glyph))
+                    .detail(format!("{} · {status}", truncate_label(&target, 28)))
+                    .trailing(
                         div()
-                            .flex()
-                            .justify_between()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(if active {
-                                theme.accent.value()
-                            } else {
-                                theme.text.value()
-                            }))
-                            .child(semantic_name)
-                            .child(relative_time),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_token(DesignSpace::Xs)
-                            .font_family(MONOSPACE_FONT_FAMILY)
                             .text_token(DesignText::Metadata)
                             .text_color(rgb(theme.muted_text.value()))
-                            .child(div().text_color(status_color).child(status_glyph))
-                            .child(format!("{} · {status}", truncate_label(&target, 22))),
+                            .child(relative_time),
+                        64.,
                     )
-                    .when(!active, |row| {
-                        row.child(
-                            Button::new(("open-session", index))
-                                .compact()
-                                .label("Open")
-                                .tooltip("Open this recent coding task")
-                                .disabled(
-                                    composer_running || awaiting_prompt_start || session_pending,
-                                )
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.emit(SessionsPaneEvent::Open(target.clone()));
-                                })),
-                        )
-                    })
+                    .build(theme)
+                    .debug_selector(move || format!("desktop-session-row-{index}"))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SessionsPaneEvent::Open(target.clone()));
+                    }))
             })
             .collect::<Vec<_>>();
+        let empty_state = if visible_session_count > 0 {
+            None
+        } else if session_catalog_pending && view_model.catalog.is_empty() {
+            Some("Loading sessions…".to_owned())
+        } else if !search.is_empty() {
+            Some(format!(
+                "No sessions match “{}”.",
+                truncate_label(&search, 24)
+            ))
+        } else {
+            Some("No recent sessions yet. Create one to begin.".to_owned())
+        };
 
         div()
             .id("sessions-panel")
@@ -221,11 +208,12 @@ impl Render for SessionsPane {
             })
             .debug_selector(|| "desktop-sessions-panel".into())
             .track_focus(&self.focus)
-            .w(px(panel_width as f32))
+            .when(context_is_overlay, |panel| panel.w_full())
+            .when(!context_is_overlay, |panel| panel.w(px(panel_width as f32)))
             .h_full()
             .flex()
             .flex_col()
-            .border_r_1()
+            .when(!context_is_overlay, |panel| panel.border_r_1())
             .border_color(rgb(if focused {
                 theme.focus_ring.value()
             } else {
@@ -248,27 +236,33 @@ impl Render for SessionsPane {
                             .items_center()
                             .gap_token(DesignSpace::Xs)
                             .child(
-                                Button::new("create-session")
-                                    .debug_selector(|| "desktop-hit-create-session".into())
-                                    .compact()
-                                    .label("New")
-                                    .tooltip("Create a new session · Ctrl/Cmd+N")
-                                    .disabled(
-                                        composer_running
-                                            || awaiting_prompt_start
-                                            || session_pending,
-                                    )
-                                    .on_click(cx.listener(|_, _, _, cx| {
+                                DesktopIconButton::new(
+                                    "create-session",
+                                    DesktopIcon::Plus,
+                                    "Create a new session · Ctrl/Cmd+N",
+                                )
+                                .build()
+                                .debug_selector(|| "desktop-hit-create-session".into())
+                                .disabled(
+                                    composer_running || awaiting_prompt_start || session_pending,
+                                )
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| {
                                         cx.emit(SessionsPaneEvent::Create);
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("sessions-overflow")
-                                    .debug_selector(|| "desktop-hit-sessions-overflow".into())
-                                    .compact()
-                                    .label("...")
-                                    .tooltip("More Sessions actions")
-                                    .dropdown_menu(move |menu, _, _| {
+                                DesktopIconButton::new(
+                                    "sessions-overflow",
+                                    DesktopIcon::Overflow,
+                                    "More Sessions actions",
+                                )
+                                .busy(session_catalog_pending)
+                                .build()
+                                .debug_selector(|| "desktop-hit-sessions-overflow".into())
+                                .dropdown_menu(
+                                    move |menu, _, _| {
                                         let refresh_target = refresh_target.clone();
                                         menu.item(
                                             PopupMenuItem::new(if session_catalog_pending {
@@ -285,8 +279,25 @@ impl Render for SessionsPane {
                                                 }
                                             }),
                                         )
-                                    }),
-                            ),
+                                    },
+                                ),
+                            )
+                            .when(context_is_overlay, |actions| {
+                                actions.child(
+                                    DesktopIconButton::new(
+                                        "close-narrow-sessions",
+                                        DesktopIcon::Close,
+                                        "Close Sessions",
+                                    )
+                                    .build()
+                                    .debug_selector(|| "desktop-hit-close-narrow-sessions".into())
+                                    .on_click(cx.listener(
+                                        |_, _, _, cx| {
+                                            cx.emit(SessionsPaneEvent::Close);
+                                        },
+                                    )),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -304,30 +315,44 @@ impl Render for SessionsPane {
                     .child(
                         div()
                             .id("sessions-search")
+                            .debug_selector(|| "sessions-search".into())
                             .role(Role::Search)
                             .aria_label("Search sessions")
                             .child(
                                 Input::new(&search_input)
                                     .role(Role::SearchInput)
+                                    .prefix(Icon::new(DesktopIcon::Search.name()).small())
+                                    .when(!search.is_empty(), |input| {
+                                        input.suffix(
+                                            DesktopIconButton::new(
+                                                "clear-session-search",
+                                                DesktopIcon::Clear,
+                                                "Clear session search",
+                                            )
+                                            .size(DesktopControlSize::Tool)
+                                            .build()
+                                            .on_click(
+                                                move |_, window, cx| {
+                                                    clear_search_input.update(cx, |input, cx| {
+                                                        input.set_value("", window, cx);
+                                                    });
+                                                },
+                                            ),
+                                        )
+                                    })
                                     .appearance(false),
                             ),
                     )
                     .children(session_rows)
-                    .when(
-                        !search.is_empty()
-                            && !view_model.catalog.iter().any(|session| {
-                                session.session_id.to_lowercase().contains(&search)
-                                    || session.updated_at.to_lowercase().contains(&search)
-                            }),
-                        |panel| {
-                            panel.child(
-                                div()
-                                    .p_token(DesignSpace::Sm)
-                                    .text_color(rgb(theme.muted_text.value()))
-                                    .child("No matching sessions."),
-                            )
-                        },
-                    )
+                    .when_some(empty_state, |panel, message| {
+                        panel.child(
+                            div()
+                                .debug_selector(|| "desktop-sessions-empty-state".into())
+                                .p_token(DesignSpace::Sm)
+                                .text_color(rgb(theme.muted_text.value()))
+                                .child(message),
+                        )
+                    })
                     .when(omitted_sessions > 0, |panel| {
                         panel.child(
                             div()

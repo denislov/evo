@@ -381,76 +381,65 @@ impl DesktopActionRow {
         self
     }
 
-    pub(super) fn build(self, theme: SemanticTheme) -> impl IntoElement {
-        let background = if self.state.selected {
-            Some(theme.selection)
-        } else {
-            None
-        };
+    pub(super) fn build(self, theme: SemanticTheme) -> Button {
         let text_color = if self.state.disabled {
             theme.subtle_text
         } else {
             theme.text
         };
-        div()
-            .id(self.id)
-            .flex()
-            .flex_row()
-            .items_center()
+        Button::new(self.id)
+            .ghost()
+            .selected(self.state.selected)
+            .disabled(self.state.disabled)
+            .label(self.title)
+            .tooltip(self.accessible_label.clone())
             .w_full()
             .h(px(self.size.pixels()))
             .px_token(DesignSpace::Sm)
-            .gap_token(DesignSpace::Sm)
-            .rounded_token(DesignRadius::Sm)
-            .text_token(DesignText::Body)
-            .text_color(rgb(text_color.value()))
-            .role(gpui::Role::ListItem)
-            .aria_label(self.accessible_label)
-            .aria_selected(self.state.selected)
-            .when(self.state.disabled, |row| {
-                row.aria_description("Unavailable while the session is switching")
-            })
-            .when_some(background, |row, color| row.bg(rgb(color.value())))
-            .when(!self.state.disabled, |row| {
-                row.hover(|row| row.bg(rgb(theme.hover.value())))
-            })
             .when(self.state.focus_visible, |row| {
                 row.border_1().border_color(rgb(theme.focus_ring.value()))
             })
-            // Selection rail: readable without colour, and it does not change
-            // the row's height the way a full border would.
             .child(
                 div()
-                    .w(px(2.))
-                    .h(px(self.size.pixels() * 0.5))
-                    .flex_none()
-                    .rounded_token(DesignRadius::Sm)
-                    .when(self.state.selected, |rail| {
-                        rail.bg(rgb(theme.accent.value()))
-                    }),
-            )
-            .when_some(self.leading, |row, leading| row.child(leading))
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(self.title)
-                    .when_some(self.detail, |title, detail| {
-                        title.child(
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .size_full()
+                    .gap_token(DesignSpace::Sm)
+                    .text_token(DesignText::Body)
+                    .text_color(rgb(text_color.value()))
+                    // Selection rail is readable without colour and never
+                    // changes the row's height.
+                    .child(
+                        div()
+                            .w(px(2.))
+                            .h(px(self.size.pixels() * 0.5))
+                            .flex_none()
+                            .rounded_token(DesignRadius::Sm)
+                            .when(self.state.selected, |rail| {
+                                rail.bg(rgb(theme.accent.value()))
+                            }),
+                    )
+                    .when_some(self.leading, |row, leading| row.child(leading))
+                    .when_some(self.detail, |row, detail| {
+                        row.child(
                             div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
                                 .text_token(DesignText::Metadata)
                                 .text_color(rgb(theme.muted_text.value()))
                                 .child(detail),
                         )
-                    }),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(self.trailing_reserved_px))
-                    .flex()
-                    .justify_end()
-                    .when_some(self.trailing, |slot, trailing| slot.child(trailing)),
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(self.trailing_reserved_px))
+                            .flex()
+                            .justify_end()
+                            .when_some(self.trailing, |slot, trailing| slot.child(trailing)),
+                    ),
             )
     }
 }
