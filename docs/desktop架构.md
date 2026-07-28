@@ -1,6 +1,6 @@
 # `desktop` Crate 下一步架构与界面优化计划
 
-> 状态：Ready for execution
+> 状态：执行中（结构 lane 已完成，继续视觉 lane）
 > 基线：当前 `main` 分支
 > 更新日期：2026-07-28
 > 原则：行为保持、视觉语义明确、并行工作流、每批可独立回退
@@ -10,7 +10,6 @@
 | 任务 | 状态 | 当前证据 |
 | --- | --- | --- |
 | `DSK-000` | 完成（含已记录基线红灯） | fmt、Desktop 全量测试、dependency boundary、七个 visual fixture、native performance 和 diff check 通过；Clippy 的两项既有失败记录见下文 |
-| `VUI-000` | 进行中 | 七个 fixture compare 为零差异；尚未完成人工问题清单 review |
 | `DSK-101` | 完成 | Header/StatusBar 已改为 bounded ViewModel + typed event；隔离、dirty-routing、响应式、全量测试和 visual golden 通过 |
 | `DSK-201` | 完成 | `runtime/protocol.rs` 与 `runtime/bridge.rs` 已机械拆分并稳定 re-export；Runtime 27 项定向测试、Desktop 全量测试、boundary 和两组 performance gate 通过 |
 | `DSK-202` | 完成 | `runtime/driver.rs`、`runtime/dispatch.rs` 与 `runtime/tests.rs` 已机械拆分；Runtime 27 项定向测试、Desktop 177 项通过/5 项 release fixture 忽略、boundary 14 项和两组 performance gate 通过 |
@@ -18,10 +17,11 @@
 | `DSK-103` | 完成 | ComposerPane 独占 InputState、focus handle、Change subscription 与 latency probe；Root 保留 ComposerState、ledger/runtime admission 和 session-scoped draft/mode；全量、boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `DSK-104` | 完成 | InspectorPane/OverlayHost 已改为 bounded DTO + typed event，不再持有 Root；telemetry/focus/overlay lifecycle 仍由 Root 管理；全量、boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `DSK-105` | 完成 | ConversationController 已成为 transcript cache/layout/viewport/dirty-sequence 的唯一 owner；Root 只提供 bounded `ConversationSource` 并消费 ViewModel；全量、boundary、七个 visual fixture 和两组 performance gate 通过 |
-| `DSK-301` | 进行中 | 第一步 `markdown.rs` 已抽出并保留 re-export；其余六步待续 |
+| `DSK-301` | 完成 | 七个纯逻辑 owner 已拆分，`conversation/mod.rs` 仅保留稳定 re-export；生产依赖为无环 DAG；全量、15/15 boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `VUI-000` | 完成 | 七个 fixture 已 review；文档第二节七条问题经确认全部纳入改造范围 |
 | `VUI-101` | 完成 | 已接入 `gpui-component-assets` 的 Lucide 图标源并建立控件权重阶梯；全量、boundary、七个 visual fixture（零像素变化）通过 |
-| `VUI-102` 至 `VUI-201` | 未开始 | 前置已全部满足，按 Pane lane 顺序推进 |
+| `VUI-102` 至 `VUI-106` | 未开始 | 结构与视觉 foundation 前置均已满足，按 Pane lane 顺序推进 |
+| `VUI-201` | 未开始 | 等 `VUI-102` 至 `VUI-106` 完成后统一全局视觉节奏和层级 |
 
 `DSK-000` 在 2026-07-28 记录的既有 Clippy 红灯：
 
@@ -740,6 +740,59 @@ refactor(desktop): separate runtime protocol and bridge
 - memory/performance matrix 无回退；
 - `conversation.rs` 被目录模块替代后不存在循环依赖。
 
+**完成记录（2026-07-28）**
+
+七步已全部完成，旧 `conversation.rs` 已由目录模块替代。`conversation/mod.rs` 只声明
+七个 owner 并维持稳定 `conversation::` re-export，不再定义业务 struct、enum 或
+function：
+
+- `markdown.rs` 独占 bounded Markdown preview、sanitization、安全边界和相关常量；
+- `copy.rs` 独占 bounded copy、UTF-8 安全 byte truncation 和 `MAX_COPY_BYTES`；
+- `composer.rs` 独占 composer admission、submission kind、submitted preview 和错误；
+- `render_cache.rs` 独占 render source/data/cache、streaming phase、settle budget，以及
+  初始 render-data 高度估算；
+- `layout.rs` 独占实际 measurement、height commit、15 Hz throttle、paused anchor
+  compensation 和 width bucket；
+- `viewport.rs` 独占 selection、follow-latest、unseen update 和 hydration reconciliation；
+- `model.rs` 独占 block/item identity、projection、hydration、bounds 和 content revision。
+
+计划中的高度职责根据真实依赖作了收敛：`conversation_block_height` 和 Unicode 行数
+估算归 `render_cache.rs`，因为它们产生 render data 的初始高度；`layout.rs` 只处理
+实际测量和提交策略。若把初始估算放进 `layout.rs`，会同时产生
+`render_cache -> layout` 和 `layout -> render_cache::StreamingTextPhase`，形成生产循环。
+最终依赖图为：
+
+```text
+model -> copy
+composer -> model + copy
+render_cache -> model + markdown
+layout -> model + render_cache
+viewport -> model
+```
+
+新增 `conversation_presentation_modules_have_stable_acyclic_owners` boundary，锁定七个
+owner、稳定 re-export、无业务实现的 `mod.rs` 和上述无环方向。模块迁移还暴露出外部
+性能脚本仍过滤旧的 `conversation::tests::desktop_release_`，Cargo 因而运行 0 项测试
+却返回成功。Bash 和 PowerShell gate 现逐项使用完整路径和 `--exact`，并要求输出
+`running 1 test`；boundary 同时锁定五项 release fixture 和 fail-closed 契约。
+
+最终验证：
+
+- `cargo check -p desktop --all-targets` 通过；
+- conversation 定向测试 41 项通过、3 项 release fixture 忽略；
+- Desktop 全量测试 184 项通过、5 项 release fixture 忽略；
+- dependency boundary 15/15，`cargo fmt --all -- --check` 与 `git diff --check` 通过；
+- wide、medium、narrow、authorization、reduced-motion、keyboard-focus、no-color
+  七个 visual fixture 全部 `RMSE=0`；
+- native GPU frame P95 `6.403 ms`、input-to-post-render P95 `8.382 ms`、
+  steady RSS growth `32 KiB`、production Markdown completion P95 `130 us`；
+- headless 10k-row CPU frame P95 `2.863 ms`、input roundtrip P95 `5.394 ms`、
+  input Change-to-render P95 `323 us`、window RSS growth `24,997,888 bytes`；
+- 10 MiB hydration `14.541 ms`、10k-block hydration `3.196 ms`、
+  scroll/render preparation P95 `210 us`、streaming event P95 `4–21 us`；
+- Desktop Clippy 仅保留 `DSK-000` 已记录的
+  `field_reassign_with_default` 和 `large_enum_variant`，没有新增 lint。
+
 ### DSK-401：可选低优先级整理
 
 **优先级：P3**
@@ -1124,32 +1177,25 @@ VUI task 的评审顺序：
 
 ## 十、下一批建议
 
-下一批按四个独立 owner 并行启动：
+结构 lane、视觉基线和共享控件 foundation 已全部完成。下一批按 Pane lane 推进：
 
-1. Baseline owner：`DSK-000 + VUI-000`，冻结行为、性能和七个视觉 fixture；
-2. UI architecture owner：`DSK-101`，先完成 Header/StatusBar ViewModel；
-3. Visual foundation owner：`VUI-101`，建立共享图标和控件语义；
-4. Runtime owner：`DSK-201`，机械拆分 protocol/bridge，不修改 GPUI 文件。
+1. `VUI-102`：简化 Header 与 StatusBar；
+2. `VUI-103`：重做 Sessions 管理列表；
+3. `VUI-104`：重做 Composer 输入与提交区；
+4. `VUI-105`：收敛 Inspector 与 Overlay 控件；
+5. `VUI-106`：降低 Conversation 永久按钮密度。
 
-第一批全部通过后，按 Pane lane 并行：
-
-1. Header：`VUI-102`；
-2. Sessions：`DSK-102 -> VUI-103`；
-3. Composer：`DSK-103 -> VUI-104`；
-4. Inspector：`DSK-104 -> VUI-105`；
-5. Runtime：若 `DSK-201` 已完成，继续 `DSK-202`。
-
-同一 Pane 的箭头表示必须串行；不共享文件的 lane 可以并行。`native_shell.rs` 集成、
-共享 visual token 和 golden 安装仍由单一 owner 顺序落地。完成这些任务并通过全量
-gate 后，再进入 `DSK-105 -> VUI-106`，最后并行评估 `DSK-301` 与 `VUI-201`。
+这些任务的结构前置和 `VUI-101` 均已满足。虽然 Pane 主文件不同，但它们共享
+`native_shell.rs` 集成和 visual golden，因此在当前工作树按上述顺序落地和验收，
+避免跨 Pane 的视觉差异互相遮蔽。五项完成后执行 `VUI-201`，统一全局 token、节奏
+和层级；`DSK-401` 仍只在主计划完成后按收益单独评估。
 
 ## 十一、当前推进状态（2026-07-28）
 
-结构 lane（`DSK-*`）除 `DSK-301` 外已全部完成。下一批可并行启动：
+结构 lane（`DSK-000`、`DSK-101` 至 `DSK-105`、`DSK-201`、`DSK-202`、
+`DSK-301`）已全部完成；`VUI-000` 与 `VUI-101` 也已完成。当前没有未满足的视觉
+前置。
 
-1. Visual foundation owner：`VUI-000` 人工问题清单 review + `VUI-101` 共享控件语义。
-   这是 `VUI-102` 至 `VUI-106` 的共同前置，目前是关键路径上唯一未完成的前置项；
-2. Conversation lane：`DSK-301` 按七步机械拆分 `conversation.rs`，与所有 VUI 任务
-   文件不重叠，可立即并行。
-
-`VUI-102` 至 `VUI-106` 的 `DSK-*` 前置均已满足，只等 `VUI-101` 落地。
+下一关键路径是依次完成 `VUI-102`、`VUI-103`、`VUI-104`、`VUI-105` 和
+`VUI-106`，每项分别执行交互、accessibility、responsive、visual golden 和性能
+验收。之后进入 `VUI-201` 做全局视觉节奏与层级收敛。当前立即推进 `VUI-102`。
