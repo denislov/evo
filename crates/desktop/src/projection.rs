@@ -476,8 +476,8 @@ impl DesktopProjection {
             } => {
                 if metadata
                     .session
-                    .submitted_operation
                     .as_ref()
+                    .and_then(|session| session.submitted_operation.as_ref())
                     .is_some_and(|submitted| submitted.operation_id != operation_id)
                 {
                     return self.require_resync(DesktopProjectionIssue::new(
@@ -635,6 +635,17 @@ impl DesktopProjection {
         replacement: DesktopRuntimeMetadataSnapshot,
     ) -> DesktopProjectionApply {
         let DesktopRuntimeMetadataSnapshot { project, session } = replacement;
+        let Some(session) = session else {
+            self.project = project;
+            self.counters.metadata_replacements += 1;
+            self.lifecycle = DesktopProjectionLifecycle::Running;
+            self.last_resync_reason = None;
+            return DesktopProjectionApply::Replaced(DesktopProjectionDelta {
+                profiles: true,
+                capabilities: true,
+                ..DesktopProjectionDelta::default()
+            });
+        };
         let mut candidate = self.product.clone();
         if let Err(issue) = candidate.replace_snapshot(session) {
             return self.require_resync(issue.into());

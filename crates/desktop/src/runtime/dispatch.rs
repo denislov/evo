@@ -22,12 +22,12 @@ pub(super) async fn dispatch_idle_command(
                 .reload_local_resources()
                 .map(|_| ())
                 .map_err(DesktopBridgeError::from);
-            reload
-                .and_then(|()| state.metadata_snapshot())
-                .map(|metadata| DesktopRuntimeUpdate::Reloaded {
+            reload.map(|()| state.metadata_snapshot()).map(|metadata| {
+                DesktopRuntimeUpdate::Reloaded {
                     command_id,
                     metadata,
-                })
+                }
+            })
         }
         DesktopRuntimeCommand::Resync { .. } => {
             state
@@ -67,7 +67,7 @@ pub(super) async fn dispatch_idle_command(
             .select_model(model_id)
             .map(|_| ())
             .map_err(DesktopBridgeError::from)
-            .and_then(|()| state.metadata_snapshot())
+            .map(|()| state.metadata_snapshot())
             .map(|metadata| DesktopRuntimeUpdate::SelectionChanged {
                 command_id,
                 selection: DesktopRuntimeSelectionKind::Model,
@@ -166,7 +166,7 @@ pub(super) fn dispatch_active_command(
                 replacement: DesktopRuntimeResyncSnapshot::Metadata(
                     DesktopRuntimeMetadataSnapshot {
                         project: active.project.clone(),
-                        session,
+                        session: Some(session),
                     },
                 ),
             },

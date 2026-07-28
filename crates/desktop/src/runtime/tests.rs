@@ -96,13 +96,19 @@ fn isolated_options(temp: &tempfile::TempDir) -> (ProcessEnvGuard, CodingAgentEm
     (env, options)
 }
 
-fn start_runtime(
+async fn start_runtime(
     options: CodingAgentEmbeddingOptions,
 ) -> (DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot) {
-    DesktopRuntimeBridge::spawn(options)
+    let (mut bridge, _) = DesktopRuntimeBridge::spawn(options)
         .unwrap()
         .wait_blocking()
-        .unwrap()
+        .unwrap();
+    bridge.try_create_session(u64::MAX).unwrap();
+    let DesktopRuntimeUpdate::SessionChanged { snapshot, .. } = bridge.next_update().await.unwrap()
+    else {
+        panic!("test runtime session creation should publish a hydrated snapshot");
+    };
+    (bridge, snapshot)
 }
 
 #[test]
@@ -131,7 +137,136 @@ async fn bootstrap_can_be_polled_without_waiting_on_runtime_initialization() {
         }
         tokio::task::yield_now().await;
     };
-    assert!(!snapshot.session.session.session_id.is_empty());
+    assert!(!snapshot.project.selected_model_id.is_empty());
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sessionless_startup_supports_project_commands_and_rejects_session_commands() {
+    use coding_agent::api::review::{CodingAgentFileChangeIdentity, CodingAgentFileRevision};
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions_dir = temp.path().join("sessions");
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, ready) = DesktopRuntimeBridge::spawn(options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+
+    assert_eq!(ready.project.selected_model_id, "claude-sonnet-4-5");
+    assert!(!sessions_dir.exists());
+
+    bridge.try_reload(1).unwrap();
+    let Some(DesktopRuntimeUpdate::Reloaded {
+        command_id: 1,
+        metadata,
+    }) = bridge.next_update().await
+    else {
+        panic!("sessionless reload should return project metadata");
+    };
+    assert!(metadata.session.is_none());
+
+    bridge.try_list_sessions(2).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionsListed {
+        command_id: 2,
+        sessions,
+        omitted: 0,
+    }) = bridge.next_update().await
+    else {
+        panic!("sessionless catalog query should return a typed empty catalog");
+    };
+    assert!(sessions.is_empty());
+
+    bridge.try_select_model(3, "claude-haiku-4-5").unwrap();
+    let Some(DesktopRuntimeUpdate::SelectionChanged {
+        command_id: 3,
+        selection: DesktopRuntimeSelectionKind::Model,
+        metadata,
+    }) = bridge.next_update().await
+    else {
+        panic!("sessionless model selection should return project metadata");
+    };
+    assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
+    assert!(metadata.session.is_none());
+
+    bridge.try_resync(4).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 4,
+            command: DesktopRuntimeCommandKind::Resync,
+            code,
+            message,
+        }) if code == "session" && message == "desktop runtime has no idle session owner"
+    ));
+
+    let review = CodingAgentFileReviewRequest::new(
+        CodingAgentFileChangeIdentity {
+            operation_id: "operation-sessionless-review".into(),
+            tool_call_id: Some("call-sessionless-review".into()),
+            path: "src/lib.rs".into(),
+        },
+        CodingAgentFileRevision::new(1),
+    );
+    let (commands, mut events, shutdown) = bridge.into_parts();
+    commands.try_review_changed_file(5, &review).unwrap();
+    assert!(matches!(
+        events.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 5,
+            command: DesktopRuntimeCommandKind::ReviewChangedFile,
+            code,
+            message,
+        }) if code == "session" && message == "desktop runtime has no idle session owner"
+    ));
+
+    let recovery = DesktopRecoveryIdentity {
+        operation_id: "operation-sessionless-recovery".into(),
+        recovery_id: "recovery-sessionless".into(),
+        record_version: 1,
+        descriptor_revision: 1,
+        capability_generation: Some(1),
+        attempt_count: 0,
+    };
+    commands.try_retry_recovery(6, &recovery).unwrap();
+    assert!(matches!(
+        events.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 6,
+            command: DesktopRuntimeCommandKind::RetryRecovery,
+            code,
+            message,
+        }) if code == "session" && message == "desktop runtime has no idle session owner"
+    ));
+
+    assert!(!sessions_dir.exists());
+    drop(commands);
+    shutdown.shutdown(&mut events).await.unwrap();
+}
+
+#[tokio::test]
+async fn sessionless_runtime_opens_an_existing_session_without_an_intermediate_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (creator, created) = start_runtime(options.clone()).await;
+    let session_id = created.session.session.session_id.clone();
+    creator.shutdown().await.unwrap();
+
+    let (mut bridge, ready) = DesktopRuntimeBridge::spawn(options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+    assert_eq!(ready.project.selected_model_id, "claude-sonnet-4-5");
+
+    bridge.try_open_session(7, &session_id).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionChanged {
+        command_id: 7,
+        snapshot,
+    }) = bridge.next_update().await
+    else {
+        panic!("sessionless open should install the requested existing session");
+    };
+    assert_eq!(snapshot.session.session.session_id, session_id);
     bridge.shutdown().await.unwrap();
 }
 
@@ -139,7 +274,7 @@ async fn bootstrap_can_be_polled_without_waiting_on_runtime_initialization() {
 async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, initial) = start_runtime(options);
+    let (mut bridge, initial) = start_runtime(options).await;
     assert_eq!(
         initial.transcript.session_id,
         initial.session.session.session_id
@@ -189,7 +324,10 @@ async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
         panic!("reload should publish the retained current session");
     };
     assert_eq!(command_id, 4);
-    assert_eq!(metadata.session.session.session_id, initial_session_id);
+    assert_eq!(
+        metadata.session.as_ref().unwrap().session.session_id,
+        initial_session_id
+    );
 
     bridge.try_resync(5).unwrap();
     let DesktopRuntimeUpdate::Resynced {
@@ -233,7 +371,7 @@ async fn changed_file_review_command_is_typed_and_preserves_product_error_codes(
 
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (bridge, _) = start_runtime(options);
+    let (bridge, _) = start_runtime(options).await;
     let (commands, mut events, shutdown) = bridge.into_parts();
     let request = CodingAgentFileReviewRequest::new(
         CodingAgentFileChangeIdentity {
@@ -273,7 +411,7 @@ async fn failed_reload_retains_the_previous_runtime_context() {
     let (_env, _) = isolated_options(&temp);
     let options = CodingAgentEmbeddingOptions::new(temp.path().join("project"))
         .with_session_dir(temp.path().join("sessions"));
-    let (mut bridge, initial) = start_runtime(options);
+    let (mut bridge, initial) = start_runtime(options).await;
     std::fs::write(
         temp.path().join("global").join("settings.toml"),
         "default_model = \"missing-desktop-reload-model\"\n",
@@ -318,10 +456,24 @@ async fn failed_reload_retains_the_previous_runtime_context() {
 async fn idle_model_and_session_profile_selection_are_typed_and_transactional() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, initial) = start_runtime(options);
+    let (mut bridge, initial) = start_runtime(options).await;
     let session_id = initial.session.session.session_id.clone();
     let mut projection = DesktopProjection::new(initial).unwrap();
     let conversation = projection.conversation().clone();
+    let product_snapshot = projection.snapshot().clone();
+    assert!(
+        projection
+            .apply(DesktopRuntimeUpdate::Reloaded {
+                command_id: 7,
+                metadata: DesktopRuntimeMetadataSnapshot {
+                    project: projection.project().clone(),
+                    session: None,
+                },
+            })
+            .is_replaced()
+    );
+    assert_eq!(projection.snapshot(), &product_snapshot);
+    assert_eq!(projection.conversation(), &conversation);
 
     bridge.try_select_model(8, "claude-haiku-4-5").unwrap();
     let update = bridge.next_update().await.unwrap();
@@ -334,7 +486,10 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
         panic!("idle model selection must return a typed replacement snapshot");
     };
     assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
-    assert_eq!(metadata.session.session.session_id, session_id);
+    assert_eq!(
+        metadata.session.as_ref().unwrap().session.session_id,
+        session_id
+    );
     assert!(projection.apply(update).is_replaced());
     assert_eq!(projection.conversation(), &conversation);
 
@@ -349,7 +504,13 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
         panic!("idle profile selection must return a typed replacement snapshot");
     };
     assert_eq!(
-        metadata.session.session.default_agent_profile_id.as_str(),
+        metadata
+            .session
+            .as_ref()
+            .unwrap()
+            .session
+            .default_agent_profile_id
+            .as_str(),
         "review"
     );
     assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
@@ -399,7 +560,7 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
 async fn ten_mib_transcript_stays_single_hydration_across_metadata_commands() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (bridge, mut initial) = start_runtime(options);
+    let (bridge, mut initial) = start_runtime(options).await;
     let payload = "x".repeat(1_280);
     initial.transcript.items = (0..MAX_TRANSCRIPT_BLOCKS)
         .map(|index| CodingAgentSessionTranscriptItem::User {
@@ -418,7 +579,7 @@ async fn ten_mib_transcript_stays_single_hydration_across_metadata_commands() {
     assert!(fixture_bytes >= 10 * 1024 * 1024);
     let metadata = DesktopRuntimeMetadataSnapshot {
         project: initial.project.clone(),
-        session: initial.session.clone(),
+        session: Some(initial.session.clone()),
     };
     let recovery = DesktopRuntimeRecoverySnapshot {
         project: initial.project.clone(),
@@ -516,7 +677,7 @@ async fn ten_mib_transcript_stays_single_hydration_across_metadata_commands() {
 async fn prompt_submission_forwards_product_events_and_returns_the_session_owner() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, initial) = start_runtime(options);
+    let (mut bridge, initial) = start_runtime(options).await;
     let session_id = initial.session.session.session_id;
 
     bridge
@@ -595,7 +756,7 @@ async fn prompt_submission_forwards_product_events_and_returns_the_session_owner
 async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, initial) = start_runtime(options);
+    let (mut bridge, initial) = start_runtime(options).await;
     let mut wrong_transcript = initial.clone();
     wrong_transcript.transcript.session_id = "wrong-session".into();
     assert_eq!(
@@ -807,7 +968,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
 async fn shared_cross_adapter_fixture_matches_desktop_product_state_exactly() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (bridge, initial) = start_runtime(options);
+    let (bridge, initial) = start_runtime(options).await;
     let transcript = initial.transcript.clone();
     let mut shared = CodingAgentClientProjection::from_bootstrap(CodingAgentClientBootstrap {
         snapshot: initial.session.clone(),
@@ -1405,7 +1566,7 @@ fn streaming_batch_timer_does_not_require_a_tokio_reactor() {
 async fn data_queue_overflow_emits_a_priority_resync_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (bridge, initial) = start_runtime(options);
+    let (bridge, initial) = start_runtime(options).await;
     let (priority_updates, mut priority_rx) = mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
     let (data_updates, _data_rx) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
     for command_id in 0..DESKTOP_UPDATE_QUEUE_CAPACITY as u64 {
@@ -1442,7 +1603,7 @@ async fn data_queue_overflow_emits_a_priority_resync_snapshot() {
 async fn typed_recovery_reasons_replace_the_projection_atomically() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (bridge, initial) = start_runtime(options);
+    let (bridge, initial) = start_runtime(options).await;
     let mut projection = DesktopProjection::new(initial.clone()).unwrap();
     let cursor = initial.session.cursor.clone();
 
@@ -1491,7 +1652,7 @@ async fn typed_recovery_reasons_replace_the_projection_atomically() {
 async fn reconnect_state_machine_handles_gap_lag_and_exhaustion_deterministically() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (bridge, initial) = start_runtime(options);
+    let (bridge, initial) = start_runtime(options).await;
     let cursor = initial.session.cursor.clone();
 
     let retained = CodingAgentFreshSnapshotRecovery {
@@ -1588,7 +1749,7 @@ async fn reconnect_state_machine_handles_gap_lag_and_exhaustion_deterministicall
 async fn command_sender_loss_stops_and_joins_the_runtime() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, _) = start_runtime(options);
+    let (mut bridge, _) = start_runtime(options).await;
     drop(bridge.commands.take());
 
     let stopped = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1608,7 +1769,7 @@ async fn command_sender_loss_stops_and_joins_the_runtime() {
 async fn split_runtime_owners_deliver_commands_then_shutdown_and_join() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (bridge, initial) = start_runtime(options);
+    let (bridge, initial) = start_runtime(options).await;
     let initial_session_id = initial.session.session.session_id;
     let (commands, mut events, shutdown) = bridge.into_parts();
 
@@ -1621,7 +1782,10 @@ async fn split_runtime_owners_deliver_commands_then_shutdown_and_join() {
         panic!("the split event owner must deliver the command result");
     };
     assert_eq!(command_id, 60);
-    assert_eq!(metadata.session.session.session_id, initial_session_id);
+    assert_eq!(
+        metadata.session.as_ref().unwrap().session.session_id,
+        initial_session_id
+    );
 
     shutdown.shutdown(&mut events).await.unwrap();
     assert_eq!(
@@ -1760,7 +1924,7 @@ async fn runtime_thread_panic_is_reported_during_join() {
 async fn abort_race_is_typed_and_window_close_is_non_blocking() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, _) = start_runtime(options);
+    let (mut bridge, _) = start_runtime(options).await;
     bridge.try_submit_prompt(20, "abort race", None).unwrap();
 
     let mut saw_control_result = false;
@@ -1831,7 +1995,7 @@ async fn abort_race_is_typed_and_window_close_is_non_blocking() {
 async fn steer_and_follow_up_races_keep_typed_command_association() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, _) = start_runtime(options);
+    let (mut bridge, _) = start_runtime(options).await;
     bridge
         .try_submit_prompt(25, "control association race", None)
         .unwrap();
@@ -1895,7 +2059,7 @@ async fn steer_and_follow_up_races_keep_typed_command_association() {
 async fn authorization_decision_is_typed_and_rejected_without_an_active_prompt() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, _) = start_runtime(options);
+    let (mut bridge, _) = start_runtime(options).await;
     let identity = ToolAuthorizationIdentity {
         authorization_id: "authorization-31".into(),
         operation_id: "operation-31".into(),
@@ -1927,7 +2091,7 @@ async fn authorization_decision_is_typed_and_rejected_without_an_active_prompt()
 async fn recovery_actions_are_identity_bound_and_stale_facts_fail_closed() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, initial) = start_runtime(options);
+    let (mut bridge, initial) = start_runtime(options).await;
     let pending = CodingAgentRecoveryPending {
         operation_id: "operation-recovery".into(),
         recovery_id: "recovery-id".into(),
@@ -1975,7 +2139,7 @@ async fn recovery_actions_are_identity_bound_and_stale_facts_fail_closed() {
 async fn authorization_projection_preserves_identity_and_bounds_display_payloads() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (bridge, initial) = start_runtime(options);
+    let (bridge, initial) = start_runtime(options).await;
     let request = ToolAuthorizationRequest {
         authorization_id: "authorization-exact".into(),
         operation_id: "operation-exact".into(),

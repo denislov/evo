@@ -160,6 +160,11 @@ pub enum DesktopRuntimeCommandKind {
 }
 
 #[derive(Debug, Clone)]
+pub struct DesktopRuntimeReadySnapshot {
+    pub project: CodingAgentEmbeddingSnapshot,
+}
+
+#[derive(Debug, Clone)]
 pub struct DesktopRuntimeHydratedSnapshot {
     pub project: CodingAgentEmbeddingSnapshot,
     pub session: CodingAgentSnapshot,
@@ -175,7 +180,7 @@ pub struct DesktopRuntimeHydratedSnapshot {
 #[derive(Debug, Clone)]
 pub struct DesktopRuntimeMetadataSnapshot {
     pub project: CodingAgentEmbeddingSnapshot,
-    pub session: CodingAgentSnapshot,
+    pub session: Option<CodingAgentSnapshot>,
 }
 
 /// Narrow recovery replacement without durable transcript content.
@@ -453,9 +458,7 @@ impl DesktopRuntimeErrorSource for DesktopBridgeError {
             DesktopBridgeError::Input { .. } => {
                 local_runtime_error("input", "The desktop request is invalid.")
             }
-            DesktopBridgeError::Session { .. } => {
-                local_runtime_error("session", "The desktop session operation failed.")
-            }
+            DesktopBridgeError::Session { message } => local_runtime_error("session", message),
             DesktopBridgeError::Busy { .. } => {
                 local_runtime_error("busy", "The desktop runtime is busy.")
             }

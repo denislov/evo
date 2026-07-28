@@ -16,13 +16,46 @@ use crate::preferences::{
     DesktopPreferences, PreferenceLoad, PreferenceRecovery, PreferenceStore, PreferenceWriter,
 };
 use crate::projection::DesktopProjection;
-use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeStartError};
+use crate::runtime::{
+    DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot, DesktopRuntimeStartError,
+};
 use crate::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme, UI_FONT_FAMILY, truncate_label};
 
 const BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 struct StartupFailure {
     message: String,
+}
+
+struct ProjectReadySurface {
+    _runtime: DesktopRuntimeBridge,
+    model_id: String,
+    notice: Option<String>,
+}
+
+impl Render for ProjectReadySurface {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let theme = SemanticTheme::GEEK_DARK;
+        div()
+            .size_full()
+            .p_8()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .font_family(UI_FONT_FAMILY)
+            .bg(rgb(theme.canvas.value()))
+            .text_color(rgb(theme.text.value()))
+            .child(div().text_xl().child("Evo is ready"))
+            .child("No session is open. Start a new conversation or open a previous session.")
+            .child(
+                div()
+                    .font_family(MONOSPACE_FONT_FAMILY)
+                    .child(format!("Model: {}", self.model_id)),
+            )
+            .when_some(self.notice.clone(), |surface, notice| {
+                surface.child(div().text_color(rgb(theme.warning.value())).child(notice))
+            })
+    }
 }
 
 impl Render for StartupFailure {
@@ -88,7 +121,7 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                         return;
                     }
                 };
-                let (runtime, snapshot) = loop {
+                let (mut runtime, snapshot) = loop {
                     match bootstrap.try_ready() {
                         Ok(Some(ready)) => break ready,
                         Ok(None) => {
@@ -124,17 +157,45 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                         None
                     }
                 };
-                let projection = match DesktopProjection::new(snapshot) {
-                    Ok(projection) => projection,
-                    Err(issue) => {
-                        let _ = open_failure(
-                            format!("projection initialization failed: {}", issue.message),
-                            cx,
-                        );
-                        return;
-                    }
-                };
                 let options = window_options(&loaded.preferences);
+                let requested = match session_id.as_deref() {
+                    Some(session_id) => {
+                        match open_requested_session(&mut runtime, session_id).await {
+                            Ok(snapshot) => match DesktopProjection::new(snapshot) {
+                                Ok(projection) => Some(projection),
+                                Err(issue) => {
+                                    let _ = open_failure(
+                                        format!(
+                                            "projection initialization failed: {}",
+                                            issue.message
+                                        ),
+                                        cx,
+                                    );
+                                    return;
+                                }
+                            },
+                            Err(message) => {
+                                notice = Some(message);
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                let Some(projection) = requested else {
+                    if let Err(error) = cx.open_window(options, |window, cx| {
+                        window.set_window_title("evo · native coding agent");
+                        let view = cx.new(|_| ProjectReadySurface {
+                            _runtime: runtime,
+                            model_id: snapshot.project.selected_model_id.clone(),
+                            notice,
+                        });
+                        cx.new(|cx| Root::new(view, window, cx))
+                    }) {
+                        eprintln!("desktop: failed to open native window: {error}");
+                    }
+                    return;
+                };
                 if let Err(error) = cx.open_window(options, |window, cx| {
                     window.set_window_title("evo · native coding agent");
                     let view = cx.new(|cx| {
@@ -145,7 +206,7 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                                 preferences: loaded.preferences,
                                 preference_writer: writer,
                                 preference_notice: notice,
-                                initial_session_id: session_id,
+                                initial_session_id: None,
                             },
                             window,
                             cx,
@@ -158,6 +219,16 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
             })
             .detach();
         });
+}
+
+async fn open_requested_session(
+    runtime: &mut DesktopRuntimeBridge,
+    session_id: &str,
+) -> Result<DesktopRuntimeHydratedSnapshot, String> {
+    const BOOTSTRAP_OPEN_COMMAND_ID: u64 = u64::MAX;
+    runtime
+        .open_session_for_bootstrap(BOOTSTRAP_OPEN_COMMAND_ID, session_id)
+        .await
 }
 
 fn preference_notice(load: &PreferenceLoad) -> Option<String> {

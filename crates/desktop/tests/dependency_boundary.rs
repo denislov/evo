@@ -799,6 +799,7 @@ fn desktop_metadata_deliveries_cannot_hydrate_or_replace_the_transcript() {
         .expect("metadata snapshot owner should remain distinct from full hydration");
 
     assert!(protocol.contains("pub struct DesktopRuntimeMetadataSnapshot"));
+    assert!(protocol.contains("pub struct DesktopRuntimeReadySnapshot"));
     assert!(protocol.contains("pub struct DesktopRuntimeRecoverySnapshot"));
     assert!(protocol.contains("pub struct DesktopRuntimeHydratedSnapshot"));
     assert!(protocol.contains("pub enum DesktopRuntimeResyncSnapshot"));
@@ -833,8 +834,8 @@ fn desktop_metadata_deliveries_cannot_hydrate_or_replace_the_transcript() {
         "metadata snapshot construction must not read durable transcript or recovery payloads"
     );
     for command_path in [
-        "reload\n                .and_then(|()| state.metadata_snapshot())",
-        ".and_then(|()| state.metadata_snapshot())\n            .map(|metadata| DesktopRuntimeUpdate::SelectionChanged",
+        "reload.map(|()| state.metadata_snapshot())",
+        ".map(|()| state.metadata_snapshot())\n            .map(|metadata| DesktopRuntimeUpdate::SelectionChanged",
     ] {
         assert!(
             dispatch.contains(command_path),

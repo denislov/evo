@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103、CAG-104、CAG-105 实现完成；CAG-102 的 cwd 摘要契约待确认）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103、CAG-104、CAG-105、DSK-501 实现完成；CAG-102 的 cwd 摘要契约待确认）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-28
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -672,6 +672,25 @@ feat(coding-agent): auto-name sessions after the first exchange
   `Resync` / `ReviewChangedFile` / recovery 返回类型化拒绝；
 - 新增测试：启动后不产生任何会话目录；
 - 现有 27 项 runtime 定向测试通过。
+
+**实现记录（2026-07-28）**
+
+- `run_runtime` 现在只加载 `CodingAgentEmbeddingContext`，以 `session: None` 进入命令循环；
+  ready 通道新增 `DesktopRuntimeReadySnapshot`，只携带项目快照，启动与关闭均不会调用
+  `create_session` 或建立 session 目录；
+- `DesktopRuntimeMetadataSnapshot.session` 改为可选。`Reload`、`ListSessions` 与
+  `SelectModel` 在无会话态正常工作，metadata 只替换项目事实；完整 hydration、recovery、
+  resync、文件审查等会话命令仍要求真实 session，并以 `code = "session"` 和既有精确消息
+  `desktop runtime has no idle session owner` 拒绝；priority/data queue 与 command id 未改；
+- 应用 bootstrap 在没有显式 session id 时打开持有运行时的 project-ready surface；传入
+  `--session` 时先通过同一有界命令通道执行 `OpenSession`，拿到真实 hydrated snapshot 后
+  再安装原 NativeShell，不创建中间会话。完整 Home、composer 与 sessionless shell 交互留给
+  DSK-503；
+- 新增测试覆盖无会话启动后的三类项目命令、三类会话拒绝、零 session 目录，以及从
+  sessionless 状态直接打开已有会话；现有 runtime 定向集现为 `29/29`，Desktop lib
+  `195 passed / 5 ignored` 与 dependency boundary `16/16` 通过。严格 Clippy 仍被两个
+  与本任务无关的既有 lint 阻断：`native_perf.rs` 的 `field_reassign_with_default` 与
+  `commands.rs` 的 `large_enum_variant`。
 
 **建议提交**
 

@@ -20,10 +20,10 @@ use super::protocol::{
     DESKTOP_COMMAND_QUEUE_CAPACITY, DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY,
     DESKTOP_UPDATE_QUEUE_CAPACITY, DesktopCommandAdmissionError, DesktopRecoveryIdentity,
     DesktopRuntimeCommand, DesktopRuntimeError, DesktopRuntimeHydratedSnapshot,
-    DesktopRuntimeShutdownError, DesktopRuntimeStartError, DesktopRuntimeUpdate,
-    local_runtime_error, validate_authorization_identity, validate_control_text,
-    validate_file_review_request, validate_prompt, validate_recovery_identity,
-    validate_selection_id, validate_session_id,
+    DesktopRuntimeReadySnapshot, DesktopRuntimeShutdownError, DesktopRuntimeStartError,
+    DesktopRuntimeUpdate, local_runtime_error, validate_authorization_identity,
+    validate_control_text, validate_file_review_request, validate_prompt,
+    validate_recovery_identity, validate_selection_id, validate_session_id,
 };
 use super::run_runtime;
 
@@ -65,20 +65,18 @@ pub struct DesktopRuntimeCommandHandle {
 
 /// Non-blocking startup handle for a desktop runtime.
 ///
-/// GPUI owns this value while project configuration and the initial session
-/// load on the dedicated runtime thread. [`Self::try_ready`] never waits.
+/// GPUI owns this value while project configuration loads on the dedicated
+/// runtime thread. [`Self::try_ready`] never waits and startup creates no session.
 pub struct DesktopRuntimeBootstrap {
-    ready: std_mpsc::Receiver<Result<DesktopRuntimeHydratedSnapshot, DesktopRuntimeError>>,
+    ready: std_mpsc::Receiver<Result<DesktopRuntimeReadySnapshot, DesktopRuntimeError>>,
     bridge: Option<DesktopRuntimeBridge>,
 }
 
 impl DesktopRuntimeBootstrap {
     pub fn try_ready(
         &mut self,
-    ) -> Result<
-        Option<(DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot)>,
-        DesktopRuntimeStartError,
-    > {
+    ) -> Result<Option<(DesktopRuntimeBridge, DesktopRuntimeReadySnapshot)>, DesktopRuntimeStartError>
+    {
         match self.ready.try_recv() {
             Ok(result) => self.finish(result).map(Some),
             Err(std_mpsc::TryRecvError::Empty) => Ok(None),
@@ -90,8 +88,7 @@ impl DesktopRuntimeBootstrap {
     #[cfg(test)]
     pub fn wait_blocking(
         mut self,
-    ) -> Result<(DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot), DesktopRuntimeStartError>
-    {
+    ) -> Result<(DesktopRuntimeBridge, DesktopRuntimeReadySnapshot), DesktopRuntimeStartError> {
         match self.ready.recv() {
             Ok(result) => self.finish(result),
             Err(_) => self.finish_disconnected_initialization().and_then(|ready| {
@@ -102,9 +99,8 @@ impl DesktopRuntimeBootstrap {
 
     fn finish(
         &mut self,
-        result: Result<DesktopRuntimeHydratedSnapshot, DesktopRuntimeError>,
-    ) -> Result<(DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot), DesktopRuntimeStartError>
-    {
+        result: Result<DesktopRuntimeReadySnapshot, DesktopRuntimeError>,
+    ) -> Result<(DesktopRuntimeBridge, DesktopRuntimeReadySnapshot), DesktopRuntimeStartError> {
         let mut bridge = self
             .bridge
             .take()
@@ -126,10 +122,8 @@ impl DesktopRuntimeBootstrap {
 
     fn finish_disconnected_initialization(
         &mut self,
-    ) -> Result<
-        Option<(DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot)>,
-        DesktopRuntimeStartError,
-    > {
+    ) -> Result<Option<(DesktopRuntimeBridge, DesktopRuntimeReadySnapshot)>, DesktopRuntimeStartError>
+    {
         let Some(mut bridge) = self.bridge.take() else {
             return Err(DesktopRuntimeStartError::InitializationChannelClosed);
         };
@@ -428,6 +422,50 @@ impl DesktopRuntimeBridge {
             self.events,
             self.shutdown,
         )
+    }
+
+    pub(crate) async fn open_session_for_bootstrap(
+        &mut self,
+        command_id: u64,
+        session_id: &str,
+    ) -> Result<DesktopRuntimeHydratedSnapshot, String> {
+        validate_session_id(session_id).map_err(|error| error.to_string())?;
+        self.commands
+            .as_ref()
+            .ok_or_else(|| DesktopCommandAdmissionError::RuntimeClosed.to_string())?
+            .try_send(DesktopRuntimeCommand::OpenSession {
+                command_id,
+                session_id: session_id.to_owned(),
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    DesktopCommandAdmissionError::QueueFull.to_string()
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    DesktopCommandAdmissionError::RuntimeClosed.to_string()
+                }
+            })?;
+        while let Some(update) = self.events.next_update().await {
+            match update {
+                DesktopRuntimeUpdate::SessionChanged {
+                    command_id: completed_id,
+                    snapshot,
+                } if completed_id == command_id => return Ok(snapshot),
+                DesktopRuntimeUpdate::CommandRejected {
+                    command_id: rejected_id,
+                    message,
+                    ..
+                } if rejected_id == command_id => return Err(message),
+                DesktopRuntimeUpdate::RuntimeFailed { error } => return Err(error.message),
+                DesktopRuntimeUpdate::Stopped => {
+                    return Err(
+                        "desktop runtime stopped while opening the requested session".into(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        Err("desktop runtime closed while opening the requested session".into())
     }
 
     #[cfg(test)]

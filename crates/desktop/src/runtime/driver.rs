@@ -35,9 +35,10 @@ use super::dispatch::{dispatch_active_command, dispatch_idle_command};
 use super::protocol::{
     DESKTOP_UPDATE_QUEUE_CAPACITY, DesktopBridgeError, DesktopRecoveryIdentity,
     DesktopRuntimeCommand, DesktopRuntimeError, DesktopRuntimeErrorSource,
-    DesktopRuntimeHydratedSnapshot, DesktopRuntimeMetadataSnapshot, DesktopRuntimeRecoverySnapshot,
-    DesktopRuntimeUpdate, DesktopSessionCatalogEntry, MAX_DESKTOP_SESSION_CATALOG,
-    MAX_SESSION_ID_BYTES, bounded_utf8_prefix, local_runtime_error, runtime_error,
+    DesktopRuntimeHydratedSnapshot, DesktopRuntimeMetadataSnapshot, DesktopRuntimeReadySnapshot,
+    DesktopRuntimeRecoverySnapshot, DesktopRuntimeUpdate, DesktopSessionCatalogEntry,
+    MAX_DESKTOP_SESSION_CATALOG, MAX_SESSION_ID_BYTES, bounded_utf8_prefix, local_runtime_error,
+    runtime_error,
 };
 
 const RUNTIME_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
@@ -49,19 +50,11 @@ pub(super) struct RuntimeState {
 }
 
 impl RuntimeState {
-    pub(super) fn metadata_snapshot(
-        &self,
-    ) -> Result<DesktopRuntimeMetadataSnapshot, DesktopBridgeError> {
-        let session = self
-            .session
-            .as_ref()
-            .ok_or_else(|| DesktopBridgeError::Session {
-                message: "desktop runtime has no idle session owner".into(),
-            })?;
-        Ok(DesktopRuntimeMetadataSnapshot {
+    pub(super) fn metadata_snapshot(&self) -> DesktopRuntimeMetadataSnapshot {
+        DesktopRuntimeMetadataSnapshot {
             project: self.context.snapshot().clone(),
-            session: session.snapshot(),
-        })
+            session: self.session.as_ref().map(CodingAgentSession::snapshot),
+        }
     }
 
     pub(super) fn snapshot(&self) -> Result<DesktopRuntimeHydratedSnapshot, DesktopBridgeError> {
@@ -232,7 +225,7 @@ impl RuntimeState {
                 message: "desktop profile selection returned an unexpected outcome".into(),
             });
         }
-        self.metadata_snapshot()
+        Ok(self.metadata_snapshot())
     }
 
     pub(super) async fn replace_with_new_session(&mut self) -> Result<(), DesktopBridgeError> {
@@ -376,7 +369,7 @@ pub(super) async fn run_runtime(
     mut shutdown: watch::Receiver<bool>,
     priority_updates: mpsc::Sender<DesktopRuntimeUpdate>,
     data_updates: mpsc::Sender<DesktopRuntimeUpdate>,
-    ready: std_mpsc::SyncSender<Result<DesktopRuntimeHydratedSnapshot, DesktopRuntimeError>>,
+    ready: std_mpsc::SyncSender<Result<DesktopRuntimeReadySnapshot, DesktopRuntimeError>>,
 ) {
     let context = match CodingAgentEmbeddingContext::load(options) {
         Ok(context) => context,
@@ -385,24 +378,12 @@ pub(super) async fn run_runtime(
             return;
         }
     };
-    let session = match context.create_session().await {
-        Ok(session) => session,
-        Err(error) => {
-            let _ = ready.send(Err(runtime_error(&error)));
-            return;
-        }
-    };
     let mut state = RuntimeState {
         context,
-        session: Some(session),
+        session: None,
     };
-    let initial = match state.snapshot() {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            let _ = ready.send(Err(runtime_error(&error)));
-            let _ = state.shutdown_idle_session().await;
-            return;
-        }
+    let initial = DesktopRuntimeReadySnapshot {
+        project: state.context.snapshot().clone(),
     };
     if ready.send(Ok(initial)).is_err() {
         let _ = state.shutdown_idle_session().await;
@@ -928,7 +909,7 @@ async fn ensure_operation_started(
             operation_id,
             metadata: DesktopRuntimeMetadataSnapshot {
                 project: active.project.clone(),
-                session: snapshot,
+                session: Some(snapshot),
             },
         })
         .await
