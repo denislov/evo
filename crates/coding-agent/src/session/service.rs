@@ -22,9 +22,10 @@ use crate::runtime::capability::OperationCapabilitySnapshot;
 use crate::runtime::capability::SessionWriteCapability;
 use crate::runtime::facade::{
     CodingAgentSessionDiagnostic, CodingAgentSessionHydration, CodingAgentSessionOptions,
-    CodingAgentSessionSummary, CodingAgentSessionTranscriptItem, CodingAgentSessionTree,
-    CodingAgentSessionUsageSummary, CodingAgentSessionView, CodingSessionError, ProfileId,
-    ProfileKind, SelfHealingEditOutcome, SelfHealingEditRepairAttempt,
+    CodingAgentSessionOverview, CodingAgentSessionSummary, CodingAgentSessionTranscriptItem,
+    CodingAgentSessionTree, CodingAgentSessionUsageSummary, CodingAgentSessionView,
+    CodingSessionError, ProfileId, ProfileKind, SelfHealingEditOutcome,
+    SelfHealingEditRepairAttempt,
 };
 use crate::runtime::finalization::FinalizationDecision;
 use crate::services::event::EventService;
@@ -320,6 +321,60 @@ impl SessionService {
             summaries.push(CodingAgentSessionSummary::from(summary));
         }
         Ok(summaries)
+    }
+
+    pub(crate) fn list_overviews(
+        options: &CodingAgentSessionOptions,
+        limit: usize,
+    ) -> Result<(Vec<CodingAgentSessionOverview>, bool), CodingSessionError> {
+        let root = resolve_session_log_root(options)?;
+        let store = SessionLogStore::new(root);
+        let cwd_filter = option_cwd_string(options);
+        let summaries = store.list_sessions()?;
+        let mut overviews = Vec::new();
+        if cwd_filter.is_none() {
+            let truncated = summaries.len() > limit;
+            for summary in summaries.into_iter().take(limit) {
+                let cwd = match store.session_creation_cwd(&summary) {
+                    Ok(cwd) => cwd,
+                    Err(_) => continue,
+                };
+                overviews.push(CodingAgentSessionOverview {
+                    session_id: summary.session_id,
+                    name: summary.name,
+                    cwd,
+                    created_at: summary.created_at,
+                    updated_at: summary.updated_at,
+                    active_leaf_id: summary.active_leaf_id,
+                });
+            }
+            return Ok((overviews, truncated));
+        }
+
+        let mut matching = 0_usize;
+        for summary in summaries {
+            let cwd = match store.session_creation_cwd(&summary) {
+                Ok(cwd) => cwd,
+                Err(_) => continue,
+            };
+            if let Some(expected) = cwd_filter.as_deref()
+                && cwd.as_deref() != Some(expected)
+            {
+                continue;
+            }
+            matching = matching.saturating_add(1);
+            if overviews.len() < limit {
+                overviews.push(CodingAgentSessionOverview {
+                    session_id: summary.session_id,
+                    name: summary.name,
+                    cwd,
+                    created_at: summary.created_at,
+                    updated_at: summary.updated_at,
+                    active_leaf_id: summary.active_leaf_id,
+                });
+            }
+        }
+        Ok((overviews, matching > limit))
     }
 
     pub(crate) fn hydrate(

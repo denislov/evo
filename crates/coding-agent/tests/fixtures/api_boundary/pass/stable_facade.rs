@@ -52,10 +52,10 @@ use coding_agent::api::settings::{
 };
 use coding_agent::api::view::{
     CodingAgentAgentProfileSummary, CodingAgentSessionCatalog, CodingAgentSessionChoice,
-    CodingAgentSessionChoiceKind, CodingAgentSessionExport, CodingAgentSessionSnapshot,
-    CodingAgentSessionSummary, CodingAgentSessionTreeNode, CodingAgentSessionTreeRole,
-    CodingAgentSessionTreeSnapshot, CodingAgentSessionUsage, CodingAgentSessionView,
-    CodingAgentTeamProfileSummary, ProfileId,
+    CodingAgentSessionChoiceKind, CodingAgentSessionExport, CodingAgentSessionOverview,
+    CodingAgentSessionOverviewCatalog, CodingAgentSessionSnapshot, CodingAgentSessionSummary,
+    CodingAgentSessionTreeNode, CodingAgentSessionTreeRole, CodingAgentSessionTreeSnapshot,
+    CodingAgentSessionUsage, CodingAgentSessionView, CodingAgentTeamProfileSummary, ProfileId,
 };
 
 fn prompt() -> PromptTurnOptions {
@@ -74,6 +74,8 @@ fn session_queries(context: &CodingAgentEmbeddingContext) -> Result<(), CodingAg
     let catalog: CodingAgentSessionCatalog = query.catalog()?;
     let _: Option<CodingAgentSessionChoice> = catalog.choices.into_iter().next();
     let _: Option<CodingAgentSessionChoiceKind> = None;
+    let overview_catalog: CodingAgentSessionOverviewCatalog = query.overviews()?;
+    let _: Option<CodingAgentSessionOverview> = overview_catalog.overviews.into_iter().next();
     let _: Option<CodingAgentSessionSnapshot> = None;
     let _: Option<CodingAgentSessionTreeSnapshot> = None;
     let _: Option<CodingAgentSessionTreeNode> = None;

@@ -81,8 +81,8 @@ pub use crate::runtime::facade::context::{
     CapabilityStatus, CodingAgentCapabilities, CodingAgentRecoveryPending,
     CodingAgentRecoveryResolutionRequest, CodingAgentRecoveryResolutionResult,
     CodingAgentRecoveryRetryRequest, CodingAgentRecoveryRetryResult, CodingAgentSessionOptions,
-    CodingAgentSessionSummary, CodingAgentSessionTranscriptItem, CodingAgentSessionView,
-    CodingAgentTranscriptSnapshot,
+    CodingAgentSessionOverview, CodingAgentSessionSummary, CodingAgentSessionTranscriptItem,
+    CodingAgentSessionView, CodingAgentTranscriptSnapshot,
 };
 pub(crate) use crate::runtime::facade::context::{
     CodingAgentSessionDiagnostic, CodingAgentSessionHydration, CodingAgentSessionTree,

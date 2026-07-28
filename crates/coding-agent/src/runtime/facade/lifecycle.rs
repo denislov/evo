@@ -147,6 +147,13 @@ impl CodingAgentSession {
         SessionService::list(&options)
     }
 
+    pub(crate) fn list_overviews_internal(
+        options: CodingAgentSessionOptions,
+        limit: usize,
+    ) -> Result<(Vec<CodingAgentSessionOverview>, bool), CodingSessionError> {
+        SessionService::list_overviews(&options, limit)
+    }
+
     pub(crate) fn hydrate(
         options: CodingAgentSessionOptions,
     ) -> Result<CodingAgentSessionHydration, CodingSessionError> {

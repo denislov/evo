@@ -186,13 +186,15 @@ pub mod api {
     pub mod view {
         pub use crate::app::session::{
             CodingAgentSessionCatalog, CodingAgentSessionChoice, CodingAgentSessionChoiceKind,
-            CodingAgentSessionSnapshot, CodingAgentSessionTreeNode, CodingAgentSessionTreeRole,
-            CodingAgentSessionTreeSnapshot, CodingAgentSessionUsage,
+            CodingAgentSessionOverviewCatalog, CodingAgentSessionSnapshot,
+            CodingAgentSessionTreeNode, CodingAgentSessionTreeRole, CodingAgentSessionTreeSnapshot,
+            CodingAgentSessionUsage,
         };
         pub use crate::runtime::facade::{
             CapabilityStatus, CodingAgentAgentProfileSummary, CodingAgentCapabilities,
             CodingAgentRecoveryPending, CodingAgentSessionExport, CodingAgentSessionExportItem,
-            CodingAgentSessionSummary, CodingAgentSessionTranscriptItem, CodingAgentSessionView,
+            CodingAgentSessionOverview, CodingAgentSessionSummary,
+            CodingAgentSessionTranscriptItem, CodingAgentSessionView,
             CodingAgentTeamProfileSummary, CodingAgentTranscriptSnapshot, ProfileId, ProfileKind,
             ProfileSource, TeamStrategy, TeamSupervisor,
         };

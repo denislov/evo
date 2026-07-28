@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103、CAG-104、CAG-105、DSK-501、DSK-502 实现完成；CAG-102 的 cwd 摘要契约待确认）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、DSK-501、DSK-502 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-28
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -389,9 +389,10 @@ feat(coding-agent): expose a context-free durable session query
 
 **工作**
 
-1. 新增「摘要级」目录查询：只读 manifest，返回 `session_id` / `created_at` /
-   `updated_at` / `active_leaf_id` / `cwd` / `name`（名称字段由 CAG-105 填入，
-   本任务先留 `Option<String>` 并恒为 `None`）。
+1. 新增「摘要级」目录查询：每个候选只读 manifest 与 `events.jsonl`
+   的第一个有界、带 checksum 的 `SessionCreated` frame，返回 `session_id` /
+   `created_at` / `updated_at` / `active_leaf_id` / `cwd` / `name`。`name`
+   直接复用 CAG-105 已落盘的 manifest 字段，`cwd` 从创建 frame 恢复。
 2. 现有 `catalog()` 保持不变，继续提供含 `entry_count` 的完整视图，供需要它的调用方使用。
 3. 明确文档化两者差异：摘要不含 `entry_count`（该值需要读 event log）。
 
@@ -402,13 +403,33 @@ feat(coding-agent): expose a context-free durable session query
 
 **完成条件**
 
-- 新增测试：摘要查询在 N 条会话下的文件读取次数与 N 成正比但**不读 events.jsonl**；
+- 新增测试：摘要查询在 N 条会话下只解码 N 个首 frame，
+  后续 frame 即使损坏也不影响摘要；首 frame 损坏时跳过该会话；
 - 新增测试：摘要与 `catalog()` 在共有字段上一致。
+
+**实现记录（2026-07-28）**
+
+- 新增 `CodingAgentSessionQuery::overviews()`、
+  `CodingAgentSessionOverviewCatalog` 与 `CodingAgentSessionOverview`；公开 DTO
+  仅包含列表展示所需的六个字段，不暴露会话目录、转录、usage
+  或 `entry_count`，现有 `catalog()` 签名与完整 hydrate 行为不变；
+- repository 复用单条 durable record 的 1 MiB 上限、UTF-8、checksum、
+  序号与 session-id 校验，并要求首条为 `SessionCreated`。查询不读
+  第二条及后续 frame；无效首 frame 仅跳过对应会话，不使整个目录失败；
+- cwd-free 查询对排序后的前 256 个候选保持既有有界语义，不因某条
+  首 frame 损坏而从第 257 条回填；cwd-filtered 查询则按有效首 frame
+  恢复的 cwd 匹配后计算 `truncated`；
+- 新增共有字段一致性、后续 frame 损坏仍可列出、首 frame 损坏跳过、
+  disabled 空结果、256 条截断语义与稳定 facade compile-pass 覆盖。
+- 直接相关 gate 已通过：coding-agent lib 串行 `750/750`、API boundary
+  `14/14`、lib-only Clippy `-D warnings`、Desktop / CLI / TUI `cargo check`、
+  CLI binary `174/174`、TUI 全量 `140/140`、fmt 与 `git diff --check`。CLI 全量
+  仍有 4 个已记录的 `ai` ownership 文本边界失败，与本次新增查询无关。
 
 **建议提交**
 
 ```text
-feat(coding-agent): add a manifest-only session summary query
+feat(coding-agent): add a lightweight session overview query
 ```
 
 ---

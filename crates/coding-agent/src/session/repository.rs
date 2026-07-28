@@ -22,7 +22,7 @@ use crate::events::outbox::{
     DurableOutboxRecord, DurableOutboxRecordCandidate, OUTBOX_SCHEMA, OUTBOX_VERSION,
 };
 use crate::runtime::facade::{CodingSessionError, ProfileId};
-use crate::session::event::SessionEventEnvelope;
+use crate::session::event::{SessionEventData, SessionEventEnvelope};
 
 const SESSION_WRITER_LOCK_FILE: &str = ".writer.lock";
 const MAX_SESSION_RECORD_BYTES: usize = 1024 * 1024;
@@ -693,6 +693,45 @@ impl SessionLogStore {
             Ok(())
         })?;
         Ok(events)
+    }
+
+    pub(crate) fn session_creation_cwd(
+        &self,
+        summary: &SessionSummary,
+    ) -> Result<Option<String>, CodingSessionError> {
+        let handle = self.open_session(&summary.session_dir)?;
+        let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
+        let file = File::open(&event_log_path).map_err(|error| {
+            session_error(format!(
+                "failed to open session event log {}: {error}",
+                event_log_path.display()
+            ))
+        })?;
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        if !read_bounded_line(&mut reader, &mut line, &event_log_path)? {
+            return Err(session_error(format!(
+                "session event log {} is missing its SessionCreated frame",
+                event_log_path.display()
+            )));
+        }
+        let line = decode_utf8_line(&line, 1, &event_log_path)?;
+        if line.trim().is_empty() {
+            return Err(session_error(format!(
+                "session event log {} has an empty first frame",
+                event_log_path.display()
+            )));
+        }
+        let event = decode_event_line(line, 1, &event_log_path)?;
+        validate_contiguous_session_sequence(&event, 1)?;
+        validate_event_for_session(&event, &handle.manifest.session_id)?;
+        match event.data {
+            SessionEventData::SessionCreated { cwd } => Ok(cwd),
+            _ => Err(session_error(format!(
+                "session event log {} must begin with SessionCreated",
+                event_log_path.display()
+            ))),
+        }
     }
 
     fn visit_events(

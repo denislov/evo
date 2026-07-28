@@ -227,6 +227,20 @@ pub struct CodingAgentSessionSummary {
     pub active_leaf_id: Option<String>,
 }
 
+/// Lightweight durable-session facts for list surfaces.
+///
+/// Manifest fields are combined with only the first `SessionCreated` frame to
+/// recover `cwd`; no transcript, usage, or later event is replayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodingAgentSessionOverview {
+    pub session_id: String,
+    pub name: Option<String>,
+    pub cwd: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub active_leaf_id: Option<String>,
+}
+
 /// Complete read-only transcript projection for the current session leaf.
 ///
 /// This DTO contains presentation facts only. It does not expose repository

@@ -4,8 +4,8 @@ use crate::app::prompt_runtime::PromptRuntimeOptions;
 use crate::authorization::ToolAuthorizationMode;
 use crate::runtime::facade::{
     CodingAgentPublicError, CodingAgentSession, CodingAgentSessionHydration,
-    CodingAgentSessionOptions, CodingAgentSessionTranscriptItem, CodingAgentSessionTree,
-    CodingSessionError, ProfileId,
+    CodingAgentSessionOptions, CodingAgentSessionOverview, CodingAgentSessionTranscriptItem,
+    CodingAgentSessionTree, CodingSessionError, ProfileId,
 };
 use agent_core::api::transcript::{SessionEntry, SessionTreeNode};
 use ai::api::client::AiClient;
@@ -326,6 +326,17 @@ pub struct CodingAgentSessionCatalog {
     pub truncated: bool,
 }
 
+/// Bounded lightweight directory for idle and session-picker surfaces.
+///
+/// Each entry combines manifest facts with the cwd from only the first
+/// `SessionCreated` frame. Unlike [`CodingAgentSessionCatalog`], this query
+/// does not replay transcripts and therefore has no `entry_count`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodingAgentSessionOverviewCatalog {
+    pub overviews: Vec<CodingAgentSessionOverview>,
+    pub truncated: bool,
+}
+
 /// Product-owned cumulative usage facts for a hydrated session.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CodingAgentSessionUsage {
@@ -445,6 +456,35 @@ impl CodingAgentSessionQuery {
     pub fn catalog(&self) -> Result<CodingAgentSessionCatalog, CodingAgentPublicError> {
         self.catalog_internal()
             .map_err(CodingAgentPublicError::from)
+    }
+
+    /// List durable sessions without replaying their event logs.
+    ///
+    /// The manifest is read for every candidate and only its first bounded,
+    /// checksummed `SessionCreated` frame is decoded to recover cwd. Later
+    /// event frames, transcript state, and usage are never read.
+    pub fn overviews(&self) -> Result<CodingAgentSessionOverviewCatalog, CodingAgentPublicError> {
+        self.overviews_internal()
+            .map_err(CodingAgentPublicError::from)
+    }
+
+    pub(crate) fn overviews_internal(
+        &self,
+    ) -> Result<CodingAgentSessionOverviewCatalog, CodingSessionError> {
+        let Some(options) = &self.options else {
+            return Ok(CodingAgentSessionOverviewCatalog {
+                overviews: Vec::new(),
+                truncated: false,
+            });
+        };
+        let (overviews, truncated) = CodingAgentSession::list_overviews_internal(
+            options.clone(),
+            MAX_SESSION_QUERY_CHOICES,
+        )?;
+        Ok(CodingAgentSessionOverviewCatalog {
+            overviews,
+            truncated,
+        })
     }
 
     pub(crate) fn catalog_internal(&self) -> Result<CodingAgentSessionCatalog, CodingSessionError> {
@@ -1308,6 +1348,7 @@ mod tests {
 
         let query = CodingAgentSessionQuery::global().expect("global query resolves product root");
         let catalog = query.catalog().expect("global catalog is readable");
+        let overviews = query.overviews().expect("global overviews are readable");
         let ids = catalog
             .choices
             .iter()
@@ -1319,12 +1360,18 @@ mod tests {
             std::collections::BTreeSet::from(["sess_global_query_a", "sess_global_query_b"])
         );
         assert!(!catalog.truncated);
+        assert_eq!(overviews.overviews.len(), 2);
+        assert!(!overviews.truncated);
         let options = query.options.as_ref().expect("global query is persistent");
         assert_eq!(options.cwd(), None);
         assert_eq!(
             options.default_agent_profile_id(),
             Some(&ProfileId::from("default"))
         );
+        let (bounded, truncated) =
+            CodingAgentSession::list_overviews_internal(options.clone(), 1).unwrap();
+        assert_eq!(bounded.len(), 1);
+        assert!(truncated);
     }
 
     #[tokio::test]
@@ -1346,6 +1393,76 @@ mod tests {
         assert_eq!(catalog.choices[0].id, "sess_override_root_visible");
     }
 
+    #[tokio::test]
+    async fn session_overviews_match_full_catalog_without_replaying_transcripts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        let session = CodingAgentSession::create_internal(
+            CodingAgentSessionOptions::new()
+                .with_cwd(PathBuf::from("/overview-project"))
+                .with_session_id("sess_overview_fields")
+                .with_session_name("Overview name")
+                .with_session_log_root(&root)
+                .with_default_agent_profile_id(ProfileId::from("default")),
+        )
+        .await
+        .unwrap();
+        drop(session);
+        let query = CodingAgentSessionQuery::from_session_root(&root);
+
+        let overviews = query.overviews().unwrap();
+        let catalog = query.catalog().unwrap();
+
+        assert!(!overviews.truncated);
+        assert_eq!(overviews.overviews.len(), 1);
+        assert_eq!(catalog.choices.len(), 1);
+        let overview = &overviews.overviews[0];
+        let choice = &catalog.choices[0];
+        assert_eq!(overview.session_id, choice.id);
+        assert_eq!(overview.name, choice.name);
+        assert_eq!(overview.cwd.as_deref(), Some(choice.cwd.as_str()));
+        assert_eq!(overview.created_at, choice.created_at);
+        assert_eq!(overview.updated_at, choice.updated_at);
+        assert_eq!(overview.active_leaf_id, choice.active_leaf_id);
+        assert_eq!(overview.name.as_deref(), Some("Overview name"));
+    }
+
+    #[tokio::test]
+    async fn session_overviews_read_only_the_first_bounded_creation_frame() {
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        create_query_fixture(&root, "sess_bad_later_frame").await;
+        create_query_fixture(&root, "sess_bad_first_frame").await;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.join("sess_bad_later_frame/events.jsonl"))
+            .unwrap()
+            .write_all(b"not-a-durable-frame\n")
+            .unwrap();
+        std::fs::write(
+            root.join("sess_bad_first_frame/events.jsonl"),
+            b"not-a-durable-frame\n",
+        )
+        .unwrap();
+        let query = CodingAgentSessionQuery::from_session_root(&root);
+
+        let overviews = query.overviews().unwrap();
+        let catalog = query.catalog().unwrap();
+
+        assert_eq!(overviews.overviews.len(), 1);
+        assert_eq!(overviews.overviews[0].session_id, "sess_bad_later_frame");
+        assert_eq!(
+            overviews.overviews[0].cwd.as_deref(),
+            Some("/query-fixture")
+        );
+        assert!(
+            catalog.choices.is_empty(),
+            "full catalog hydration must still reject both corrupt event logs"
+        );
+    }
+
     #[test]
     fn explicit_session_root_query_is_read_only_when_the_root_is_missing() {
         let temp = tempfile::tempdir().unwrap();
@@ -1359,6 +1476,14 @@ mod tests {
         assert!(catalog.choices.is_empty());
         assert!(!catalog.truncated);
         assert!(!missing_root.exists());
+    }
+
+    #[test]
+    fn disabled_session_overviews_are_empty() {
+        let catalog = CodingAgentSessionQuery::disabled().overviews().unwrap();
+
+        assert!(catalog.overviews.is_empty());
+        assert!(!catalog.truncated);
     }
 
     #[test]
