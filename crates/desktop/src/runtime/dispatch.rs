@@ -128,13 +128,7 @@ pub(super) async fn dispatch_idle_command(
             prompt,
             thinking_level,
             ..
-        } => match state.start_prompt(command_id, prompt, thinking_level) {
-            Ok(started) => {
-                *active = Some(started);
-                Ok(DesktopRuntimeUpdate::PromptAccepted { command_id })
-            }
-            Err(error) => Err(error),
-        },
+        } => start_prompt(state, active, command_id, prompt, thinking_level).await,
         DesktopRuntimeCommand::Abort { .. }
         | DesktopRuntimeCommand::Steer { .. }
         | DesktopRuntimeCommand::FollowUp { .. }
@@ -151,6 +145,52 @@ pub(super) async fn dispatch_idle_command(
             message: error.message,
         }
     })
+}
+
+async fn start_prompt(
+    state: &mut RuntimeState,
+    active: &mut Option<ActivePrompt>,
+    command_id: u64,
+    prompt: String,
+    thinking_level: Option<coding_agent::api::embedding::CodingAgentThinkingLevel>,
+) -> Result<DesktopRuntimeUpdate, DesktopBridgeError> {
+    let created_snapshot = if state.session.is_none() {
+        state.replace_with_new_session().await?;
+        match state.snapshot() {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                return Ok(DesktopRuntimeUpdate::PromptRejectedWithSession {
+                    command_id,
+                    metadata: state.metadata_snapshot(),
+                    snapshot: None,
+                    error: runtime_error(&error),
+                });
+            }
+        }
+    } else {
+        None
+    };
+    match state.start_prompt(command_id, prompt, thinking_level) {
+        Ok(started) => {
+            *active = Some(started);
+            Ok(match created_snapshot {
+                Some(snapshot) => DesktopRuntimeUpdate::PromptAcceptedWithSession {
+                    command_id,
+                    snapshot,
+                },
+                None => DesktopRuntimeUpdate::PromptAccepted { command_id },
+            })
+        }
+        Err(error) => match created_snapshot {
+            Some(snapshot) => Ok(DesktopRuntimeUpdate::PromptRejectedWithSession {
+                command_id,
+                metadata: state.metadata_snapshot(),
+                snapshot: Some(state.snapshot().unwrap_or(snapshot)),
+                error: runtime_error(&error),
+            }),
+            None => Err(error),
+        },
+    }
 }
 
 pub(super) fn dispatch_active_command(

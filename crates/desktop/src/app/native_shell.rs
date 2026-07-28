@@ -940,7 +940,11 @@ impl NativeShell {
             let composer_pane_state_before = self.composer_pane_state();
             let projection_completions = ProjectionCommandCompletions::capture(self, &update);
             match &update {
-                desktop::runtime::DesktopRuntimeUpdate::PromptAccepted { command_id } => {
+                desktop::runtime::DesktopRuntimeUpdate::PromptAccepted { command_id }
+                | desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
+                    command_id,
+                    ..
+                } => {
                     if self
                         .command_ledger
                         .complete(*command_id, &DesktopCommandIntent::Prompt)
@@ -948,6 +952,30 @@ impl NativeShell {
                     {
                         self.composer_needs_sync = true;
                         self.conversation_controller.mark_live_dirty();
+                        sessions_pane_dirty = true;
+                    }
+                }
+                desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
+                    command_id,
+                    error,
+                    ..
+                } => {
+                    if self
+                        .command_ledger
+                        .complete_rejection(
+                            *command_id,
+                            desktop::runtime::DesktopRuntimeCommandKind::SubmitPrompt,
+                        )
+                        .is_some()
+                    {
+                        let _ = self.composer.rejected(
+                            *command_id,
+                            safe_runtime_rejection_notice(
+                                desktop::runtime::DesktopRuntimeCommandKind::SubmitPrompt,
+                                &error.code,
+                            ),
+                        );
+                        sessions_pane_dirty = true;
                     }
                 }
                 desktop::runtime::DesktopRuntimeUpdate::PromptStarted { command_id, .. } => {

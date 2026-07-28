@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103、CAG-104、CAG-105、DSK-501 实现完成；CAG-102 的 cwd 摘要契约待确认）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-103、CAG-104、CAG-105、DSK-501、DSK-502 实现完成；CAG-102 的 cwd 摘要契约待确认）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-28
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -726,6 +726,27 @@ refactor(desktop): boot the runtime without an implicit session
 - 新增测试：无会话时提交 prompt，得到会话创建 + prompt accepted 的有序更新；
 - 新增测试：创建成功而启动失败时，状态可判定且无孤儿会话；
 - 新增测试：已有会话时提交路径与改动前完全一致。
+
+**实现记录（2026-07-28）**
+
+- `SubmitPrompt` 在 idle state 没有 session 时，先在同一运行时线程创建会话并取得初始
+  hydrated snapshot，随后立即走原 `start_prompt` 准备与 task 启动路径；已有 session 时
+  仍返回原 `PromptAccepted`，未改变 prompt task、ProductEvent drain 或 terminal 顺序；
+- 新增 `PromptAcceptedWithSession`，用一个 priority update 原子表达「会话已建立且 prompt
+  已接受」，其中 snapshot 可直接建立产品投影；没有先发 `SessionChanged` 再等待
+  `PromptAccepted`，因此 shell 不需要两步状态机；
+- 创建会话本身失败时仍返回普通 `CommandRejected`，不产生 active owner。创建成功后
+  `start_prompt` 失败则采用计划允许的「明确报告已建立会话」契约：
+  `PromptRejectedWithSession` 始终携带真实 session metadata 与安全错误投影，并在 hydration
+  成功时同时携带完整 snapshot。之所以不做假回滚，是因为 persistent `create_session`
+  返回前已写 manifest/event log，而当前没有 delete API；即使 transcript/recovery hydration
+  本身失败，UI 仍知道已建立的 session id 并可重新打开，不会形成不可见孤儿；
+- DesktopProjection 与既有 NativeShell 已识别两种新 update：成功时按 prompt admission
+  完成并原子替换 session，失败时保留草稿、安装 session 并显示类型化拒绝；待机 Home 的
+  实际 composer 接线仍属于 DSK-503；
+- 新增测试覆盖首次提交的创建 + 接受 + 完整 ProductEvent/terminal 投影、创建失败、创建后
+  prompt 启动失败，以及已有 session 仍走旧路径。runtime 定向集为 `32/32`，dependency
+  boundary `16/16`、Desktop lib `198 passed / 5 ignored` 通过。
 
 **建议提交**
 

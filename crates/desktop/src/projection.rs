@@ -469,6 +469,22 @@ impl DesktopProjection {
             DesktopRuntimeUpdate::SessionChanged { snapshot, .. } => {
                 self.replace_runtime_snapshot(snapshot, true, None)
             }
+            DesktopRuntimeUpdate::PromptAcceptedWithSession { snapshot, .. } => {
+                self.replace_runtime_snapshot(snapshot, true, None)
+            }
+            DesktopRuntimeUpdate::PromptRejectedWithSession {
+                metadata,
+                snapshot,
+                error,
+                ..
+            } => {
+                let outcome = match snapshot {
+                    Some(snapshot) => self.replace_runtime_snapshot(snapshot, true, None),
+                    None => self.replace_metadata_snapshot(metadata),
+                };
+                self.push_issue(DesktopProjectionIssue::new(error.code, error.message));
+                outcome
+            }
             DesktopRuntimeUpdate::PromptStarted {
                 operation_id,
                 metadata,

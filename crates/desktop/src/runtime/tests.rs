@@ -33,7 +33,7 @@ use crate::projection::{
 };
 
 use super::bridge::build_desktop_runtime;
-use super::dispatch::dispatch_active_command;
+use super::dispatch::{dispatch_active_command, dispatch_idle_command};
 use super::driver::*;
 use super::protocol::*;
 use super::*;
@@ -750,6 +750,147 @@ async fn prompt_submission_forwards_product_events_and_returns_the_session_owner
         Some(DesktopRuntimeUpdate::SessionChanged { command_id: 11, .. })
     ));
     bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, _) = DesktopRuntimeBridge::spawn(options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+
+    bridge
+        .try_submit_prompt(13, "first desktop prompt", None)
+        .unwrap();
+    let Some(DesktopRuntimeUpdate::PromptAcceptedWithSession {
+        command_id: 13,
+        snapshot: created,
+    }) = bridge.next_update().await
+    else {
+        panic!("first prompt should atomically publish its created session");
+    };
+    let session_id = created.session.session.session_id.clone();
+    assert!(created.transcript.items.is_empty());
+    let mut projection = DesktopProjection::new(created).unwrap();
+
+    let finished = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let update = bridge.next_update().await.unwrap();
+            assert!(!matches!(
+                projection.apply(update.clone()),
+                DesktopProjectionApply::NeedsResync
+            ));
+            if let DesktopRuntimeUpdate::PromptFinished {
+                command_id: 13,
+                snapshot,
+                ..
+            } = update
+            {
+                assert_eq!(snapshot.session.session.session_id, session_id);
+                assert!(snapshot.transcript.items.iter().any(|item| matches!(
+                    item,
+                    CodingAgentSessionTranscriptItem::User { text }
+                        if text == "first desktop prompt"
+                )));
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(finished.is_ok(), "first sessionless prompt did not finish");
+
+    bridge.try_list_sessions(14).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionsListed { sessions, .. }) = bridge.next_update().await
+    else {
+        panic!("created prompt session should be visible in the catalog");
+    };
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|session| session.session_id == session_id)
+            .count(),
+        1
+    );
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_creation_failure_rejects_the_first_prompt_without_an_active_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, _) = isolated_options(&temp);
+    let blocked_session_root = temp.path().join("blocked-session-root");
+    std::fs::write(&blocked_session_root, "not a directory").unwrap();
+    let options = CodingAgentEmbeddingOptions::new(temp.path().join("project"))
+        .with_session_dir(&blocked_session_root)
+        .with_model_id("claude-sonnet-4-5");
+    let (mut bridge, _) = DesktopRuntimeBridge::spawn(options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+
+    bridge
+        .try_submit_prompt(15, "cannot create this session", None)
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 15,
+            command: DesktopRuntimeCommandKind::SubmitPrompt,
+            ..
+        })
+    ));
+    assert!(blocked_session_root.is_file());
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn prompt_start_failure_reports_the_session_that_was_already_created() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let context = CodingAgentEmbeddingContext::load(options).unwrap();
+    let mut state = RuntimeState {
+        context,
+        session: None,
+        fail_next_prompt_start: true,
+    };
+    let mut active = None;
+
+    let update = dispatch_idle_command(
+        &mut state,
+        &mut active,
+        DesktopRuntimeCommand::SubmitPrompt {
+            command_id: 16,
+            prompt: "prompt start failure".into(),
+            thinking_level: None,
+        },
+    )
+    .await;
+    let DesktopRuntimeUpdate::PromptRejectedWithSession {
+        command_id: 16,
+        metadata,
+        snapshot: Some(snapshot),
+        error,
+    } = update
+    else {
+        panic!("post-creation failure must report the retained session atomically");
+    };
+    assert_eq!(error.code, "session");
+    assert_eq!(error.message, "injected desktop prompt start failure");
+    assert_eq!(
+        metadata.session.as_ref().unwrap().session.session_id,
+        snapshot.session.session.session_id
+    );
+    assert!(active.is_none());
+    assert_eq!(
+        state.session.as_ref().unwrap().view().session_id,
+        snapshot.session.session.session_id
+    );
+    assert_eq!(state.session_catalog().unwrap().0.len(), 1);
+
+    let mut session = state.session.take().unwrap();
+    session.shutdown().await.unwrap();
 }
 
 #[tokio::test]

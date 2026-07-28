@@ -47,6 +47,8 @@ pub(super) const DESKTOP_CLIENT_ID: &str = "evo-desktop";
 pub(super) struct RuntimeState {
     pub(super) context: CodingAgentEmbeddingContext,
     pub(super) session: Option<CodingAgentSession>,
+    #[cfg(test)]
+    pub(super) fail_next_prompt_start: bool,
 }
 
 impl RuntimeState {
@@ -258,6 +260,12 @@ impl RuntimeState {
         prompt: String,
         thinking_level: Option<CodingAgentThinkingLevel>,
     ) -> Result<ActivePrompt, DesktopBridgeError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_prompt_start) {
+            return Err(DesktopBridgeError::Session {
+                message: "injected desktop prompt start failure".into(),
+            });
+        }
         let mut session = self
             .session
             .take()
@@ -381,6 +389,8 @@ pub(super) async fn run_runtime(
     let mut state = RuntimeState {
         context,
         session: None,
+        #[cfg(test)]
+        fail_next_prompt_start: false,
     };
     let initial = DesktopRuntimeReadySnapshot {
         project: state.context.snapshot().clone(),

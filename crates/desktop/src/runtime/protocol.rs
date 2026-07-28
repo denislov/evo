@@ -311,6 +311,16 @@ pub enum DesktopRuntimeUpdate {
     PromptAccepted {
         command_id: u64,
     },
+    PromptAcceptedWithSession {
+        command_id: u64,
+        snapshot: DesktopRuntimeHydratedSnapshot,
+    },
+    PromptRejectedWithSession {
+        command_id: u64,
+        metadata: DesktopRuntimeMetadataSnapshot,
+        snapshot: Option<DesktopRuntimeHydratedSnapshot>,
+        error: DesktopRuntimeError,
+    },
     PromptStarted {
         command_id: u64,
         operation_id: String,
@@ -374,6 +384,8 @@ impl DesktopRuntimeUpdate {
             Self::SessionsListed { .. } => "sessions_listed",
             Self::SelectionChanged { .. } => "selection_changed",
             Self::PromptAccepted { .. } => "prompt_accepted",
+            Self::PromptAcceptedWithSession { .. } => "prompt_accepted_with_session",
+            Self::PromptRejectedWithSession { .. } => "prompt_rejected_with_session",
             Self::PromptStarted { .. } => "prompt_started",
             Self::ProductEvent { .. } => "product_event",
             Self::ResyncRequired { .. } => "resync_required",
