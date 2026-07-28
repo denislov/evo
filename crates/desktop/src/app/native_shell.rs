@@ -489,7 +489,6 @@ impl NativeShell {
                     ConversationHeaderEvent::SelectNextSessionProfile => {
                         this.select_next_session_profile(cx);
                     }
-                    ConversationHeaderEvent::CycleThinking => this.cycle_thinking_selection(cx),
                     ConversationHeaderEvent::Abort => this.abort_active_operation(cx),
                 },
             ),
@@ -561,10 +560,6 @@ impl NativeShell {
                 &status_bar,
                 window,
                 |this, _, event: &StatusBarEvent, _, cx| match event {
-                    StatusBarEvent::SelectNextModel => this.select_next_model(cx),
-                    StatusBarEvent::SelectNextSessionProfile => {
-                        this.select_next_session_profile(cx);
-                    }
                     StatusBarEvent::CycleThinking => this.cycle_thinking_selection(cx),
                 },
             ),
@@ -2594,6 +2589,7 @@ impl NativeShell {
         if inspector_overlay_changed {
             self.notify_inspector_pane(cx);
         }
+        self.notify_conversation_header(cx);
         self.notify_overlay_host(cx);
         cx.notify();
     }
@@ -2607,6 +2603,7 @@ impl NativeShell {
         if inspector_overlay_changed {
             self.notify_inspector_pane(cx);
         }
+        self.notify_conversation_header(cx);
         self.notify_overlay_host(cx);
         cx.notify();
     }
@@ -3429,35 +3426,12 @@ impl NativeShell {
     fn status_bar_view_model(&self) -> StatusBarViewModel {
         let snapshot = self.projection.snapshot();
         let project = self.projection.project();
-        let composer_running = snapshot.active_operation.is_some();
-        let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
-        let reload_pending = self.command_ledger.contains(&DesktopCommandIntent::Reload);
-        let selection_pending = self
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)));
         let thinking = self
             .thinking_selection
             .label(project.settings.default_thinking_level.as_deref());
 
         StatusBarViewModel {
             status: self.semantic_status(),
-            selector_disabled: composer_running
-                || awaiting_prompt_start
-                || reload_pending
-                || selection_pending,
-            model_cycle_available: project
-                .models
-                .iter()
-                .filter(|model| model.supports_text && (model.configured || model.selected))
-                .take(2)
-                .count()
-                > 1,
-            profile_cycle_available: project.profiles.len() > 1,
-            model: Arc::from(truncate_label(&project.selected_model_id, 14)),
-            profile: Arc::from(truncate_label(
-                snapshot.session.default_agent_profile_id.as_str(),
-                12,
-            )),
             thinking: Arc::from(truncate_label(&thinking, 12)),
             changed_file_count: snapshot.context.changes.len(),
             notice: self.preference_notice.as_deref().map(Arc::from),
@@ -3542,13 +3516,11 @@ impl NativeShell {
                 snapshot.session.default_agent_profile_id.as_str(),
                 9,
             )),
-            thinking: Arc::from(
-                self.thinking_selection
-                    .label(project.settings.default_thinking_level.as_deref()),
-            ),
             project_name: Arc::from(project_name),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             panel_visibility: self.visibility(),
+            narrow_sessions_open: self.narrow_sessions_open,
+            narrow_context_open: self.narrow_context_open,
             sessions_panel_width: self.preferences.sessions_panel_width,
             context_panel_width: self.preferences.context_panel_width,
         }
@@ -4193,10 +4165,13 @@ mod tests {
             assert!(primary.right() <= secondary.left());
             assert!(primary.left() >= status.left() && secondary.right() <= status.right());
 
-            assert_eq!(
-                cx.debug_bounds("desktop-status-configuration").is_some(),
-                width >= 1_200.,
-                "model/profile/thinking footer controls fold before medium width"
+            assert!(
+                cx.debug_bounds("desktop-status-configuration").is_none(),
+                "model and profile belong only to the header selector"
+            );
+            assert!(
+                cx.debug_bounds("desktop-status-thinking").is_some(),
+                "the temporary thinking selector remains available in the status bar"
             );
         }
     }
@@ -4692,6 +4667,7 @@ mod tests {
                 "desktop-hit-toggle-inspector",
                 "desktop-hit-submit-composer",
                 "desktop-header-model-profile",
+                "desktop-status-thinking",
             ] {
                 assert_minimum_hit_target(cx, selector);
             }
@@ -4699,7 +4675,6 @@ mod tests {
 
         cx.simulate_resize(size(px(1_300.), px(900.)));
         cx.run_until_parked();
-        assert_minimum_hit_target(cx, "desktop-hit-cycle-model");
         assert_minimum_hit_target(cx, "desktop-hit-create-session");
     }
 
@@ -6303,7 +6278,7 @@ mod tests {
         assert!(shell.contains("ConversationHeaderEvent::Reload"));
         assert!(shell.contains("ConversationHeaderEvent::SelectNextModel"));
         assert!(shell.contains("ConversationHeaderEvent::SelectNextSessionProfile"));
-        assert!(shell.contains("ConversationHeaderEvent::CycleThinking"));
+        assert!(!header.contains("ConversationHeaderEvent::CycleThinking"));
         assert!(shell.contains("ConversationHeaderEvent::Abort"));
         assert!(header.contains("ConversationHeaderViewModel"));
         assert!(shell.contains("conversation_header_view_model"));
@@ -6316,6 +6291,14 @@ mod tests {
         assert!(header.contains("header-overflow"));
         assert!(header.contains("Reload local resources"));
         assert!(header.contains("Inspector"));
+        assert!(header.contains("DesktopIcon::PanelLeft"));
+        assert!(header.contains("DesktopIcon::PanelRight"));
+        assert!(header.contains("DesktopIcon::Overflow"));
+        assert!(header.contains("DesktopSelector::new("));
+        assert!(!header.contains(".label(\"Sessions\")"));
+        assert!(!header.contains(".label(\"Inspector\")"));
+        assert!(!header.contains(".label(\"...\")"));
+        assert!(!header.contains("thinking: Arc<str>"));
         assert!(!header.contains("conversation_controller.render_dirty_sequences"));
     }
 
@@ -6344,12 +6327,10 @@ mod tests {
         assert!(shell.contains("status_bar: gpui::Entity<StatusBar>"));
         assert!(shell.contains("let status_bar = self.status_bar.clone()"));
         assert!(bar.contains("impl EventEmitter<StatusBarEvent>"));
-        assert!(shell.contains("StatusBarEvent::SelectNextModel"));
-        assert!(shell.contains("this.select_next_model(cx)"));
-        assert!(shell.contains("StatusBarEvent::SelectNextSessionProfile"));
-        assert!(shell.contains("this.select_next_session_profile(cx)"));
         assert!(shell.contains("StatusBarEvent::CycleThinking"));
         assert!(shell.contains("this.cycle_thinking_selection(cx)"));
+        assert!(!bar.contains("StatusBarEvent::SelectNextModel"));
+        assert!(!bar.contains("StatusBarEvent::SelectNextSessionProfile"));
         assert!(bar.contains("StatusBarViewModel"));
         assert!(shell.contains("status_bar_view_model"));
         assert!(!bar.contains("WeakEntity"));
@@ -6362,6 +6343,12 @@ mod tests {
         assert!(!bar.contains("truncate_label(&notice, 28)"));
         assert!(bar.contains("status-details"));
         assert!(bar.contains("Commands Ctrl/Cmd+K"));
+        assert!(bar.contains("desktop-status-thinking"));
+        assert!(!bar.contains("desktop-status-configuration"));
+        assert!(!bar.contains("cycle-model"));
+        assert!(!bar.contains("cycle-session-profile"));
+        assert!(!bar.contains("model: Arc<str>"));
+        assert!(!bar.contains("profile: Arc<str>"));
         assert!(!bar.contains("conversation_controller.render_dirty_sequences"));
     }
 

@@ -4,32 +4,25 @@ use gpui::{
     div, prelude::*, px, rgb,
 };
 use gpui_component::{
-    Disableable as _,
     button::Button,
     menu::{DropdownMenu as _, PopupMenuItem},
 };
 use std::sync::Arc;
 
 use super::{
+    desktop_controls::DesktopSelector,
     desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
     semantic_status_color,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StatusBarEvent {
-    SelectNextModel,
-    SelectNextSessionProfile,
     CycleThinking,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StatusBarViewModel {
     pub(super) status: SemanticStatus,
-    pub(super) selector_disabled: bool,
-    pub(super) model_cycle_available: bool,
-    pub(super) profile_cycle_available: bool,
-    pub(super) model: Arc<str>,
-    pub(super) profile: Arc<str>,
     pub(super) thinking: Arc<str>,
     pub(super) changed_file_count: usize,
     pub(super) notice: Option<Arc<str>>,
@@ -66,8 +59,6 @@ impl Render for StatusBar {
         let notice = view_model.notice.clone();
         let notice_for_menu = notice.clone();
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
-        let viewport_width = u32::from(window.viewport_size().width);
-        let show_configuration = viewport_width >= 1_200;
 
         div()
             .id("status-panel")
@@ -127,51 +118,18 @@ impl Render for StatusBar {
                     .gap_token(DesignSpace::Sm)
                     .font_family(MONOSPACE_FONT_FAMILY)
                     .text_color(rgb(theme.subtle_text.value()))
-                    .when(show_configuration, |bar| {
-                        bar.child(
-                            div()
-                                .debug_selector(|| "desktop-status-configuration".into())
-                                .flex()
-                                .items_center()
-                                .gap_token(DesignSpace::Sm)
-                                .child(
-                                    Button::new("cycle-model")
-                                        .debug_selector(|| "desktop-hit-cycle-model".into())
-                                        .compact()
-                                        .label(format!("M {}", view_model.model))
-                                        .tooltip("Select the next configured text model")
-                                        .disabled(
-                                            view_model.selector_disabled
-                                                || !view_model.model_cycle_available,
-                                        )
-                                        .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.emit(StatusBarEvent::SelectNextModel);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("cycle-session-profile")
-                                        .compact()
-                                        .label(format!("P {}", view_model.profile))
-                                        .tooltip("Select the next session agent profile")
-                                        .disabled(
-                                            view_model.selector_disabled
-                                                || !view_model.profile_cycle_available,
-                                        )
-                                        .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.emit(StatusBarEvent::SelectNextSessionProfile);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("cycle-thinking")
-                                        .compact()
-                                        .label(format!("T {}", view_model.thinking))
-                                        .tooltip("Cycle the composer thinking override")
-                                        .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.emit(StatusBarEvent::CycleThinking);
-                                        })),
-                                ),
+                    .child(
+                        DesktopSelector::new(
+                            "cycle-thinking",
+                            format!("T {}", view_model.thinking),
+                            "Cycle the composer thinking override",
                         )
-                    })
+                        .build()
+                        .debug_selector(|| "desktop-status-thinking".into())
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(StatusBarEvent::CycleThinking);
+                        })),
+                    )
                     .when_some(notice_for_menu, |bar, notice| {
                         bar.child(
                             Button::new("status-details")

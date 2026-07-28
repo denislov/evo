@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use super::{
     conversation_focus_accent,
+    desktop_controls::{DesktopIcon, DesktopIconButton, DesktopSelector},
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
     semantic_status_color,
 };
@@ -22,7 +23,6 @@ pub(super) enum ConversationHeaderEvent {
     ToggleInspector,
     SelectNextModel,
     SelectNextSessionProfile,
-    CycleThinking,
     Reload,
     Abort,
 }
@@ -38,10 +38,11 @@ pub(super) struct ConversationHeaderViewModel {
     pub(super) profile_cycle_available: bool,
     pub(super) model: Arc<str>,
     pub(super) profile: Arc<str>,
-    pub(super) thinking: Arc<str>,
     pub(super) project_name: Arc<str>,
     pub(super) keyboard_focus_visible: bool,
     pub(super) panel_visibility: PanelVisibility,
+    pub(super) narrow_sessions_open: bool,
+    pub(super) narrow_context_open: bool,
     pub(super) sessions_panel_width: u32,
     pub(super) context_panel_width: u32,
 }
@@ -74,26 +75,42 @@ impl Render for ConversationHeader {
         let theme = SemanticTheme::GEEK_DARK;
         let status = view_model.status;
         let viewport = window.viewport_size();
-        let workspace_width = ShellLayout::resolve_with_panel_widths(
+        let layout = ShellLayout::resolve_with_panel_widths(
             u32::from(viewport.width),
             u32::from(viewport.height),
             view_model.panel_visibility,
             view_model.sessions_panel_width,
             view_model.context_panel_width,
-        )
-        .workspace
-        .width;
-        let model_profile_label = if workspace_width >= 680 {
+        );
+        let forced_layout = ShellLayout::resolve_with_panel_widths(
+            u32::from(viewport.width),
+            u32::from(viewport.height),
+            PanelVisibility::default(),
+            view_model.sessions_panel_width,
+            view_model.context_panel_width,
+        );
+        let sessions_open = if forced_layout.sessions.is_some() {
+            view_model.panel_visibility.sessions
+        } else {
+            view_model.narrow_sessions_open
+        };
+        let inspector_open = if forced_layout.context.is_some() {
+            view_model.panel_visibility.context
+        } else {
+            view_model.narrow_context_open
+        };
+        let model_profile_label = if layout.workspace.width >= 680 {
             format!("{} / {}", view_model.model, view_model.profile)
         } else {
-            "Model / profile".into()
+            view_model.model.to_string()
         };
+        let model_profile_accessible_label =
+            format!("Model {}, profile {}", view_model.model, view_model.profile);
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let focus_accent = conversation_focus_accent(focused, theme);
 
         let model_target = cx.entity().downgrade();
         let profile_target = cx.entity().downgrade();
-        let thinking_target = cx.entity().downgrade();
         let reload_target = cx.entity().downgrade();
 
         div()
@@ -115,14 +132,25 @@ impl Render for ConversationHeader {
                     .items_center()
                     .gap_token(DesignSpace::Sm)
                     .child(
-                        Button::new("toggle-sessions")
-                            .debug_selector(|| "desktop-hit-toggle-sessions".into())
-                            .compact()
-                            .label("Sessions")
-                            .tooltip("Show or hide Sessions")
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(ConversationHeaderEvent::ToggleSessions);
-                            })),
+                        DesktopIconButton::new(
+                            "toggle-sessions",
+                            if sessions_open {
+                                DesktopIcon::PanelLeftClose
+                            } else {
+                                DesktopIcon::PanelLeftOpen
+                            },
+                            if sessions_open {
+                                "Hide Sessions panel"
+                            } else {
+                                "Show Sessions panel"
+                            },
+                        )
+                        .selected(sessions_open)
+                        .build()
+                        .debug_selector(|| "desktop-hit-toggle-sessions".into())
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(ConversationHeaderEvent::ToggleSessions);
+                        })),
                     )
                     .child(
                         div()
@@ -173,75 +201,72 @@ impl Render for ConversationHeader {
                             .child(status.label()),
                     )
                     .child(
-                        Button::new("header-model-profile")
-                            .debug_selector(|| "desktop-header-model-profile".into())
-                            .compact()
-                            .label(model_profile_label)
-                            .tooltip("Model, profile, and thinking settings")
-                            .dropdown_menu(move |menu, _, _| {
-                                let model_target = model_target.clone();
-                                let profile_target = profile_target.clone();
-                                let thinking_target = thinking_target.clone();
-                                menu.item(
-                                    PopupMenuItem::new(format!(
-                                        "Next model · {}",
-                                        view_model.model
-                                    ))
-                                        .disabled(
-                                            view_model.selector_disabled
-                                                || !view_model.model_cycle_available,
-                                        )
-                                        .on_click(move |_, _, cx| {
-                                            if let Some(target) = model_target.upgrade() {
-                                                target.update(cx, |_, cx| {
-                                                    cx.emit(ConversationHeaderEvent::SelectNextModel);
-                                                });
-                                            }
-                                        }),
-                                )
-                                .item(
-                                    PopupMenuItem::new(format!(
-                                        "Next profile · {}",
-                                        view_model.profile
-                                    ))
+                        DesktopSelector::new(
+                            "header-model-profile",
+                            model_profile_label,
+                            model_profile_accessible_label,
+                        )
+                        .disabled(view_model.selector_disabled)
+                        .build()
+                        .debug_selector(|| "desktop-header-model-profile".into())
+                        .dropdown_menu(move |menu, _, _| {
+                            let model_target = model_target.clone();
+                            let profile_target = profile_target.clone();
+                            menu.item(
+                                PopupMenuItem::new(format!("Next model · {}", view_model.model))
                                     .disabled(
                                         view_model.selector_disabled
-                                            || !view_model.profile_cycle_available,
+                                            || !view_model.model_cycle_available,
                                     )
                                     .on_click(move |_, _, cx| {
-                                        if let Some(target) = profile_target.upgrade() {
+                                        if let Some(target) = model_target.upgrade() {
                                             target.update(cx, |_, cx| {
-                                                cx.emit(
-                                                    ConversationHeaderEvent::SelectNextSessionProfile,
-                                                );
+                                                cx.emit(ConversationHeaderEvent::SelectNextModel);
                                             });
                                         }
                                     }),
+                            )
+                            .item(
+                                PopupMenuItem::new(format!(
+                                    "Next profile · {}",
+                                    view_model.profile
+                                ))
+                                .disabled(
+                                    view_model.selector_disabled
+                                        || !view_model.profile_cycle_available,
                                 )
-                                .item(
-                                    PopupMenuItem::new(format!(
-                                        "Thinking · {}",
-                                        view_model.thinking
-                                    ))
-                                        .on_click(move |_, _, cx| {
-                                            if let Some(target) = thinking_target.upgrade() {
-                                                target.update(cx, |_, cx| {
-                                                    cx.emit(ConversationHeaderEvent::CycleThinking);
-                                                });
-                                            }
-                                        }),
-                                )
-                            }),
+                                .on_click(move |_, _, cx| {
+                                    if let Some(target) = profile_target.upgrade() {
+                                        target.update(cx, |_, cx| {
+                                            cx.emit(
+                                                ConversationHeaderEvent::SelectNextSessionProfile,
+                                            );
+                                        });
+                                    }
+                                }),
+                            )
+                        }),
                     )
                     .child(
-                        Button::new("toggle-inspector")
-                            .debug_selector(|| "desktop-hit-toggle-inspector".into())
-                            .compact()
-                            .label("Inspector")
-                            .tooltip("Show or hide Inspector · Ctrl/Cmd+\\")
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(ConversationHeaderEvent::ToggleInspector);
-                            })),
+                        DesktopIconButton::new(
+                            "toggle-inspector",
+                            if inspector_open {
+                                DesktopIcon::PanelRightClose
+                            } else {
+                                DesktopIcon::PanelRightOpen
+                            },
+                            if inspector_open {
+                                "Hide Inspector panel · Ctrl/Cmd+\\"
+                            } else {
+                                "Show Inspector panel · Ctrl/Cmd+\\"
+                            },
+                        )
+                        .selected(inspector_open)
+                        .build()
+                        .debug_selector(|| "desktop-hit-toggle-inspector".into())
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(ConversationHeaderEvent::ToggleInspector);
+                        })),
                     )
                     .when(view_model.composer_running, |actions| {
                         actions.child(
@@ -261,29 +286,31 @@ impl Render for ConversationHeader {
                         )
                     })
                     .child(
-                        Button::new("header-overflow")
-                            .debug_selector(|| "desktop-header-overflow".into())
-                            .compact()
-                            .label("...")
-                            .tooltip("More conversation actions")
-                            .dropdown_menu(move |menu, _, _| {
-                                let reload_target = reload_target.clone();
-                                menu.item(
-                                    PopupMenuItem::new(if view_model.reload_pending {
-                                        "Reloading local resources…"
-                                    } else {
-                                        "Reload local resources"
-                                    })
-                                    .disabled(view_model.selector_disabled)
-                                    .on_click(move |_, _, cx| {
-                                        if let Some(target) = reload_target.upgrade() {
-                                            target.update(cx, |_, cx| {
-                                                cx.emit(ConversationHeaderEvent::Reload);
-                                            });
-                                        }
-                                    }),
-                                )
-                            }),
+                        DesktopIconButton::new(
+                            "header-overflow",
+                            DesktopIcon::Overflow,
+                            "More conversation actions",
+                        )
+                        .build()
+                        .debug_selector(|| "desktop-header-overflow".into())
+                        .dropdown_menu(move |menu, _, _| {
+                            let reload_target = reload_target.clone();
+                            menu.item(
+                                PopupMenuItem::new(if view_model.reload_pending {
+                                    "Reloading local resources…"
+                                } else {
+                                    "Reload local resources"
+                                })
+                                .disabled(view_model.selector_disabled)
+                                .on_click(move |_, _, cx| {
+                                    if let Some(target) = reload_target.upgrade() {
+                                        target.update(cx, |_, cx| {
+                                            cx.emit(ConversationHeaderEvent::Reload);
+                                        });
+                                    }
+                                }),
+                            )
+                        }),
                     ),
             )
             .into_any_element()
