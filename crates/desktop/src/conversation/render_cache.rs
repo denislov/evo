@@ -5,15 +5,67 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use unicode_width::UnicodeWidthStr as _;
+
 use super::{
     ConversationBlockKind, ConversationItemKey, MAX_TRANSCRIPT_BLOCKS, bounded_markdown_preview,
-    conversation_block_height,
 };
+use crate::shell::USER_MESSAGE_WIDTH_PERCENT;
 
 pub const STREAMING_MARKDOWN_SETTLE_DELAY: Duration = Duration::from_millis(100);
 pub const MAX_SETTLING_MARKDOWN_BYTES: usize = 64 * 1024;
 pub const MAX_ROW_RENDER_CACHE_ENTRIES: usize = MAX_TRANSCRIPT_BLOCKS + 256;
 pub const MAX_ROW_RENDER_CACHE_BYTES: usize = 40 * 1024 * 1024;
+
+fn estimated_text_rows(text: &str, columns: usize, limit: usize) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut rows = 0usize;
+    for line in text.lines().take(limit) {
+        rows = rows.saturating_add(line.width().max(1).div_ceil(columns));
+        if rows >= limit {
+            return limit;
+        }
+    }
+    rows.max(1).min(limit)
+}
+
+pub fn conversation_block_height(
+    kind: ConversationBlockKind,
+    text: &str,
+    detail: &str,
+    panel_width: u32,
+) -> f32 {
+    let effective_width = if kind == ConversationBlockKind::User {
+        panel_width.saturating_mul(USER_MESSAGE_WIDTH_PERCENT) / 100
+    } else {
+        panel_width
+    };
+    let columns = (effective_width.saturating_sub(128) as usize / 8).max(24);
+    let main_rows = estimated_text_rows(text, columns, 22);
+    let detail_rows = estimated_text_rows(detail, columns.saturating_sub(4).max(20), 14);
+    let chrome = match kind {
+        ConversationBlockKind::Diagnostic => 58.0,
+        ConversationBlockKind::User => 66.0,
+        _ => 72.0,
+    };
+    let main_height = main_rows.max(1) as f32 * 22.0;
+    let detail_height = if detail_rows == 0 {
+        0.0
+    } else if kind == ConversationBlockKind::Assistant {
+        42.0 + detail_rows as f32 * 19.0
+    } else {
+        24.0 + detail_rows as f32 * 19.0
+    };
+    let minimum = match kind {
+        ConversationBlockKind::Diagnostic => 86.0,
+        ConversationBlockKind::User => 94.0,
+        ConversationBlockKind::Tool => 106.0,
+        _ => 110.0,
+    };
+    (chrome + main_height + detail_height).max(minimum)
+}
 
 #[derive(Debug)]
 pub struct ConversationRowRenderSource<'a> {
@@ -337,6 +389,18 @@ mod tests {
 
     fn cache_contains_row(cache: &ConversationRowRenderCache, row_id: &str) -> bool {
         cache.entries.keys().any(|key| key.row_id() == row_id)
+    }
+
+    #[test]
+    fn conversation_row_estimates_use_display_width_for_unicode() {
+        assert_eq!(super::estimated_text_rows("abcdefghij", 10, 20), 1);
+        assert_eq!(super::estimated_text_rows("界界界界界", 10, 20), 1);
+        assert_eq!(super::estimated_text_rows("界界界界界界", 10, 20), 2);
+        assert_eq!(super::estimated_text_rows("🙂🙂🙂🙂🙂", 10, 20), 1);
+        assert_eq!(
+            super::estimated_text_rows("e\u{301}e\u{301}e\u{301}", 3, 20),
+            1
+        );
     }
 
     #[test]
