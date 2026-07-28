@@ -20,7 +20,8 @@
 | `DSK-301` | 完成 | 七个纯逻辑 owner 已拆分，`conversation/mod.rs` 仅保留稳定 re-export；生产依赖为无环 DAG；全量、15/15 boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `VUI-000` | 完成 | 七个 fixture 已 review；文档第二节七条问题经确认全部纳入改造范围 |
 | `VUI-101` | 完成 | 已接入 `gpui-component-assets` 的 Lucide 图标源并建立控件权重阶梯；全量、boundary、七个 visual fixture（零像素变化）通过 |
-| `VUI-102` 至 `VUI-106` | 未开始 | 结构与视觉 foundation 前置均已满足，按 Pane lane 顺序推进 |
+| `VUI-102` | 完成 | Header 已使用 panel/overflow icon 与唯一 model/profile selector；StatusBar 仅保留临时 thinking selector 和被动状态；全量、七个 reviewed golden 与两组 performance gate 通过 |
+| `VUI-103` 至 `VUI-106` | 未开始 | 结构与视觉 foundation 前置均已满足，按 Pane lane 顺序推进 |
 | `VUI-201` | 未开始 | 等 `VUI-102` 至 `VUI-106` 完成后统一全局视觉节奏和层级 |
 
 `DSK-000` 在 2026-07-28 记录的既有 Clippy 红灯：
@@ -926,6 +927,31 @@ owner、稳定 re-export、无业务实现的 `mod.rs` 和上述无环方向。�
 - wide/medium/narrow 无文本溢出、按钮换行或布局跳动；
 - keyboard focus 和快捷键行为保持不变。
 
+**完成记录（2026-07-28）**
+
+- `Sessions` 与 `Inspector` 已改为 bundled panel-left/panel-right icon toggle，图标和
+  accessible label 会按 docked panel 或 narrow overlay 的真实开闭状态切换；
+- `...` 已改为 bundled overflow icon；reload 仍位于原 typed dropdown event；
+- Header 使用唯一的 model/profile `DesktopSelector`，显示当前值和 caret，原有
+  selection disabled/admission 规则不变；thinking 字段和 event 已从 Header contract 删除；
+- StatusBar 的 model/profile 字段、event 和控件已删除；临时 thinking selector 是其
+  唯一配置入口，lifecycle、changed-file count、notice 与 command hint 保持被动展示；
+- Abort 继续使用危险色文字和 pending disabled 状态，没有退化为仅图标；
+- overlay activate/dismiss 会刷新 Header DTO，因此 narrow drawer 的图标、tooltip 和
+  accessible label 不会显示过期状态；
+- 三档 viewport 无 Header/StatusBar overlap，五项主控件均保持最小 hit target；
+  responsive drawer、authorization、keyboard-focus、typed owner 测试通过；
+- Desktop 全量单线程验证 184 项通过、5 项 release fixture 忽略，boundary 15/15；
+  `cargo check -p desktop --all-targets`、fmt 和 diff check 通过；
+- 七个 before/after/diff 已人工 review 并安装，安装后 wide、medium、narrow、
+  authorization、reduced-motion、keyboard-focus、no-color 全部 `RMSE=0`；
+- headless 10k-row CPU frame P95 `3.324 ms`、input roundtrip P95 `6.562 ms`、
+  input Change-to-render P95 `341 us`、window RSS growth `24,834,048 bytes`；
+- native GPU present P95 `6.377 ms`、input-to-post-render P95 `8.340 ms`、
+  steady RSS growth `36 KiB`、production Markdown completion P95 `141 us`；
+- Desktop Clippy 仍仅 `DSK-000` 的两项既有红灯。交互式
+  `desktop-click-to-photon.sh` 需要人工按键采样，本任务未把它计作自动通过项。
+
 ### VUI-103：重做 Sessions 管理列表
 
 **优先级：P1**
@@ -1179,11 +1205,10 @@ VUI task 的评审顺序：
 
 结构 lane、视觉基线和共享控件 foundation 已全部完成。下一批按 Pane lane 推进：
 
-1. `VUI-102`：简化 Header 与 StatusBar；
-2. `VUI-103`：重做 Sessions 管理列表；
-3. `VUI-104`：重做 Composer 输入与提交区；
-4. `VUI-105`：收敛 Inspector 与 Overlay 控件；
-5. `VUI-106`：降低 Conversation 永久按钮密度。
+1. `VUI-103`：重做 Sessions 管理列表；
+2. `VUI-104`：重做 Composer 输入与提交区；
+3. `VUI-105`：收敛 Inspector 与 Overlay 控件；
+4. `VUI-106`：降低 Conversation 永久按钮密度。
 
 这些任务的结构前置和 `VUI-101` 均已满足。虽然 Pane 主文件不同，但它们共享
 `native_shell.rs` 集成和 visual golden，因此在当前工作树按上述顺序落地和验收，
@@ -1193,9 +1218,9 @@ VUI task 的评审顺序：
 ## 十一、当前推进状态（2026-07-28）
 
 结构 lane（`DSK-000`、`DSK-101` 至 `DSK-105`、`DSK-201`、`DSK-202`、
-`DSK-301`）已全部完成；`VUI-000` 与 `VUI-101` 也已完成。当前没有未满足的视觉
-前置。
+`DSK-301`）已全部完成；`VUI-000`、`VUI-101` 与 `VUI-102` 也已完成。当前没有
+未满足的视觉前置。
 
-下一关键路径是依次完成 `VUI-102`、`VUI-103`、`VUI-104`、`VUI-105` 和
-`VUI-106`，每项分别执行交互、accessibility、responsive、visual golden 和性能
-验收。之后进入 `VUI-201` 做全局视觉节奏与层级收敛。当前立即推进 `VUI-102`。
+下一关键路径是依次完成 `VUI-103`、`VUI-104`、`VUI-105` 和 `VUI-106`，每项分别
+执行交互、accessibility、responsive、visual golden 和性能验收。之后进入
+`VUI-201` 做全局视觉节奏与层级收敛。当前立即推进 `VUI-103`。
