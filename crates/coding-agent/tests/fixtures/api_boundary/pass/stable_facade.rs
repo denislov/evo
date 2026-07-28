@@ -62,6 +62,8 @@ fn prompt() -> PromptTurnOptions {
 
 fn session_queries(context: &CodingAgentEmbeddingContext) -> Result<(), CodingAgentPublicError> {
     let query: CodingAgentSessionQuery = context.session_query()?;
+    touch(CodingAgentSessionQuery::global()?);
+    touch(CodingAgentSessionQuery::from_session_root("sessions"));
     let bootstrap: CodingAgentSessionBootstrap = context.session_bootstrap();
     touch(bootstrap.clone().with_session_id("session"));
     touch(bootstrap.clone().with_new_session());

@@ -400,6 +400,31 @@ impl CodingAgentSessionQuery {
         Self { options: None }
     }
 
+    /// Build a read-only query for the product-global durable session root.
+    ///
+    /// Resolution preserves the existing product precedence:
+    /// `EVO_SESSION_DIR`, then `EVO_DIR/sessions`, then `~/.evo/sessions`.
+    /// This does not load project configuration or create a session runtime.
+    pub fn global() -> Result<Self, CodingAgentPublicError> {
+        resolve_session_dir(Path::new("."), None, None)
+            .map(Self::from_session_root)
+            .map_err(CodingAgentPublicError::from)
+    }
+
+    /// Build a read-only query for an explicit durable session root.
+    ///
+    /// The remaining repository inputs use product defaults so callers do not
+    /// need a cwd, profile registry, or [`CodingAgentEmbeddingContext`](crate::api::embedding::CodingAgentEmbeddingContext).
+    pub fn from_session_root(root: impl Into<PathBuf>) -> Self {
+        Self {
+            options: Some(
+                CodingAgentSessionOptions::new()
+                    .with_session_log_root(root)
+                    .with_default_agent_profile_id(ProfileId::from("default")),
+            ),
+        }
+    }
+
     pub(crate) fn from_run_options(
         session_options: &Option<SessionRunOptions>,
     ) -> Result<Self, CodingSessionError> {
@@ -1198,6 +1223,19 @@ mod tests {
     use agent_core::api::transcript::StoredAgentMessage;
     use ai::api::conversation::ContentBlock;
 
+    async fn create_query_fixture(root: &Path, session_id: &str) {
+        let session = CodingAgentSession::create_internal(
+            CodingAgentSessionOptions::new()
+                .with_cwd(PathBuf::from("/query-fixture"))
+                .with_session_id(session_id)
+                .with_session_log_root(root)
+                .with_default_agent_profile_id(ProfileId::from("default")),
+        )
+        .await
+        .expect("query fixture session is created");
+        drop(session);
+    }
+
     #[test]
     fn default_sessions_root_uses_evo_dir() {
         let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
@@ -1226,6 +1264,71 @@ mod tests {
         let root = resolve_session_dir(Path::new("."), None, None).unwrap();
 
         assert_eq!(root, global.path().join("sessions"));
+    }
+
+    #[tokio::test]
+    async fn global_session_query_lists_two_sessions_without_embedding_context() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR", "EVO_SESSION_DIR"]);
+        let global = tempfile::tempdir().unwrap();
+        env.set_evo_dir(global.path());
+        env.remove("EVO_SESSION_DIR");
+        let session_root = global.path().join("sessions");
+        create_query_fixture(&session_root, "sess_global_query_a").await;
+        create_query_fixture(&session_root, "sess_global_query_b").await;
+
+        let query = CodingAgentSessionQuery::global().expect("global query resolves product root");
+        let catalog = query.catalog().expect("global catalog is readable");
+        let ids = catalog
+            .choices
+            .iter()
+            .map(|choice| choice.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            ids,
+            std::collections::BTreeSet::from(["sess_global_query_a", "sess_global_query_b"])
+        );
+        assert!(!catalog.truncated);
+        let options = query.options.as_ref().expect("global query is persistent");
+        assert_eq!(options.cwd(), None);
+        assert_eq!(
+            options.default_agent_profile_id(),
+            Some(&ProfileId::from("default"))
+        );
+    }
+
+    #[tokio::test]
+    async fn evo_session_dir_overrides_the_default_global_query_root() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR", "EVO_SESSION_DIR"]);
+        let global = tempfile::tempdir().unwrap();
+        let override_root = tempfile::tempdir().unwrap();
+        env.set_evo_dir(global.path());
+        create_query_fixture(&global.path().join("sessions"), "sess_default_root_hidden").await;
+        create_query_fixture(override_root.path(), "sess_override_root_visible").await;
+        env.set("EVO_SESSION_DIR", override_root.path());
+
+        let catalog = CodingAgentSessionQuery::global()
+            .expect("override query resolves")
+            .catalog()
+            .expect("override catalog is readable");
+
+        assert_eq!(catalog.choices.len(), 1);
+        assert_eq!(catalog.choices[0].id, "sess_override_root_visible");
+    }
+
+    #[test]
+    fn explicit_session_root_query_is_read_only_when_the_root_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_root = temp.path().join("not-created");
+        let query = CodingAgentSessionQuery::from_session_root(&missing_root);
+
+        let catalog = query
+            .catalog()
+            .expect("missing root projects an empty catalog");
+
+        assert!(catalog.choices.is_empty());
+        assert!(!catalog.truncated);
+        assert!(!missing_root.exists());
     }
 
     #[test]

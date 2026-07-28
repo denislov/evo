@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 代码与自动验收已完成；物理 click-to-photon 待人工，下一项 CAG-101）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101 实现完成、全量基线 gate 待修复，下一项 CAG-102）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-28
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -345,6 +345,28 @@ fix(desktop): keep transcript rows anchored when details toggle
 - 新增测试：在临时 `EVO_DIR` 下创建两个会话，用新构造器（不经 `EmbeddingContext`）能列出两条；
 - 新增测试：`EVO_SESSION_DIR` 覆盖生效；
 - `cargo test -p coding-agent` 全绿，CLI/TUI 无改动。
+
+**实现记录（2026-07-28）**
+
+- 新增 `CodingAgentSessionQuery::global()`，复用 `resolve_session_dir` 保持
+  `EVO_SESSION_DIR > EVO_DIR/sessions > ~/.evo/sessions`；新增
+  `from_session_root(root)` 供受控嵌入与测试显式指定根路径；两者均不加载
+  `CodingAgentEmbeddingContext`，现有 `from_run_options` 与 `context.session_query()`
+  零改动；
+- cwd-free 构造器保持 `CodingAgentSessionOptions::cwd == None`，这是底层“不过滤 cwd”
+  的产品语义；若设为字面 `"."`，`SessionService::list` 会错误排除其他项目的会话。
+  default profile 使用产品默认 `ProfileId("default")`，调用方只提供可选 session root；
+- 新增临时 `EVO_DIR` 下两个持久会话的 global catalog 测试、
+  `EVO_SESSION_DIR` 覆盖测试、显式缺失根只读且不创建目录测试；稳定 facade
+  compile-pass fixture 同时锁定两个公开构造器；
+- 直接相关 gate 已通过：coding-agent lib `737/737`、API boundary `14/14`、
+  lib-only Clippy `-D warnings`、CLI binary `174/174`、TUI 全量 `140/140`、fmt 与
+  `git diff --check`；
+- 仓库当前缺少已被 `events_snapshot` 通过 `include_str!` 引用的
+  `docs/product-event-contract.md`，因此 `cargo test -p coding-agent` 与 all-target
+  Clippy 在编译该既有 integration target 时失败；CLI 全量另有 4 项既有
+  `ai` ownership 文本边界失败。本提交未改这些文件，故不伪报“全绿”；CAG-101
+  的实现与兼容性证据已闭环，但其“全量 gate 全绿”完成条件继续保留为待修复项。
 
 **建议提交**
 
