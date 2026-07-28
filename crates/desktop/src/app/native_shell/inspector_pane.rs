@@ -13,7 +13,11 @@ use std::sync::Arc;
 
 use super::{
     DesktopFileReviewState, InspectorSection, actions,
-    desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
+    desktop_controls::{
+        DesktopActionRow, DesktopControlSize, DesktopCriticalButton, DesktopCriticalTone,
+        DesktopIcon, DesktopIconButton, DesktopRowState,
+    },
+    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +37,9 @@ pub(super) enum InspectorPaneEvent {
 #[derive(Clone)]
 pub(super) struct InspectorChangedFileView {
     pub(super) request: CodingAgentFileReviewRequest,
-    pub(super) label: String,
+    pub(super) mutation_kind: String,
+    pub(super) file_name: String,
+    pub(super) path: String,
 }
 
 #[derive(Clone)]
@@ -136,20 +142,45 @@ impl Render for InspectorPane {
         let file_review_pending = view_model.file_review_pending;
         let external_editor_pending = view_model.external_editor_pending;
         let change_count = view_model.change_count;
+        let selected_review_request = match view_model.file_review.as_ref() {
+            DesktopFileReviewState::Empty => None,
+            DesktopFileReviewState::Loading(request)
+            | DesktopFileReviewState::Failed { request, .. } => Some(request),
+            DesktopFileReviewState::Ready(document) => Some(&document.request),
+        };
         let changed_file_rows = view_model
             .changed_files
             .iter()
             .enumerate()
             .map(|(index, change)| {
                 let request = change.request.clone();
-                Button::new(("changed-file-review", index))
-                    .compact()
-                    .label(change.label.clone())
-                    .tooltip("Load this product-authorized changed-file review")
-                    .disabled(composer_running || awaiting_prompt_start || file_review_pending)
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(InspectorPaneEvent::RequestFileReview(request.clone()));
-                    }))
+                let selected = selected_review_request == Some(&change.request);
+                DesktopActionRow::new(
+                    ("changed-file-review", index),
+                    change.file_name.clone(),
+                    format!("{} changed file {}", change.mutation_kind, change.path),
+                )
+                .state(DesktopRowState {
+                    selected,
+                    disabled: composer_running || awaiting_prompt_start || file_review_pending,
+                    focus_visible: false,
+                })
+                .size(DesktopControlSize::Critical)
+                .leading(
+                    div()
+                        .rounded_token(DesignRadius::Sm)
+                        .bg(rgb(theme.canvas.value()))
+                        .px_token(DesignSpace::Xs)
+                        .text_token(DesignText::Metadata)
+                        .text_color(rgb(theme.accent.value()))
+                        .child(change.mutation_kind.clone()),
+                )
+                .detail(change.path.clone())
+                .build(theme)
+                .debug_selector(move || format!("desktop-changed-file-row-{index}"))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(InspectorPaneEvent::RequestFileReview(request.clone()));
+                }))
             })
             .collect::<Vec<_>>();
         let omitted_changed_files = change_count.saturating_sub(changed_file_rows.len());
@@ -255,42 +286,54 @@ impl Render for InspectorPane {
                     .child(
                         div()
                             .flex()
-                            .flex_wrap()
                             .gap_token(DesignSpace::Sm)
                             .child(
-                                Button::new("copy-review-path")
-                                    .compact()
-                                    .label("Copy path")
-                                    .tooltip("Copy the reviewed project-relative path")
-                                    .on_click(cx.listener(|_, _, _, cx| {
+                                DesktopIconButton::new(
+                                    "copy-review-path",
+                                    DesktopIcon::Copy,
+                                    "Copy the reviewed project-relative path",
+                                )
+                                .build()
+                                .debug_selector(|| "desktop-hit-copy-review-path".into())
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| {
                                         cx.emit(InspectorPaneEvent::CopyReviewPath);
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("copy-file-review")
-                                    .compact()
-                                    .label("Copy review")
-                                    .tooltip("Copy the bounded read-only file review")
-                                    .on_click(cx.listener(|_, _, _, cx| {
+                                DesktopIconButton::new(
+                                    "copy-file-review",
+                                    DesktopIcon::Copy,
+                                    "Copy the bounded read-only file review",
+                                )
+                                .build()
+                                .debug_selector(|| "desktop-hit-copy-file-review".into())
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| {
                                         cx.emit(InspectorPaneEvent::CopyFileReview);
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("open-external-editor")
-                                    .compact()
-                                    .label("Open editor")
-                                    .tooltip(
-                                        "Revalidate and open this file in the configured editor",
-                                    )
-                                    .disabled(
-                                        !view_model.external_editor_configured
-                                            || external_editor_pending
-                                            || composer_running
-                                            || awaiting_prompt_start,
-                                    )
-                                    .on_click(cx.listener(|_, _, _, cx| {
+                                DesktopIconButton::new(
+                                    "open-external-editor",
+                                    DesktopIcon::OpenExternal,
+                                    "Revalidate and open this file in the configured editor",
+                                )
+                                .busy(external_editor_pending)
+                                .build()
+                                .debug_selector(|| "desktop-hit-open-external-editor".into())
+                                .disabled(
+                                    !view_model.external_editor_configured
+                                        || composer_running
+                                        || awaiting_prompt_start,
+                                )
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| {
                                         cx.emit(InspectorPaneEvent::OpenExternalEditor);
-                                    })),
+                                    },
+                                )),
                             ),
                     )
                     .child(
@@ -364,26 +407,28 @@ impl Render for InspectorPane {
                     .child("INSPECTOR")
                     .when(context_is_overlay, |header| {
                         header.child(
-                            Button::new("close-inspector")
-                                .debug_selector(|| "desktop-hit-close-inspector".into())
-                                .compact()
-                                .label("Close")
-                                .tooltip("Close Inspector")
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(InspectorPaneEvent::Close);
-                                })),
+                            DesktopIconButton::new(
+                                "close-inspector",
+                                DesktopIcon::Close,
+                                "Close Inspector",
+                            )
+                            .build()
+                            .debug_selector(|| "desktop-hit-close-inspector".into())
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(InspectorPaneEvent::Close);
+                            })),
                         )
                     }),
             )
             .child(
                 div()
                     .id("inspector-tabs")
+                    .debug_selector(|| "desktop-inspector-tabs".into())
                     .role(Role::TabList)
                     .aria_label("Inspector sections")
                     .px_token(DesignSpace::Sm)
                     .py_token(DesignSpace::Sm)
                     .flex()
-                    .flex_wrap()
                     .gap_token(DesignSpace::Xs)
                     .border_b_1()
                     .border_color(rgb(theme.divider.value()))
@@ -409,17 +454,19 @@ impl Render for InspectorPane {
                         cx,
                     ))
                     .child(
-                        Badge::new()
-                            .count(runtime_attention_count)
-                            .max(99)
-                            .color(rgb(theme.warning.value()))
-                            .child(inspector_section_button(
-                                "inspector-runtime",
-                                "Runtime",
-                                InspectorSection::Runtime,
-                                selected_section,
-                                cx,
-                            )),
+                        div().flex_1().min_w_0().child(
+                            Badge::new()
+                                .count(runtime_attention_count)
+                                .max(99)
+                                .color(rgb(theme.warning.value()))
+                                .child(inspector_section_button(
+                                    "inspector-runtime",
+                                    "Runtime",
+                                    InspectorSection::Runtime,
+                                    selected_section,
+                                    cx,
+                                )),
+                        ),
                     ),
             )
             .child(
@@ -597,9 +644,14 @@ fn inspector_section_button(
     let active = section == selected;
     Button::new(id)
         .compact()
+        .h(px(DesktopControlSize::Compact.pixels()))
+        .w_full()
+        .flex_1()
+        .min_w_0()
         .selected(active)
-        .label(format!("{} {label}", if active { "●" } else { "○" }))
+        .label(label)
         .tooltip(format!("Show {label} details"))
+        .debug_selector(move || format!("desktop-inspector-tab-{}", label.to_lowercase()))
         .on_click(cx.listener(move |_, _, _, cx| {
             cx.emit(InspectorPaneEvent::SelectSection(section));
         }))
@@ -613,15 +665,20 @@ fn recovery_button(
     disabled: bool,
     cx: &gpui::Context<InspectorPane>,
 ) -> Button {
-    Button::new(id)
-        .compact()
-        .label(label)
-        .tooltip(match action {
-            DesktopRecoveryAction::Retry => "Retry this authoritative recovery",
-            DesktopRecoveryAction::MarkFailed => "Resolve this recovery as failed",
-            DesktopRecoveryAction::Abort => "Resolve this recovery as aborted",
-        })
+    let tooltip = match action {
+        DesktopRecoveryAction::Retry => "Retry this authoritative recovery",
+        DesktopRecoveryAction::MarkFailed => "Resolve this recovery as failed",
+        DesktopRecoveryAction::Abort => "Resolve this recovery as aborted",
+    };
+    let tone = match action {
+        DesktopRecoveryAction::Retry => DesktopCriticalTone::Neutral,
+        DesktopRecoveryAction::MarkFailed | DesktopRecoveryAction::Abort => {
+            DesktopCriticalTone::Dangerous
+        }
+    };
+    DesktopCriticalButton::new(id, label, tooltip, tone)
         .disabled(disabled)
+        .build()
         .on_click(cx.listener(move |_, _, _, cx| {
             cx.emit(InspectorPaneEvent::Recovery {
                 identity: identity.clone(),

@@ -81,6 +81,10 @@ pub(super) trait DesktopStyledExt: Styled + Sized {
         self.py(px(spacing.pixels()))
     }
 
+    fn pl_token(self, spacing: DesignSpace) -> Self {
+        self.pl(px(spacing.pixels()))
+    }
+
     fn gap_token(self, spacing: DesignSpace) -> Self {
         self.gap(px(spacing.pixels()))
     }
@@ -116,9 +120,9 @@ mod tests {
         assert_eq!(DesignSpace::Md.pixels(), 12.);
         assert_eq!(DesignSpace::Lg.pixels(), 16.);
         assert_eq!(DesignSpace::Xl.pixels(), 24.);
-        assert_eq!(DesignRadius::Sm.pixels(), 6.);
-        assert_eq!(DesignRadius::Md.pixels(), 10.);
-        assert_eq!(DesignRadius::Lg.pixels(), 12.);
+        assert_eq!(DesignRadius::Sm.pixels(), 4.);
+        assert_eq!(DesignRadius::Md.pixels(), 6.);
+        assert_eq!(DesignRadius::Lg.pixels(), 8.);
         assert_eq!(DesignText::Metadata.metrics(), (12., 16.));
         assert_eq!(DesignText::Body.metrics(), (14., 21.));
         assert_eq!(DesignText::Title.metrics(), (16., 24.));

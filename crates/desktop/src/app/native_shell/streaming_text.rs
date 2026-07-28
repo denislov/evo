@@ -8,9 +8,12 @@ use gpui::{
     InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ParentElement as _, Pixels,
     SharedString, Styled as _, WeakEntity, Window, div,
 };
-use gpui_component::{button::Button, text::TextView};
+use gpui_component::text::TextView;
 
-use super::conversation_pane::{ConversationPane, ConversationPaneEvent};
+use super::{
+    conversation_pane::{ConversationPane, ConversationPaneEvent},
+    desktop_controls::{DesktopIcon, DesktopIconButton},
+};
 
 const MARKDOWN_COMPLETION_TRACE_ENV: &str = "EVO_DESKTOP_MARKDOWN_TRACE";
 
@@ -100,19 +103,21 @@ impl MarkdownCompletionTraceElement {
             .code_block_actions(move |code_block, _, _| {
                 let code = code_block.code().to_string();
                 let event_target = event_target.clone();
-                Button::new("copy-markdown-code")
-                    .debug_selector(|| "desktop-copy-markdown-code".into())
-                    .compact()
-                    .label("Copy code")
-                    .tooltip("Copy this code block")
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                        if let Some(target) = event_target.upgrade() {
-                            target.update(cx, |_, cx| {
-                                cx.emit(ConversationPaneEvent::CopyCodeCompleted);
-                            });
-                        }
-                    })
+                DesktopIconButton::new(
+                    "copy-markdown-code",
+                    DesktopIcon::Copy,
+                    "Copy this code block",
+                )
+                .build()
+                .debug_selector(|| "desktop-copy-markdown-code".into())
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                    if let Some(target) = event_target.upgrade() {
+                        target.update(cx, |_, cx| {
+                            cx.emit(ConversationPaneEvent::CopyCodeCompleted);
+                        });
+                    }
+                })
             })
             .into_any_element()
     }

@@ -7,11 +7,12 @@ use gpui::{
     Entity, EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, SharedString,
     Styled as _, Window, div, prelude::*, px, rgb, rgba,
 };
-use gpui_component::{Disableable as _, Selectable as _, button::Button};
+use gpui_component::{Selectable as _, button::Button};
 use std::sync::Arc;
 
 use super::{
     ConversationFullMessageView, DesktopPaletteCommand, InspectorPane, PALETTE_ENTRIES, actions,
+    desktop_controls::{DesktopCriticalButton, DesktopCriticalTone},
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 
@@ -193,125 +194,115 @@ impl Render for OverlayHost {
                         .child(self.sessions_pane.clone()),
                 )
         });
-        let authorization_overlay = view_model.authorization.map(|authorization| {
-            let request = authorization.request;
-            let decision_pending = authorization.decision_pending;
-            let mut details = vec![
-                format!("operation  {}", request.operation_id),
-                format!(
-                    "tool       {} · {}",
-                    request.tool_name, request.tool_call_id
-                ),
-                format!("risk       {:?}", request.risk),
-                format!("scope      {}", authorization_scope_text(&request.scope)),
-            ];
-            if let Some(path) = request.preview.path.as_ref() {
-                details.push(format!("path       {path}"));
-            }
-            if let Some(cwd) = request.preview.cwd.as_ref() {
-                details.push(format!("cwd        {cwd}"));
-            }
-            if let Some(command) = request.preview.command.as_ref() {
-                details.push(format!("command\n{command}"));
-            }
-            if let Some(content) = request.preview.content_preview.as_ref() {
-                details.push(format!("content preview\n{content}"));
-            }
-            let identity = request.identity();
-            let allow_once = identity.clone();
-            let allow_operation = identity.clone();
-            overlay_surface("authorization-overlay", &self.authorization_focus)
-                .role(Role::AlertDialog)
-                .aria_label("Authorization required")
-                .aria_description(request.preview.summary.clone())
-                .key_context(actions::AUTHORIZATION_KEY_CONTEXT)
-                .child(
-                    div()
-                        .id("authorization-dialog")
-                        .w_full()
-                        .max_w(px(720.))
-                        .max_h(max_height)
-                        .overflow_hidden()
-                        .rounded_token(DesignRadius::Md)
-                        .border_1()
-                        .border_color(rgb(theme.warning.value()))
-                        .bg(rgb(theme.elevated.value()))
-                        .p_token(DesignSpace::Xl)
-                        .flex()
-                        .flex_col()
-                        .gap_token(DesignSpace::Md)
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .text_color(rgb(theme.warning.value()))
-                                .child("AUTHORIZATION REQUIRED")
-                                .child(if decision_pending {
-                                    "decision pending…"
-                                } else {
-                                    "explicit decision required"
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_color(rgb(theme.text.value()))
-                                .whitespace_normal()
-                                .child(request.preview.summary),
-                        )
-                        .child(
-                            div()
-                                .id("authorization-details")
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .font_family(MONOSPACE_FONT_FAMILY)
-                                .flex()
-                                .flex_col()
-                                .gap_token(DesignSpace::Sm)
-                                .children(details.into_iter().map(|detail| {
-                                    div()
-                                        .whitespace_normal()
-                                        .text_color(rgb(theme.muted_text.value()))
-                                        .child(detail)
-                                })),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap_token(DesignSpace::Sm)
-                                .child(authorization_button(
-                                    "deny-authorization",
-                                    "1 · Deny",
-                                    "Deny this authorization request · 1",
-                                    identity,
-                                    ToolAuthorizationDecision::Deny {
-                                        reason: Some("denied from native desktop".into()),
-                                    },
-                                    decision_pending,
-                                    cx,
-                                ))
-                                .child(authorization_button(
-                                    "allow-authorization-once",
-                                    "2 · Allow once",
-                                    "Allow this exact request once · 2",
-                                    allow_once,
-                                    ToolAuthorizationDecision::AllowOnce,
-                                    decision_pending,
-                                    cx,
-                                ))
-                                .child(authorization_button(
-                                    "allow-authorization-operation",
-                                    "3 · Allow for operation",
-                                    "Allow this scope for the current operation · 3",
-                                    allow_operation,
-                                    ToolAuthorizationDecision::AllowForOperation,
-                                    decision_pending,
-                                    cx,
-                                )),
-                        ),
-                )
-        });
+        let authorization_overlay =
+            view_model.authorization.map(|authorization| {
+                let request = authorization.request;
+                let decision_pending = authorization.decision_pending;
+                let mut details = vec![
+                    ("operation", request.operation_id.clone()),
+                    (
+                        "tool",
+                        format!("{} · {}", request.tool_name, request.tool_call_id),
+                    ),
+                    ("risk", format!("{:?}", request.risk)),
+                    ("scope", authorization_scope_text(&request.scope)),
+                ];
+                if let Some(path) = request.preview.path.as_ref() {
+                    details.push(("path", path.clone()));
+                }
+                if let Some(cwd) = request.preview.cwd.as_ref() {
+                    details.push(("cwd", cwd.clone()));
+                }
+                if let Some(command) = request.preview.command.as_ref() {
+                    details.push(("command", command.clone()));
+                }
+                if let Some(content) = request.preview.content_preview.as_ref() {
+                    details.push(("content preview", content.clone()));
+                }
+                let identity = request.identity();
+                let allow_once = identity.clone();
+                let allow_operation = identity.clone();
+                overlay_surface("authorization-overlay", &self.authorization_focus)
+                    .role(Role::AlertDialog)
+                    .aria_label("Authorization required")
+                    .aria_description(request.preview.summary.clone())
+                    .key_context(actions::AUTHORIZATION_KEY_CONTEXT)
+                    .child(
+                        div()
+                            .id("authorization-dialog")
+                            .w_full()
+                            .max_w(px(720.))
+                            .max_h(max_height)
+                            .overflow_hidden()
+                            .rounded_token(DesignRadius::Md)
+                            .border_1()
+                            .border_color(rgb(theme.warning.value()))
+                            .bg(rgb(theme.elevated.value()))
+                            .p_token(DesignSpace::Xl)
+                            .flex()
+                            .flex_col()
+                            .gap_token(DesignSpace::Md)
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .text_color(rgb(theme.warning.value()))
+                                    .child("AUTHORIZATION REQUIRED")
+                                    .child(if decision_pending {
+                                        "decision pending…"
+                                    } else {
+                                        "explicit decision required"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(theme.text.value()))
+                                    .whitespace_normal()
+                                    .child(request.preview.summary),
+                            )
+                            .child(
+                                div()
+                                    .id("authorization-details")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .font_family(MONOSPACE_FONT_FAMILY)
+                                    .flex()
+                                    .flex_col()
+                                    .gap_token(DesignSpace::Sm)
+                                    .children(details.into_iter().map(|(term, value)| {
+                                        authorization_detail(term, value, theme)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "desktop-authorization-actions".into())
+                                    .flex()
+                                    .justify_end()
+                                    .gap_token(DesignSpace::Sm)
+                                    .child(authorization_button(
+                                        identity,
+                                        ToolAuthorizationDecision::Deny {
+                                            reason: Some("denied from native desktop".into()),
+                                        },
+                                        decision_pending,
+                                        cx,
+                                    ))
+                                    .child(authorization_button(
+                                        allow_once,
+                                        ToolAuthorizationDecision::AllowOnce,
+                                        decision_pending,
+                                        cx,
+                                    ))
+                                    .child(authorization_button(
+                                        allow_operation,
+                                        ToolAuthorizationDecision::AllowForOperation,
+                                        decision_pending,
+                                        cx,
+                                    )),
+                            ),
+                    )
+            });
         let full_message_overlay = view_model.full_message.as_ref().map(|message| {
             let text = SharedString::new(Arc::clone(&message.text));
             overlay_surface("full-message-overlay", &self.full_message_focus)
@@ -373,11 +364,12 @@ impl Render for OverlayHost {
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_y_scroll()
-                                .rounded_token(DesignRadius::Md)
-                                .border_1()
-                                .border_color(rgb(theme.border.value()))
+                                .border_t_1()
+                                .border_b_1()
+                                .border_color(rgb(theme.divider.value()))
                                 .bg(rgb(theme.canvas.value()))
-                                .p_token(DesignSpace::Lg)
+                                .px_token(DesignSpace::Lg)
+                                .py_token(DesignSpace::Md)
                                 .font_family(MONOSPACE_FONT_FAMILY)
                                 .whitespace_normal()
                                 .text_color(rgb(theme.text.value()))
@@ -438,24 +430,101 @@ fn overlay_surface(id: &'static str, focus: &gpui::FocusHandle) -> gpui::Statefu
 }
 
 fn authorization_button(
-    id: &'static str,
-    label: &'static str,
-    tooltip: &'static str,
     identity: ToolAuthorizationIdentity,
     decision: ToolAuthorizationDecision,
     disabled: bool,
     cx: &gpui::Context<OverlayHost>,
 ) -> Button {
-    Button::new(id)
-        .label(label)
-        .tooltip(tooltip)
-        .disabled(disabled)
-        .on_click(cx.listener(move |_, _, _, cx| {
-            cx.emit(OverlayHostEvent::DecideAuthorization {
-                identity: identity.clone(),
-                decision: decision.clone(),
-            });
-        }))
+    let presentation = authorization_decision_presentation(&decision);
+    DesktopCriticalButton::new(
+        presentation.id,
+        presentation.label,
+        presentation.tooltip,
+        presentation.tone,
+    )
+    .disabled(disabled)
+    .build()
+    .debug_selector(move || format!("desktop-hit-{}", presentation.id))
+    .child(
+        div()
+            .rounded_token(DesignRadius::Sm)
+            .border_1()
+            .px_token(DesignSpace::Xs)
+            .font_family(MONOSPACE_FONT_FAMILY)
+            .text_token(DesignText::Metadata)
+            .child(presentation.shortcut),
+    )
+    .on_click(cx.listener(move |_, _, _, cx| {
+        cx.emit(OverlayHostEvent::DecideAuthorization {
+            identity: identity.clone(),
+            decision: decision.clone(),
+        });
+    }))
+}
+
+#[derive(Clone, Copy)]
+struct AuthorizationDecisionPresentation {
+    id: &'static str,
+    label: &'static str,
+    shortcut: &'static str,
+    tooltip: &'static str,
+    tone: DesktopCriticalTone,
+}
+
+const fn authorization_decision_presentation(
+    decision: &ToolAuthorizationDecision,
+) -> AuthorizationDecisionPresentation {
+    match decision {
+        ToolAuthorizationDecision::Deny { .. } => AuthorizationDecisionPresentation {
+            id: "deny-authorization",
+            label: "Deny",
+            shortcut: "1",
+            tooltip: "Deny this authorization request · 1",
+            tone: DesktopCriticalTone::Dangerous,
+        },
+        ToolAuthorizationDecision::AllowOnce => AuthorizationDecisionPresentation {
+            id: "allow-authorization-once",
+            label: "Allow once",
+            shortcut: "2",
+            tooltip: "Allow this exact request once · 2",
+            tone: DesktopCriticalTone::Neutral,
+        },
+        ToolAuthorizationDecision::AllowForOperation => AuthorizationDecisionPresentation {
+            id: "allow-authorization-operation",
+            label: "Allow for operation",
+            shortcut: "3",
+            tooltip: "Allow this scope for the current operation · 3",
+            tone: DesktopCriticalTone::Affirmative,
+        },
+    }
+}
+
+fn authorization_detail(term: &'static str, value: String, theme: SemanticTheme) -> gpui::Div {
+    div()
+        .flex()
+        .items_start()
+        .gap_token(DesignSpace::Md)
+        .child(
+            div()
+                .debug_selector(move || {
+                    format!("desktop-authorization-term-{}", term.replace(' ', "-"))
+                })
+                .w(px(112.))
+                .flex_none()
+                .text_color(rgb(theme.subtle_text.value()))
+                .child(term),
+        )
+        .child(
+            div()
+                .debug_selector(move || {
+                    format!("desktop-authorization-value-{}", term.replace(' ', "-"))
+                })
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .text_color(rgb(theme.muted_text.value()))
+                .child(value),
+        )
 }
 
 fn authorization_scope_text(scope: &ToolAuthorizationScope) -> String {

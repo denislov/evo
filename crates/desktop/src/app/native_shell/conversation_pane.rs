@@ -8,6 +8,9 @@ use std::{collections::HashSet, rc::Rc};
 use super::{
     ConversationBlockKind, conversation_block_visual,
     conversation_controller::ConversationRenderReader,
+    desktop_controls::{
+        DesktopCriticalButton, DesktopCriticalTone, DesktopIcon, DesktopIconButton,
+    },
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
     streaming_text::StreamingText,
 };
@@ -134,9 +137,13 @@ impl Render for ConversationPane {
                         let copy_block_id = block_id.clone();
                         let copy_tool_command_block_id = block_id.clone();
                         let copy_tool_output_block_id = block_id.clone();
-                        let toggle_block_id = block_id.clone();
-                        let reasoning_toggle_block_id = block_id.clone();
                         let tool_header_toggle_block_id = block_id.clone();
+                        let tool_chevron_select_block_id = block_id.clone();
+                        let tool_chevron_toggle_block_id = block_id.clone();
+                        let reasoning_collapsed_toggle_block_id = block_id.clone();
+                        let reasoning_collapsed_chevron_block_id = block_id.clone();
+                        let reasoning_expanded_toggle_block_id = block_id.clone();
+                        let reasoning_expanded_chevron_block_id = block_id.clone();
                         let full_block_id = block_id.clone();
                         let open_tool_output_block_id = block_id.clone();
                         let hover_group = SharedString::new(format!(
@@ -291,24 +298,61 @@ impl Render for ConversationPane {
                                         .child(
                                             div()
                                                 .id(("conversation-row-header", index))
+                                                .debug_selector(|| {
+                                                    "desktop-conversation-row-header".into()
+                                                })
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()
                                                 .gap_token(DesignSpace::Md)
-                                                .pr_24()
-                                                .on_click(cx.listener(move |_, _, _, cx| {
-                                                    cx.emit(ConversationPaneEvent::Select {
-                                                        block_id: select_block_id.clone(),
-                                                        durable,
-                                                    });
-                                                }))
+                                                .pr_12()
+                                                .when(
+                                                    is_tool && has_collapsible_detail,
+                                                    |header| {
+                                                        header.debug_selector(|| {
+                                                            "desktop-tool-toggle-header".into()
+                                                        })
+                                                    },
+                                                )
                                                 .child(
                                                     div()
+                                                        .id(("conversation-row-main", index))
                                                         .flex()
                                                         .flex_1()
                                                         .min_w_0()
                                                         .items_center()
                                                         .gap_token(DesignSpace::Sm)
+                                                        .when(
+                                                            is_tool && has_collapsible_detail,
+                                                            |surface| {
+                                                                surface
+                                                                    .role(Role::Button)
+                                                                    .aria_label(
+                                                                        "Show or hide tool output and arguments",
+                                                                    )
+                                                                    .aria_expanded(detail_expanded)
+                                                            },
+                                                        )
+                                                        .on_click(cx.listener(
+                                                            move |_, _, _, cx| {
+                                                                cx.emit(
+                                                                    ConversationPaneEvent::Select {
+                                                                        block_id: select_block_id
+                                                                            .clone(),
+                                                                        durable,
+                                                                    },
+                                                                );
+                                                                if is_tool
+                                                                    && has_collapsible_detail
+                                                                {
+                                                                    cx.emit(
+                                                                        ConversationPaneEvent::ToggleDetails {
+                                                                            block_id: tool_header_toggle_block_id.clone(),
+                                                                        },
+                                                                    );
+                                                                }
+                                                            },
+                                                        ))
                                                         .when(
                                                             block.kind
                                                                 != ConversationBlockKind::User,
@@ -348,40 +392,70 @@ impl Render for ConversationPane {
                                                                 .child(SharedString::new(
                                                                     block.title.clone(),
                                                                 )),
+                                                        )
+                                                        .when_some(
+                                                            terminal_label.filter(|_| is_tool),
+                                                            |surface, label| {
+                                                                surface.child(
+                                                                    div()
+                                                                        .flex_shrink_0()
+                                                                        .text_token(
+                                                                            DesignText::Metadata,
+                                                                        )
+                                                                        .text_color(rgb(
+                                                                            visual.accent.value(),
+                                                                        ))
+                                                                        .child(label),
+                                                                )
+                                                            },
                                                         ),
                                                 )
-                                                .when_some(terminal_label, |header, label| {
-                                                    header.child(
-                                                        div()
-                                                            .flex_shrink_0()
-                                                            .text_token(DesignText::Metadata)
-                                                            .text_color(rgb(visual.accent.value()))
-                                                            .child(label),
-                                                    )
-                                                })
+                                                .when_some(
+                                                    terminal_label.filter(|_| !is_tool),
+                                                    |header, label| {
+                                                        header.child(
+                                                            div()
+                                                                .flex_shrink_0()
+                                                                .text_token(DesignText::Metadata)
+                                                                .text_color(rgb(
+                                                                    visual.accent.value(),
+                                                                ))
+                                                                .child(label),
+                                                        )
+                                                    },
+                                                )
                                                 .when(
                                                     is_tool && has_collapsible_detail,
                                                     |header| {
                                                         header.child(
-                                                            Button::new((
-                                                                "show-tool-details",
-                                                                index,
-                                                            ))
-                                                            .compact()
-                                                            .label(if detail_expanded {
-                                                                "Hide"
-                                                            } else {
-                                                                "Show"
-                                                            })
-                                                            .tooltip(
-                                                                "Show or hide tool output and arguments",
+                                                            DesktopIconButton::new(
+                                                                ("toggle-tool-details", index),
+                                                                if detail_expanded {
+                                                                    DesktopIcon::ChevronUp
+                                                                } else {
+                                                                    DesktopIcon::ChevronDown
+                                                                },
+                                                                if detail_expanded {
+                                                                    "Hide tool output and arguments"
+                                                                } else {
+                                                                    "Show tool output and arguments"
+                                                                },
                                                             )
+                                                            .build()
+                                                            .debug_selector(|| {
+                                                                "desktop-toggle-tool-details".into()
+                                                            })
                                                             .on_click(cx.listener(
                                                                 move |_, _, _, cx| {
-                                                                    cx.stop_propagation();
+                                                                    cx.emit(
+                                                                        ConversationPaneEvent::Select {
+                                                                            block_id: tool_chevron_select_block_id.clone(),
+                                                                            durable,
+                                                                        },
+                                                                    );
                                                                     cx.emit(
                                                                         ConversationPaneEvent::ToggleDetails {
-                                                                            block_id: tool_header_toggle_block_id.clone(),
+                                                                            block_id: tool_chevron_toggle_block_id.clone(),
                                                                         },
                                                                     );
                                                                 },
@@ -397,10 +471,14 @@ impl Render for ConversationPane {
                                             |card| {
                                                 card.child(
                                                     div()
+                                                        .id(("reasoning-toggle", index))
+                                                        .debug_selector(|| {
+                                                            "desktop-reasoning-toggle-header".into()
+                                                        })
                                                         .rounded_token(DesignRadius::Md)
                                                         .border_l_3()
                                                         .border_color(rgb(theme.reasoning.value()))
-                                                        .bg(rgb(theme.thinking_surface.value()))
+                                                        .bg(rgb(theme.elevated.value()))
                                                         .px_token(DesignSpace::Md)
                                                         .py_token(DesignSpace::Sm)
                                                         .flex()
@@ -410,9 +488,24 @@ impl Render for ConversationPane {
                                                         .text_color(rgb(theme.reasoning.value()))
                                                         .child(
                                                             div()
+                                                                .id(("reasoning-toggle-main", index))
                                                                 .flex_1()
                                                                 .min_w_0()
                                                                 .whitespace_normal()
+                                                                .role(Role::Button)
+                                                                .aria_label(
+                                                                    "Show reasoning details",
+                                                                )
+                                                                .aria_expanded(false)
+                                                                .on_click(cx.listener(
+                                                                    move |_, _, _, cx| {
+                                                                        cx.emit(
+                                                                            ConversationPaneEvent::ToggleDetails {
+                                                                                block_id: reasoning_collapsed_toggle_block_id.clone(),
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                ))
                                                                 .child(if let Some(duration) = &reasoning_duration_label {
                                                                     SharedString::new(format!(
                                                                         "◇ Reasoning · {duration} · collapsed"
@@ -426,19 +519,21 @@ impl Render for ConversationPane {
                                                                 }),
                                                         )
                                                         .child(
-                                                            Button::new((
-                                                                "show-reasoning",
-                                                                index,
-                                                            ))
-                                                            .compact()
-                                                            .label("Show")
-                                                            .tooltip("Show reasoning details")
+                                                            DesktopIconButton::new(
+                                                                ("show-reasoning", index),
+                                                                DesktopIcon::ChevronDown,
+                                                                "Show reasoning details",
+                                                            )
+                                                            .build()
+                                                            .debug_selector(|| {
+                                                                "desktop-toggle-reasoning-details"
+                                                                    .into()
+                                                            })
                                                             .on_click(cx.listener(
                                                                 move |_, _, _, cx| {
-                                                                    cx.stop_propagation();
                                                                     cx.emit(
                                                                         ConversationPaneEvent::ToggleDetails {
-                                                                            block_id: reasoning_toggle_block_id.clone(),
+                                                                            block_id: reasoning_collapsed_chevron_block_id.clone(),
                                                                         },
                                                                     );
                                                                 },
@@ -457,7 +552,7 @@ impl Render for ConversationPane {
                                                     .rounded_token(DesignRadius::Md)
                                                     .border_l_3()
                                                     .border_color(rgb(theme.reasoning.value()))
-                                                    .bg(rgb(theme.thinking_surface.value()))
+                                                    .bg(rgb(theme.elevated.value()))
                                                     .px_token(DesignSpace::Md)
                                                     .py_token(DesignSpace::Sm)
                                                     .flex()
@@ -465,6 +560,14 @@ impl Render for ConversationPane {
                                                     .gap_token(DesignSpace::Xs)
                                                     .child(
                                                         div()
+                                                            .id(("reasoning-toggle-expanded", index))
+                                                            .debug_selector(|| {
+                                                                "desktop-reasoning-toggle-header"
+                                                                    .into()
+                                                            })
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_between()
                                                             .text_token(DesignText::Metadata)
                                                             .font_weight(
                                                                 gpui::FontWeight::SEMIBOLD,
@@ -472,14 +575,58 @@ impl Render for ConversationPane {
                                                             .text_color(rgb(
                                                                 theme.reasoning.value(),
                                                             ))
-                                                            .child(match &reasoning_duration_label {
-                                                                Some(duration) => SharedString::new(
-                                                                    format!("◇ REASONING · {duration}"),
-                                                                ),
-                                                                None => SharedString::new(
-                                                                    "◇ REASONING",
-                                                                ),
-                                                            }),
+                                                            .child(
+                                                                div()
+                                                                    .id((
+                                                                        "reasoning-toggle-expanded-main",
+                                                                        index,
+                                                                    ))
+                                                                    .flex_1()
+                                                                    .min_w_0()
+                                                                    .role(Role::Button)
+                                                                    .aria_label(
+                                                                        "Hide reasoning details",
+                                                                    )
+                                                                    .aria_expanded(true)
+                                                                    .on_click(cx.listener(
+                                                                        move |_, _, _, cx| {
+                                                                            cx.emit(
+                                                                                ConversationPaneEvent::ToggleDetails {
+                                                                                    block_id: reasoning_expanded_toggle_block_id.clone(),
+                                                                                },
+                                                                            );
+                                                                        },
+                                                                    ))
+                                                                    .child(match &reasoning_duration_label {
+                                                                        Some(duration) => SharedString::new(
+                                                                            format!("◇ REASONING · {duration}"),
+                                                                        ),
+                                                                        None => SharedString::new(
+                                                                            "◇ REASONING",
+                                                                        ),
+                                                                    }),
+                                                            )
+                                                            .child(
+                                                                DesktopIconButton::new(
+                                                                    ("hide-reasoning", index),
+                                                                    DesktopIcon::ChevronUp,
+                                                                    "Hide reasoning details",
+                                                                )
+                                                                .build()
+                                                                .debug_selector(|| {
+                                                                    "desktop-toggle-reasoning-details"
+                                                                        .into()
+                                                                })
+                                                                .on_click(cx.listener(
+                                                                    move |_, _, _, cx| {
+                                                                        cx.emit(
+                                                                            ConversationPaneEvent::ToggleDetails {
+                                                                                block_id: reasoning_expanded_chevron_block_id.clone(),
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                )),
+                                                            ),
                                                     )
                                                     .child(
                                                         StreamingText::new(
@@ -525,13 +672,15 @@ impl Render for ConversationPane {
                                                             .gap_token(DesignSpace::Xs)
                                                             .when(tool_command.is_some(), |actions| {
                                                                 actions.child(
-                                                                    Button::new(("copy-tool-command", index))
+                                                                    DesktopIconButton::new(
+                                                                        ("copy-tool-command", index),
+                                                                        DesktopIcon::Copy,
+                                                                        "Copy the complete bounded tool command",
+                                                                    )
+                                                                        .build()
                                                                         .debug_selector(|| {
                                                                             "desktop-copy-tool-command".into()
                                                                         })
-                                                                        .compact()
-                                                                        .label("Copy command")
-                                                                        .tooltip("Copy the complete bounded tool command")
                                                                         .on_click(cx.listener(move |_, _, _, cx| {
                                                                             cx.stop_propagation();
                                                                             cx.emit(ConversationPaneEvent::CopyToolCommand {
@@ -543,13 +692,15 @@ impl Render for ConversationPane {
                                                             .when(!text.is_empty(), |actions| {
                                                                 actions
                                                                     .child(
-                                                                        Button::new(("copy-tool-output", index))
+                                                                        DesktopIconButton::new(
+                                                                            ("copy-tool-output", index),
+                                                                            DesktopIcon::Copy,
+                                                                            "Copy the complete bounded tool output",
+                                                                        )
+                                                                            .build()
                                                                             .debug_selector(|| {
                                                                                 "desktop-copy-tool-output".into()
                                                                             })
-                                                                            .compact()
-                                                                            .label("Copy output")
-                                                                            .tooltip("Copy the complete bounded tool output")
                                                                             .on_click(cx.listener(move |_, _, _, cx| {
                                                                                 cx.stop_propagation();
                                                                                 cx.emit(ConversationPaneEvent::CopyToolOutput {
@@ -558,13 +709,15 @@ impl Render for ConversationPane {
                                                                             })),
                                                                     )
                                                                     .child(
-                                                                        Button::new(("open-tool-output", index))
+                                                                        DesktopIconButton::new(
+                                                                            ("open-tool-output", index),
+                                                                            DesktopIcon::Expand,
+                                                                            "Open the complete bounded tool output",
+                                                                        )
+                                                                            .build()
                                                                             .debug_selector(|| {
                                                                                 "desktop-open-tool-output".into()
                                                                             })
-                                                                            .compact()
-                                                                            .label("Open full output")
-                                                                            .tooltip("Open the complete bounded tool output")
                                                                             .on_click(cx.listener(move |_, _, _, cx| {
                                                                                 cx.stop_propagation();
                                                                                 cx.emit(ConversationPaneEvent::OpenToolOutput {
@@ -615,11 +768,9 @@ impl Render for ConversationPane {
                                             card.child(
                                                 div()
                                                     .mt_token(DesignSpace::Xs)
-                                                    .rounded_token(DesignRadius::Md)
-                                                    .border_1()
-                                                    .border_color(rgb(theme.border.value()))
-                                                    .bg(rgb(theme.canvas.value()))
-                                                    .px_token(DesignSpace::Md)
+                                                    .border_l_1()
+                                                    .border_color(rgb(theme.divider.value()))
+                                                    .pl_token(DesignSpace::Md)
                                                     .py_token(DesignSpace::Sm)
                                                     .when(is_tool, |detail| {
                                                         detail
@@ -696,46 +847,43 @@ impl Render for ConversationPane {
                                                     .items_center()
                                                     .gap_token(DesignSpace::Xs)
                                                     .child(
-                                                        Button::new(("retry-diagnostic", index))
+                                                        conversation_recovery_button(
+                                                            ("retry-diagnostic", index),
+                                                            "Retry",
+                                                            "Retry the pending recovery",
+                                                            retry_identity,
+                                                            DesktopRecoveryAction::Retry,
+                                                            cx,
+                                                        )
                                                             .debug_selector(|| {
                                                                 "desktop-retry-diagnostic".into()
-                                                            })
-                                                            .compact()
-                                                            .label("Retry")
-                                                            .tooltip("Retry the pending recovery")
-                                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                                cx.stop_propagation();
-                                                                cx.emit(ConversationPaneEvent::Recovery {
-                                                                    identity: retry_identity.clone(),
-                                                                    action: DesktopRecoveryAction::Retry,
-                                                                });
-                                                            })),
+                                                            }),
                                                     )
                                                     .child(
-                                                        Button::new(("mark-diagnostic-failed", index))
-                                                            .compact()
-                                                            .label("Mark failed")
-                                                            .tooltip("Resolve the pending recovery as failed")
-                                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                                cx.stop_propagation();
-                                                                cx.emit(ConversationPaneEvent::Recovery {
-                                                                    identity: failed_identity.clone(),
-                                                                    action: DesktopRecoveryAction::MarkFailed,
-                                                                });
-                                                            })),
+                                                        conversation_recovery_button(
+                                                            ("mark-diagnostic-failed", index),
+                                                            "Mark failed",
+                                                            "Resolve the pending recovery as failed",
+                                                            failed_identity,
+                                                            DesktopRecoveryAction::MarkFailed,
+                                                            cx,
+                                                        )
+                                                        .debug_selector(|| {
+                                                            "desktop-mark-failed-diagnostic".into()
+                                                        }),
                                                     )
                                                     .child(
-                                                        Button::new(("abort-diagnostic", index))
-                                                            .compact()
-                                                            .label("Abort")
-                                                            .tooltip("Resolve the pending recovery as aborted")
-                                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                                cx.stop_propagation();
-                                                                cx.emit(ConversationPaneEvent::Recovery {
-                                                                    identity: identity.clone(),
-                                                                    action: DesktopRecoveryAction::Abort,
-                                                                });
-                                                            })),
+                                                        conversation_recovery_button(
+                                                            ("abort-diagnostic", index),
+                                                            "Abort",
+                                                            "Resolve the pending recovery as aborted",
+                                                            identity,
+                                                            DesktopRecoveryAction::Abort,
+                                                            cx,
+                                                        )
+                                                        .debug_selector(|| {
+                                                            "desktop-abort-diagnostic".into()
+                                                        }),
                                                     ),
                                             )
                                         })
@@ -743,37 +891,36 @@ impl Render for ConversationPane {
                                             card.child(
                                                 div()
                                                     .absolute()
-                                                    .left_4()
-                                                    .right_4()
-                                                    .bottom_2()
+                                                    .left_0()
+                                                    .right_0()
+                                                    .bottom_0()
                                                     .flex()
                                                     .items_center()
                                                     .justify_between()
                                                     .gap_token(DesignSpace::Sm)
-                                                    .rounded_token(DesignRadius::Md)
-                                                    .border_1()
+                                                    .border_t_1()
                                                     .border_color(rgb(theme.warning.value()))
                                                     .bg(rgb(theme.elevated.value()))
-                                                    .px_token(DesignSpace::Md)
+                                                    .px_token(DesignSpace::Lg)
                                                     .py_token(DesignSpace::Sm)
                                                     .text_color(rgb(theme.warning.value()))
                                                     .child(
                                                         "! preview truncated at desktop safety limit",
                                                     )
                                                     .child(
-                                                        Button::new(("open-full-message", index))
+                                                        DesktopIconButton::new(
+                                                            ("open-full-message", index),
+                                                            DesktopIcon::Expand,
+                                                            "Open the complete bounded message source",
+                                                        )
+                                                            .build()
                                                             .debug_selector(|| {
                                                                 "desktop-open-full-message".into()
                                                             })
-                                                            .compact()
-                                                            .label("Open full message")
-                                                            .tooltip(
-                                                                "Open the complete bounded message source",
-                                                            )
-                                                                .on_click(cx.listener(
-                                                                    move |_, _, _, cx| {
-                                                                        cx.emit(
-                                                                            ConversationPaneEvent::OpenFull {
+                                                            .on_click(cx.listener(
+                                                                move |_, _, _, cx| {
+                                                                    cx.emit(
+                                                                        ConversationPaneEvent::OpenFull {
                                                                             block_id: full_block_id
                                                                                 .clone(),
                                                                         },
@@ -815,42 +962,17 @@ impl Render for ConversationPane {
                                                 .top_2()
                                                 .right_2()
                                                 .flex()
-                                                .gap_token(DesignSpace::Xs)
-                                                .invisible()
-                                                .group_hover(hover_group, |style| style.visible())
-                                                .when(selected, |actions| actions.visible())
-                                                .when(has_collapsible_detail && !is_tool, |actions| {
-                                                    actions.child(
-                                                        Button::new((
-                                                            "toggle-conversation-details",
-                                                            index,
-                                                        ))
-                                                        .compact()
-                                                        .label(if detail_expanded {
-                                                            "Hide"
-                                                        } else {
-                                                            "More"
-                                                        })
-                                                        .tooltip(
-                                                            "Show or hide secondary message details",
-                                                        )
-                                                        .on_click(cx.listener(
-                                                            move |_, _, _, cx| {
-                                                                cx.stop_propagation();
-                                                                cx.emit(
-                                                                    ConversationPaneEvent::ToggleDetails {
-                                                                        block_id: toggle_block_id.clone(),
-                                                                    },
-                                                                );
-                                                            },
-                                                        )),
-                                                    )
-                                                })
                                                 .child(
-                                                    Button::new(("copy-conversation-row", index))
-                                                        .compact()
-                                                        .label("Copy")
-                                                        .tooltip("Copy this bounded message")
+                                                    conversation_hover_tool(
+                                                        DesktopIconButton::new(
+                                                            ("copy-conversation-row", index),
+                                                            DesktopIcon::Copy,
+                                                            "Copy this bounded message",
+                                                        )
+                                                        .build()
+                                                        .debug_selector(|| {
+                                                            "desktop-copy-conversation-row".into()
+                                                        })
                                                         .on_click(cx.listener(
                                                             move |_, _, _, cx| {
                                                                 cx.stop_propagation();
@@ -862,6 +984,9 @@ impl Render for ConversationPane {
                                                                 );
                                                             },
                                                         )),
+                                                        hover_group,
+                                                        selected,
+                                                    ),
                                                 ),
                                         ),
                                 ),
@@ -960,6 +1085,43 @@ impl Render for ConversationPane {
                     })
             })
     }
+}
+
+fn conversation_hover_tool(button: Button, hover_group: SharedString, selected: bool) -> Button {
+    // Keep the button paint-visible with zero opacity instead of using
+    // `visibility: hidden`: GPUI registers tab stops during paint after its
+    // hidden-visibility early return, so an invisible button could never
+    // receive keyboard focus to reveal itself.
+    button
+        .opacity(0.)
+        .group_hover(hover_group, |style| style.opacity(1.))
+        .focus(|style| style.opacity(1.))
+        .when(selected, |button| button.opacity(1.))
+}
+
+fn conversation_recovery_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    tooltip: &'static str,
+    identity: DesktopRecoveryIdentity,
+    action: DesktopRecoveryAction,
+    cx: &gpui::Context<ConversationPane>,
+) -> Button {
+    let tone = match action {
+        DesktopRecoveryAction::Retry => DesktopCriticalTone::Neutral,
+        DesktopRecoveryAction::MarkFailed | DesktopRecoveryAction::Abort => {
+            DesktopCriticalTone::Dangerous
+        }
+    };
+    DesktopCriticalButton::new(id, label, tooltip, tone)
+        .build()
+        .on_click(cx.listener(move |_, _, _, cx| {
+            cx.stop_propagation();
+            cx.emit(ConversationPaneEvent::Recovery {
+                identity: identity.clone(),
+                action,
+            });
+        }))
 }
 
 fn structured_tool_command(detail: &str, text: &str) -> Option<String> {

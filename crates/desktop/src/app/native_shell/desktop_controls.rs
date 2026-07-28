@@ -36,7 +36,8 @@
 #![allow(dead_code)]
 
 use gpui::{
-    ElementId, IntoElement, ParentElement as _, SharedString, Styled as _, div, prelude::*, px, rgb,
+    ElementId, IntoElement, ParentElement as _, Role, SharedString, Styled as _, div, prelude::*,
+    px, rgb,
 };
 use gpui_component::{
     Disableable as _, IconName, Selectable as _,
@@ -164,6 +165,53 @@ impl DesktopCriticalTone {
             Self::Neutral => theme.muted_text,
             Self::Affirmative => theme.accent,
             Self::Dangerous => theme.danger,
+        }
+    }
+}
+
+/// Text-labelled action with a business consequence.
+///
+/// Critical actions share one 40 px height and keep their semantic label at
+/// every viewport. Tone changes weight, never geometry.
+pub(super) struct DesktopCriticalButton {
+    id: ElementId,
+    label: SharedString,
+    accessible_label: SharedString,
+    tone: DesktopCriticalTone,
+    disabled: bool,
+}
+
+impl DesktopCriticalButton {
+    pub(super) fn new(
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        accessible_label: impl Into<SharedString>,
+        tone: DesktopCriticalTone,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            accessible_label: accessible_label.into(),
+            tone,
+            disabled: false,
+        }
+    }
+
+    pub(super) const fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub(super) fn build(self) -> Button {
+        let button = Button::new(self.id)
+            .label(self.label)
+            .tooltip(self.accessible_label)
+            .disabled(self.disabled)
+            .h(px(DesktopControlSize::Critical.pixels()));
+        match self.tone {
+            DesktopCriticalTone::Neutral => button.outline(),
+            DesktopCriticalTone::Affirmative => button.primary(),
+            DesktopCriticalTone::Dangerous => button.danger(),
         }
     }
 }
@@ -328,8 +376,8 @@ pub(super) struct DesktopActionRow {
     size: DesktopControlSize,
     leading: Option<gpui::AnyElement>,
     title: SharedString,
-    /// Rendered dimmed after the title; truncated from the start so the
-    /// meaningful tail of a path stays visible.
+    /// Rendered dimmed after the title and ellipsized inside the row's
+    /// remaining width, so long metadata cannot displace the primary label.
     detail: Option<SharedString>,
     trailing: Option<gpui::AnyElement>,
     trailing_reserved_px: f32,
@@ -387,11 +435,13 @@ impl DesktopActionRow {
         } else {
             theme.text
         };
+        let content_id = (self.id.clone(), "content");
+        let accessible_label = self.accessible_label.clone();
+        let selected = self.state.selected;
         Button::new(self.id)
             .ghost()
             .selected(self.state.selected)
             .disabled(self.state.disabled)
-            .label(self.title)
             .tooltip(self.accessible_label.clone())
             .w_full()
             .h(px(self.size.pixels()))
@@ -401,6 +451,10 @@ impl DesktopActionRow {
             })
             .child(
                 div()
+                    .id(content_id)
+                    .role(Role::Button)
+                    .aria_label(accessible_label)
+                    .aria_selected(selected)
                     .flex()
                     .flex_row()
                     .items_center()
@@ -421,12 +475,22 @@ impl DesktopActionRow {
                             }),
                     )
                     .when_some(self.leading, |row, leading| row.child(leading))
+                    .child(
+                        div()
+                            .flex_none()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(self.title),
+                    )
                     .when_some(self.detail, |row, detail| {
                         row.child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
                                 .text_token(DesignText::Metadata)
                                 .text_color(rgb(theme.muted_text.value()))
                                 .child(detail),
@@ -495,6 +559,28 @@ mod tests {
         assert_ne!(neutral, affirmative);
         assert_ne!(neutral, dangerous);
         assert_ne!(affirmative, dangerous);
+    }
+
+    #[test]
+    fn critical_text_actions_share_one_fixed_height() {
+        let neutral = DesktopCriticalButton::new(
+            "neutral",
+            "Allow once",
+            "Allow this operation once",
+            DesktopCriticalTone::Neutral,
+        );
+        let dangerous = DesktopCriticalButton::new(
+            "dangerous",
+            "Deny",
+            "Deny this operation",
+            DesktopCriticalTone::Dangerous,
+        )
+        .disabled(true);
+        assert_eq!(DesktopControlSize::Critical.pixels(), 40.);
+        assert_eq!(neutral.tone, DesktopCriticalTone::Neutral);
+        assert_eq!(dangerous.tone, DesktopCriticalTone::Dangerous);
+        assert!(!neutral.disabled);
+        assert!(dangerous.disabled);
     }
 
     #[test]

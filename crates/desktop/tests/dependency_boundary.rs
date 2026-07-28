@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs, path::PathBuf};
+use std::{collections::BTreeSet, fs, path::PathBuf, process::Command};
 
 fn manifest() -> toml::Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -150,9 +150,17 @@ fn external_desktop_performance_gates_are_cross_platform_and_fail_closed() {
         .expect("bash headless gate should be readable");
     let powershell_headless = fs::read_to_string(root.join("scripts/desktop-perf-gate.ps1"))
         .expect("PowerShell headless gate should be readable");
+    let bash_click_to_photon = fs::read_to_string(root.join("scripts/desktop-click-to-photon.sh"))
+        .expect("bash click-to-photon launcher should be readable");
+    let powershell_click_to_photon =
+        fs::read_to_string(root.join("scripts/desktop-click-to-photon.ps1"))
+            .expect("PowerShell click-to-photon launcher should be readable");
     let external_report =
         fs::read_to_string(root.join("scripts/desktop-click-to-photon-report.py"))
             .expect("external click-to-photon report should be readable");
+    let external_report_tests =
+        fs::read_to_string(root.join("scripts/desktop-click-to-photon-report-test.py"))
+            .expect("external click-to-photon report tests should be readable");
 
     for gate in [&bash_native, &powershell_native] {
         for contract in [
@@ -191,10 +199,62 @@ fn external_desktop_performance_gates_are_cross_platform_and_fail_closed() {
             "headless gate must fail when Cargo silently runs zero tests"
         );
     }
+    assert!(bash_click_to_photon.contains("minimum_samples=50"));
+    assert!(bash_click_to_photon.contains("click_to_photon_post_render"));
+    assert!(bash_click_to_photon.contains("sample_count < minimum_samples"));
+    assert!(bash_click_to_photon.contains("run_id,sample_id,latency_us"));
+    assert!(bash_click_to_photon.contains("run_count != 1"));
+    assert!(bash_click_to_photon.contains("samples[substr($4, 8)] = 1"));
+    assert!(powershell_click_to_photon.contains("$minimumSamples = 50"));
+    assert!(powershell_click_to_photon.contains("click_to_photon_post_render"));
+    assert!(powershell_click_to_photon.contains("$sampleCount -lt $minimumSamples"));
+    assert!(powershell_click_to_photon.contains("run_id,sample_id,latency_us"));
+    assert!(powershell_click_to_photon.contains("Select-Object -ExpandProperty SampleId -Unique"));
+    assert!(external_report.contains("run_id"));
     assert!(external_report.contains("sample_id"));
     assert!(external_report.contains("latency_us"));
     assert!(external_report.contains("paired_app_log"));
+    assert!(external_report.contains("expected at least {args.min_samples} external samples"));
+    assert!(external_report.contains("external samples missing from app log"));
+    assert!(external_report.contains("does not match app log run_id"));
+    assert!(external_report.contains("duplicate post-render sample"));
+    assert!(external_report.contains("has no matching input sample"));
+    assert!(external_report.contains("--output must not overwrite the external CSV or app log"));
+    assert!(external_report.contains("\"--refresh-hz\", type=float, required=True"));
+    assert!(external_report.contains("output.unlink(missing_ok=True)"));
     assert!(external_report.contains("p95_budget_us"));
+    for contract_test in [
+        "test_current_run_writes_a_paired_passing_artifact",
+        "test_stale_run_rejects_and_removes_an_old_artifact",
+        "test_duplicate_or_unpaired_app_samples_fail_closed",
+        "test_over_budget_fails_without_writing_an_artifact",
+        "test_output_cannot_overwrite_input_evidence",
+        "test_refresh_rate_is_required_and_positive",
+        "test_short_duplicate_and_mixed_external_samples_are_rejected",
+    ] {
+        assert!(
+            external_report_tests.contains(contract_test),
+            "external report test suite must retain {contract_test}"
+        );
+    }
+
+    if let Some(python) = ["python3", "python"].into_iter().find(|candidate| {
+        Command::new(candidate)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }) {
+        let output = Command::new(python)
+            .arg(root.join("scripts/desktop-click-to-photon-report-test.py"))
+            .output()
+            .expect("Python contract test suite should start");
+        assert!(
+            output.status.success(),
+            "Python contract test suite failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
@@ -263,6 +323,9 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
     })
     .collect::<Vec<_>>()
     .join("\n");
+    let desktop_controls =
+        fs::read_to_string(manifest_dir.join("src/app/native_shell/desktop_controls.rs"))
+            .expect("desktop shared control owner should be readable");
     let runtime_driver = fs::read_to_string(manifest_dir.join("src/runtime/driver.rs"))
         .expect("desktop runtime driver should be readable");
     let runtime_protocol = fs::read_to_string(manifest_dir.join("src/runtime/protocol.rs"))
@@ -290,7 +353,14 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
     assert!(shell.contains(".key_context(actions::ROOT_KEY_CONTEXT)"));
     assert!(native_ui.contains(".key_context(actions::PALETTE_KEY_CONTEXT)"));
     assert!(native_ui.contains(".key_context(actions::AUTHORIZATION_KEY_CONTEXT)"));
-    assert!(shell.matches(".tooltip(").count() + native_ui.matches(".tooltip(").count() >= 20);
+    let directly_declared_tooltips =
+        shell.matches(".tooltip(").count() + native_ui.matches(".tooltip(").count();
+    let shared_icon_tools = native_ui.matches("DesktopIconButton::new(").count();
+    assert!(
+        directly_declared_tooltips + shared_icon_tools >= 20,
+        "native actions must remain discoverable through direct tooltips or the shared icon-tool contract"
+    );
+    assert!(desktop_controls.contains(".tooltip(self.accessible_label.clone())"));
     assert!(native_ui.contains("motion reduced"));
     assert!(native_ui.contains("motion static"));
     assert!(
@@ -304,6 +374,59 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
     assert!(runtime_protocol.contains("ListSessions"));
     assert!(runtime_driver.contains("self.context.list_sessions()?"));
     assert!(runtime_protocol.contains("MAX_DESKTOP_SESSION_CATALOG"));
+}
+
+#[test]
+fn desktop_visual_hierarchy_stays_flat_tokenized_and_action_heights_stay_shared() {
+    let native_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/app/native_shell");
+    let conversation = fs::read_to_string(native_root.join("conversation_pane.rs"))
+        .expect("desktop conversation pane should be readable");
+    let overlay = fs::read_to_string(native_root.join("overlay_host.rs"))
+        .expect("desktop overlay host should be readable");
+    let controls = fs::read_to_string(native_root.join("desktop_controls.rs"))
+        .expect("desktop shared controls should be readable");
+
+    let context_around = |source: &str, needle: &str, before: usize, after: usize| {
+        let lines = source.lines().collect::<Vec<_>>();
+        let index = lines
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("missing visual hierarchy marker {needle}"));
+        lines[index.saturating_sub(before)..(index + after + 1).min(lines.len())].join("\n")
+    };
+
+    let arguments = context_around(&conversation, ".child(\"ARGUMENTS\")", 24, 12);
+    assert!(arguments.contains(".border_l_1()"));
+    assert!(arguments.contains(".pl_token(DesignSpace::Md)"));
+    assert!(!arguments.contains(".rounded_token("));
+    assert!(!arguments.contains(".border_1()"));
+    assert!(!arguments.contains(".bg("));
+
+    let reasoning = context_around(&conversation, ".id((\"reasoning-toggle\", index))", 4, 24);
+    assert!(reasoning.contains(".border_l_3()"));
+    assert!(reasoning.contains(".bg(rgb(theme.elevated.value()))"));
+    assert!(!reasoning.contains("thinking_surface"));
+
+    let truncated = context_around(
+        &conversation,
+        "\"! preview truncated at desktop safety limit\"",
+        18,
+        18,
+    );
+    assert!(truncated.contains(".border_t_1()"));
+    assert!(!truncated.contains(".rounded_token("));
+    assert!(!truncated.contains(".border_1()"));
+
+    let full_message = context_around(&overlay, ".id(\"full-message-scroll\")", 0, 30);
+    assert!(full_message.contains(".border_t_1()"));
+    assert!(full_message.contains(".border_b_1()"));
+    assert!(!full_message.contains(".rounded_token("));
+    assert!(!full_message.contains(".border_1()"));
+
+    assert!(
+        controls.contains(".h(px(DesktopControlSize::Critical.pixels()))"),
+        "all consequential text actions must inherit the shared 40 px critical geometry"
+    );
 }
 
 #[test]

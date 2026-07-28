@@ -63,9 +63,9 @@ pub const DESKTOP_DESIGN_TOKENS: DesktopDesignTokens = DesktopDesignTokens {
         xl: 24,
     },
     radius: DesktopRadiusScale {
-        sm: 6,
-        md: 10,
-        lg: 12,
+        sm: 4,
+        md: 6,
+        lg: 8,
     },
     typography: DesktopTypographyScale {
         metadata_size: 12,
@@ -636,8 +636,9 @@ mod tests {
         );
         assert_eq!(
             [tokens.radius.sm, tokens.radius.md, tokens.radius.lg],
-            [6, 10, 12]
+            [4, 6, 8]
         );
+        assert!(tokens.radius.lg <= 8);
         assert_eq!(
             [
                 tokens.typography.metadata_size,

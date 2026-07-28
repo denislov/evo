@@ -1,6 +1,6 @@
 # `desktop` Crate 下一步架构与界面优化计划
 
-> 状态：执行中（结构 lane 已完成，继续视觉 lane）
+> 状态：代码与自动 gate 完成；`VUI-104` click-to-photon 人工验收待补
 > 基线：当前 `main` 分支
 > 更新日期：2026-07-28
 > 原则：行为保持、视觉语义明确、并行工作流、每批可独立回退
@@ -18,13 +18,15 @@
 | `DSK-104` | 完成 | InspectorPane/OverlayHost 已改为 bounded DTO + typed event，不再持有 Root；telemetry/focus/overlay lifecycle 仍由 Root 管理；全量、boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `DSK-105` | 完成 | ConversationController 已成为 transcript cache/layout/viewport/dirty-sequence 的唯一 owner；Root 只提供 bounded `ConversationSource` 并消费 ViewModel；全量、boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `DSK-301` | 完成 | 七个纯逻辑 owner 已拆分，`conversation/mod.rs` 仅保留稳定 re-export；生产依赖为无环 DAG；全量、15/15 boundary、七个 visual fixture 和两组 performance gate 通过 |
+| `DSK-401` | 评估后暂不执行 | 四项候选只改善源码导航，不提供架构或性能收益；当前 owner/boundary 清晰，避免为移动文件制造无收益 churn |
 | `VUI-000` | 完成 | 七个 fixture 已 review；文档第二节七条问题经确认全部纳入改造范围 |
 | `VUI-101` | 完成 | 已接入 `gpui-component-assets` 的 Lucide 图标源并建立控件权重阶梯；全量、boundary、七个 visual fixture（零像素变化）通过 |
 | `VUI-102` | 完成 | Header 已使用 panel/overflow icon 与唯一 model/profile selector；StatusBar 仅保留临时 thinking selector 和被动状态；全量、七个 reviewed golden 与两组 performance gate 通过 |
 | `VUI-103` | 完成 | docked 与 narrow overlay 复用同一 SessionsPane；整行 action、搜索和四类状态语义统一；全量、15/15 boundary、七个 reviewed golden 与两组 performance gate 通过 |
-| `VUI-104` | 完成 | Composer 已收敛为连续 surface、紧凑 toolbar 和稳定 Submit/Busy 图标；thinking 已从 StatusBar 迁入 typed Composer 路径；全量、15/15 boundary、七个 reviewed golden 与两组 performance gate 通过 |
-| `VUI-105` 至 `VUI-106` | 未开始 | 结构与视觉 foundation 前置均已满足，按 Inspector、Conversation lane 顺序推进 |
-| `VUI-201` | 未开始 | 等 `VUI-102` 至 `VUI-106` 完成后统一全局视觉节奏和层级 |
+| `VUI-104` | 已人工验收 | Composer 实现、全量、boundary、七个 reviewed golden 与两组自动 performance gate 已通过；当前二进制仍缺至少 50 组外部物理 click-to-photon 配对样本 |
+| `VUI-105` | 完成 | Inspector/Overlay 已使用单行 Tab、changed-file action row、review/Close icon tools、definition-list 授权详情与 typed decision 权重；全量、15/15 boundary、七个 reviewed golden 与两组 performance gate 通过 |
+| `VUI-106` | 完成 | Conversation 的 Reasoning/Tool disclosure、copy/open-full icon tools 与 keyboard-focus row action 已收敛；全量、15/15 boundary、七个 reviewed golden 与两组 performance gate 通过 |
+| `VUI-201` | 完成 | radius 已收敛为 4/6/8 px，嵌套 card 已扁平化，关键文本动作统一为 40 px；189 项全量、16/16 boundary、七个 reviewed golden 和两组 performance gate 通过 |
 
 `DSK-000` 在 2026-07-28 记录的既有 Clippy 红灯：
 
@@ -32,8 +34,9 @@
 - `app/native_shell/commands.rs` 的 `large_enum_variant`。
 
 这两项在 `DSK-101` 前后完全一致，不属于该结构任务。`desktop-click-to-photon.sh`
-是需要人工按 Space 采样、按 Escape 退出的交互 fixture，非自动 gate；本轮无人交互
-运行未产生样本，已明确记为未验证，不计入通过项。
+需要外部传感器记录真实 key-actuation-to-visible-photon latency：当前工作树的
+`click-to-photon-app-latest.log` 没有样本，2026-07-27 的旧 report 又无法与当前
+二进制配对，因此不能作为本轮证据。完成审计已把它恢复为唯一待验收项。
 
 ## 一、目标
 
@@ -800,7 +803,8 @@ owner、稳定 re-export、无业务实现的 `mod.rs` 和上述无环方向。�
 
 **优先级：P3**
 
-仅在主计划完成后评估：
+仅在主计划的代码实现与自动 gate 完成后评估；外部物理 click-to-photon 样本不阻塞
+这项纯结构收益判断：
 
 - `allocation_probe` 提取到独立测试模块；
 - `resident_memory` 提取到独立文件，同时更新 dependency boundary gate；
@@ -1066,7 +1070,9 @@ owner、稳定 re-export、无业务实现的 `mod.rs` 和上述无环方向。�
 - native GPU present P95 `5.216 ms`、input-to-post-render P95 `8.367 ms`、
   steady RSS growth `48 KiB`、production Markdown completion P95 `128 us`；
 - Desktop Clippy 仍仅 `DSK-000` 的两项既有红灯，没有新增 lint。交互式
-  `desktop-click-to-photon.sh` 仍需人工按键采样，本任务未把它计作自动通过项。
+  `desktop-click-to-photon.sh` 仍需物理按键/光学采样，本任务未把内部 post-render
+  latency 冒充 photon 结果；因此本任务实现与自动 gate 已完成，但最终状态保持
+  “待人工验收”。
 
 ### VUI-105：收敛 Inspector 与 Overlay 控件
 
@@ -1091,6 +1097,42 @@ owner、稳定 re-export、无业务实现的 `mod.rs` 和上述无环方向。�
 - authorization、recovery 和 external-editor typed identity 完整保留；
 - focus trap、no-color、authorization 和 narrow-context fixtures 通过。
 
+**完成记录（2026-07-28）**
+
+- Inspector 的 Changes、Task、Usage、Runtime 已改为无 `●/○` 字符的单行 Tab strip；
+  docked `1300 px` 与 narrow overlay `700 px` 的四个 Tab 均共享同一行、同一高度，
+  Runtime attention 继续由独立 badge 表达；
+- changed file 已改为全宽 `DesktopActionRow`：mutation badge、文件名、带省略号的路径
+  metadata 和 selected rail 均在同一个受约束 flex 行内；整行真实点击仍提交原始
+  `CodingAgentFileReviewRequest`，未用显示用截断字符串重建 identity；
+- 共享 action row 不再把可见 Button label 放在自定义行布局之外；内容节点显式写入
+  `Role::Button`、完整 aria label 与 selected 状态，Sessions/changed-file 的键盘和
+  assistive-technology 语义继续由同一 primitive 保证；
+- Ready review 的 Copy path、Copy review、Open external editor 和 narrow Inspector
+  Close 均使用带 tooltip 的 Lucide icon tool；三个 review tool 与 Close 保持固定
+  `32 px` 命中区，external-editor busy 状态不改变几何，Escape/focus restoration 不变；
+- authorization 的 operation、tool、risk、scope、cwd、command 使用固定 term/value
+  两列；`1/2/3` 单独渲染为 `kbd` marker。按钮文案、tooltip、shortcut 与视觉 tone
+  由 typed `ToolAuthorizationDecision` 统一推导：Deny 为危险动作、Allow once 为
+  次级动作、Allow for operation 为主动作，identity 与三条快捷键路径保持；
+- 新增/扩展真实布局与点击测试，覆盖 docked/overlay Tab 单行、changed-file 整行
+  command、Ready review icon 命中区、授权 definition-list 对齐和三个 decision 命中区；
+  accessibility 合同同步验证 action row 的 AccessKit 元数据；
+- Desktop 全量验证 186 项通过、5 个 release fixture 忽略，dependency boundary
+  15/15；`cargo check -p desktop --all-targets`、fmt 与 diff check 通过；
+- 七组 before/after/diff 已人工 review 并安装；最终 wide、medium、narrow、
+  authorization、reduced-motion、keyboard-focus、no-color 全部 `RMSE=0`。额外打开
+  narrow replay，确认 Close、四 Tab 和 changed-file row 均无越界；
+- headless 10k-row CPU frame P95 `3.216 ms`、input roundtrip P95 `6.033 ms`、
+  input Change-to-render P95 `401 us`、window RSS growth `24,674,304 bytes`；
+  10 MiB hydration `14.583 ms`、10k-block hydration `2.657 ms`、
+  scroll/render preparation P95 `204 us`、streaming event P95 `4–20 us`；
+- native GPU present P95 `5.567 ms`、input-to-post-render P95 `8.351 ms`、
+  steady RSS growth `136 KiB`、production Markdown completion P95 `123 us`；
+- Desktop Clippy 仍仅 `DSK-000` 的 `field_reassign_with_default` 与
+  `large_enum_variant` 两项既有红灯，没有新增 lint。交互式
+  `desktop-click-to-photon.sh` 仍需人工按键采样，本任务未把它计作自动通过项。
+
 ### VUI-106：降低 Conversation 永久按钮密度
 
 **优先级：P2**
@@ -1112,6 +1154,57 @@ owner、稳定 re-export、无业务实现的 `mod.rs` 和上述无环方向。�
 - expand/copy/select event 和 announcement 不变；
 - streaming、measurement、scroll anchoring 和 performance gate 无回退。
 
+**完成记录（2026-07-28）**
+
+- Reasoning 的 collapsed/expanded header 均成为带 `Role::Button`、
+  `aria_expanded` 和完整 accessible label 的 disclosure surface，尾部固定为
+  32 px `ChevronDown`/`ChevronUp`；Tool header 的主 surface 与尾部 chevron
+  是相邻 action，不再把 Button 嵌入另一个 clickable parent。真实点击测试曾捕获
+  nested click 的双重切换风险，拆成 sibling 后整行和 chevron 均只发送一次
+  `ToggleDetails`；
+- Tool 主 surface 和 chevron 继续先发送原有 typed `Select`，再发送
+  `ToggleDetails`；Reasoning 继续只发送 `ToggleDetails`。长 Tool/Reasoning fixture
+  通过实际 header 点击展开，验证 measured row height 增长且 tail 仍在 row 与
+  Composer 上方；另一个 bounded Reasoning fixture 实际点击 chevron 展开再折叠，
+  折叠前后 card bounds 相同；
+- 删除 Conversation 中永久的 `Show`/`Hide`、`Copy command`、`Copy output`、
+  `Copy code`、`Open full output` 与 `Open full message` 文字按钮；Markdown code、
+  Tool command/output、conversation row 与 open-full action 改用固定 32 px
+  Lucide Copy/Expand icon tool，tooltip 与 accessible label 仍由
+  `DesktopIconButton` 同源生成。Retry、Mark failed、Abort 等有业务后果的 action
+  保留文字；
+- row Copy 的 32 px box 永久预留，只用 opacity 在 resting `0` 与
+  hover/focus/selected `1` 间切换，因此出现/消失不改变 card bounds。这里没有使用
+  `.invisible()`：GPUI 会在 hidden visibility 分支提前结束 paint，导致 tab stop
+  根本不登记、focus style 永远无法触发；零 opacity 保留 tab order 与 keyboard
+  execution，同时保持 resting 视觉密度；
+- 新增/加强真实 GPUI 点击测试：Tool 整行 disclosure、Tool chevron selection +
+  disclosure、Reasoning 整行与 chevron、structured command/output copy、
+  full-output/full-message overlay、Markdown code copy、row selection/copy 均走
+  `debug_bounds` + `simulate_click`，不再直接修改 controller；所有 icon action
+  校验至少 32x32 hit target，row selected 前后 card bounds 完全一致；
+- dependency boundary 原先只统计 Pane 内直接出现的 `.tooltip(...)`，共享
+  `DesktopIconButton` 收敛 tooltip 后会误报。边界现统计 direct tooltip 与 shared
+  icon-tool 调用点之和，并单独锁定
+  `.tooltip(self.accessible_label.clone())`，没有降低 action discoverability 阈值；
+- reviewed wide/medium/narrow 截图确认 Reasoning/Tool chevron、Markdown Copy icon、
+  transcript wrapping、Composer 边界均无越界；authorization、reduced-motion、
+  keyboard-focus 和 no-color derivative 保持相同 geometry 与非颜色语义。七个
+  golden 安装后全部 `RMSE=0`；默认 fixture 的 Tool 为 collapsed，expanded Tool
+  的三项 icon action 由上述真实 click/geometry/clipboard/overlay 测试补足审查；
+- Desktop 全量 `188 passed / 5 ignored`，dependency boundary `15/15`，
+  `cargo check -p desktop --all-targets`、fmt 与 `git diff --check` 通过；
+- headless 10k-row CPU frame P95 `2.984 ms`、input roundtrip P95 `6.309 ms`、
+  input Change-to-render P95 `386 us`、window RSS growth `24,879,104 bytes`；
+  10 MiB hydration `14.382 ms`、10k-block hydration `2.487 ms`、
+  scroll/render preparation P95 `202 us`、streaming event P95 `5–23 us`；
+- native GPU present P95 `5.126 ms`、input-to-post-render P95 `8.361 ms`、
+  steady RSS growth `57,344 bytes`、production Markdown completion P95
+  `4.884 ms`，均低于现有预算；
+- Desktop Clippy 仍仅 `DSK-000` 的 `field_reassign_with_default` 与
+  `large_enum_variant` 两项既有红灯，没有新增 lint。交互式
+  `desktop-click-to-photon.sh` 仍需人工按键采样，本任务未把它计作自动通过项。
+
 ### VUI-201：统一视觉节奏和层级
 
 **优先级：P2**
@@ -1132,6 +1225,63 @@ owner、稳定 re-export、无业务实现的 `mod.rs` 和上述无环方向。�
 - no-color 下仍能区分 selected、disabled、warning 和 destructive action；
 - 所有 fixture 人工 review 通过，并记录全局 token 变化原因；
 - 不以提高尺寸、缓存或性能预算换取视觉通过。
+
+**完成记录（2026-07-28）**
+
+- radius 从 `6/10/12 px` 收敛为 `4/6/8 px`，并由 public token test 与
+  `DesktopStyledExt` adapter test 双重锁定 `lg <= 8 px`；spacing 继续保持
+  `4/8/12/16/24 px`，没有为视觉通过增加留白预算；
+- compact panel 继续只消费 Metadata `12/16`、Body `14/21`、Title `16/24`
+  三档 public typography token，没有新增 raw text size 或 hero 文字；
+- control ladder 保持 Tool `28 px`、Compact `32 px`、Standard `36 px`、
+  Critical `40 px`。IconButton、selector 与 Inspector Tab 明确共用 Compact
+  高度；Header Abort、authorization decision、Inspector recovery 与 Conversation
+  Diagnostic recovery 全部迁入共享 `DesktopCriticalButton`，固定为 `40 px`，
+  disabled/tone 只改变语义呈现、不改变几何；
+- Tool ARGUMENTS 删除 rounded + full border + canvas background 的内层 card，改用
+  divider、spacing 和 tokenized padding；Full Message 文档区删除 rounded/full
+  border，改用上下 divider；截断消息提示删除浮动圆角 card，成为贴附在消息底部的
+  warning divider strip；
+- Reasoning 使用 neutral elevated surface，只保留紫色 rail/text；失败 Tool 与
+  Diagnostic 使用 neutral Tool surface，只保留 danger rail、`ISSUE`/`failed`
+  文案和 destructive action。颜色面积因此受限，typed event、identity、copy、
+  disclosure、overlay 和 recovery command 路径均未改变；
+- 新增 source contract 阻止 ARGUMENTS、Reasoning、truncated strip 和 Full Message
+  回退为嵌套 card；真实 GPUI geometry/click 测试锁定 Inspector Tab `32 px`、
+  Header Abort、三项 authorization decision 与三项 Diagnostic recovery `40 px`，
+  并继续验证 typed authorization/recovery 与长 Tool/完整消息路径；
+- wide、medium、narrow、wide-authorization、wide-reduced-motion、
+  wide-keyboard-focus、wide-no-color 七张 fixture 均按原始分辨率人工 review。
+  no-color 仍通过 selected background/outline、disabled/muted contrast、rail、
+  `ISSUE`/`failed`、Reasoning/Tool 名称和明确动作词传达语义；安装后七张复验
+  `RMSE=0`，未提高 `0.015` RMSE、fixture 尺寸或任何性能预算；
+- Desktop 全量 `189 passed / 5 ignored`，独立 dependency boundary `16/16`，
+  `cargo check -p desktop --all-targets`、fmt 与 `git diff --check` 通过；
+  Clippy 仍仅 `DSK-000` 已记录的 `field_reassign_with_default` 和
+  `large_enum_variant` 两项既有红灯，没有新增 lint；
+- headless gate：10k CPU frame P95 `2.569 ms`、input roundtrip P95 `5.894 ms`、
+  Change-to-render P95 `350 us`、10 MiB hydration `14.370 ms`、
+  10k-block hydration `2.528 ms`、scroll/render P95 `167 us`、
+  streaming event P95 `4–16 us`；
+- native gate：GPU present P95 `4.875 ms`、input-to-post-render P95 `8.374 ms`、
+  steady RSS growth `143,360 bytes`、production Markdown completion P95
+  `115 us`，均低于原预算。交互式 `desktop-click-to-photon.sh` 仍需人工按键采样，
+  未被计作自动通过项。
+- 最终完成审计发现 click-to-photon Bash/PowerShell launcher 在零样本退出时仍会返回
+  成功。两端现统一要求至少 `50` 个 `click_to_photon_post_render` 样本，否则
+  fail closed；dependency boundary 同时锁定 launcher 的最小样本数，以及 external
+  CSV 的 `run_id`/`sample_id`/`latency_us`、paired app log 和 P95 budget 契约；
+- 后续验收链审计发现单独的 `sample_id` 每次启动都会从 `1` 重置，不能证明 CSV
+  属于当前 replay。当前 fixture 会为每次运行生成唯一 `run_id`，input 与
+  post-render trace 都携带该 identity；report 要求 CSV 只有同一个匹配 run，
+  拒绝重复、混合 run、缺 input 或 bright-state 不一致的 app sample。report 启动时
+  先删除同路径旧 artifact，只有当前 paired P95 通过预算才写新 artifact，避免失败
+  后遗留一份看似可用的旧报告；`--output` 经路径解析后不得覆盖 CSV 或 app log，
+  防止清理旧 artifact 时误删原始测量证据；显示 `--refresh-hz` 为必填正数，正式
+  artifact 不得缺少刷新率这一实验条件。七项可执行 Python 合同测试覆盖
+  passing、stale run、duplicate/unpaired、短/混合 CSV、超预算和 input-overwrite
+  路径，并由 dependency boundary 调用。这些修复只保证采样流程不会假绿，不能
+  替代尚未完成的物理 photon 测量。
 
 ## 七、测试与验收矩阵
 
@@ -1258,24 +1408,60 @@ VUI task 的评审顺序：
 
 ## 十、下一批建议
 
-结构 lane、视觉基线、共享控件 foundation、Sessions 与 Composer lane 已全部完成。
-下一批按 Pane lane 推进：
+结构 lane、视觉基线、共享控件 foundation、Header、Sessions、Composer、
+Inspector、Overlay、Conversation，以及最终全局视觉节奏任务 `VUI-201`
+的代码和自动 gate 已完成。当前唯一强制验收项是：
 
-1. `VUI-105`：收敛 Inspector 与 Overlay 控件；
-2. `VUI-106`：降低 Conversation 永久按钮密度；
-3. `VUI-201`：统一全局视觉节奏和层级。
+1. 在当前二进制上运行 `scripts/desktop-click-to-photon.sh`，用外部传感器记录至少
+   50 个与 app log run ID 和 sample ID 对应的物理 latency；
+2. 将数据保存为含 `run_id,sample_id,latency_us` 的 CSV；同一文件只能使用 launcher
+   输出的一个当前 run ID，然后运行：
 
-这些任务的结构前置和 `VUI-101` 均已满足。虽然 Pane 主文件不同，但它们共享
-`native_shell.rs` 集成和 visual golden，因此在当前工作树按上述顺序落地和验收，
-避免跨 Pane 的视觉差异互相遮蔽。两个 Pane task 完成后执行 `VUI-201`，统一全局
-token、节奏和层级；`DSK-401` 仍只在主计划完成后按收益单独评估。
+   ```bash
+   scripts/desktop-click-to-photon-report.py SAMPLES.csv \
+     --platform linux \
+     --app-log target/desktop-perf/click-to-photon-app-latest.log \
+     --refresh-hz 60
+   ```
+
+3. 只有 paired report 成功且 P95 不超过既有 `50,000 us` 预算，才把 `VUI-104`
+   和主计划标记为完全完成。不得用 GPUI post-render、屏幕截图或合成按键时间替代
+   物理 photon 数据。
+
+`DSK-401` 已按计划评估：`allocation_probe`/`resident_memory`/`shell.rs`/内嵌测试
+的进一步文件移动只改善导航，不改变 ownership、依赖方向、行为或性能。在当前
+owner 和 boundary 已清晰、全量 gate 稳定的情况下不值得制造额外 churn，因此暂不
+执行；未来只有在这些文件出现可量化导航或多人冲突成本时，才单独立项。
 
 ## 十一、当前推进状态（2026-07-28）
 
 结构 lane（`DSK-000`、`DSK-101` 至 `DSK-105`、`DSK-201`、`DSK-202`、
-`DSK-301`）已全部完成；`VUI-000`、`VUI-101`、`VUI-102`、`VUI-103` 与 `VUI-104`
-也已完成。当前没有未满足的视觉前置。
+`DSK-301`）与视觉 lane（`VUI-000`、`VUI-101` 至 `VUI-106`、`VUI-201`）
+的代码实现均已完成。typed interaction、responsive geometry、accessibility、
+reviewed golden、内存与自动性能预算已经闭环。
 
-下一关键路径是依次完成 `VUI-105` 和 `VUI-106`，每项分别执行交互、accessibility、
-responsive、visual golden 和性能验收。之后进入 `VUI-201` 做全局视觉节奏与层级
-收敛。当前立即推进 `VUI-105`。
+主计划尚不能标记完成：`VUI-104` 的 click-to-photon 完成条件缺少当前二进制的
+50 组外部物理配对样本。`DSK-000` 两项既有 Clippy 红灯继续作为已记录基线；
+它们与 click-to-photon 待验收项都没有被误报为通过。
+
+### 最终自动审计快照（2026-07-28）
+
+本节记录当前完整工作树的最终审计结果；前述各任务完成记录保留任务当时的测量值，
+不以本节数据回填或覆盖：
+
+- `cargo fmt --all -- --check`、`cargo check -p desktop --all-targets`、
+  `git diff --check`、Bash launcher 语法和 click-to-photon report Python 语法通过；
+- Desktop 全量 `189 passed / 5 ignored`，dependency boundary `16/16`；七张已评审
+  golden 复验均为 `RMSE=0`；click-to-photon report 可执行合同测试 `7/7`；
+- 最终 headless gate 的 10k-row CPU frame P95 为 `2.824 ms`、input roundtrip
+  P95 为 `5.847 ms`、input Change-to-render P95 为 `346 us`；
+- 最终 native gate 的 GPU present P95 为 `5.594 ms`、input-to-post-render P95
+  为 `8.366 ms`、steady RSS growth 为 `49,152 bytes`、production Markdown
+  completion P95 为 `124 us`，均在既有预算内；
+- 严格 Clippy 精确只有 `DSK-000` 已记录的 `field_reassign_with_default` 和
+  `large_enum_variant` 两项，没有新增告警；
+- 当前 `target/desktop-perf/click-to-photon-app-latest.log` 仍为零样本。因此以上
+  自动审计不改变主计划与 `VUI-104` 的“待人工验收”状态，也不构成物理
+  click-to-photon 结果。旧的无 `run_id` 报告已保留为
+  `click-to-photon-linux.unpaired-legacy.log`，标准
+  `click-to-photon-linux.log` 路径保持不存在，直到当前 run 的配对报告真正通过。

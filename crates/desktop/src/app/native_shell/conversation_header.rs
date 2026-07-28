@@ -3,16 +3,14 @@ use gpui::{
     EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
     prelude::*, rgb,
 };
-use gpui_component::{
-    Disableable as _,
-    button::{Button, ButtonVariants as _},
-    menu::{DropdownMenu as _, PopupMenuItem},
-};
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use std::sync::Arc;
 
 use super::{
     conversation_focus_accent,
-    desktop_controls::{DesktopIcon, DesktopIconButton, DesktopSelector},
+    desktop_controls::{
+        DesktopCriticalButton, DesktopCriticalTone, DesktopIcon, DesktopIconButton, DesktopSelector,
+    },
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
     semantic_status_color,
 };
@@ -270,19 +268,22 @@ impl Render for ConversationHeader {
                     )
                     .when(view_model.composer_running, |actions| {
                         actions.child(
-                            Button::new("abort-operation")
-                                .compact()
-                                .danger()
-                                .label(if view_model.abort_pending {
+                            DesktopCriticalButton::new(
+                                "abort-operation",
+                                if view_model.abort_pending {
                                     "Aborting…"
                                 } else {
                                     "Abort"
-                                })
-                                .tooltip("Abort the active operation · Ctrl/Cmd+Esc")
-                                .disabled(view_model.abort_pending)
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(ConversationHeaderEvent::Abort);
-                                })),
+                                },
+                                "Abort the active operation · Ctrl/Cmd+Esc",
+                                DesktopCriticalTone::Dangerous,
+                            )
+                            .disabled(view_model.abort_pending)
+                            .build()
+                            .debug_selector(|| "desktop-hit-abort-operation".into())
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(ConversationHeaderEvent::Abort);
+                            })),
                         )
                     })
                     .child(

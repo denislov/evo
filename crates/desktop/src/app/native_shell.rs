@@ -97,11 +97,7 @@ fn conversation_block_visual(
         },
         ConversationBlockKind::Tool => ConversationBlockVisual {
             glyph: "TOOL",
-            surface: if is_error {
-                theme.diagnostic_surface
-            } else {
-                theme.tool_surface
-            },
+            surface: theme.tool_surface,
             accent: if is_error {
                 theme.danger
             } else {
@@ -125,7 +121,7 @@ fn conversation_block_visual(
         }
         ConversationBlockKind::Diagnostic => ConversationBlockVisual {
             glyph: "ISSUE",
-            surface: theme.diagnostic_surface,
+            surface: theme.tool_surface,
             accent: theme.danger,
             align_right: false,
         },
@@ -3251,11 +3247,16 @@ impl NativeShell {
             .take(MAX_VISIBLE_FILE_CHANGES)
             .map(|change| InspectorChangedFileView {
                 request: CodingAgentFileReviewRequest::from(change),
-                label: format!(
-                    "{}  {}",
-                    truncate_label(&change.mutation_kind, 10),
-                    truncate_label(&change.path, 24)
+                mutation_kind: truncate_label(&change.mutation_kind, 10),
+                file_name: truncate_label(
+                    change
+                        .path
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(change.path.as_str()),
+                    22,
                 ),
+                path: truncate_label(&change.path, 34),
             })
             .collect();
         let latest_recovery =
@@ -3794,6 +3795,7 @@ mod tests {
     use coding_agent::api::embedding::{
         CodingAgentEmbeddingSnapshot, CodingAgentResourceSummary, CodingAgentSettingsSummary,
     };
+    use coding_agent::api::review::CodingAgentFileReview;
     use coding_agent::api::view::{
         CodingAgentCapabilities, CodingAgentSessionTranscriptItem, CodingAgentSessionView,
         CodingAgentTranscriptSnapshot, ProfileId,
@@ -4148,6 +4150,46 @@ mod tests {
     }
 
     #[gpui::test]
+    fn inspector_tabs_stay_on_one_line_in_docked_and_overlay_layouts(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+
+        for (width, open_overlay) in [(1_300., false), (700., true)] {
+            cx.simulate_resize(size(px(width), px(900.)));
+            cx.run_until_parked();
+            if open_overlay {
+                cx.dispatch_action(ToggleInspectorPanel);
+                cx.run_until_parked();
+            }
+
+            let tabs = cx
+                .debug_bounds("desktop-inspector-tabs")
+                .expect("Inspector tab strip is visible");
+            let tab_bounds = [
+                "desktop-inspector-tab-changes",
+                "desktop-inspector-tab-task",
+                "desktop-inspector-tab-usage",
+                "desktop-inspector-tab-runtime",
+            ]
+            .map(|selector| {
+                cx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("missing Inspector tab {selector}"))
+            });
+            let first = tab_bounds[0];
+            for bounds in tab_bounds {
+                assert_eq!(bounds.top(), first.top());
+                assert_eq!(bounds.bottom(), first.bottom());
+                assert_eq!(f32::from(bounds.size.height), 32.);
+                assert!(bounds.left() >= tabs.left() && bounds.right() <= tabs.right());
+            }
+        }
+    }
+
+    #[gpui::test]
     fn responsive_drawers_preserve_conversation_geometry_scroll_and_owner_focus(
         cx: &mut TestAppContext,
     ) {
@@ -4391,11 +4433,23 @@ mod tests {
                 .last_row_id_for_tests()
                 .expect("Tool row exists")
         });
-        shell.update(cx, |shell, cx| {
-            shell.toggle_conversation_details(&block_id, cx);
-        });
+        assert_minimum_hit_target(cx, "desktop-toggle-tool-details");
+        let tool_header = cx
+            .debug_bounds("desktop-tool-toggle-header")
+            .expect("the complete tool header is a disclosure action");
+        cx.simulate_click(tool_header.center(), gpui::Modifiers::default());
         settle_visual_measurements(cx);
 
+        assert_eq!(
+            shell.read_with(cx, |shell, _| {
+                shell
+                    .conversation_controller
+                    .selected_block_id()
+                    .map(str::to_owned)
+            }),
+            Some(block_id.clone()),
+            "clicking the tool disclosure preserves the typed row-selection path"
+        );
         assert_last_row_matches_card_and_tail(cx, "expanded Tool");
         let expanded_height = f32::from(
             cx.debug_bounds("conversation-last-card")
@@ -4432,11 +4486,24 @@ mod tests {
                 .last_row_id_for_tests()
                 .expect("Tool row exists")
         });
-        shell.update(cx, |shell, cx| {
-            shell.toggle_conversation_details(&block_id, cx);
-        });
+        assert_minimum_hit_target(cx, "desktop-toggle-tool-details");
+        let disclosure = cx
+            .debug_bounds("desktop-toggle-tool-details")
+            .expect("tool chevron exposes the typed disclosure path");
+        cx.simulate_click(disclosure.center(), gpui::Modifiers::default());
         settle_visual_measurements(cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| {
+                shell
+                    .conversation_controller
+                    .selected_block_id()
+                    .map(str::to_owned)
+            }),
+            Some(block_id.clone())
+        );
 
+        assert_minimum_hit_target(cx, "desktop-toggle-tool-details");
+        assert_minimum_hit_target(cx, "desktop-copy-tool-command");
         let copy_command = cx
             .debug_bounds("desktop-copy-tool-command")
             .expect("structured shell command exposes a copy action");
@@ -4447,6 +4514,7 @@ mod tests {
             Some(command.into())
         );
 
+        assert_minimum_hit_target(cx, "desktop-copy-tool-output");
         let copy_output = cx
             .debug_bounds("desktop-copy-tool-output")
             .expect("tool output exposes a copy action");
@@ -4457,6 +4525,7 @@ mod tests {
             Some(output.into())
         );
 
+        assert_minimum_hit_target(cx, "desktop-open-tool-output");
         let open_output = cx
             .debug_bounds("desktop-open-tool-output")
             .expect("tool output exposes a full-output action");
@@ -4477,7 +4546,7 @@ mod tests {
     #[gpui::test]
     fn assistant_reasoning_expands_without_losing_the_answer_tail(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
-        let (shell, cx) = add_visual_shell(
+        let (_, cx) = add_visual_shell(
             cx,
             DesktopRuntimeBridge::disconnected_for_test(),
             projection_with_last_item(CodingAgentSessionTranscriptItem::Assistant {
@@ -4499,15 +4568,11 @@ mod tests {
                 .height,
         );
 
-        let block_id = shell.read_with(cx, |shell, _| {
-            shell
-                .conversation_controller
-                .last_row_id_for_tests()
-                .expect("Assistant row exists")
-        });
-        shell.update(cx, |shell, cx| {
-            shell.toggle_conversation_details(&block_id, cx);
-        });
+        assert_minimum_hit_target(cx, "desktop-toggle-reasoning-details");
+        let reasoning_header = cx
+            .debug_bounds("desktop-reasoning-toggle-header")
+            .expect("the complete reasoning header is a disclosure action");
+        cx.simulate_click(reasoning_header.center(), gpui::Modifiers::default());
         settle_visual_measurements(cx);
 
         assert_last_row_matches_card_and_tail(cx, "expanded Reasoning");
@@ -4520,6 +4585,138 @@ mod tests {
         assert!(
             expanded_height > collapsed_height + 100.,
             "expanded reasoning must contribute its real content height: collapsed={collapsed_height}, expanded={expanded_height}"
+        );
+    }
+
+    #[gpui::test]
+    fn assistant_reasoning_chevron_toggles_once_without_reflow(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::Assistant {
+                id: "reasoning-chevron".into(),
+                text: "The final answer remains below the disclosure.".into(),
+                thinking: "A bounded reasoning detail line.\n".repeat(12),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: Some(640),
+            }),
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+        let block_id = shell.read_with(cx, |shell, _| {
+            shell
+                .conversation_controller
+                .last_row_id_for_tests()
+                .expect("Assistant row exists")
+        });
+        let collapsed_height = f32::from(
+            cx.debug_bounds("conversation-last-card")
+                .expect("collapsed reasoning card is laid out")
+                .size
+                .height,
+        );
+
+        assert_minimum_hit_target(cx, "desktop-toggle-reasoning-details");
+        let expand = cx
+            .debug_bounds("desktop-toggle-reasoning-details")
+            .expect("collapsed reasoning retains its trailing disclosure icon");
+        cx.simulate_click(expand.center(), gpui::Modifiers::default());
+        settle_visual_measurements(cx);
+        assert!(shell.read_with(cx, |shell, _| {
+            shell
+                .conversation_controller
+                .expanded_details()
+                .contains(&block_id)
+        }));
+        let expanded_height = f32::from(
+            cx.debug_bounds("conversation-last-card")
+                .expect("expanded reasoning card is laid out")
+                .size
+                .height,
+        );
+        assert!(expanded_height > collapsed_height);
+
+        assert_minimum_hit_target(cx, "desktop-toggle-reasoning-details");
+        let collapse = cx
+            .debug_bounds("desktop-toggle-reasoning-details")
+            .expect("expanded reasoning retains its trailing disclosure icon");
+        cx.simulate_click(collapse.center(), gpui::Modifiers::default());
+        settle_visual_measurements(cx);
+        let collapsed_again = f32::from(
+            cx.debug_bounds("conversation-last-card")
+                .expect("collapsed reasoning card remains laid out")
+                .size
+                .height,
+        );
+        assert!(
+            (collapsed_again - collapsed_height).abs() <= 1.,
+            "the standalone icon must emit exactly one collapse: initial={collapsed_height}, final={collapsed_again}"
+        );
+        assert!(
+            !shell.read_with(cx, |shell, _| {
+                shell
+                    .conversation_controller
+                    .expanded_details()
+                    .contains(&block_id)
+            }),
+            "the reasoning disclosure returns to its collapsed state"
+        );
+    }
+
+    #[gpui::test]
+    fn conversation_row_copy_selection_is_typed_and_geometry_stable(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let message = "Copy the complete bounded conversation row.";
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::Assistant {
+                id: "row-copy-selection".into(),
+                text: message.into(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: None,
+            }),
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+        let card_before_selection = cx
+            .debug_bounds("conversation-last-card")
+            .expect("conversation row card remains mounted");
+        assert_minimum_hit_target(cx, "desktop-copy-conversation-row");
+
+        let row_header = cx
+            .debug_bounds("desktop-conversation-row-header")
+            .expect("conversation row header exposes its typed selection path");
+        cx.simulate_click(row_header.center(), gpui::Modifiers::default());
+        settle_visual_measurements(cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| {
+                shell
+                    .conversation_controller
+                    .selected_block_id()
+                    .map(str::to_owned)
+            }),
+            Some("assistant:row-copy-selection".into())
+        );
+        assert_eq!(
+            cx.debug_bounds("conversation-last-card"),
+            Some(card_before_selection),
+            "revealing the selected-row copy icon must not reflow the card"
+        );
+
+        assert_minimum_hit_target(cx, "desktop-copy-conversation-row");
+        let copy = cx
+            .debug_bounds("desktop-copy-conversation-row")
+            .expect("selected row exposes its copy icon");
+        cx.simulate_click(copy.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(message.into())
         );
     }
 
@@ -4561,6 +4758,8 @@ mod tests {
         let open = cx
             .debug_bounds("desktop-open-full-message")
             .expect("truncated preview exposes an explicit full-message action");
+        assert_minimum_hit_target(cx, "desktop-open-full-message");
+        assert_minimum_hit_target(cx, "desktop-copy-conversation-row");
         let composer = cx
             .debug_bounds("desktop-composer-panel")
             .expect("Composer remains visible below the preview");
@@ -4574,15 +4773,7 @@ mod tests {
             "full-message action must be reachable inside its row and above the Composer: open={open:?}, row={row:?}, composer={composer:?}, offset={:?}",
             shell.read_with(cx, |shell, _| shell.conversation_controller.scroll.offset())
         );
-        cx.update(|window, app| {
-            shell.update(app, |shell, cx| {
-                shell.open_full_conversation_message(
-                    "assistant:full-message-regression",
-                    window,
-                    cx,
-                );
-            });
-        });
+        cx.simulate_click(open.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
             shell.read_with(cx, |shell, _| shell.active_overlay),
@@ -4818,6 +5009,10 @@ mod tests {
         cx.simulate_resize(size(px(700.), px(800.)));
         settle_visual_measurements(cx);
         assert_composer_regions_do_not_overlap(cx, false);
+        let abort = cx
+            .debug_bounds("desktop-hit-abort-operation")
+            .expect("running operation exposes the critical Abort action");
+        assert_eq!(f32::from(abort.size.height), 40.);
         let selector = cx
             .debug_bounds("desktop-composer-running-mode-selector")
             .expect("running Composer exposes one mode selector");
@@ -5109,7 +5304,7 @@ mod tests {
         let bounds = cx
             .debug_bounds("desktop-copy-markdown-code")
             .expect("final Markdown code block exposes a copy action");
-        assert!(f32::from(bounds.size.height) >= 32.);
+        assert_minimum_hit_target(cx, "desktop-copy-markdown-code");
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
         cx.run_until_parked();
 
@@ -5212,6 +5407,64 @@ mod tests {
             shell.read_with(cx, |shell, _| shell.focus.active()),
             FocusTarget::Overlay
         );
+        let term_left = f32::from(
+            cx.debug_bounds("desktop-authorization-term-operation")
+                .expect("authorization operation term is visible")
+                .left(),
+        );
+        let value_left = f32::from(
+            cx.debug_bounds("desktop-authorization-value-operation")
+                .expect("authorization operation value is visible")
+                .left(),
+        );
+        for (term, term_selector, value_selector) in [
+            (
+                "tool",
+                "desktop-authorization-term-tool",
+                "desktop-authorization-value-tool",
+            ),
+            (
+                "risk",
+                "desktop-authorization-term-risk",
+                "desktop-authorization-value-risk",
+            ),
+            (
+                "scope",
+                "desktop-authorization-term-scope",
+                "desktop-authorization-value-scope",
+            ),
+            (
+                "cwd",
+                "desktop-authorization-term-cwd",
+                "desktop-authorization-value-cwd",
+            ),
+            (
+                "command",
+                "desktop-authorization-term-command",
+                "desktop-authorization-value-command",
+            ),
+        ] {
+            let term_bounds = cx
+                .debug_bounds(term_selector)
+                .unwrap_or_else(|| panic!("authorization {term} term is visible"));
+            let value_bounds = cx
+                .debug_bounds(value_selector)
+                .unwrap_or_else(|| panic!("authorization {term} value is visible"));
+            assert_eq!(f32::from(term_bounds.left()), term_left);
+            assert_eq!(f32::from(value_bounds.left()), value_left);
+            assert!(term_bounds.right() <= value_bounds.left());
+        }
+        for selector in [
+            "desktop-hit-deny-authorization",
+            "desktop-hit-allow-authorization-once",
+            "desktop-hit-allow-authorization-operation",
+        ] {
+            assert_minimum_hit_target(cx, selector);
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("missing critical action {selector}"));
+            assert_eq!(f32::from(bounds.size.height), 40.);
+        }
 
         cx.dispatch_action(AuthorizationDeny);
         cx.run_until_parked();
@@ -5297,11 +5550,14 @@ mod tests {
             })
         }));
 
-        inspector.update(cx, |_, cx| {
-            cx.emit(InspectorPaneEvent::RequestFileReview(
-                review_request.clone(),
-            ));
-        });
+        let changed_file = cx
+            .debug_bounds("desktop-changed-file-row-0")
+            .expect("changed file is a full-row review action");
+        assert!(
+            f32::from(changed_file.size.height) >= 40.,
+            "changed-file action row retains its stable height"
+        );
+        cx.simulate_click(changed_file.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(
             runtime_harness
@@ -5314,6 +5570,44 @@ mod tests {
                 DesktopFileReviewState::Loading(request) if request == &review_request
             )
         }));
+
+        shell.update(cx, |shell, cx| {
+            shell.file_review = Arc::new(DesktopFileReviewState::Ready(
+                DesktopFileReviewDocument::from_product(CodingAgentFileReview {
+                    change: review_request.change.clone(),
+                    revision: review_request.revision,
+                    display_path: review_request.change.path.clone(),
+                    mutation_kind: "edit".into(),
+                    content: "fn reviewed() {}\n".into(),
+                    total_bytes: 17,
+                    line_count: 1,
+                    content_truncated: false,
+                    diff: Some("@@ -0,0 +1 @@\n+fn reviewed() {}\n".into()),
+                    diff_truncated: false,
+                    first_changed_line: Some(1),
+                    added_lines: Some(1),
+                    removed_lines: Some(0),
+                    external_editor_target: None,
+                }),
+            ));
+            shell.notify_inspector_pane(cx);
+        });
+        cx.run_until_parked();
+        for selector in [
+            "desktop-hit-copy-review-path",
+            "desktop-hit-copy-file-review",
+            "desktop-hit-open-external-editor",
+        ] {
+            assert_minimum_hit_target(cx, selector);
+        }
+        inspector.update(cx, |_, cx| {
+            cx.emit(InspectorPaneEvent::CopyFileReview);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.preference_notice.clone()),
+            Some("File review copied.".into())
+        );
     }
 
     #[gpui::test]
@@ -5345,9 +5639,19 @@ mod tests {
         settle_visual_measurements(cx);
         runtime_harness.drain_command_kinds();
 
-        let retry = cx
-            .debug_bounds("desktop-retry-diagnostic")
-            .expect("Diagnostic exposes an authoritative retry action in place");
+        let recovery_actions = [
+            "desktop-retry-diagnostic",
+            "desktop-mark-failed-diagnostic",
+            "desktop-abort-diagnostic",
+        ]
+        .map(|selector| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("Diagnostic exposes {selector} in place"))
+        });
+        let retry = recovery_actions[0];
+        for bounds in recovery_actions {
+            assert_eq!(f32::from(bounds.size.height), 40.);
+        }
         cx.simulate_click(retry.center(), gpui::Modifiers::default());
         cx.run_until_parked();
 
@@ -5692,9 +5996,25 @@ mod tests {
         assert!(pane.contains("Reasoning · collapsed"));
         assert!(pane.contains("\"OUTPUT\""));
         assert!(pane.contains("\"ARGUMENTS\""));
-        assert!(pane.contains("\"show-tool-details\""));
+        assert!(pane.contains("DesktopIconButton::new("));
+        assert!(pane.contains("DesktopIcon::ChevronDown"));
+        assert!(pane.contains("DesktopIcon::ChevronUp"));
+        assert!(pane.contains("DesktopIcon::Copy"));
+        assert!(pane.contains("DesktopIcon::Expand"));
+        assert!(pane.contains("desktop-tool-toggle-header"));
+        assert!(pane.contains("desktop-reasoning-toggle-header"));
+        assert!(pane.contains("conversation_hover_tool"));
+        assert!(pane.contains(".opacity(0.)"));
+        assert!(pane.contains(".focus(|style| style.opacity(1.))"));
+        assert!(!pane.contains(".invisible()"));
         assert!(pane.contains("ConversationPaneEvent::ToggleDetails"));
         assert!(pane.contains("group_hover(hover_group"));
+        assert!(!pane.contains(".label(\"Show\")"));
+        assert!(!pane.contains(".label(\"Hide\")"));
+        assert!(!pane.contains(".label(\"Copy command\")"));
+        assert!(!pane.contains(".label(\"Copy output\")"));
+        assert!(!pane.contains(".label(\"Open full output\")"));
+        assert!(!pane.contains(".label(\"Open full message\")"));
         assert!(pane.contains(".absolute()"));
         assert!(pane.contains(
             ".id((\n                                    ElementId::from(\"conversation-block\")"
@@ -5712,6 +6032,7 @@ mod tests {
         assert!(streaming.contains(
             "TextView::markdown(self.id.clone(), self.text.clone())\n            .w_full()\n            .min_w_0()"
         ));
+        assert!(!streaming.contains(".label(\"Copy code\")"));
         assert!(pane.contains(
             "block.kind\n                                                                != ConversationBlockKind::User"
         ));
@@ -5809,7 +6130,9 @@ mod tests {
         assert!(sessions.contains("DesktopActionRow::new("));
         assert!(controls.contains("pub(super) struct DesktopActionRow"));
         assert!(controls.contains("Button::new(self.id)"));
-        assert!(controls.contains(".label(self.title)"));
+        assert!(controls.contains(".role(Role::Button)"));
+        assert!(controls.contains(".aria_label(accessible_label)"));
+        assert!(controls.contains(".aria_selected(selected)"));
         assert!(conversation.contains(".role(Role::Log)"));
         assert!(conversation.contains(".role(Role::ListItem)"));
         assert!(conversation.contains("row.aria_active_descendant()"));
@@ -5863,10 +6186,13 @@ mod tests {
         assert!(!assistant.align_right);
         assert_ne!(user.surface, assistant.surface);
         assert_ne!(assistant.surface, tool.surface);
-        assert_ne!(tool.surface, failed_tool.surface);
+        assert_eq!(tool.surface, failed_tool.surface);
         assert_eq!(failed_tool.surface, diagnostic.surface);
         assert_ne!(tool.accent, failed_tool.accent);
         assert_eq!(tool.accent, theme.muted_text);
+        assert_eq!(failed_tool.accent, theme.danger);
+        assert_eq!(diagnostic.accent, theme.danger);
+        assert_ne!(tool.glyph, diagnostic.glyph);
         assert_eq!(delegation.accent, theme.accent);
         assert_ne!(delegation.surface, theme.thinking_surface);
     }
@@ -6281,6 +6607,17 @@ mod tests {
         assert!(pane.contains("InspectorPaneEvent::SelectSection(section)"));
         assert!(pane.contains("Badge::new()"));
         assert!(pane.contains(".count(runtime_attention_count)"));
+        assert!(pane.contains("DesktopActionRow::new("));
+        assert!(pane.contains("DesktopIcon::Copy"));
+        assert!(pane.contains("DesktopIcon::OpenExternal"));
+        assert!(pane.contains("DesktopIcon::Close"));
+        assert!(pane.contains("desktop-inspector-tabs"));
+        assert!(!pane.contains("\"●\""));
+        assert!(!pane.contains("\"○\""));
+        assert!(!pane.contains(".label(\"Copy path\")"));
+        assert!(!pane.contains(".label(\"Copy review\")"));
+        assert!(!pane.contains(".label(\"Open editor\")"));
+        assert!(!pane.contains(".label(\"Close\")"));
         assert!(pane.contains("when_some(latest_diagnostic"));
         assert!(pane.contains("when_some(latest_recovery"));
         assert!(!pane.contains(&permanent_diagnostics));
@@ -6457,6 +6794,14 @@ mod tests {
         assert!(host.contains("struct OverlayViewModel"));
         assert!(host.contains("view_model: Option<OverlayViewModel>"));
         assert!(host.contains("DecideAuthorization"));
+        assert!(host.contains("fn authorization_detail("));
+        assert!(host.contains("DesktopCriticalTone::Neutral"));
+        assert!(host.contains("DesktopCriticalTone::Affirmative"));
+        assert!(host.contains("DesktopCriticalTone::Dangerous"));
+        assert!(host.contains("font_family(MONOSPACE_FONT_FAMILY)"));
+        assert!(!host.contains("\"1 · Deny\""));
+        assert!(!host.contains("\"2 · Allow once\""));
+        assert!(!host.contains("\"3 · Allow for operation\""));
         assert!(shell.contains("this.decide_tool_authorization("));
         assert!(shell.contains("Self::on_trap_overlay_focus"));
         assert!(host.contains("self.inspector_pane.clone()"));

@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use coding_agent::api::authorization::{
     ToolAuthorizationPreview, ToolAuthorizationRequest, ToolAuthorizationRisk,
@@ -135,14 +135,25 @@ struct NativeFrameReplay {
 
 struct ClickToPhotonReplay {
     focus_handle: FocusHandle,
+    run_id: String,
     bright: bool,
     samples: u64,
 }
 
 impl ClickToPhotonReplay {
     fn new(cx: &mut Context<Self>) -> Self {
+        let run_id = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        println!("desktop_trace\tclick_to_photon_run\trun={run_id}");
         Self {
             focus_handle: cx.focus_handle(),
+            run_id,
             bright: false,
             samples: 0,
         }
@@ -161,12 +172,15 @@ impl ClickToPhotonReplay {
         self.samples = self.samples.saturating_add(1);
         let sample = self.samples;
         let bright = self.bright;
+        let run_id = self.run_id.clone();
         let received_at = Instant::now();
-        println!("desktop_trace\tclick_to_photon_input_received\tsample={sample}\tbright={bright}");
+        println!(
+            "desktop_trace\tclick_to_photon_input_received\trun={run_id}\tsample={sample}\tbright={bright}"
+        );
         window.on_next_frame(move |_, _| {
             println!(
-                "desktop_trace\tclick_to_photon_post_render\tsample={sample}\tbright={bright}\t\
-                 input_received_to_post_render_us={}",
+                "desktop_trace\tclick_to_photon_post_render\trun={run_id}\tsample={sample}\t\
+                 bright={bright}\tinput_received_to_post_render_us={}",
                 received_at.elapsed().as_micros()
             );
         });
