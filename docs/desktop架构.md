@@ -21,7 +21,8 @@
 | `VUI-000` | 完成 | 七个 fixture 已 review；文档第二节七条问题经确认全部纳入改造范围 |
 | `VUI-101` | 完成 | 已接入 `gpui-component-assets` 的 Lucide 图标源并建立控件权重阶梯；全量、boundary、七个 visual fixture（零像素变化）通过 |
 | `VUI-102` | 完成 | Header 已使用 panel/overflow icon 与唯一 model/profile selector；StatusBar 仅保留临时 thinking selector 和被动状态；全量、七个 reviewed golden 与两组 performance gate 通过 |
-| `VUI-103` 至 `VUI-106` | 未开始 | 结构与视觉 foundation 前置均已满足，按 Pane lane 顺序推进 |
+| `VUI-103` | 完成 | docked 与 narrow overlay 复用同一 SessionsPane；整行 action、搜索和四类状态语义统一；全量、15/15 boundary、七个 reviewed golden 与两组 performance gate 通过 |
+| `VUI-104` 至 `VUI-106` | 未开始 | 结构与视觉 foundation 前置均已满足，按 Composer、Inspector、Conversation lane 顺序推进 |
 | `VUI-201` | 未开始 | 等 `VUI-102` 至 `VUI-106` 完成后统一全局视觉节奏和层级 |
 
 `DSK-000` 在 2026-07-28 记录的既有 Clippy 红灯：
@@ -981,6 +982,31 @@ owner、稳定 re-export、无业务实现的 `mod.rs` 和上述无环方向。�
 - empty、loading、filtered-empty、omitted 四种状态均有明确展示；
 - medium 和 narrow overlay 使用相同 action-row 语义。
 
+**完成记录（2026-07-28）**
+
+- session row 统一使用 Button-backed `DesktopActionRow`：整行提供焦点、Enter 激活、
+  selected/disabled 状态和稳定命中区；active row 保留 selection background 与
+  不依赖颜色的 selection rail，recent row 不再永久显示 `Open`；
+- `New`、overflow、search、clear 和 overlay close 全部使用共享图标词汇，并保留
+  tooltip、accessible label 与 typed `SessionsPaneEvent` 路径；
+- `SessionsPane` 独占 search Input、catalog 呈现、pending/disabled 判断，以及 empty、
+  loading、filtered-empty、omitted 四类状态；
+- narrow Sessions dialog 直接挂载与 docked layout 相同的 `SessionsPane` entity；
+  `OverlayHost` 删除重复的 session DTO、catalog/pending ViewModel 字段和
+  create/refresh/open event，因此两种布局不会产生行为漂移；
+- command intent、ledger association、recent ordering、relative time、refresh deadline、
+  omitted bound、Escape、scroll geometry 和 focus restoration 均保持不变；
+- Desktop 全量单线程验证 184 项通过、5 项 release fixture 忽略，boundary 15/15；
+  `cargo check -p desktop --all-targets`、fmt 和 diff check 通过；
+- 七个 before/after/diff 已人工 review 并安装，安装后 wide、medium、narrow、
+  authorization、reduced-motion、keyboard-focus、no-color 全部 `RMSE=0`；
+- headless 10k-row CPU frame P95 `2.878 ms`、input roundtrip P95 `5.210 ms`、
+  input Change-to-render P95 `317 us`、window RSS growth `24,981,504 bytes`；
+- native GPU present P95 `4.439 ms`、input-to-post-render P95 `8.367 ms`、
+  steady RSS growth `36 KiB`、production Markdown completion P95 `124 us`；
+- Desktop Clippy 仍仅 `DSK-000` 的两项既有红灯，没有新增 lint。交互式
+  `desktop-click-to-photon.sh` 仍需人工按键采样，本任务未把它计作自动通过项。
+
 ### VUI-104：重做 Composer 输入与提交区
 
 **优先级：P1**
@@ -1203,24 +1229,25 @@ VUI task 的评审顺序：
 
 ## 十、下一批建议
 
-结构 lane、视觉基线和共享控件 foundation 已全部完成。下一批按 Pane lane 推进：
+结构 lane、视觉基线、共享控件 foundation 与 Sessions lane 已全部完成。下一批按
+Pane lane 推进：
 
-1. `VUI-103`：重做 Sessions 管理列表；
-2. `VUI-104`：重做 Composer 输入与提交区；
-3. `VUI-105`：收敛 Inspector 与 Overlay 控件；
-4. `VUI-106`：降低 Conversation 永久按钮密度。
+1. `VUI-104`：重做 Composer 输入与提交区；
+2. `VUI-105`：收敛 Inspector 与 Overlay 控件；
+3. `VUI-106`：降低 Conversation 永久按钮密度；
+4. `VUI-201`：统一全局视觉节奏和层级。
 
 这些任务的结构前置和 `VUI-101` 均已满足。虽然 Pane 主文件不同，但它们共享
 `native_shell.rs` 集成和 visual golden，因此在当前工作树按上述顺序落地和验收，
-避免跨 Pane 的视觉差异互相遮蔽。五项完成后执行 `VUI-201`，统一全局 token、节奏
-和层级；`DSK-401` 仍只在主计划完成后按收益单独评估。
+避免跨 Pane 的视觉差异互相遮蔽。三个 Pane task 完成后执行 `VUI-201`，统一全局
+token、节奏和层级；`DSK-401` 仍只在主计划完成后按收益单独评估。
 
 ## 十一、当前推进状态（2026-07-28）
 
 结构 lane（`DSK-000`、`DSK-101` 至 `DSK-105`、`DSK-201`、`DSK-202`、
-`DSK-301`）已全部完成；`VUI-000`、`VUI-101` 与 `VUI-102` 也已完成。当前没有
-未满足的视觉前置。
+`DSK-301`）已全部完成；`VUI-000`、`VUI-101`、`VUI-102` 与 `VUI-103` 也已完成。
+当前没有未满足的视觉前置。
 
-下一关键路径是依次完成 `VUI-103`、`VUI-104`、`VUI-105` 和 `VUI-106`，每项分别
-执行交互、accessibility、responsive、visual golden 和性能验收。之后进入
-`VUI-201` 做全局视觉节奏与层级收敛。当前立即推进 `VUI-103`。
+下一关键路径是依次完成 `VUI-104`、`VUI-105` 和 `VUI-106`，每项分别执行交互、
+accessibility、responsive、visual golden 和性能验收。之后进入 `VUI-201` 做全局
+视觉节奏与层级收敛。当前立即推进 `VUI-104`。
