@@ -42,6 +42,17 @@ pub(super) struct ConversationSource<'a> {
     tools: &'a VecDeque<DesktopToolOverlay>,
 }
 
+#[derive(Clone)]
+struct ConversationToggleAnchor {
+    item_key: ConversationItemKey,
+    source_revision: u64,
+    width_bucket: u32,
+    details_expanded: bool,
+    row_top: f32,
+    scroll_top: f32,
+    layout_applied: bool,
+}
+
 impl<'a> ConversationSource<'a> {
     pub(super) fn new(
         projection: &'a DesktopProjection,
@@ -97,6 +108,7 @@ pub(super) struct ConversationController {
     height_refresh_deadline: Option<Instant>,
     height_refresh_full: bool,
     expanded_details: HashSet<String>,
+    toggle_anchor: Option<ConversationToggleAnchor>,
 }
 
 impl Default for ConversationController {
@@ -121,6 +133,7 @@ impl Default for ConversationController {
             height_refresh_deadline: None,
             height_refresh_full: false,
             expanded_details: HashSet::new(),
+            toggle_anchor: None,
         }
     }
 }
@@ -272,12 +285,38 @@ impl ConversationController {
     /// The expanded set is bounded; overflowing it collapses everything rather
     /// than retaining unbounded per-row UI state.
     pub(super) fn toggle_details(&mut self, block_id: &str) {
-        if !self.expanded_details.remove(block_id) {
+        let anchor = {
+            let rows = self.render_rows.borrow();
+            let heights = self.render_heights.borrow();
+            rows.iter()
+                .position(|row| row.item_key.row_id() == block_id)
+                .and_then(|index| {
+                    let row = rows.get(index)?;
+                    let row_top = heights.get(..index)?.iter().copied().sum();
+                    Some(ConversationToggleAnchor {
+                        item_key: row.item_key.clone(),
+                        source_revision: row.source_revision,
+                        width_bucket: row.width_bucket,
+                        details_expanded: false,
+                        row_top,
+                        scroll_top: (-f32::from(self.scroll.offset().y)).max(0.),
+                        layout_applied: false,
+                    })
+                })
+        };
+        let details_expanded = if self.expanded_details.remove(block_id) {
+            false
+        } else {
             if self.expanded_details.len() >= MAX_EXPANDED_DETAILS {
                 self.expanded_details.clear();
             }
             self.expanded_details.insert(block_id.to_owned());
-        }
+            true
+        };
+        self.toggle_anchor = anchor.map(|mut anchor| {
+            anchor.details_expanded = details_expanded;
+            anchor
+        });
         self.render_full_dirty = true;
     }
 
@@ -356,6 +395,7 @@ impl ConversationController {
         if previous_session_id == next_session_id {
             return false;
         }
+        self.toggle_anchor = None;
         let scroll_top = (-f32::from(self.scroll.offset().y)).max(0.);
         if self.session_views.len() >= MAX_SESSION_VIEW_STATES
             && !self.session_views.contains_key(previous_session_id)
@@ -456,9 +496,19 @@ impl ConversationController {
         } else {
             &mut self.live_layout
         };
+        let is_toggle_measurement = self.toggle_anchor.as_ref().is_some_and(|anchor| {
+            anchor.layout_applied
+                && anchor.item_key == measurement.item_key
+                && anchor.source_revision == measurement.source_revision
+                && anchor.width_bucket == measurement.width_bucket
+                && anchor.details_expanded == measurement.details_expanded
+        });
         let Some(resolution) = layout.submit_measurement(measurement, Instant::now()) else {
             return outcome;
         };
+        if is_toggle_measurement {
+            self.toggle_anchor = None;
+        }
         if let Some(delay) = resolution.next_refresh_after {
             outcome.refresh = Some((delay, durable));
         }
@@ -466,16 +516,17 @@ impl ConversationController {
             return outcome;
         }
 
-        let paused_scroll_top = (!self.viewport.follow_latest()).then(|| {
-            let scroll_top = (-f32::from(self.scroll.offset().y)).max(0.);
-            let render_heights = self.render_heights.borrow();
-            compensate_scroll_top_for_single_row_height(
-                &render_heights,
-                index,
-                resolution.height,
-                scroll_top,
-            )
-        });
+        let paused_scroll_top =
+            (!is_toggle_measurement && !self.viewport.follow_latest()).then(|| {
+                let scroll_top = (-f32::from(self.scroll.offset().y)).max(0.);
+                let render_heights = self.render_heights.borrow();
+                compensate_scroll_top_for_single_row_height(
+                    &render_heights,
+                    index,
+                    resolution.height,
+                    scroll_top,
+                )
+            });
         self.render_heights.borrow_mut()[index] = resolution.height;
         let mut row_sizes = self.row_sizes.borrow_mut();
         if let Some(row_size) = Rc::make_mut(&mut row_sizes).get_mut(index) {
@@ -483,7 +534,9 @@ impl ConversationController {
         }
         drop(row_sizes);
 
-        if self.viewport.follow_latest() {
+        if is_toggle_measurement {
+            tracing::trace!(target: "desktop", event = "toggle_scroll_anchor_hold");
+        } else if self.viewport.follow_latest() {
             self.align_scroll_to_bottom(source.visible_count());
         } else if let Some(adjusted) = paused_scroll_top {
             let current = (-f32::from(self.scroll.offset().y)).max(0.);
@@ -929,12 +982,18 @@ impl ConversationController {
         )
         .entered();
         let session_scroll_restore = self.pending_scroll_restore.take();
+        let toggle_anchor = self
+            .toggle_anchor
+            .as_ref()
+            .filter(|anchor| !anchor.layout_applied)
+            .cloned();
         let previous_scroll_top = (session_scroll_restore.is_none()
             && !self.viewport.follow_latest())
         .then(|| (-f32::from(self.scroll.offset().y)).max(0.0));
         let full_render_update =
             self.render_full_dirty || self.render_width_bucket != Some(layout_width);
         let mut paused_scroll_top = None;
+        let mut toggle_scroll_top = None;
         let mut next_refresh_after = None;
         let mut refresh_requires_full = false;
         if full_render_update {
@@ -949,9 +1008,41 @@ impl ConversationController {
                 row_layout_inputs,
                 layout_width,
                 Instant::now(),
-                previous_scroll_top,
+                toggle_anchor
+                    .as_ref()
+                    .map(|anchor| anchor.row_top)
+                    .or(previous_scroll_top),
             );
-            paused_scroll_top = row_layout.paused_scroll_top;
+            if let Some(anchor) = &toggle_anchor {
+                toggle_scroll_top = row_layout.paused_scroll_top.map(|resolved_row_top| {
+                    (anchor.scroll_top + resolved_row_top - anchor.row_top).max(0.)
+                });
+                if toggle_scroll_top.is_some() {
+                    let resolved_identity = self
+                        .render_rows
+                        .borrow()
+                        .iter()
+                        .find(|row| row.item_key == anchor.item_key)
+                        .map(|row| (row.source_revision, row.width_bucket));
+                    if let Some((source_revision, width_bucket)) = resolved_identity {
+                        if let Some(current) = self
+                            .toggle_anchor
+                            .as_mut()
+                            .filter(|current| current.item_key == anchor.item_key)
+                        {
+                            current.source_revision = source_revision;
+                            current.width_bucket = width_bucket;
+                            current.layout_applied = true;
+                        }
+                    } else {
+                        self.toggle_anchor = None;
+                    }
+                } else {
+                    self.toggle_anchor = None;
+                }
+            } else {
+                paused_scroll_top = row_layout.paused_scroll_top;
+            }
             next_refresh_after = row_layout.next_refresh_after;
             refresh_requires_full = next_refresh_after.is_some();
             let row_sizes = Rc::new(
@@ -1026,7 +1117,17 @@ impl ConversationController {
             self.render_heights.borrow().len(),
             visible_conversation_count
         );
-        if let Some(restored_scroll_top) = session_scroll_restore
+        let toggle_anchor_applied = toggle_scroll_top.is_some();
+        if let Some(toggle_scroll_top) = toggle_scroll_top {
+            let mut offset = self.scroll.offset();
+            offset.y = px(-toggle_scroll_top);
+            self.scroll.set_offset(offset);
+            tracing::trace!(
+                target: "desktop",
+                event = "toggle_scroll_anchor_apply",
+                scroll_top = toggle_scroll_top,
+            );
+        } else if let Some(restored_scroll_top) = session_scroll_restore
             && !self.viewport.follow_latest()
         {
             let mut offset = self.scroll.offset();
@@ -1045,7 +1146,7 @@ impl ConversationController {
             offset.y = px(-adjusted_scroll_top);
             self.scroll.set_offset(offset);
         }
-        if self.viewport.follow_latest() {
+        if self.viewport.follow_latest() && !toggle_anchor_applied {
             self.align_scroll_to_bottom(visible_conversation_count);
         }
         next_refresh_after.map(|delay| (delay, refresh_requires_full))
@@ -1077,6 +1178,10 @@ impl ConversationController {
         let mut offset = self.scroll.offset();
         offset.y = px(-scroll_top);
         self.scroll.set_offset(offset);
+    }
+
+    pub(super) fn scroll_top_for_tests(&self) -> f32 {
+        (-f32::from(self.scroll.offset().y)).max(0.)
     }
 
     pub(super) fn render_heights_for_tests(&self) -> Rc<RefCell<Vec<f32>>> {
@@ -1148,7 +1253,11 @@ pub(super) fn row_target_height(
     panel_width: u32,
 ) -> f32 {
     if expanded_details.contains(row.item_key.row_id()) {
-        return row.estimated_height;
+        return if row.width_bucket == panel_width {
+            row.estimated_height
+        } else {
+            conversation_block_height(row.kind, &row.text, &row.detail, panel_width)
+        };
     }
     let collapsed = match row.kind {
         ConversationBlockKind::Assistant if !row.detail.is_empty() => Some(

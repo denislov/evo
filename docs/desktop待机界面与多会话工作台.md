@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：计划待评审，尚未开工
+> 状态：执行中（VUI-301 代码与自动验收已完成；物理 click-to-photon 待人工，下一项 CAG-101）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-28
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -277,6 +277,36 @@ DSK-503 ─► VUI-302 / VUI-303 / VUI-304 / VUI-305 / VUI-307 / VUI-308 / VUI-3
 - 新增单元测试：展开一行后，其之前所有行的累计偏移量不变；
 - conversation 性能 gate 无回归；
 - 七个 visual golden 无变化（本任务不改变静态截图形态）。
+
+**完成记录（2026-07-28）**
+
+- `ConversationRowHeight` 现分别保留 collapsed/expanded 两份真实测量；toggle 只切换
+  当前变体，width bucket、streaming/text phase 或 source revision 改变时才同时清空
+  两份缓存，late prepaint 的四项 identity 拒绝条件保持不变；
+- expanded 首帧估算显式按当前 width bucket、主文本与 detail 文本重新计算；正常缓存
+  宽度一致时继续复用 `ConversationRowRenderData::estimated_height`，没有把长文本扫描
+  移入稳定帧热路径，collapsed preview 的 `680 px` 封顶保持；
+- toggle 记录目标行顶部、当前 scroll top 与完整 row identity，并经现有 `anchor_at`
+  路径解析新顶部；该路径优先于 session restore、paused anchor 与 follow-latest 对齐。
+  后续真实 measurement 命中同一 identity 时继续保持 scroll top，目标行即使位于视口
+  上方也不会因展开/折叠或二次测量移动；
+- 新增双态循环测试，第二次 expanded measurement 明确返回
+  `height_changed == false`；新增四行累计 offset 测试、width invalidation 测试，以及
+  follow-latest 开启且目标行在视口上方的 controller 首帧 + measurement 集成测试；
+- Desktop 全量 `193 passed / 5 ignored`，dependency boundary `16/16`，
+  `cargo check -p desktop --all-targets`、fmt 与 `git diff --check` 通过；Clippy 仍只报
+  `desktop架构.md` 已记录的 `field_reassign_with_default` 与 `large_enum_variant` 两项
+  既有红灯，本任务没有新增 lint；
+- headless gate：10k CPU frame P95 `3.083 ms`、input roundtrip P95 `5.778 ms`、
+  Change-to-render P95 `361 us`、10 MiB hydration `14.789 ms`、10k-block hydration
+  `2.728 ms`、scroll/render P95 `216 us`、streaming event P95 `5–22 us`；
+- native gate：GPU present P95 `6.803 ms`、input-to-post-render P95 `8.353 ms`、
+  steady RSS growth `45,056 bytes`、production Markdown completion P95 `116 us`，均低于
+  既有预算；wide、medium、narrow、authorization、reduced-motion、keyboard-focus、
+  no-color 七个 visual golden 全部 `RMSE=0`；
+- 本任务没有以内部 post-render latency 冒充物理 photon 结果；计划测试矩阵中的
+  `desktop-click-to-photon.sh` 仍需外部传感器提供至少 50 组配对样本，继续作为人工
+  验收项保留，不阻塞后续代码任务推进。
 
 **建议提交**
 

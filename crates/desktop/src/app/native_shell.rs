@@ -5963,7 +5963,7 @@ mod tests {
     #[test]
     fn secondary_message_details_are_collapsed_by_default_and_height_aware() {
         let mut cache = ConversationRowRenderCache::default();
-        let reasoning = "reasoning line\n".repeat(20);
+        let reasoning = "reasoning ".repeat(45);
         cache.begin_frame();
         let assistant = cache.resolve(
             ConversationRowRenderSource {
@@ -5989,8 +5989,19 @@ mod tests {
         let collapsed = conversation_row_target_height(&assistant, &HashSet::new(), 900);
         let expanded_ids = HashSet::from([assistant.item_key.row_id().to_owned()]);
         let expanded = conversation_row_target_height(&assistant, &expanded_ids, 900);
+        let narrow_expanded = conversation_row_target_height(&assistant, &expanded_ids, 480);
         assert!(collapsed < expanded);
         assert_eq!(expanded, assistant.estimated_height);
+        assert_eq!(
+            narrow_expanded,
+            conversation_block_height(
+                ConversationBlockKind::Assistant,
+                &assistant.text,
+                &assistant.detail,
+                480,
+            )
+        );
+        assert!(narrow_expanded > expanded);
 
         let pane = include_str!("native_shell/conversation_pane.rs");
         assert!(pane.contains("Reasoning · collapsed"));
@@ -6037,6 +6048,71 @@ mod tests {
             "block.kind\n                                                                != ConversationBlockKind::User"
         ));
         assert!(pane.contains("!is_assistant"));
+    }
+
+    #[test]
+    fn detail_toggle_holds_its_row_anchor_while_following_latest() {
+        let mut snapshot = visual_test_snapshot();
+        snapshot.transcript.items = vec![
+            CodingAgentSessionTranscriptItem::User {
+                text: "Earlier user context".repeat(8),
+            },
+            CodingAgentSessionTranscriptItem::Assistant {
+                id: "anchored-reasoning".into(),
+                text: "A compact final answer.".into(),
+                thinking: "reasoning line\n".repeat(32),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: Some(1_200),
+            },
+            CodingAgentSessionTranscriptItem::User {
+                text: "Later content keeps the toggled row above the viewport".repeat(16),
+            },
+        ];
+        let projection = DesktopProjection::new(snapshot)
+            .expect("toggle anchor fixture is a valid product projection");
+        let source = ConversationSource::new(&projection, None);
+        let mut controller = ConversationController::default();
+        controller.prepare_rows(&source, 600);
+
+        let heights = controller.render_heights_for_tests();
+        let heights = heights.borrow();
+        let target_top = heights[0];
+        let scroll_top = target_top + heights[1] + 48.;
+        drop(heights);
+        controller.set_scroll_top_for_tests(scroll_top);
+        assert!(controller.follow_latest_enabled());
+        let target_id = controller
+            .row_at(1)
+            .expect("reasoning row exists")
+            .item_key
+            .row_id()
+            .to_owned();
+
+        controller.toggle_details(&target_id);
+        controller.prepare_rows(&source, 600);
+        assert_eq!(controller.scroll_top_for_tests(), scroll_top);
+        assert!(controller.expanded_details().contains(&target_id));
+
+        let expanded_row = controller.row_at(1).expect("expanded reasoning row exists");
+        let estimated_height = controller.render_heights_for_tests().borrow()[1];
+        let outcome = controller.submit_row_measurement(
+            &source,
+            &ConversationRowMeasurement {
+                item_key: expanded_row.item_key,
+                source_revision: expanded_row.source_revision,
+                width_bucket: 600,
+                text_phase: expanded_row.text_phase,
+                details_expanded: true,
+                height: estimated_height + 96.,
+            },
+        );
+        assert!(outcome.pane_dirty);
+        assert_eq!(controller.scroll_top_for_tests(), scroll_top);
+        assert_eq!(
+            controller.render_heights_for_tests().borrow()[0],
+            target_top
+        );
     }
 
     #[test]

@@ -71,12 +71,36 @@ pub struct ConversationRowLayoutSingleResolution {
 struct ConversationRowHeight {
     committed: f32,
     estimate: f32,
-    measured: Option<f32>,
+    measured_collapsed: Option<f32>,
+    measured_expanded: Option<f32>,
     source_revision: u64,
     width_bucket: u32,
     text_phase: StreamingTextPhase,
     details_expanded: bool,
     last_commit_at: Instant,
+}
+
+impl ConversationRowHeight {
+    fn measured(&self, details_expanded: bool) -> Option<f32> {
+        if details_expanded {
+            self.measured_expanded
+        } else {
+            self.measured_collapsed
+        }
+    }
+
+    fn set_measured(&mut self, details_expanded: bool, height: f32) {
+        if details_expanded {
+            self.measured_expanded = Some(height);
+        } else {
+            self.measured_collapsed = Some(height);
+        }
+    }
+
+    fn clear_measurements(&mut self) {
+        self.measured_collapsed = None;
+        self.measured_expanded = None;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -115,7 +139,8 @@ impl ConversationRowLayoutState {
             .or_insert(ConversationRowHeight {
                 committed: estimate,
                 estimate,
-                measured: None,
+                measured_collapsed: None,
+                measured_expanded: None,
                 source_revision: input.source_revision,
                 width_bucket,
                 text_phase: input.text_phase,
@@ -126,11 +151,11 @@ impl ConversationRowLayoutState {
         let phase_changed = row.text_phase != input.text_phase;
         let details_changed = row.details_expanded != input.details_expanded;
         let revision_changed = row.source_revision != input.source_revision;
-        if width_changed || phase_changed || details_changed || revision_changed {
-            row.measured = None;
+        if width_changed || phase_changed || revision_changed {
+            row.clear_measurements();
         }
         row.estimate = estimate;
-        let target_height = row.measured.unwrap_or(row.estimate);
+        let target_height = row.measured(input.details_expanded).unwrap_or(row.estimate);
         let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
         let mut next_refresh_after = None;
         if target_changed {
@@ -159,7 +184,7 @@ impl ConversationRowLayoutState {
         ConversationRowLayoutSingleResolution {
             height: row.committed,
             source: if row
-                .measured
+                .measured(input.details_expanded)
                 .is_some_and(|height| (row.committed - height).abs() <= 0.5)
             {
                 ConversationRowHeightSource::Measured
@@ -204,7 +229,7 @@ impl ConversationRowLayoutState {
         }
 
         let measured = sanitize_row_height(measurement.height);
-        row.measured = Some(measured);
+        row.set_measured(measurement.details_expanded, measured);
         let target_changed = (row.committed - measured).abs() > 0.5;
         let mut next_refresh_after = None;
         let mut height_changed = false;
@@ -266,7 +291,8 @@ impl ConversationRowLayoutState {
             let mut row = previous_rows.remove(&key).unwrap_or(ConversationRowHeight {
                 committed: estimate,
                 estimate,
-                measured: None,
+                measured_collapsed: None,
+                measured_expanded: None,
                 source_revision: input.source_revision,
                 width_bucket,
                 text_phase: input.text_phase,
@@ -278,11 +304,11 @@ impl ConversationRowLayoutState {
             let phase_changed = row.text_phase != input.text_phase;
             let details_changed = row.details_expanded != input.details_expanded;
             let revision_changed = row.source_revision != input.source_revision;
-            if width_changed || phase_changed || details_changed || revision_changed {
-                row.measured = None;
+            if width_changed || phase_changed || revision_changed {
+                row.clear_measurements();
             }
             row.estimate = estimate;
-            let target_height = row.measured.unwrap_or(row.estimate);
+            let target_height = row.measured(input.details_expanded).unwrap_or(row.estimate);
             let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
             if target_changed {
                 let elapsed = now
@@ -393,6 +419,16 @@ mod tests {
         }
     }
 
+    fn detail_layout(
+        key: &str,
+        target_height: f32,
+        details_expanded: bool,
+    ) -> ConversationRowLayoutInput {
+        let mut input = row_layout(key, target_height, false);
+        input.details_expanded = details_expanded;
+        input
+    }
+
     #[test]
     fn single_row_layout_update_does_not_revisit_ten_thousand_history_rows() {
         let now = Instant::now();
@@ -486,6 +522,197 @@ mod tests {
         }
         assert_eq!(layout.rows[&stable_id].committed, 734.25);
         assert_eq!(layout.full_input_visits, visits_before);
+    }
+
+    #[test]
+    fn disclosure_measurements_are_cached_for_both_states() {
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let item_key = detail_layout("assistant:details", 100., false).item_key;
+
+        layout.resolve(
+            vec![detail_layout("assistant:details", 100., false)],
+            600,
+            started,
+            None,
+        );
+        let collapsed = layout
+            .submit_measurement(
+                &ConversationRowMeasurement {
+                    item_key: item_key.clone(),
+                    source_revision: 1,
+                    width_bucket: 600,
+                    text_phase: StreamingTextPhase::FinalMarkdown,
+                    details_expanded: false,
+                    height: 124.,
+                },
+                started + Duration::from_millis(1),
+            )
+            .expect("collapsed measurement is current");
+        assert!(collapsed.height_changed);
+
+        let first_expansion = layout.resolve(
+            vec![detail_layout("assistant:details", 260., true)],
+            600,
+            started + Duration::from_millis(2),
+            None,
+        );
+        assert_eq!(first_expansion.heights, vec![260.]);
+        let expanded = layout
+            .submit_measurement(
+                &ConversationRowMeasurement {
+                    item_key: item_key.clone(),
+                    source_revision: 1,
+                    width_bucket: 600,
+                    text_phase: StreamingTextPhase::FinalMarkdown,
+                    details_expanded: true,
+                    height: 284.,
+                },
+                started + Duration::from_millis(3),
+            )
+            .expect("expanded measurement is current");
+        assert!(expanded.height_changed);
+
+        let second_collapse = layout.resolve(
+            vec![detail_layout("assistant:details", 105., false)],
+            600,
+            started + Duration::from_millis(4),
+            None,
+        );
+        assert_eq!(second_collapse.heights, vec![124.]);
+
+        let second_expansion = layout.resolve(
+            vec![detail_layout("assistant:details", 265., true)],
+            600,
+            started + Duration::from_millis(5),
+            None,
+        );
+        assert_eq!(second_expansion.heights, vec![284.]);
+        let repeated_measurement = layout
+            .submit_measurement(
+                &ConversationRowMeasurement {
+                    item_key,
+                    source_revision: 1,
+                    width_bucket: 600,
+                    text_phase: StreamingTextPhase::FinalMarkdown,
+                    details_expanded: true,
+                    height: 284.,
+                },
+                started + Duration::from_millis(6),
+            )
+            .expect("repeated expanded measurement is current");
+        assert!(!repeated_measurement.height_changed);
+        assert_eq!(
+            repeated_measurement.source,
+            ConversationRowHeightSource::Measured
+        );
+    }
+
+    #[test]
+    fn disclosure_toggle_preserves_every_preceding_row_offset() {
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let initial = layout.resolve(
+            vec![
+                row_layout("a", 70., false),
+                row_layout("b", 90., false),
+                detail_layout("c", 110., false),
+                row_layout("d", 130., false),
+            ],
+            600,
+            started,
+            None,
+        );
+        let before_offsets = initial
+            .heights
+            .iter()
+            .scan(0., |offset, height| {
+                let current = *offset;
+                *offset += height;
+                Some(current)
+            })
+            .collect::<Vec<_>>();
+
+        let expanded = layout.resolve(
+            vec![
+                row_layout("a", 70., false),
+                row_layout("b", 90., false),
+                detail_layout("c", 310., true),
+                row_layout("d", 130., false),
+            ],
+            600,
+            started + Duration::from_millis(1),
+            Some(before_offsets[2]),
+        );
+        let after_offsets = expanded
+            .heights
+            .iter()
+            .scan(0., |offset, height| {
+                let current = *offset;
+                *offset += height;
+                Some(current)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(&after_offsets[..=2], &before_offsets[..=2]);
+        assert_eq!(expanded.paused_scroll_top, Some(before_offsets[2]));
+        assert_eq!(expanded.heights, vec![70., 90., 310., 130.]);
+    }
+
+    #[test]
+    fn geometry_identity_changes_clear_both_disclosure_measurements() {
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let item_key = detail_layout("assistant:identity", 100., false).item_key;
+        layout.resolve(
+            vec![detail_layout("assistant:identity", 100., false)],
+            600,
+            started,
+            None,
+        );
+        layout.submit_measurement(
+            &ConversationRowMeasurement {
+                item_key: item_key.clone(),
+                source_revision: 1,
+                width_bucket: 600,
+                text_phase: StreamingTextPhase::FinalMarkdown,
+                details_expanded: false,
+                height: 120.,
+            },
+            started + Duration::from_millis(1),
+        );
+        layout.resolve(
+            vec![detail_layout("assistant:identity", 240., true)],
+            600,
+            started + Duration::from_millis(2),
+            None,
+        );
+        layout.submit_measurement(
+            &ConversationRowMeasurement {
+                item_key,
+                source_revision: 1,
+                width_bucket: 600,
+                text_phase: StreamingTextPhase::FinalMarkdown,
+                details_expanded: true,
+                height: 280.,
+            },
+            started + Duration::from_millis(3),
+        );
+
+        let resized = layout.resolve(
+            vec![detail_layout("assistant:identity", 300., true)],
+            624,
+            started + Duration::from_millis(4),
+            None,
+        );
+        assert_eq!(resized.heights, vec![300.]);
+        let collapsed_after_resize = layout.resolve(
+            vec![detail_layout("assistant:identity", 108., false)],
+            624,
+            started + Duration::from_millis(5),
+            None,
+        );
+        assert_eq!(collapsed_after_resize.heights, vec![108.]);
     }
 
     #[test]
