@@ -31,6 +31,24 @@ impl SessionController {
         self.omitted = omitted;
     }
 
+    pub(super) fn rename_session(
+        &mut self,
+        session_id: &str,
+        name: Option<String>,
+        updated_at: String,
+    ) -> bool {
+        let Some(session) = self
+            .catalog
+            .iter_mut()
+            .find(|session| session.session_id == session_id)
+        else {
+            return false;
+        };
+        session.name = name;
+        session.updated_at = updated_at;
+        true
+    }
+
     pub(super) fn schedule_refresh(&mut self, now: Instant) -> Option<Instant> {
         let deadline = now + SESSION_CATALOG_REFRESH_INTERVAL;
         if self
@@ -136,6 +154,36 @@ impl NativeShell {
             self.command_ledger.complete(command_id, &intent);
             self.set_preference_notice(message);
             self.schedule_session_catalog_refresh(cx);
+        }
+        self.notify_sessions_pane(cx);
+        cx.notify();
+    }
+
+    pub(super) fn rename_session(
+        &mut self,
+        session_id: String,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let intent = DesktopCommandIntent::RenameSession {
+            session_id: session_id.clone(),
+        };
+        let Some(command_id) = self.reserve_command(intent.clone()) else {
+            self.notify_toast_host(cx);
+            return;
+        };
+        let admission = self.runtime.as_ref().map_or_else(
+            || Err("desktop runtime is stopped".to_owned()),
+            |runtime| {
+                runtime
+                    .try_rename_session(command_id, &session_id, Some(&name))
+                    .map_err(|error| error.to_string())
+            },
+        );
+        if let Err(message) = admission {
+            self.command_ledger.complete(command_id, &intent);
+            self.set_preference_notice(message);
+            self.notify_toast_host(cx);
         }
         self.notify_sessions_pane(cx);
         cx.notify();

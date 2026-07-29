@@ -106,6 +106,27 @@ pub(super) fn reconcile_direct_update(
                 inspector_dirty: false,
             }
         }
+        DesktopRuntimeUpdate::SessionRenamed {
+            command_id,
+            session_id,
+            name,
+            updated_at,
+        } => {
+            let intent = DesktopCommandIntent::RenameSession {
+                session_id: session_id.clone(),
+            };
+            let sessions_dirty = shell.command_ledger.complete(command_id, &intent);
+            if sessions_dirty {
+                shell
+                    .session_controller
+                    .rename_session(&session_id, name, updated_at);
+                shell.set_preference_notice("Session name updated.".into());
+            }
+            DirectCommandUpdate::Consumed {
+                sessions_dirty,
+                inspector_dirty: false,
+            }
+        }
         update => DirectCommandUpdate::Continue(Box::new(update)),
     }
 }

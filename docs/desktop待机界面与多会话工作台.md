@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302、VUI-303、VUI-304 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302、VUI-303、VUI-304、VUI-305、VUI-306 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -1430,6 +1430,25 @@ feat(desktop): rearrange the composer and accept attachments
 
 - 新增测试：有名称与无名称两种会话的显示与搜索；
 - 三档 golden 更新并附 review note。
+
+**实现记录（2026-07-29）**
+
+- 会话行改为产品 `CodingAgentSessionSummary.name` / Desktop catalog `name` 驱动的 name-first 层级；
+  无名称时使用当前英文 UI locale 的等价文案 `Untitled`，稳定 session id 降为 detail。docked 布局显示
+  有界 id 前缀，narrow overlay 保留完整 id 与相对更新时间，搜索继续同时匹配名称和 id。
+- 每行新增带明确 accessible label 的 overflow 重命名入口。进入后仅该行切换为 inline editor，并提供 Save、
+  Cancel 与 Enter 提交；编辑器打开时主动取得焦点。Desktop runtime 新增有界 `RenameSession` 命令，保持
+  command/session identity，空白由产品规则归一化，最终通过既有产品 `SetSessionName` operation 持久化；
+  Desktop 不复制产品命名算法或名称长度语义。
+- runtime admission 独立限制名称载荷不得包含 NUL 且不得超过 1024 bytes，拒绝使用专门的
+  `InvalidSessionName` 错误；产品返回的 normalized name 与 `updated_at` 原样写回 catalog。重命名只更新
+  catalog metadata，不伪造 conversation projection 事件。
+- 新增 runtime 与 GPUI 回归，覆盖名称载荷边界、trim 后的精确命令、session identity、有名称/无名称显示、
+  按名称与 id 搜索以及手动重命名入口。最终验证为 Desktop `224 passed / 5 ignored`、dependency boundary
+  `16/16`、严格 Clippy、fmt 与 `git diff --check`。
+- wide / medium / narrow 会话列表及其 idle、authorization、reduced-motion、keyboard-focus、no-color 共
+  10 个 native fixture 已人工审图并附 review note；安装后确定性复播 RMSE 全部为 `0`，低于 `0.015`
+  预算。VUI-306 不新增性能通道；click-to-photon 外部传感器脚本继续按执行指示跳过，不计为通过或失败。
 
 **建议提交**
 

@@ -2701,6 +2701,27 @@ fn attachment_commands_preserve_bounded_paths_and_session_target() {
 }
 
 #[test]
+fn rename_command_is_bounded_trimmed_and_identity_preserving() {
+    let (bridge, mut harness) = DesktopRuntimeBridge::instrumented_for_test();
+    bridge
+        .try_rename_session(902, "session-to-rename", Some("  Release plan  "))
+        .unwrap();
+    assert_eq!(
+        harness.drain_session_renames(),
+        [("session-to-rename".into(), Some("Release plan".into()))]
+    );
+    assert!(
+        bridge
+            .try_rename_session(
+                903,
+                "session-to-rename",
+                Some(&"x".repeat(MAX_SESSION_NAME_BYTES + 1)),
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn runtime_error_preserves_only_the_product_safe_error_projection() {
     let product_error = CodingAgentPublicError {
         category: CodingAgentErrorCategory::Provider,

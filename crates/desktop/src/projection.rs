@@ -535,6 +535,7 @@ impl DesktopProjection {
             }
             DesktopRuntimeUpdate::PromptAccepted { .. }
             | DesktopRuntimeUpdate::SessionsListed { .. }
+            | DesktopRuntimeUpdate::SessionRenamed { .. }
             | DesktopRuntimeUpdate::ControlAccepted { .. }
             | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
             | DesktopRuntimeUpdate::FileReviewed { .. }

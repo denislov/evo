@@ -65,6 +65,18 @@ async fn dispatch_command_inner(
                 omitted,
             })
         }
+        DesktopRuntimeCommand::RenameSession {
+            session_id, name, ..
+        } => {
+            let session_id = resolve_idle_target(state, active, Some(&session_id))?;
+            let (name, updated_at) = state.rename_session(&session_id, name).await?;
+            Ok(DesktopRuntimeUpdate::SessionRenamed {
+                command_id,
+                session_id,
+                name,
+                updated_at,
+            })
+        }
         DesktopRuntimeCommand::SelectModel { model_id, .. } => {
             state.context.select_model(model_id)?;
             Ok(DesktopRuntimeUpdate::SelectionChanged {

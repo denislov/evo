@@ -22,6 +22,9 @@ pub(crate) enum DesktopCommandIntent {
         session_id: String,
     },
     ListSessions,
+    RenameSession {
+        session_id: String,
+    },
     Abort {
         operation_id: String,
     },
@@ -54,6 +57,7 @@ impl DesktopCommandIntent {
             Self::OpenSession { .. } => DesktopRuntimeCommandKind::OpenSession,
             Self::CloseSession { .. } => DesktopRuntimeCommandKind::CloseSession,
             Self::ListSessions => DesktopRuntimeCommandKind::ListSessions,
+            Self::RenameSession { .. } => DesktopRuntimeCommandKind::RenameSession,
             Self::Abort { .. } => DesktopRuntimeCommandKind::Abort,
             Self::Reload => DesktopRuntimeCommandKind::Reload,
             Self::Selection(DesktopRuntimeSelectionKind::Model) => {

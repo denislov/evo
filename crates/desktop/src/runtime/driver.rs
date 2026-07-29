@@ -258,6 +258,28 @@ impl RuntimeState {
         Ok(self.metadata_snapshot(Some(session_id)))
     }
 
+    pub(super) async fn rename_session(
+        &mut self,
+        session_id: &str,
+        name: Option<String>,
+    ) -> Result<(Option<String>, String), DesktopBridgeError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| DesktopBridgeError::Busy {
+                    operation: "desktop_session_rename".into(),
+                })?;
+        let outcome = session
+            .run(CodingAgentOperation::SetSessionName { name })
+            .await?;
+        let CodingAgentOperationOutcome::SessionNameChanged { name, updated_at } = outcome else {
+            return Err(DesktopBridgeError::Session {
+                message: "desktop session rename returned an unexpected outcome".into(),
+            });
+        };
+        Ok((name, updated_at))
+    }
+
     pub(super) async fn create_session(
         &mut self,
         open_session_count: usize,

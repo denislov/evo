@@ -25,7 +25,7 @@ use super::protocol::{
     DesktopRuntimeUpdate, local_runtime_error, validate_authorization_identity,
     validate_control_text, validate_file_review_request, validate_prompt,
     validate_prompt_with_attachments, validate_recovery_identity, validate_selection_id,
-    validate_session_id,
+    validate_session_id, validate_session_name,
 };
 use super::run_runtime;
 
@@ -307,6 +307,25 @@ impl DesktopRuntimeBridge {
     #[cfg(test)]
     pub fn try_list_sessions(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
         self.try_send(DesktopRuntimeCommand::ListSessions { command_id })
+    }
+
+    #[cfg(test)]
+    pub fn try_rename_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+        name: Option<&str>,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        validate_session_name(name)?;
+        self.try_send(DesktopRuntimeCommand::RenameSession {
+            command_id,
+            session_id: session_id.to_owned(),
+            name: name
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+        })
     }
 
     #[cfg(test)]
@@ -673,6 +692,19 @@ impl DesktopRuntimeTestHarness {
         }
         prompts
     }
+
+    pub(crate) fn drain_session_renames(&mut self) -> Vec<(String, Option<String>)> {
+        let mut renames = Vec::new();
+        while let Ok(command) = self.commands.try_recv() {
+            if let DesktopRuntimeCommand::RenameSession {
+                session_id, name, ..
+            } = command
+            {
+                renames.push((session_id, name));
+            }
+        }
+        renames
+    }
 }
 
 impl DesktopRuntimeEventStream {
@@ -850,6 +882,24 @@ impl DesktopRuntimeCommandHandle {
 
     pub fn try_list_sessions(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
         self.try_send(DesktopRuntimeCommand::ListSessions { command_id })
+    }
+
+    pub fn try_rename_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+        name: Option<&str>,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        validate_session_name(name)?;
+        self.try_send(DesktopRuntimeCommand::RenameSession {
+            command_id,
+            session_id: session_id.to_owned(),
+            name: name
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+        })
     }
 
     pub fn try_select_model(

@@ -1,8 +1,8 @@
 use desktop::runtime::DesktopSessionCatalogEntry;
 use desktop::shell::{SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
 use gpui::{
-    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, Styled as _,
-    Subscription, Window, div, prelude::*, px, rgb,
+    EventEmitter, FocusHandle, Focusable as _, IntoElement, ParentElement as _, Render, Role,
+    Styled as _, Subscription, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{
@@ -25,6 +25,7 @@ pub(super) enum SessionsPaneEvent {
     Create,
     Refresh,
     Open(String),
+    Rename(String, String),
     CloseSession(String),
     Dismiss,
 }
@@ -55,8 +56,11 @@ pub(super) struct SessionsPaneViewModel {
 pub(super) struct SessionsPane {
     focus: FocusHandle,
     search_input: gpui::Entity<InputState>,
+    rename_input: gpui::Entity<InputState>,
+    renaming_session_id: Option<String>,
     view_model: Option<SessionsPaneViewModel>,
     _search_subscription: Subscription,
+    _rename_subscription: Subscription,
 }
 
 impl SessionsPane {
@@ -72,16 +76,88 @@ impl SessionsPane {
                     cx.notify();
                 }
             });
+        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
+        let rename_subscription = cx.subscribe_in(
+            &rename_input,
+            window,
+            |this, input, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => {
+                    if let Some(session_id) = this.renaming_session_id.take() {
+                        cx.emit(SessionsPaneEvent::Rename(
+                            session_id,
+                            input.read(cx).value().to_string(),
+                        ));
+                        cx.notify();
+                    }
+                }
+                _ => {}
+            },
+        );
         Self {
             focus,
             search_input,
+            rename_input,
+            renaming_session_id: None,
             view_model: None,
             _search_subscription: search_subscription,
+            _rename_subscription: rename_subscription,
         }
     }
 
     pub(super) fn set_view_model(&mut self, view_model: SessionsPaneViewModel) {
         self.view_model = Some(view_model);
+    }
+
+    fn begin_rename(
+        &mut self,
+        session_id: String,
+        current_name: Option<String>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.renaming_session_id = Some(session_id);
+        self.rename_input.update(cx, |input, cx| {
+            input.set_value(current_name.unwrap_or_default(), window, cx)
+        });
+        self.rename_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(session_id) = self.renaming_session_id.take() else {
+            return;
+        };
+        let name = self.rename_input.read(cx).value().to_string();
+        cx.emit(SessionsPaneEvent::Rename(session_id, name));
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, cx: &mut gpui::Context<Self>) {
+        self.renaming_session_id = None;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_search_value(
+        &mut self,
+        value: &str,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.search_input
+            .update(cx, |input, cx| input.set_value(value, window, cx));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_rename_value(
+        &mut self,
+        value: &str,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.rename_input
+            .update(cx, |input, cx| input.set_value(value, window, cx));
     }
 }
 
@@ -119,6 +195,8 @@ impl Render for SessionsPane {
         let context_is_overlay = view_model.context_is_overlay;
         let search_input = self.search_input.clone();
         let clear_search_input = search_input.clone();
+        let rename_input = self.rename_input.clone();
+        let renaming_session_id = self.renaming_session_id.clone();
         let search = search_input.read(cx).value().trim().to_lowercase();
         let omitted_sessions = view_model.omitted_sessions;
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
@@ -167,13 +245,7 @@ impl Render for SessionsPane {
                     .name
                     .as_deref()
                     .map(|name| truncate_label(name, 24))
-                    .unwrap_or_else(|| {
-                        if active {
-                            "Current task".to_owned()
-                        } else {
-                            truncate_label(&target, 24)
-                        }
-                    });
+                    .unwrap_or_else(|| "Untitled".to_owned());
                 let relative_time = relative_session_time(&session.updated_at, now);
                 let row_status = runtime_states
                     .iter()
@@ -201,43 +273,39 @@ impl Render for SessionsPane {
                 let accessible_label =
                     format!("{semantic_name}, {status}, updated {relative_time}");
                 let close_label = format!("Close {semantic_name}");
-                let row =
-                    DesktopActionRow::new(("session-row", index), semantic_name, accessible_label)
-                        .state(DesktopRowState {
-                            selected: active,
-                            disabled: active
-                                || composer_running
-                                || awaiting_prompt_start
-                                || session_pending,
-                            focus_visible: false,
-                        })
-                        .size(DesktopControlSize::Critical)
-                        .leading(div().text_color(status_color).child(status_glyph));
+                let row = DesktopActionRow::new(
+                    ("session-row", index),
+                    semantic_name.clone(),
+                    accessible_label,
+                )
+                .state(DesktopRowState {
+                    selected: active,
+                    disabled: active
+                        || composer_running
+                        || awaiting_prompt_start
+                        || session_pending,
+                    focus_visible: false,
+                })
+                .size(DesktopControlSize::Critical)
+                .leading(div().text_color(status_color).child(status_glyph));
                 // The docked panel is intentionally compact: preserve the
                 // primary session name and close action. The wide overlay has
                 // enough room to add cwd metadata and relative time.
                 let row = if context_is_overlay {
-                    row.detail(format!(
-                        "{} · {status}",
-                        session
-                            .cwd
-                            .as_deref()
-                            .map(|cwd| truncate_label(cwd, 28))
-                            .unwrap_or_else(|| truncate_label(&target, 28))
-                    ))
-                    .trailing(
-                        div()
-                            .w(px(60.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_token(DesignText::Metadata)
-                            .text_color(rgb(theme.muted_text.value()))
-                            .child(relative_time),
-                        60.,
-                    )
+                    row.detail(format!("{} · {status}", truncate_label(&target, 28)))
+                        .trailing(
+                            div()
+                                .w(px(60.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_token(DesignText::Metadata)
+                                .text_color(rgb(theme.muted_text.value()))
+                                .child(relative_time),
+                            60.,
+                        )
                 } else {
-                    row
+                    row.detail(truncate_label(&target, 14))
                 };
                 let row = row
                     .build(theme)
@@ -246,6 +314,46 @@ impl Render for SessionsPane {
                         cx.emit(SessionsPaneEvent::Open(target.clone()));
                     }));
                 let close_target = session.session_id.clone();
+                let rename_target = session.session_id.clone();
+                let rename_name = session.name.clone();
+                let rename_event_target = cx.entity().downgrade();
+                if renaming_session_id.as_deref() == Some(session.session_id.as_str()) {
+                    return div()
+                        .debug_selector(move || format!("desktop-session-rename-{index}"))
+                        .w_full()
+                        .h(px(DesktopControlSize::Critical.pixels()))
+                        .flex()
+                        .items_center()
+                        .gap_token(DesignSpace::Xs)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&rename_input).appearance(false)),
+                        )
+                        .child(
+                            DesktopIconButton::new(
+                                ("commit-session-rename", index),
+                                DesktopIcon::Submit,
+                                "Save session name",
+                            )
+                            .build()
+                            .debug_selector(move || {
+                                format!("desktop-hit-commit-session-rename-{index}")
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.commit_rename(cx))),
+                        )
+                        .child(
+                            DesktopIconButton::new(
+                                ("cancel-session-rename", index),
+                                DesktopIcon::Close,
+                                "Cancel session rename",
+                            )
+                            .build()
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))),
+                        )
+                        .into_any_element();
+                }
                 div()
                     .w_full()
                     .min_w_0()
@@ -254,6 +362,35 @@ impl Render for SessionsPane {
                     .items_center()
                     .gap_token(DesignSpace::Xs)
                     .child(div().flex_1().min_w_0().child(row))
+                    .child(
+                        DesktopIconButton::new(
+                            ("rename-session", index),
+                            DesktopIcon::Overflow,
+                            format!("Rename {semantic_name}"),
+                        )
+                        .size(DesktopControlSize::Tool)
+                        .build()
+                        .debug_selector(move || format!("desktop-hit-rename-session-{index}"))
+                        .dropdown_menu(move |menu, _, _| {
+                            let event_target = rename_event_target.clone();
+                            let target = rename_target.clone();
+                            let name = rename_name.clone();
+                            menu.item(PopupMenuItem::new("Rename session").on_click(
+                                move |_, window, cx| {
+                                    if let Some(event_target) = event_target.upgrade() {
+                                        event_target.update(cx, |pane, cx| {
+                                            pane.begin_rename(
+                                                target.clone(),
+                                                name.clone(),
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    }
+                                },
+                            ))
+                        }),
+                    )
                     // A GPUI Button cannot contain another Button. Keep the
                     // trailing tool as a fixed-width sibling. The docked row
                     // reserves 36 px; the overlay additionally reserves 60 px
@@ -271,6 +408,7 @@ impl Render for SessionsPane {
                             cx.emit(SessionsPaneEvent::CloseSession(close_target.clone()));
                         })),
                     )
+                    .into_any_element()
             })
             .collect::<Vec<_>>();
         let empty_state = if visible_session_count > 0 {

@@ -20,6 +20,7 @@ pub const MAX_CONCURRENT_DESKTOP_SESSIONS: usize = 4;
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_ATTACHMENTS: usize = 16;
 pub const MAX_CONTROL_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_SESSION_NAME_BYTES: usize = 1024;
 pub const MAX_DESKTOP_SESSION_CATALOG: usize = 128;
 
 pub(super) const MAX_SESSION_ID_BYTES: usize = 256;
@@ -53,6 +54,11 @@ pub(super) enum DesktopRuntimeCommand {
     },
     ListSessions {
         command_id: u64,
+    },
+    RenameSession {
+        command_id: u64,
+        session_id: String,
+        name: Option<String>,
     },
     SelectModel {
         command_id: u64,
@@ -123,6 +129,7 @@ impl DesktopRuntimeCommand {
             | Self::OpenSession { command_id, .. }
             | Self::CloseSession { command_id, .. }
             | Self::ListSessions { command_id }
+            | Self::RenameSession { command_id, .. }
             | Self::SelectModel { command_id, .. }
             | Self::SelectSessionProfile { command_id, .. }
             | Self::SubmitPrompt { command_id, .. }
@@ -145,6 +152,7 @@ impl DesktopRuntimeCommand {
             Self::OpenSession { .. } => DesktopRuntimeCommandKind::OpenSession,
             Self::CloseSession { .. } => DesktopRuntimeCommandKind::CloseSession,
             Self::ListSessions { .. } => DesktopRuntimeCommandKind::ListSessions,
+            Self::RenameSession { .. } => DesktopRuntimeCommandKind::RenameSession,
             Self::SelectModel { .. } => DesktopRuntimeCommandKind::SelectModel,
             Self::SelectSessionProfile { .. } => DesktopRuntimeCommandKind::SelectSessionProfile,
             Self::SubmitPrompt { .. } => DesktopRuntimeCommandKind::SubmitPrompt,
@@ -163,9 +171,9 @@ impl DesktopRuntimeCommand {
 
     pub(super) fn target_session_id(&self) -> Option<&str> {
         match self {
-            Self::OpenSession { session_id, .. } | Self::CloseSession { session_id, .. } => {
-                Some(session_id)
-            }
+            Self::OpenSession { session_id, .. }
+            | Self::CloseSession { session_id, .. }
+            | Self::RenameSession { session_id, .. } => Some(session_id),
             Self::Resync { session_id, .. }
             | Self::SelectSessionProfile { session_id, .. }
             | Self::SubmitPrompt { session_id, .. }
@@ -193,6 +201,7 @@ pub enum DesktopRuntimeCommandKind {
     OpenSession,
     CloseSession,
     ListSessions,
+    RenameSession,
     SelectModel,
     SelectSessionProfile,
     SubmitPrompt,
@@ -362,6 +371,12 @@ pub enum DesktopRuntimeUpdate {
         sessions: Vec<DesktopSessionCatalogEntry>,
         omitted: usize,
     },
+    SessionRenamed {
+        command_id: u64,
+        session_id: String,
+        name: Option<String>,
+        updated_at: String,
+    },
     SelectionChanged {
         command_id: u64,
         selection: DesktopRuntimeSelectionKind,
@@ -451,6 +466,7 @@ impl DesktopRuntimeUpdate {
             Self::SessionChanged { .. } => "session_changed",
             Self::SessionClosed { .. } => "session_closed",
             Self::SessionsListed { .. } => "sessions_listed",
+            Self::SessionRenamed { .. } => "session_renamed",
             Self::SelectionChanged { .. } => "selection_changed",
             Self::PromptAccepted { .. } => "prompt_accepted",
             Self::PromptAcceptedWithSession { .. } => "prompt_accepted_with_session",
@@ -491,6 +507,8 @@ pub enum DesktopCommandAdmissionError {
     RuntimeClosed,
     #[error("invalid session id: {message}")]
     InvalidSessionId { message: String },
+    #[error("invalid session name: {message}")]
+    InvalidSessionName { message: String },
     #[error("invalid prompt: {message}")]
     InvalidPrompt { message: String },
     #[error("invalid control text: {message}")]
@@ -578,6 +596,19 @@ pub(super) fn validate_session_id(session_id: &str) -> Result<(), DesktopCommand
     if session_id.len() > MAX_SESSION_ID_BYTES {
         return Err(DesktopCommandAdmissionError::InvalidSessionId {
             message: format!("session id exceeds {MAX_SESSION_ID_BYTES} bytes"),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn validate_session_name(
+    name: Option<&str>,
+) -> Result<(), DesktopCommandAdmissionError> {
+    if name.is_some_and(|name| name.len() > MAX_SESSION_NAME_BYTES || name.contains('\0')) {
+        return Err(DesktopCommandAdmissionError::InvalidSessionName {
+            message: format!(
+                "session name must not contain NUL or exceed {MAX_SESSION_NAME_BYTES} bytes"
+            ),
         });
     }
     Ok(())

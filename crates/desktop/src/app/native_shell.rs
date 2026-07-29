@@ -374,6 +374,7 @@ fn runtime_update_command_id(update: &desktop::runtime::DesktopRuntimeUpdate) ->
         | DesktopRuntimeUpdate::SessionChanged { command_id, .. }
         | DesktopRuntimeUpdate::SessionClosed { command_id, .. }
         | DesktopRuntimeUpdate::SessionsListed { command_id, .. }
+        | DesktopRuntimeUpdate::SessionRenamed { command_id, .. }
         | DesktopRuntimeUpdate::SelectionChanged { command_id, .. }
         | DesktopRuntimeUpdate::PromptAccepted { command_id }
         | DesktopRuntimeUpdate::PromptAcceptedWithSession { command_id, .. }
@@ -608,6 +609,9 @@ impl NativeShell {
                     SessionsPaneEvent::Refresh => this.request_session_catalog(cx),
                     SessionsPaneEvent::Open(session_id) => {
                         this.open_session(session_id.clone(), cx);
+                    }
+                    SessionsPaneEvent::Rename(session_id, name) => {
+                        this.rename_session(session_id.clone(), name.clone(), cx);
                     }
                     SessionsPaneEvent::CloseSession(session_id) => {
                         this.close_session(session_id, cx);
@@ -885,6 +889,7 @@ impl NativeShell {
                 Some(snapshot.session.session_id.clone())
             }
             DesktopRuntimeUpdate::SessionsListed { .. }
+            | DesktopRuntimeUpdate::SessionRenamed { .. }
             | DesktopRuntimeUpdate::SessionClosed { .. } => None,
             _ => runtime_update_command_id(update)
                 .and_then(|command_id| self.command_owner_session_id(command_id)),
@@ -6267,6 +6272,82 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sessions_show_names_search_name_and_id_and_offer_manual_rename(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, visual_test_projection());
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+        shell.update(cx, |shell, cx| {
+            shell.session_controller.replace_catalog(
+                vec![
+                    desktop::runtime::DesktopSessionCatalogEntry {
+                        session_id: "named-session-id".into(),
+                        name: Some("Release plan".into()),
+                        updated_at: "9999-12-31T23:59:59Z".into(),
+                        ..Default::default()
+                    },
+                    desktop::runtime::DesktopSessionCatalogEntry {
+                        session_id: "unnamed-session-id".into(),
+                        name: None,
+                        updated_at: "9999-12-31T23:59:59Z".into(),
+                        ..Default::default()
+                    },
+                ],
+                0,
+            );
+            shell.notify_sessions_pane(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-session-row-0").is_some());
+        assert!(cx.debug_bounds("desktop-session-row-1").is_some());
+
+        cx.update(|window, app| {
+            shell.update(app, |shell, app| {
+                shell.sessions_pane.update(app, |pane, app| {
+                    pane.set_search_value("Release", window, app)
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-session-row-0").is_some());
+        assert!(cx.debug_bounds("desktop-session-row-1").is_none());
+
+        cx.update(|window, app| {
+            shell.update(app, |shell, app| {
+                shell
+                    .sessions_pane
+                    .update(app, |pane, app| pane.set_search_value("", window, app));
+            });
+        });
+        cx.run_until_parked();
+        let rename = cx
+            .debug_bounds("desktop-hit-rename-session-1")
+            .expect("unnamed session exposes rename fallback");
+        cx.simulate_click(rename.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        choose_popup_item(cx, 0);
+        assert!(cx.debug_bounds("desktop-session-rename-1").is_some());
+        cx.update(|window, app| {
+            shell.update(app, |shell, app| {
+                shell.sessions_pane.update(app, |pane, app| {
+                    pane.set_rename_value("Recovered name", window, app)
+                });
+            });
+        });
+        cx.run_until_parked();
+        let commit = cx
+            .debug_bounds("desktop-hit-commit-session-rename-1")
+            .expect("inline rename exposes a save action");
+        cx.simulate_click(commit.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            runtime_harness.drain_session_renames(),
+            [("unnamed-session-id".into(), Some("Recovered name".into()))]
+        );
+    }
+
+    #[gpui::test]
     fn idle_model_selector_lists_the_complete_catalog_and_submits_the_exact_id(
         cx: &mut TestAppContext,
     ) {
@@ -8251,7 +8332,9 @@ mod tests {
         assert!(controller.contains("refresh_deadline: Option<Instant>"));
         assert!(!shell.contains(&root_refresh_deadline));
         assert!(pane.contains("relative_session_time"));
-        assert!(pane.contains("Current task"));
+        assert!(pane.contains("Untitled"));
+        assert!(pane.contains("Rename session"));
+        assert!(pane.contains("SessionsPaneEvent::Rename"));
         assert!(pane.contains("view_model.catalog"));
         assert!(pane.contains("sessions-overflow"));
         assert!(pane.contains("PopupMenuItem::new(if session_catalog_pending"));
