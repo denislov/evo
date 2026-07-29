@@ -519,7 +519,7 @@ impl CodingAgentEmbeddingContext {
             .map_err(CodingAgentPublicError::from)
     }
 
-    /// Build the read-only durable-session query port for this context.
+    /// Build the bounded durable-session navigation port for this context.
     ///
     /// Repository roots and session directories remain private inside the
     /// returned handle; adapters address sessions only by product identity.

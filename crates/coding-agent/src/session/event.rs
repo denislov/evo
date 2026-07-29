@@ -7,7 +7,7 @@ use crate::profiles::{ProfileId, ProfileKind};
 use ai::api::conversation::Usage;
 use ai::api::model::Model;
 
-use super::manifest::{EVENT_SCHEMA, EVENT_VERSION};
+use super::manifest::{EVENT_SCHEMA, EVENT_VERSION, PersistedWorkspaceScope};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SessionEventEnvelope {
@@ -97,7 +97,12 @@ impl SessionEventEnvelope {
 )]
 pub(crate) enum SessionEventData {
     #[serde(rename = "session.created")]
-    SessionCreated { cwd: Option<String> },
+    SessionCreated {
+        /// Compatibility execution cwd retained for v1 readers.
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_scope: Option<PersistedWorkspaceScope>,
+    },
     #[serde(rename = "session.cloned")]
     SessionCloned {
         source_session_id: String,
@@ -512,7 +517,10 @@ mod tests {
     fn session_event_data_variants_keep_stable_kind_names() {
         let cases = [
             (
-                SessionEventData::SessionCreated { cwd: None },
+                SessionEventData::SessionCreated {
+                    cwd: None,
+                    workspace_scope: None,
+                },
                 "session.created",
             ),
             (

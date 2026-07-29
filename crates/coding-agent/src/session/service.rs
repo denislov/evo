@@ -35,6 +35,7 @@ use crate::session::event::{
     SessionEventEnvelope,
 };
 use crate::session::id::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
+use crate::session::manifest::PersistedWorkspaceScope;
 #[cfg(test)]
 use crate::session::replay::SessionRecoverySummary;
 use crate::session::replay::{
@@ -48,6 +49,10 @@ use crate::session::repository::{
 };
 use crate::session::transaction::{
     SessionCommitReceipt, SessionTransactionWriter, TurnTransaction,
+};
+use crate::workspace::{
+    CodingAgentWorkspaceMigration, CodingAgentWorkspaceMigrationOutcome, CodingAgentWorkspaceScope,
+    infer_legacy_workspace, projectless_workspace_id_for_session, workspace_migration_status,
 };
 
 const RECOVERY_RECORD_VERSION: u64 = crate::events::recovery::RECOVERY_RECORD_VERSION;
@@ -369,12 +374,15 @@ impl SessionService {
             Some(session_id) => normalize_session_id(session_id, "session id")?,
             None => ids.next_session_id(),
         };
+        let cwd = option_cwd_string(options);
+        let workspace_scope = option_workspace_scope(options, &session_id)?;
         Self::create_with_id(
             store,
             session_id,
             &mut ids,
             &clock,
-            option_cwd_string(options),
+            workspace_scope,
+            cwd,
             option_default_agent_profile_id(options),
             normalize_session_name(options.session_name().map(str::to_owned)),
             None,
@@ -386,6 +394,11 @@ impl SessionService {
         let store = SessionLogStore::new(root);
         let target = open_target(options)?;
         let handle = store.open_session(&target)?;
+        let handle = migrate_workspace_on_open(
+            &store,
+            handle,
+            workspace_global_config_dir(options).as_path(),
+        )?;
 
         let mut service = Self::from_handle(store, handle)?;
         service.apply_startup_recovery()?;
@@ -410,6 +423,11 @@ impl SessionService {
         let store = SessionLogStore::new(root);
 
         if let Some(handle) = store.try_open_session_id(&session_id)? {
+            let handle = migrate_workspace_on_open(
+                &store,
+                handle,
+                workspace_global_config_dir(options).as_path(),
+            )?;
             let mut service = Self::from_handle(store, handle)?;
             service.apply_startup_recovery()?;
             return Ok(service);
@@ -417,12 +435,15 @@ impl SessionService {
 
         let mut ids = SystemIdGenerator;
         let clock = SystemClock;
+        let cwd = option_cwd_string(options);
+        let workspace_scope = option_workspace_scope(options, &session_id)?;
         Self::create_with_id(
             store,
             session_id,
             &mut ids,
             &clock,
-            option_cwd_string(options),
+            workspace_scope,
+            cwd,
             option_default_agent_profile_id(options),
             normalize_session_name(options.session_name().map(str::to_owned)),
             None,
@@ -462,19 +483,24 @@ impl SessionService {
         let root = resolve_session_log_root(options)?;
         let store = SessionLogStore::new(root);
         let cwd_filter = option_cwd_string(options);
+        let workspace_filter = options.workspace_scope().cloned();
+        let global_config_dir = workspace_global_config_dir(options);
         let summaries = store.list_sessions()?;
         let mut overviews = Vec::new();
-        if cwd_filter.is_none() {
+        if cwd_filter.is_none() && workspace_filter.is_none() {
             let truncated = summaries.len() > limit;
             for summary in summaries.into_iter().take(limit) {
-                let cwd = match store.session_creation_cwd(&summary) {
-                    Ok(cwd) => cwd,
-                    Err(_) => continue,
-                };
+                let workspace =
+                    match workspace_facts_for_summary(&store, &summary, &global_config_dir) {
+                        Ok(workspace) => workspace,
+                        Err(_) => continue,
+                    };
                 overviews.push(CodingAgentSessionOverview {
                     session_id: summary.session_id,
                     name: summary.name,
-                    cwd,
+                    workspace: workspace.scope.overview(),
+                    workspace_migration: workspace.migration,
+                    cwd: workspace.compatibility_cwd,
                     created_at: summary.created_at,
                     updated_at: summary.updated_at,
                     active_leaf_id: summary.active_leaf_id,
@@ -485,12 +511,17 @@ impl SessionService {
 
         let mut matching = 0_usize;
         for summary in summaries {
-            let cwd = match store.session_creation_cwd(&summary) {
-                Ok(cwd) => cwd,
+            let workspace = match workspace_facts_for_summary(&store, &summary, &global_config_dir)
+            {
+                Ok(workspace) => workspace,
                 Err(_) => continue,
             };
-            if let Some(expected) = cwd_filter.as_deref()
-                && cwd.as_deref() != Some(expected)
+            if let Some(expected) = workspace_filter.as_ref() {
+                if &workspace.scope != expected {
+                    continue;
+                }
+            } else if let Some(expected) = cwd_filter.as_deref()
+                && workspace.compatibility_cwd.as_deref() != Some(expected)
             {
                 continue;
             }
@@ -499,7 +530,9 @@ impl SessionService {
                 overviews.push(CodingAgentSessionOverview {
                     session_id: summary.session_id,
                     name: summary.name,
-                    cwd,
+                    workspace: workspace.scope.overview(),
+                    workspace_migration: workspace.migration,
+                    cwd: workspace.compatibility_cwd,
                     created_at: summary.created_at,
                     updated_at: summary.updated_at,
                     active_leaf_id: summary.active_leaf_id,
@@ -507,6 +540,21 @@ impl SessionService {
             }
         }
         Ok((overviews, matching > limit))
+    }
+
+    pub(crate) fn migrate_workspace(
+        options: &CodingAgentSessionOptions,
+    ) -> Result<CodingAgentWorkspaceMigration, CodingSessionError> {
+        let root = resolve_session_log_root(options)?;
+        let store = SessionLogStore::new(root);
+        let target = open_target(options)?;
+        let handle = store.open_session(&target)?;
+        migrate_workspace_handle(
+            &store,
+            handle,
+            workspace_global_config_dir(options).as_path(),
+        )
+        .map(|(_, migration)| migration)
     }
 
     pub(crate) fn hydrate(
@@ -2131,12 +2179,21 @@ impl SessionService {
             .map(str::to_owned)
             .unwrap_or_else(|| ids.next_session_copy_id());
         let replay = self.replay()?;
+        let workspace_scope = writer_manifest
+            .workspace_scope
+            .as_ref()
+            .ok_or_else(|| CodingSessionError::Session {
+                message: "legacy session workspace is unavailable for copy".into(),
+            })?
+            .to_product()
+            .map_err(workspace_persistence_error)?;
         let target_session_id = ids.next_session_id();
         let target = Self::create_with_id(
             self.store.clone(),
             target_session_id,
             &mut ids,
             &clock,
+            workspace_scope,
             replay.cwd,
             self.current_default_agent_profile_id(),
             writer_manifest.name,
@@ -2213,16 +2270,20 @@ impl SessionService {
         session_id: String,
         ids: &mut impl IdGenerator,
         clock: &impl Clock,
+        workspace_scope: CodingAgentWorkspaceScope,
         cwd: Option<String>,
         default_agent_profile_id: ProfileId,
         name: Option<String>,
         copy_operation_id: Option<&str>,
     ) -> Result<Self, CodingSessionError> {
         let created_at = clock.now_rfc3339();
+        let persisted_workspace_scope = PersistedWorkspaceScope::from_product(&workspace_scope)
+            .map_err(workspace_persistence_error)?;
         let handle = match store.create_session(
             CreateSessionOptions::new(session_id, created_at.clone())
                 .name(name)
-                .default_agent_profile_id(default_agent_profile_id),
+                .default_agent_profile_id(default_agent_profile_id)
+                .workspace_scope(persisted_workspace_scope.clone()),
         ) {
             Ok(handle) => handle,
             Err(SessionCreateError::CleanupFailed {
@@ -2256,7 +2317,10 @@ impl SessionService {
             handle.manifest().session_id.clone(),
             ids.next_event_id(),
             created_at,
-            SessionEventData::SessionCreated { cwd },
+            SessionEventData::SessionCreated {
+                cwd,
+                workspace_scope: Some(persisted_workspace_scope),
+            },
         );
         let service = Self::from_handle(store, handle)?;
         let receipt = match service
@@ -2940,6 +3004,161 @@ fn option_cwd_string(options: &CodingAgentSessionOptions) -> Option<String> {
     options.cwd().map(normalized_path_string)
 }
 
+fn option_workspace_scope(
+    options: &CodingAgentSessionOptions,
+    session_id: &str,
+) -> Result<CodingAgentWorkspaceScope, CodingSessionError> {
+    let scope = match options.workspace_scope() {
+        Some(CodingAgentWorkspaceScope::Legacy { .. }) => {
+            return Err(CodingSessionError::Input {
+                message: "new sessions cannot use a legacy workspace scope".into(),
+            });
+        }
+        Some(scope) => scope.clone(),
+        None => match options.cwd() {
+            Some(cwd) => CodingAgentWorkspaceScope::Project {
+                cwd: cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf()),
+            },
+            None => CodingAgentWorkspaceScope::Projectless {
+                workspace_id: projectless_workspace_id_for_session(session_id),
+            },
+        },
+    };
+    PersistedWorkspaceScope::from_product(&scope).map_err(workspace_persistence_error)?;
+    Ok(scope)
+}
+
+fn workspace_global_config_dir(options: &CodingAgentSessionOptions) -> PathBuf {
+    options
+        .workspace_global_config_dir()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::app::embedding::global_config_directory)
+}
+
+fn migrate_workspace_on_open(
+    store: &SessionLogStore,
+    handle: SessionHandle,
+    global_config_dir: &Path,
+) -> Result<SessionHandle, CodingSessionError> {
+    migrate_workspace_handle(store, handle, global_config_dir).map(|(handle, _)| handle)
+}
+
+fn migrate_workspace_handle(
+    store: &SessionLogStore,
+    handle: SessionHandle,
+    global_config_dir: &Path,
+) -> Result<(SessionHandle, CodingAgentWorkspaceMigration), CodingSessionError> {
+    if handle.manifest().workspace_scope.is_some() {
+        let scope = handle
+            .manifest()
+            .workspace_scope
+            .as_ref()
+            .expect("workspace scope checked above")
+            .to_product()
+            .map_err(workspace_persistence_error)?;
+        let outcome = if handle.manifest().workspace_migrated_from_legacy {
+            CodingAgentWorkspaceMigrationOutcome::Migrated
+        } else {
+            CodingAgentWorkspaceMigrationOutcome::NotRequired
+        };
+        let migration = workspace_migration_status(&scope, outcome, global_config_dir);
+        return Ok((handle, migration));
+    }
+    let creation = store.session_creation_workspace_for_handle(&handle)?;
+    let inference = match creation.workspace_scope {
+        Some(scope) => {
+            let scope = scope.to_product().map_err(workspace_persistence_error)?;
+            crate::workspace::LegacyWorkspaceInference {
+                migration: workspace_migration_status(
+                    &scope,
+                    CodingAgentWorkspaceMigrationOutcome::Pending,
+                    global_config_dir,
+                ),
+                scope,
+            }
+        }
+        None => infer_legacy_workspace(creation.cwd.as_deref(), global_config_dir),
+    };
+    if matches!(inference.scope, CodingAgentWorkspaceScope::Legacy { .. }) {
+        return Ok((handle, inference.migration));
+    }
+    let persisted = PersistedWorkspaceScope::from_product(&inference.scope)
+        .map_err(workspace_persistence_error)?;
+    let handle = store.migrate_manifest_workspace(&handle, persisted)?;
+    let migration = workspace_migration_status(
+        &inference.scope,
+        CodingAgentWorkspaceMigrationOutcome::Migrated,
+        global_config_dir,
+    );
+    Ok((handle, migration))
+}
+
+struct SessionWorkspaceFacts {
+    scope: CodingAgentWorkspaceScope,
+    migration: CodingAgentWorkspaceMigration,
+    compatibility_cwd: Option<String>,
+}
+
+fn workspace_facts_for_summary(
+    store: &SessionLogStore,
+    summary: &SessionSummary,
+    global_config_dir: &Path,
+) -> Result<SessionWorkspaceFacts, CodingSessionError> {
+    if let Some(persisted) = summary.workspace_scope.as_ref() {
+        let scope = persisted
+            .to_product()
+            .map_err(workspace_persistence_error)?;
+        let outcome = if summary.workspace_migrated_from_legacy {
+            CodingAgentWorkspaceMigrationOutcome::Migrated
+        } else {
+            CodingAgentWorkspaceMigrationOutcome::NotRequired
+        };
+        return Ok(SessionWorkspaceFacts {
+            compatibility_cwd: compatibility_cwd(&scope),
+            migration: workspace_migration_status(&scope, outcome, global_config_dir),
+            scope,
+        });
+    }
+
+    let creation = store.session_creation_workspace(summary)?;
+    if let Some(persisted) = creation.workspace_scope {
+        let scope = persisted
+            .to_product()
+            .map_err(workspace_persistence_error)?;
+        return Ok(SessionWorkspaceFacts {
+            compatibility_cwd: compatibility_cwd(&scope),
+            migration: workspace_migration_status(
+                &scope,
+                CodingAgentWorkspaceMigrationOutcome::Pending,
+                global_config_dir,
+            ),
+            scope,
+        });
+    }
+    let inferred = infer_legacy_workspace(creation.cwd.as_deref(), global_config_dir);
+    Ok(SessionWorkspaceFacts {
+        compatibility_cwd: compatibility_cwd(&inferred.scope),
+        migration: inferred.migration,
+        scope: inferred.scope,
+    })
+}
+
+fn compatibility_cwd(scope: &CodingAgentWorkspaceScope) -> Option<String> {
+    match scope {
+        CodingAgentWorkspaceScope::Project { cwd } => Some(normalized_path_string(cwd)),
+        CodingAgentWorkspaceScope::Projectless { .. }
+        | CodingAgentWorkspaceScope::Legacy { .. } => None,
+    }
+}
+
+fn workspace_persistence_error(
+    error: crate::workspace::CodingAgentWorkspaceResolutionError,
+) -> CodingSessionError {
+    CodingSessionError::Session {
+        message: format!("invalid durable workspace identity: {error}"),
+    }
+}
+
 fn option_default_agent_profile_id(options: &CodingAgentSessionOptions) -> ProfileId {
     options
         .default_agent_profile_id()
@@ -2962,8 +3181,51 @@ mod tests {
         ToolAuthorizationRisk, ToolAuthorizationScope,
     };
     use crate::session::event::PersistedContentBlock;
+    use crate::session::manifest::{
+        LEGACY_SESSION_VERSION, SESSION_MANIFEST_FILE, SESSION_VERSION,
+    };
     use crate::session::replay::OperationReplayStatus;
     use crate::session::repository::StoreFailurePoint;
+    use crate::workspace::{
+        CodingAgentWorkspaceKind, CodingAgentWorkspaceMigrationOutcome,
+        CodingAgentWorkspaceSelection,
+    };
+
+    fn create_legacy_session_fixture(
+        root: &Path,
+        session_id: &str,
+        cwd: Option<String>,
+    ) -> PathBuf {
+        let store = SessionLogStore::new(root);
+        let handle = store
+            .create_session(CreateSessionOptions::new(
+                session_id,
+                "2026-07-30T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_events(
+                &handle,
+                &[SessionEventEnvelope::new(
+                    session_id,
+                    format!("evt-{session_id}"),
+                    "2026-07-30T00:00:00Z",
+                    SessionEventData::SessionCreated {
+                        cwd,
+                        workspace_scope: None,
+                    },
+                )],
+            )
+            .unwrap();
+        let mut manifest = handle.manifest().clone();
+        manifest.version = LEGACY_SESSION_VERSION;
+        manifest.workspace_scope = None;
+        manifest.workspace_migrated_from_legacy = false;
+        let mut bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(handle.session_dir().join(SESSION_MANIFEST_FILE), bytes).unwrap();
+        handle.session_dir().to_path_buf()
+    }
 
     #[test]
     fn session_name_persists_in_manifest_and_lists_without_decoding_events() {
@@ -3316,6 +3578,198 @@ mod tests {
 
         let replay = service.replay().unwrap();
         assert_eq!(replay.cwd.as_deref(), Some(cwd.to_str().unwrap()));
+        assert_eq!(service.handle.manifest().version, SESSION_VERSION);
+        assert!(matches!(
+            service.handle.manifest().workspace_scope.as_ref(),
+            Some(PersistedWorkspaceScope::Project { cwd: persisted })
+                if persisted == cwd.to_str().unwrap()
+        ));
+        let events = service.store.read_events(&service.handle).unwrap();
+        assert!(matches!(
+            events[0].data,
+            SessionEventData::SessionCreated {
+                workspace_scope: Some(PersistedWorkspaceScope::Project { .. }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn new_projectless_session_persists_identity_without_exposing_scratch_in_overview() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let root = temp.path().join("sessions");
+        let resolved = CodingAgentWorkspaceSelection::projectless("workspace-persisted")
+            .resolve(&global)
+            .unwrap();
+        let options = CodingAgentSessionOptions::new()
+            .with_session_id("sess_projectless")
+            .with_session_log_root(&root)
+            .with_resolved_workspace(resolved)
+            .with_workspace_global_config_dir_for_tests(&global);
+
+        let service = SessionService::create(&options).unwrap();
+
+        assert!(matches!(
+            service.handle.manifest().workspace_scope.as_ref(),
+            Some(PersistedWorkspaceScope::Projectless { workspace_id })
+                if workspace_id == "workspace-persisted"
+        ));
+        let (overviews, _) = SessionService::list_overviews(&options, 10).unwrap();
+        assert_eq!(
+            overviews[0].workspace.kind,
+            CodingAgentWorkspaceKind::Projectless
+        );
+        assert_eq!(overviews[0].workspace.display_path, None);
+        assert_eq!(overviews[0].cwd, None);
+        assert_eq!(
+            overviews[0].workspace_migration.outcome,
+            CodingAgentWorkspaceMigrationOutcome::NotRequired
+        );
+        assert_eq!(overviews[0].workspace_migration.diagnostic, None);
+    }
+
+    #[test]
+    fn opening_v1_project_session_atomically_migrates_manifest_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let root = temp.path().join("sessions");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        create_legacy_session_fixture(
+            &root,
+            "sess_legacy_project",
+            Some(project.to_string_lossy().into_owned()),
+        );
+        let options = CodingAgentSessionOptions::new()
+            .with_session_id("sess_legacy_project")
+            .with_session_log_root(&root)
+            .with_workspace_global_config_dir_for_tests(&global);
+
+        let service = SessionService::open(&options).unwrap();
+
+        assert_eq!(service.handle.manifest().version, SESSION_VERSION);
+        assert!(service.handle.manifest().workspace_migrated_from_legacy);
+        assert!(matches!(
+            service.handle.manifest().workspace_scope.as_ref(),
+            Some(PersistedWorkspaceScope::Project { cwd })
+                if cwd == project.to_str().unwrap()
+        ));
+        let (overviews, _) = SessionService::list_overviews(&options, 10).unwrap();
+        assert_eq!(
+            overviews[0].workspace.kind,
+            CodingAgentWorkspaceKind::Project
+        );
+        assert_eq!(
+            overviews[0].workspace_migration.outcome,
+            CodingAgentWorkspaceMigrationOutcome::Migrated
+        );
+        assert_eq!(overviews[0].workspace_migration.diagnostic, None);
+    }
+
+    #[test]
+    fn opening_v1_historical_scratch_migrates_to_projectless_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let scratch = global.join("scratch/workspace-legacy");
+        let root = temp.path().join("sessions");
+        std::fs::create_dir_all(&scratch).unwrap();
+        create_legacy_session_fixture(
+            &root,
+            "sess_legacy_scratch",
+            Some(scratch.to_string_lossy().into_owned()),
+        );
+        let options = CodingAgentSessionOptions::new()
+            .with_session_id("sess_legacy_scratch")
+            .with_session_log_root(&root)
+            .with_workspace_global_config_dir_for_tests(&global);
+
+        let service = SessionService::open(&options).unwrap();
+
+        assert!(matches!(
+            service.handle.manifest().workspace_scope.as_ref(),
+            Some(PersistedWorkspaceScope::Projectless { workspace_id })
+                if workspace_id == "workspace-legacy"
+        ));
+        let (overviews, _) = SessionService::list_overviews(&options, 10).unwrap();
+        assert_eq!(
+            overviews[0].workspace.kind,
+            CodingAgentWorkspaceKind::Projectless
+        );
+        assert_eq!(overviews[0].workspace.display_path, None);
+        assert_eq!(overviews[0].cwd, None);
+        assert_eq!(
+            overviews[0].workspace_migration.outcome,
+            CodingAgentWorkspaceMigrationOutcome::Migrated
+        );
+    }
+
+    #[test]
+    fn deleted_project_migrates_identity_and_reports_unavailable_diagnostic() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let root = temp.path().join("sessions");
+        let deleted = temp.path().join("deleted-project");
+        create_legacy_session_fixture(
+            &root,
+            "sess_deleted_project",
+            Some(deleted.to_string_lossy().into_owned()),
+        );
+        let options = CodingAgentSessionOptions::new()
+            .with_session_id("sess_deleted_project")
+            .with_session_log_root(&root)
+            .with_workspace_global_config_dir_for_tests(&global);
+
+        let service = SessionService::open(&options).unwrap();
+        let (overviews, _) = SessionService::list_overviews(&options, 10).unwrap();
+
+        assert!(service.handle.manifest().workspace_scope.is_some());
+        assert_eq!(
+            overviews[0].workspace.kind,
+            CodingAgentWorkspaceKind::Project
+        );
+        assert_eq!(
+            overviews[0].workspace_migration.outcome,
+            CodingAgentWorkspaceMigrationOutcome::Migrated
+        );
+        assert_eq!(
+            overviews[0].workspace_migration.diagnostic.as_deref(),
+            Some("Project workspace directory is unavailable.")
+        );
+    }
+
+    #[test]
+    fn missing_or_invalid_v1_cwd_remains_readable_without_writing_legacy_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let root = temp.path().join("sessions");
+        for (session_id, cwd) in [
+            ("sess_missing_cwd", None),
+            ("sess_invalid_cwd", Some("relative/project".into())),
+        ] {
+            create_legacy_session_fixture(&root, session_id, cwd);
+            let options = CodingAgentSessionOptions::new()
+                .with_session_id(session_id)
+                .with_session_log_root(&root)
+                .with_workspace_global_config_dir_for_tests(&global);
+
+            let service = SessionService::open(&options).unwrap();
+
+            assert_eq!(service.handle.manifest().version, LEGACY_SESSION_VERSION);
+            assert_eq!(service.handle.manifest().workspace_scope, None);
+        }
+
+        let options = CodingAgentSessionOptions::new()
+            .with_session_log_root(&root)
+            .with_workspace_global_config_dir_for_tests(&global);
+        let (overviews, _) = SessionService::list_overviews(&options, 10).unwrap();
+        assert_eq!(overviews.len(), 2);
+        assert!(overviews.iter().all(|overview| {
+            overview.workspace.kind == CodingAgentWorkspaceKind::Legacy
+                && overview.workspace_migration.outcome
+                    == CodingAgentWorkspaceMigrationOutcome::Unavailable
+                && overview.workspace_migration.diagnostic.is_some()
+        }));
     }
 
     #[test]

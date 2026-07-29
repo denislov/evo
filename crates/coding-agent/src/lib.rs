@@ -20,6 +20,7 @@ mod resources;
 mod session;
 mod theme;
 mod tools;
+mod workspace;
 
 /// Stable, scenario-oriented library facade for embedding or scripting.
 ///
@@ -53,6 +54,10 @@ pub mod api {
             CodingAgentProfileDelegationSummary, CodingAgentTeamProfileCatalogEntry,
         };
         pub use crate::app::session::CodingAgentSessionQuery;
+        pub use crate::workspace::{
+            CodingAgentResolvedWorkspace, CodingAgentWorkspaceResolutionError,
+            CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
+        };
     }
 
     /// Bounded product runtime and adapter-presentation settings.
@@ -198,6 +203,10 @@ pub mod api {
             CodingAgentSessionTranscriptItem, CodingAgentSessionView,
             CodingAgentTeamProfileSummary, CodingAgentTranscriptSnapshot, ProfileId, ProfileKind,
             ProfileSource, TeamStrategy, TeamSupervisor,
+        };
+        pub use crate::workspace::{
+            CodingAgentWorkspaceKind, CodingAgentWorkspaceMigration,
+            CodingAgentWorkspaceMigrationOutcome, CodingAgentWorkspaceOverview,
         };
     }
 }

@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::workspace::CodingAgentWorkspaceMigration;
+
 const MAX_SESSION_QUERY_CHOICES: usize = 256;
 const MAX_SESSION_QUERY_TRANSCRIPT_ITEMS: usize = 10_000;
 const MAX_SESSION_QUERY_TREE_NODES: usize = 10_000;
@@ -419,7 +421,7 @@ impl CodingAgentSessionQuery {
         Self { options: None }
     }
 
-    /// Build a read-only query for the product-global durable session root.
+    /// Build a bounded session navigation port for the product-global root.
     ///
     /// Resolution preserves the existing product precedence:
     /// `EVO_SESSION_DIR`, then `EVO_DIR/sessions`, then `~/.evo/sessions`.
@@ -430,7 +432,7 @@ impl CodingAgentSessionQuery {
             .map_err(CodingAgentPublicError::from)
     }
 
-    /// Build a read-only query for an explicit durable session root.
+    /// Build a bounded session navigation port for an explicit durable root.
     ///
     /// The remaining repository inputs use product defaults so callers do not
     /// need a cwd, profile registry, or [`CodingAgentEmbeddingContext`](crate::api::embedding::CodingAgentEmbeddingContext).
@@ -460,9 +462,10 @@ impl CodingAgentSessionQuery {
 
     /// List durable sessions without replaying their event logs.
     ///
-    /// The manifest is read for every candidate and only its first bounded,
-    /// checksummed `SessionCreated` frame is decoded to recover cwd. Later
-    /// event frames, transcript state, and usage are never read.
+    /// Current manifests provide workspace identity directly. For legacy v1
+    /// candidates only the first bounded, checksummed `SessionCreated` frame
+    /// is decoded for migration. Later event frames, transcript state, and
+    /// usage are never read.
     pub fn overviews(&self) -> Result<CodingAgentSessionOverviewCatalog, CodingAgentPublicError> {
         self.overviews_internal()
             .map_err(CodingAgentPublicError::from)
@@ -485,6 +488,22 @@ impl CodingAgentSessionQuery {
             overviews,
             truncated,
         })
+    }
+
+    /// Explicitly migrate one legacy session's workspace identity.
+    ///
+    /// A valid legacy Project or Projectless identity is atomically written to
+    /// the current manifest schema. Missing or invalid legacy identity remains
+    /// readable and returns an `Unavailable` outcome without writing Legacy.
+    pub fn migrate_workspace(
+        &self,
+        session_id: impl AsRef<str>,
+    ) -> Result<CodingAgentWorkspaceMigration, CodingAgentPublicError> {
+        let options = self
+            .options_for_session(session_id.as_ref())
+            .map_err(CodingAgentPublicError::from)?;
+        crate::session::service::SessionService::migrate_workspace(&options)
+            .map_err(CodingAgentPublicError::from)
     }
 
     pub(crate) fn catalog_internal(&self) -> Result<CodingAgentSessionCatalog, CodingSessionError> {
@@ -1421,6 +1440,18 @@ mod tests {
         assert_eq!(overview.session_id, choice.id);
         assert_eq!(overview.name, choice.name);
         assert_eq!(overview.cwd.as_deref(), Some(choice.cwd.as_str()));
+        assert_eq!(
+            overview.workspace.kind,
+            crate::workspace::CodingAgentWorkspaceKind::Project
+        );
+        assert_eq!(
+            overview.workspace_migration.outcome,
+            crate::workspace::CodingAgentWorkspaceMigrationOutcome::NotRequired
+        );
+        assert_eq!(
+            overview.workspace.display_path.as_deref(),
+            Some(Path::new("/overview-project"))
+        );
         assert_eq!(overview.created_at, choice.created_at);
         assert_eq!(overview.updated_at, choice.updated_at);
         assert_eq!(overview.active_leaf_id, choice.active_leaf_id);
@@ -1435,6 +1466,8 @@ mod tests {
         let root = temp.path().join("sessions");
         create_query_fixture(&root, "sess_bad_later_frame").await;
         create_query_fixture(&root, "sess_bad_first_frame").await;
+        downgrade_query_fixture_manifest_to_v1(&root, "sess_bad_later_frame");
+        downgrade_query_fixture_manifest_to_v1(&root, "sess_bad_first_frame");
         std::fs::OpenOptions::new()
             .append(true)
             .open(root.join("sess_bad_later_frame/events.jsonl"))
@@ -1457,10 +1490,82 @@ mod tests {
             overviews.overviews[0].cwd.as_deref(),
             Some("/query-fixture")
         );
+        assert_eq!(
+            overviews.overviews[0].workspace.kind,
+            crate::workspace::CodingAgentWorkspaceKind::Project
+        );
+        assert_eq!(
+            overviews.overviews[0].workspace_migration.outcome,
+            crate::workspace::CodingAgentWorkspaceMigrationOutcome::Pending
+        );
         assert!(
             catalog.choices.is_empty(),
             "full catalog hydration must still reject both corrupt event logs"
         );
+    }
+
+    #[tokio::test]
+    async fn v2_session_overview_uses_manifest_without_reading_the_event_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        create_query_fixture(&root, "sess_manifest_workspace").await;
+        std::fs::write(
+            root.join("sess_manifest_workspace/events.jsonl"),
+            b"not-a-durable-frame\n",
+        )
+        .unwrap();
+        let query = CodingAgentSessionQuery::from_session_root(&root);
+
+        let overviews = query.overviews().unwrap();
+        let catalog = query.catalog().unwrap();
+
+        assert_eq!(overviews.overviews.len(), 1);
+        assert_eq!(overviews.overviews[0].session_id, "sess_manifest_workspace");
+        assert_eq!(
+            overviews.overviews[0].workspace.kind,
+            crate::workspace::CodingAgentWorkspaceKind::Project
+        );
+        assert_eq!(
+            overviews.overviews[0].workspace_migration.outcome,
+            crate::workspace::CodingAgentWorkspaceMigrationOutcome::NotRequired
+        );
+        assert!(catalog.choices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_workspace_migration_upgrades_a_legacy_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        create_query_fixture(&root, "sess_explicit_migration").await;
+        downgrade_query_fixture_manifest_to_v1(&root, "sess_explicit_migration");
+        let query = CodingAgentSessionQuery::from_session_root(&root);
+
+        let migration = query.migrate_workspace("sess_explicit_migration").unwrap();
+
+        assert_eq!(
+            migration.outcome,
+            crate::workspace::CodingAgentWorkspaceMigrationOutcome::Migrated
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("sess_explicit_migration/session.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["version"], 2);
+        assert_eq!(manifest["workspace_scope"]["kind"], "project");
+        assert_eq!(manifest["workspace_migrated_from_legacy"], true);
+    }
+
+    fn downgrade_query_fixture_manifest_to_v1(root: &Path, session_id: &str) {
+        let path = root.join(session_id).join("session.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["version"] = serde_json::json!(1);
+        value.as_object_mut().unwrap().remove("workspace_scope");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("workspace_migrated_from_legacy");
+        std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     }
 
     #[test]

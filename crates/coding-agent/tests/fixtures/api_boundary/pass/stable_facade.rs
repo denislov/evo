@@ -20,8 +20,9 @@ use coding_agent::api::embedding::{
     CodingAgentProviderAuthKind, CodingAgentProviderAuthState, CodingAgentResourceCommand,
     CodingAgentResourceCommandKind, CodingAgentSessionQuery, CodingAgentSessionSelection,
     CodingAgentTeamProfileCatalogEntry, CodingAgentThinkingLevel, CodingAgentToolExecutionMode,
-    configured_model_catalog, global_auth_snapshot, global_config_directory, global_skill_catalog, model_catalog,
-    model_catalog_entry_by_id,
+    CodingAgentWorkspaceResolutionError, CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
+    CodingAgentResolvedWorkspace, configured_model_catalog, global_auth_snapshot,
+    global_config_directory, global_skill_catalog, model_catalog, model_catalog_entry_by_id,
 };
 use coding_agent::api::error::{CodingAgentPublicDiagnostic, CodingAgentPublicError};
 use coding_agent::api::event::PRODUCT_EVENT_PROTOCOL_VERSION;
@@ -56,10 +57,32 @@ use coding_agent::api::view::{
     CodingAgentSessionOverviewCatalog, CodingAgentSessionSnapshot, CodingAgentSessionSummary,
     CodingAgentSessionTreeNode, CodingAgentSessionTreeRole, CodingAgentSessionTreeSnapshot,
     CodingAgentSessionUsage, CodingAgentSessionView, CodingAgentTeamProfileSummary, ProfileId,
+    CodingAgentWorkspaceKind, CodingAgentWorkspaceMigration,
+    CodingAgentWorkspaceMigrationOutcome, CodingAgentWorkspaceOverview,
 };
 
 fn prompt() -> PromptTurnOptions {
     PromptTurnOptions::new(PromptInvocation::Text("fixture".into()))
+}
+
+fn workspace_contract() {
+    let selection = CodingAgentWorkspaceSelection::project("project");
+    let _: CodingAgentWorkspaceSelection =
+        CodingAgentWorkspaceSelection::projectless("workspace-stable");
+    let _: Option<Result<CodingAgentResolvedWorkspace, CodingAgentWorkspaceResolutionError>> = None;
+    let scope = CodingAgentWorkspaceScope::Legacy { cwd: None };
+    let overview: CodingAgentWorkspaceOverview = scope.overview();
+    let _: CodingAgentWorkspaceKind = overview.kind;
+    let _: Option<CodingAgentWorkspaceMigration> = None;
+    let _: CodingAgentWorkspaceMigrationOutcome = CodingAgentWorkspaceMigrationOutcome::Pending;
+    touch(selection);
+}
+
+fn resolved_session_options(
+    options: CodingAgentSessionOptions,
+    workspace: CodingAgentResolvedWorkspace,
+) -> CodingAgentSessionOptions {
+    options.with_resolved_workspace(workspace)
 }
 
 fn session_queries(context: &CodingAgentEmbeddingContext) -> Result<(), CodingAgentPublicError> {
@@ -76,6 +99,7 @@ fn session_queries(context: &CodingAgentEmbeddingContext) -> Result<(), CodingAg
     let _: Option<CodingAgentSessionChoiceKind> = None;
     let overview_catalog: CodingAgentSessionOverviewCatalog = query.overviews()?;
     let _: Option<CodingAgentSessionOverview> = overview_catalog.overviews.into_iter().next();
+    let _: CodingAgentWorkspaceMigration = query.migrate_workspace("session")?;
     let _: Option<CodingAgentSessionSnapshot> = None;
     let _: Option<CodingAgentSessionTreeSnapshot> = None;
     let _: Option<CodingAgentSessionTreeNode> = None;

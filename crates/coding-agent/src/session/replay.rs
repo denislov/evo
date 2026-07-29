@@ -376,7 +376,7 @@ impl ReplayBuilder {
 
     fn apply_event(&mut self, event: &SessionEventEnvelope) {
         match &event.data {
-            SessionEventData::SessionCreated { cwd } => {
+            SessionEventData::SessionCreated { cwd, .. } => {
                 self.cwd = cwd.clone();
             }
             SessionEventData::OperationStarted { operation, .. } => {
@@ -1537,6 +1537,7 @@ mod tests {
             None,
             SessionEventData::SessionCreated {
                 cwd: Some("/work".into()),
+                workspace_scope: None,
             },
         )];
 

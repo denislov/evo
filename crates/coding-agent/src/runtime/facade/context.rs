@@ -7,10 +7,16 @@ use ai::api::client::AiClient;
 use crate::authorization::ToolAuthorizationMode;
 use crate::profiles::{ProfileId, ProfileKind};
 use crate::runtime::control::{OperationActivity, OperationKind};
+use crate::workspace::{
+    CodingAgentResolvedWorkspace, CodingAgentWorkspaceMigration, CodingAgentWorkspaceOverview,
+    CodingAgentWorkspaceScope,
+};
 
 #[derive(Clone, Default)]
 pub struct CodingAgentSessionOptions {
     cwd: Option<PathBuf>,
+    workspace_scope: Option<CodingAgentWorkspaceScope>,
+    workspace_global_config_dir: Option<PathBuf>,
     session_id: Option<String>,
     session_name: Option<String>,
     session_log_root: Option<PathBuf>,
@@ -24,6 +30,7 @@ impl std::fmt::Debug for CodingAgentSessionOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CodingAgentSessionOptions")
             .field("cwd", &self.cwd)
+            .field("workspace_scope", &self.workspace_scope)
             .field("session_id", &self.session_id)
             .field("has_session_name", &self.session_name.is_some())
             .field("session_log_root", &self.session_log_root)
@@ -52,6 +59,21 @@ impl CodingAgentSessionOptions {
 
     pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    pub fn with_resolved_workspace(mut self, workspace: CodingAgentResolvedWorkspace) -> Self {
+        self.cwd = Some(workspace.execution_cwd);
+        self.workspace_scope = Some(workspace.scope);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_workspace_global_config_dir_for_tests(
+        mut self,
+        dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.workspace_global_config_dir = Some(dir.into());
         self
     }
 
@@ -90,6 +112,14 @@ impl CodingAgentSessionOptions {
 
     pub fn cwd(&self) -> Option<&Path> {
         self.cwd.as_deref()
+    }
+
+    pub(crate) fn workspace_scope(&self) -> Option<&CodingAgentWorkspaceScope> {
+        self.workspace_scope.as_ref()
+    }
+
+    pub(crate) fn workspace_global_config_dir(&self) -> Option<&Path> {
+        self.workspace_global_config_dir.as_deref()
     }
 
     pub fn session_log_root(&self) -> Option<&Path> {
@@ -229,12 +259,18 @@ pub struct CodingAgentSessionSummary {
 
 /// Lightweight durable-session facts for list surfaces.
 ///
-/// Manifest fields are combined with only the first `SessionCreated` frame to
-/// recover `cwd`; no transcript, usage, or later event is replayed.
+/// Current manifests carry workspace identity directly. Only legacy v1
+/// manifests read the first `SessionCreated` frame for migration; no
+/// transcript, usage, or later event is replayed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingAgentSessionOverview {
     pub session_id: String,
     pub name: Option<String>,
+    pub workspace: CodingAgentWorkspaceOverview,
+    pub workspace_migration: CodingAgentWorkspaceMigration,
+    /// Legacy compatibility field. New consumers should use `workspace`.
+    ///
+    /// This remains until DSK-630 moves all adapters to the typed overview.
     pub cwd: Option<String>,
     pub created_at: String,
     pub updated_at: String,

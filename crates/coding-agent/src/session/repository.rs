@@ -13,9 +13,9 @@ use serde_json::{Value, value::RawValue};
 use sha2::{Digest, Sha256};
 
 use super::manifest::{
-    EVENT_SCHEMA, EVENT_VERSION, SESSION_EVENT_LOG_FILE, SESSION_MANIFEST_FILE,
-    SESSION_OUTBOX_LOG_FILE, SESSION_SCHEMA, SESSION_VERSION, SessionManifest,
-    default_agent_profile_id,
+    EVENT_SCHEMA, EVENT_VERSION, LEGACY_SESSION_VERSION, PersistedWorkspaceScope,
+    SESSION_EVENT_LOG_FILE, SESSION_MANIFEST_FILE, SESSION_OUTBOX_LOG_FILE, SESSION_SCHEMA,
+    SESSION_VERSION, SessionManifest, default_agent_profile_id,
 };
 use super::replay::{ReplayFold, ReplayIndex, SessionReplay};
 use crate::events::outbox::{
@@ -23,6 +23,7 @@ use crate::events::outbox::{
 };
 use crate::runtime::facade::{CodingSessionError, ProfileId};
 use crate::session::event::{SessionEventData, SessionEventEnvelope};
+use crate::workspace::projectless_workspace_id_for_session;
 
 const SESSION_WRITER_LOCK_FILE: &str = ".writer.lock";
 const MAX_SESSION_RECORD_BYTES: usize = 1024 * 1024;
@@ -295,6 +296,9 @@ impl SessionLogStore {
         options: CreateSessionOptions,
     ) -> Result<SessionHandle, SessionCreateError> {
         let session_id = normalize_session_id(&options.session_id)?;
+        options.workspace_scope.to_product().map_err(|error| {
+            session_error(format!("invalid persisted workspace scope: {error}"))
+        })?;
         fs::create_dir_all(&self.root).map_err(|error| {
             session_error(format!(
                 "failed to create session log root {}: {error}",
@@ -317,9 +321,13 @@ impl SessionLogStore {
                 session_dir.display()
             ))
         })?;
-        let manifest = SessionManifest::new(session_id.clone(), options.created_at)
-            .with_name(options.name)
-            .with_default_agent_profile_id(options.default_agent_profile_id);
+        let manifest = SessionManifest::new(
+            session_id.clone(),
+            options.created_at,
+            options.workspace_scope,
+        )
+        .with_name(options.name)
+        .with_default_agent_profile_id(options.default_agent_profile_id);
         let initialization = (|| -> Result<(), CodingSessionError> {
             #[cfg(test)]
             self.fail_if_injected(StoreFailurePoint::CreateBlobs)?;
@@ -695,11 +703,18 @@ impl SessionLogStore {
         Ok(events)
     }
 
-    pub(crate) fn session_creation_cwd(
+    pub(crate) fn session_creation_workspace(
         &self,
         summary: &SessionSummary,
-    ) -> Result<Option<String>, CodingSessionError> {
+    ) -> Result<SessionCreationWorkspace, CodingSessionError> {
         let handle = self.open_session(&summary.session_dir)?;
+        self.session_creation_workspace_for_handle(&handle)
+    }
+
+    pub(crate) fn session_creation_workspace_for_handle(
+        &self,
+        handle: &SessionHandle,
+    ) -> Result<SessionCreationWorkspace, CodingSessionError> {
         let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
         let file = File::open(&event_log_path).map_err(|error| {
             session_error(format!(
@@ -726,7 +741,13 @@ impl SessionLogStore {
         validate_contiguous_session_sequence(&event, 1)?;
         validate_event_for_session(&event, &handle.manifest.session_id)?;
         match event.data {
-            SessionEventData::SessionCreated { cwd } => Ok(cwd),
+            SessionEventData::SessionCreated {
+                cwd,
+                workspace_scope,
+            } => Ok(SessionCreationWorkspace {
+                cwd,
+                workspace_scope,
+            }),
             _ => Err(session_error(format!(
                 "session event log {} must begin with SessionCreated",
                 event_log_path.display()
@@ -866,6 +887,27 @@ impl SessionLogStore {
         write_manifest(&handle.session_dir, &manifest)
     }
 
+    pub(crate) fn migrate_manifest_workspace(
+        &self,
+        handle: &SessionHandle,
+        workspace_scope: PersistedWorkspaceScope,
+    ) -> Result<SessionHandle, CodingSessionError> {
+        let _lease = self.acquire_write_lease(handle)?;
+        let mut manifest = read_manifest(&handle.session_dir)?;
+        if manifest.workspace_scope.is_none() {
+            self.update_manifest(
+                handle,
+                ManifestPatch::new().workspace_migration(workspace_scope),
+            )?;
+            manifest = read_manifest(&handle.session_dir)?;
+        }
+        validate_manifest(&manifest)?;
+        Ok(SessionHandle {
+            session_dir: handle.session_dir.clone(),
+            manifest,
+        })
+    }
+
     pub(crate) fn remove_session(&self, handle: &SessionHandle) -> Result<(), CodingSessionError> {
         let session_dir = self.resolve_existing_session_dir(handle.session_dir())?;
         self.remove_created_session_dir(&session_dir)
@@ -922,12 +964,17 @@ pub(crate) struct CreateSessionOptions {
     pub(crate) name: Option<String>,
     pub(crate) created_at: String,
     pub(crate) default_agent_profile_id: ProfileId,
+    pub(crate) workspace_scope: PersistedWorkspaceScope,
 }
 
 impl CreateSessionOptions {
     pub(crate) fn new(session_id: impl Into<String>, created_at: impl Into<String>) -> Self {
+        let session_id = session_id.into();
         Self {
-            session_id: session_id.into(),
+            workspace_scope: PersistedWorkspaceScope::Projectless {
+                workspace_id: projectless_workspace_id_for_session(&session_id),
+            },
+            session_id,
             name: None,
             created_at: created_at.into(),
             default_agent_profile_id: default_agent_profile_id(),
@@ -941,6 +988,11 @@ impl CreateSessionOptions {
 
     pub(crate) fn name(mut self, name: Option<String>) -> Self {
         self.name = name;
+        self
+    }
+
+    pub(crate) fn workspace_scope(mut self, workspace_scope: PersistedWorkspaceScope) -> Self {
+        self.workspace_scope = workspace_scope;
         self
     }
 }
@@ -974,6 +1026,8 @@ pub(crate) struct SessionSummary {
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
     pub(crate) active_leaf_id: Option<String>,
+    pub(crate) workspace_scope: Option<PersistedWorkspaceScope>,
+    pub(crate) workspace_migrated_from_legacy: bool,
 }
 
 impl SessionSummary {
@@ -985,8 +1039,16 @@ impl SessionSummary {
             created_at: handle.manifest.created_at.clone(),
             updated_at: handle.manifest.updated_at.clone(),
             active_leaf_id: handle.manifest.active_leaf_id.clone(),
+            workspace_scope: handle.manifest.workspace_scope.clone(),
+            workspace_migrated_from_legacy: handle.manifest.workspace_migrated_from_legacy,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionCreationWorkspace {
+    pub(crate) cwd: Option<String>,
+    pub(crate) workspace_scope: Option<PersistedWorkspaceScope>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -996,6 +1058,7 @@ pub(crate) struct ManifestPatch {
     active_branch_id: Option<Option<String>>,
     active_leaf_id: Option<Option<String>>,
     default_agent_profile_id: Option<ProfileId>,
+    workspace_migration: Option<PersistedWorkspaceScope>,
 }
 
 impl ManifestPatch {
@@ -1029,6 +1092,11 @@ impl ManifestPatch {
         self
     }
 
+    fn workspace_migration(mut self, scope: PersistedWorkspaceScope) -> Self {
+        self.workspace_migration = Some(scope);
+        self
+    }
+
     fn apply(self, manifest: &mut SessionManifest) {
         if let Some(updated_at) = self.updated_at {
             manifest.updated_at = updated_at;
@@ -1044,6 +1112,11 @@ impl ManifestPatch {
         }
         if let Some(default_agent_profile_id) = self.default_agent_profile_id {
             manifest.default_agent_profile_id = default_agent_profile_id;
+        }
+        if let Some(scope) = self.workspace_migration {
+            manifest.version = SESSION_VERSION;
+            manifest.workspace_scope = Some(scope);
+            manifest.workspace_migrated_from_legacy = true;
         }
     }
 }
@@ -1139,10 +1212,10 @@ fn decode_manifest(
     let schema = json_string_field(&value, "schema");
     let version = json_u32_field(&value, "version");
     match (schema.as_deref(), version) {
-        (Some(SESSION_SCHEMA), Some(SESSION_VERSION)) => {
+        (Some(SESSION_SCHEMA), Some(LEGACY_SESSION_VERSION | SESSION_VERSION)) => {
             serde_json::from_value(value).map_err(|error| {
                 session_error(format!(
-                    "failed to decode v{SESSION_VERSION} session manifest {}: {error}",
+                    "failed to decode session manifest {}: {error}",
                     manifest_path.display()
                 ))
             })
@@ -1353,11 +1426,24 @@ fn validate_manifest(manifest: &SessionManifest) -> Result<(), CodingSessionErro
             manifest.schema
         )));
     }
-    if manifest.version != SESSION_VERSION {
-        return Err(session_error(format!(
-            "unsupported session manifest version: {}",
-            manifest.version
-        )));
+    match manifest.version {
+        LEGACY_SESSION_VERSION
+            if manifest.workspace_scope.is_none() && !manifest.workspace_migrated_from_legacy => {}
+        SESSION_VERSION => {
+            let scope = manifest
+                .workspace_scope
+                .as_ref()
+                .ok_or_else(|| session_error("v2 session manifest is missing workspace scope"))?;
+            scope.to_product().map_err(|error| {
+                session_error(format!("invalid persisted workspace scope: {error}"))
+            })?;
+        }
+        _ => {
+            return Err(session_error(format!(
+                "unsupported session manifest version: {}",
+                manifest.version
+            )));
+        }
     }
     validate_relative_manifest_path(&manifest.event_log)?;
     validate_relative_manifest_path(&manifest.outbox_log)?;
@@ -1817,6 +1903,7 @@ mod tests {
                 "evt_1",
                 SessionEventData::SessionCreated {
                     cwd: Some("/tmp/project".into()),
+                    workspace_scope: None,
                 },
             ),
             event("sess_events", "evt_2", SessionEventData::TurnStarted {})
@@ -2043,7 +2130,10 @@ mod tests {
             event(
                 "sess_sequence",
                 "evt_1",
-                SessionEventData::SessionCreated { cwd: None },
+                SessionEventData::SessionCreated {
+                    cwd: None,
+                    workspace_scope: None,
+                },
             ),
             event("sess_sequence", "evt_2", SessionEventData::TurnStarted {}),
         ];
@@ -2126,7 +2216,10 @@ mod tests {
             event(
                 "sess_legacy_sequence",
                 "evt_legacy_1",
-                SessionEventData::SessionCreated { cwd: None },
+                SessionEventData::SessionCreated {
+                    cwd: None,
+                    workspace_scope: None,
+                },
             ),
             event(
                 "sess_legacy_sequence",
@@ -2167,7 +2260,10 @@ mod tests {
             event(
                 "sess_non_contiguous_sequence",
                 "evt_1",
-                SessionEventData::SessionCreated { cwd: None },
+                SessionEventData::SessionCreated {
+                    cwd: None,
+                    workspace_scope: None,
+                },
             )
             .with_session_sequence(1),
             event(
@@ -2385,7 +2481,10 @@ mod tests {
         let wrong_event = event(
             "sess_other",
             "evt_1",
-            SessionEventData::SessionCreated { cwd: None },
+            SessionEventData::SessionCreated {
+                cwd: None,
+                workspace_scope: None,
+            },
         );
 
         let error = store.append_events(&handle, &[wrong_event]).unwrap_err();
@@ -2426,6 +2525,37 @@ mod tests {
     }
 
     #[test]
+    fn workspace_migration_failure_preserves_the_complete_v1_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionLogStore::new(temp.path());
+        let handle = store
+            .create_session(create_options("sess_workspace_migration_atomic"))
+            .unwrap();
+        let mut legacy = handle.manifest().clone();
+        legacy.version = LEGACY_SESSION_VERSION;
+        legacy.workspace_scope = None;
+        write_manifest(handle.session_dir(), &legacy).unwrap();
+        let manifest_path = handle.session_dir().join(SESSION_MANIFEST_FILE);
+        let before = fs::read(&manifest_path).unwrap();
+        store.fail_after(StoreFailurePoint::UpdateManifest, 0);
+
+        let error = store
+            .migrate_manifest_workspace(
+                &handle,
+                PersistedWorkspaceScope::Project {
+                    cwd: "/migrated/project".into(),
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "session");
+        assert_eq!(fs::read(manifest_path).unwrap(), before);
+        let reopened = store.open_session(handle.session_dir()).unwrap();
+        assert_eq!(reopened.manifest().version, LEGACY_SESSION_VERSION);
+        assert_eq!(reopened.manifest().workspace_scope, None);
+    }
+
+    #[test]
     fn create_session_rejects_path_like_session_id() {
         let temp = tempfile::tempdir().unwrap();
         let store = SessionLogStore::new(temp.path());
@@ -2460,6 +2590,29 @@ mod tests {
             error
                 .to_string()
                 .contains("manifest event log path must be relative and contained")
+        );
+    }
+
+    #[test]
+    fn open_session_rejects_invalid_v2_workspace_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionLogStore::new(temp.path());
+        let handle = store
+            .create_session(create_options("sess_bad_workspace"))
+            .unwrap();
+        let mut manifest = handle.manifest().clone();
+        manifest.workspace_scope = Some(PersistedWorkspaceScope::Project {
+            cwd: "relative/project".into(),
+        });
+        write_manifest(handle.session_dir(), &manifest).unwrap();
+
+        let error = store.open_session(handle.session_dir()).unwrap_err();
+
+        assert_eq!(error.code(), "session");
+        assert!(
+            error
+                .to_string()
+                .contains("persisted project path must be absolute")
         );
     }
 }
