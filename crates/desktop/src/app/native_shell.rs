@@ -707,6 +707,18 @@ impl NativeShell {
                         this.navigate_center(target.clone(), window, cx);
                     }
                     SessionsPaneEvent::Refresh => this.request_session_catalog(cx),
+                    SessionsPaneEvent::SetProjectCollapsed {
+                        group_id,
+                        collapsed,
+                    } => {
+                        if this
+                            .project_catalog
+                            .set_group_collapsed(group_id, *collapsed)
+                        {
+                            this.notify_sessions_pane(cx);
+                            cx.notify();
+                        }
+                    }
                     SessionsPaneEvent::Rename(session_id, name) => {
                         this.rename_session(session_id.clone(), name.clone(), cx);
                     }
@@ -5510,12 +5522,15 @@ mod tests {
             "opening the Sessions surface must remain read-free"
         );
 
-        let overflow = cx
-            .debug_bounds("desktop-hit-sessions-overflow")
-            .expect("Sessions exposes the explicit refresh menu");
-        cx.simulate_click(overflow.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        choose_popup_item(cx, 0);
+        assert!(
+            cx.debug_bounds("desktop-projects-state-not-loaded")
+                .is_some(),
+            "the unloaded catalog has a local Projects state"
+        );
+        let refresh = cx
+            .debug_bounds("desktop-hit-refresh-projects")
+            .expect("Projects exposes its direct explicit refresh action");
+        cx.simulate_click(refresh.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
             runtime_harness.drain_command_kinds(),
@@ -5524,6 +5539,10 @@ mod tests {
         assert_eq!(
             shell.read_with(cx, |shell, _| shell.project_catalog.state().clone()),
             project_catalog_controller::ProjectCatalogState::Loading
+        );
+        assert!(
+            cx.debug_bounds("desktop-projects-state-loading").is_some(),
+            "the pending catalog has a local loading state"
         );
         shell.update(cx, |shell, cx| shell.request_session_catalog(cx));
         assert_eq!(
@@ -5557,6 +5576,9 @@ mod tests {
             );
             assert!(shell.preference_notice.is_none());
         });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-projects-tree").is_some());
+        assert!(cx.debug_bounds("desktop-projects-state-loading").is_none());
         cx.executor().advance_clock(Duration::from_secs(60));
         cx.run_until_parked();
         assert_eq!(
@@ -5610,6 +5632,8 @@ mod tests {
                 "failed refresh must not schedule another attempt"
             );
         });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-projects-state-error").is_some());
     }
 
     #[gpui::test]
@@ -5653,6 +5677,146 @@ mod tests {
                     .contains("private runtime detail")
             );
         });
+    }
+
+    #[gpui::test]
+    fn projects_local_empty_omitted_and_legacy_states_are_explicit(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        cx.simulate_resize(size(px(1_300.), px(900.)));
+        cx.run_until_parked();
+
+        shell.update(cx, |shell, cx| {
+            shell.project_catalog.replace_catalog(Vec::new(), 0);
+            shell.notify_sessions_pane(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-projects-state-empty").is_some());
+        assert!(cx.debug_bounds("desktop-projects-tree").is_none());
+
+        shell.update(cx, |shell, cx| {
+            shell.project_catalog.replace_catalog(
+                vec![desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id: "legacy-visible-session".into(),
+                    name: Some("Legacy visible session".into()),
+                    updated_at: "2026-07-29T08:00:00Z".into(),
+                    ..Default::default()
+                }],
+                4,
+            );
+            shell.notify_sessions_pane(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-projects-state-empty").is_none());
+        assert!(cx.debug_bounds("desktop-projects-tree").is_some());
+        assert!(cx.debug_bounds("desktop-project-row-0").is_some());
+        assert!(cx.debug_bounds("desktop-session-row-0").is_some());
+        assert!(cx.debug_bounds("desktop-projects-state-omitted").is_some());
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.project_catalog.project_groups()[0]
+                .workspace
+                .kind),
+            coding_agent::api::view::CodingAgentWorkspaceKind::Legacy
+        );
+    }
+
+    #[gpui::test]
+    fn projects_tree_disclosure_preserves_order_at_minimum_width_and_in_drawer(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let preferences = DesktopPreferences {
+            sessions_panel_width: SESSION_PANEL_MIN_WIDTH,
+            ..DesktopPreferences::default()
+        };
+        let (shell, cx) = add_idle_visual_shell_with_preferences(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            preferences,
+        );
+        shell.update(cx, |shell, cx| {
+            shell.project_catalog.replace_catalog(
+                vec![
+                    desktop::runtime::DesktopSessionCatalogEntry {
+                        session_id: "stable-first-session".into(),
+                        name: Some("First session with a long label".into()),
+                        updated_at: "2026-07-29T09:00:00Z".into(),
+                        ..Default::default()
+                    },
+                    desktop::runtime::DesktopSessionCatalogEntry {
+                        session_id: "stable-second-session".into(),
+                        name: Some("Second session".into()),
+                        updated_at: "2026-07-29T08:00:00Z".into(),
+                        ..Default::default()
+                    },
+                ],
+                0,
+            );
+            shell.notify_sessions_pane(cx);
+        });
+
+        cx.simulate_resize(size(px(1_300.), px(900.)));
+        cx.run_until_parked();
+        let panel = cx
+            .debug_bounds("desktop-sessions-panel")
+            .expect("minimum-width Sidebar remains docked");
+        assert_eq!(f32::from(panel.size.width), SESSION_PANEL_MIN_WIDTH as f32);
+        let new_conversation = cx
+            .debug_bounds("desktop-hit-new-conversation")
+            .expect("New conversation remains first");
+        let skills = cx
+            .debug_bounds("desktop-hit-skills")
+            .expect("Skills remains second");
+        let project = cx
+            .debug_bounds("desktop-project-row-0")
+            .expect("project disclosure follows fixed navigation");
+        let session = cx
+            .debug_bounds("desktop-session-row-0")
+            .expect("nested session follows its project");
+        assert!(new_conversation.origin.y < skills.origin.y);
+        assert!(skills.origin.y < project.origin.y);
+        assert!(project.origin.y < session.origin.y);
+        for selector in [
+            "desktop-hit-refresh-projects",
+            "desktop-project-row-0",
+            "desktop-session-row-0",
+            "desktop-hit-session-actions-0",
+        ] {
+            assert_minimum_hit_target(cx, selector);
+            let bounds = cx.debug_bounds(selector).unwrap();
+            assert!(bounds.origin.x >= panel.origin.x);
+            assert!(bounds.origin.x + bounds.size.width <= panel.origin.x + panel.size.width);
+        }
+
+        cx.simulate_click(project.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-project-sessions-0").is_none());
+        assert!(cx.debug_bounds("desktop-session-row-0").is_none());
+        assert!(shell.read_with(cx, |shell, _| {
+            shell.project_catalog.project_groups()[0].collapsed
+        }));
+
+        let collapsed_project = cx.debug_bounds("desktop-project-row-0").unwrap();
+        cx.simulate_click(collapsed_project.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-project-sessions-0").is_some());
+        assert!(cx.debug_bounds("desktop-session-row-0").is_some());
+        assert!(!shell.read_with(cx, |shell, _| {
+            shell.project_catalog.project_groups()[0].collapsed
+        }));
+
+        cx.simulate_resize(size(px(700.), px(900.)));
+        cx.run_until_parked();
+        let toggle = cx.debug_bounds("desktop-hit-toggle-sessions").unwrap();
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-sessions-drawer").is_some());
+        assert!(cx.debug_bounds("desktop-sidebar-evo-mark").is_some());
+        assert!(cx.debug_bounds("desktop-project-row-0").is_some());
+        assert!(cx.debug_bounds("desktop-session-row-1").is_some());
+        assert_minimum_hit_target(cx, "desktop-hit-close-narrow-sessions");
+        assert_minimum_hit_target(cx, "desktop-hit-refresh-projects");
+        assert_minimum_hit_target(cx, "desktop-hit-session-actions-1");
     }
 
     #[gpui::test]
@@ -5772,7 +5936,8 @@ mod tests {
         );
         assert!(cx.debug_bounds("desktop-hit-skills").is_some());
         assert!(cx.debug_bounds("desktop-skill-row-0").is_none());
-        assert!(cx.debug_bounds("desktop-session-history-section").is_some());
+        assert!(cx.debug_bounds("desktop-projects-section").is_some());
+        assert!(cx.debug_bounds("desktop-project-row-0").is_some());
         assert!(cx.debug_bounds("desktop-session-row-0").is_some());
         assert!(cx.debug_bounds("sessions-search").is_some());
         assert_eq!(
@@ -5810,7 +5975,7 @@ mod tests {
                 .is_some()
         );
         assert!(cx.debug_bounds("desktop-hit-skills").is_some());
-        assert!(cx.debug_bounds("desktop-session-history-section").is_some());
+        assert!(cx.debug_bounds("desktop-projects-section").is_some());
         assert!(cx.debug_bounds("desktop-session-row-0").is_some());
 
         let skills = cx
@@ -6735,11 +6900,16 @@ mod tests {
         );
         assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
         assert!(cx.debug_bounds("desktop-sessions-drawer").is_some());
-        assert_minimum_hit_target(cx, "desktop-hit-sessions-overflow");
+        assert_minimum_hit_target(cx, "desktop-hit-refresh-projects");
         assert_minimum_hit_target(cx, "desktop-hit-close-narrow-sessions");
         assert!(
-            cx.debug_bounds("sessions-search").is_some(),
-            "narrow drawer reuses the searchable SessionsPane"
+            cx.debug_bounds("desktop-projects-state-not-loaded")
+                .is_some(),
+            "narrow drawer reuses the Projects-local unloaded state"
+        );
+        assert!(
+            cx.debug_bounds("sessions-search").is_none(),
+            "search remains optional until the project catalog has entries"
         );
         assert_eq!(
             cx.debug_bounds("desktop-conversation-panel"),
@@ -7345,7 +7515,10 @@ mod tests {
         cx.simulate_resize(size(px(1_300.), px(900.)));
         cx.run_until_parked();
         assert_minimum_hit_target(cx, "desktop-hit-new-conversation");
+        assert_minimum_hit_target(cx, "desktop-hit-refresh-projects");
+        assert_minimum_hit_target(cx, "desktop-project-row-0");
         assert_minimum_hit_target(cx, "desktop-session-row-1");
+        assert_minimum_hit_target(cx, "desktop-hit-session-actions-1");
     }
 
     #[gpui::test]
@@ -7399,8 +7572,8 @@ mod tests {
         });
         cx.run_until_parked();
         let rename = cx
-            .debug_bounds("desktop-hit-rename-session-1")
-            .expect("unnamed session exposes rename fallback");
+            .debug_bounds("desktop-hit-session-actions-1")
+            .expect("unnamed session exposes its compact actions menu");
         cx.simulate_click(rename.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         choose_popup_item(cx, 0);
@@ -9604,6 +9777,20 @@ mod tests {
         assert!(controls.contains(".role(Role::Button)"));
         assert!(controls.contains(".aria_label(accessible_label)"));
         assert!(controls.contains(".aria_selected(selected)"));
+        assert!(controls.contains("content.aria_expanded(expanded)"));
+        assert!(sessions.contains(".aria_label(\"Evo workspace navigation\")"));
+        assert!(
+            sessions.contains(
+                ".aria_label(\"New conversation, Skills, Projects, and nested sessions\")"
+            )
+        );
+        assert!(sessions.contains(".id(\"projects-tree\")"));
+        assert!(sessions.contains("session-tree-item"));
+        assert!(sessions.contains(".role(Role::List)"));
+        assert!(sessions.contains(".role(Role::ListItem)"));
+        assert!(sessions.contains(".aria_label(format!(\"Sessions in {title}\"))"));
+        assert!(sessions.contains("fn is_keyboard_activation"));
+        assert!(sessions.contains("\"enter\" | \"space\""));
         assert!(conversation.contains(".role(Role::Log)"));
         assert!(conversation.contains(".role(Role::ListItem)"));
         assert!(conversation.contains("row.aria_active_descendant()"));
@@ -10003,7 +10190,9 @@ mod tests {
         assert!(pane.contains("struct SessionsPaneViewModel"));
         assert!(pane.contains("view_model: Option<SessionsPaneViewModel>"));
         assert!(pane.contains("search_input: gpui::Entity<InputState>"));
-        assert!(pane.contains("InputState::new(window, cx).placeholder(\"Search sessions…\")"));
+        assert!(pane.contains(
+            "InputState::new(window, cx).placeholder(\"Search projects and sessions…\")"
+        ));
         assert!(!pane.contains("WeakEntity<NativeShell>"));
         assert!(!pane.contains("owner.read(cx)"));
         assert!(!pane.contains("DesktopProjection"));
@@ -10134,7 +10323,7 @@ mod tests {
         let pane = include_str!("native_shell/sessions_pane.rs");
         let controller = include_str!("native_shell/project_catalog_controller.rs");
         let commands = include_str!("native_shell/commands.rs");
-        let search_placeholder = ["placeholder(\"Search ", "sessions…\")"].concat();
+        let search_placeholder = ["placeholder(\"Search projects and ", "sessions…\")"].concat();
         let active_duplicate = ["current_session_", "label"].concat();
         let root_refresh_deadline = ["session_catalog_refresh_", "deadline"].concat();
 
@@ -10153,19 +10342,31 @@ mod tests {
         assert!(pane.contains("SessionsPaneEvent::Rename"));
         assert!(pane.contains("view_model.catalog_state"));
         assert!(pane.contains("view_model.project_groups"));
-        assert!(pane.contains("sessions-overflow"));
-        assert!(pane.contains("PopupMenuItem::new(if session_catalog_pending"));
+        assert!(pane.contains("desktop-projects-section"));
+        assert!(pane.contains("desktop-projects-tree"));
+        assert!(pane.contains("desktop-hit-refresh-projects"));
+        assert!(pane.contains("SessionsPaneEvent::SetProjectCollapsed"));
+        assert!(shell.contains("SessionsPaneEvent::SetProjectCollapsed"));
+        assert!(controller.contains("fn set_group_collapsed"));
+        assert!(pane.contains(".expanded(expanded)"));
+        assert!(pane.contains(".role(Role::ListItem)"));
+        assert!(pane.contains("desktop-hit-session-actions"));
+        assert!(pane.contains("PopupMenuItem::new(\"Rename session\")"));
+        assert!(pane.contains("PopupMenuItem::new(\"Close session\")"));
         assert!(pane.contains("DesktopActionRow::new("));
         assert!(pane.contains("DesktopIcon::Plus"));
         assert!(pane.contains("DesktopIcon::Search"));
         assert!(pane.contains("DesktopIcon::Clear"));
         assert!(pane.contains("DesktopIcon::Overflow"));
-        assert!(pane.contains("No recent sessions yet."));
-        assert!(pane.contains("No sessions match"));
-        assert!(pane.contains("Loading sessions"));
+        assert!(pane.contains("No projects yet"));
+        assert!(pane.contains("No matching projects"));
+        assert!(pane.contains("Loading projects"));
+        assert!(pane.contains("Legacy scope · migration required"));
+        assert!(pane.contains("desktop-projects-state-omitted"));
         assert!(pane.contains("presented_as_drawer"));
         assert!(!pane.contains(".label(\"Open\")"));
         assert!(!pane.contains("refresh-session-catalog"));
+        assert!(!pane.contains("sessions-overflow"));
         assert!(!pane.contains(&active_duplicate));
     }
 

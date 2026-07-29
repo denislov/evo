@@ -1,7 +1,8 @@
-use desktop::shell::{SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
+use coding_agent::api::view::CodingAgentWorkspaceKind;
+use desktop::shell::{SESSION_PANEL_WIDTH, SemanticStatus, SemanticTheme, truncate_label};
 use gpui::{
-    EventEmitter, FocusHandle, Focusable as _, IntoElement, ParentElement as _, Render, Role,
-    Styled as _, Subscription, Window, div, prelude::*, px, rgb,
+    EventEmitter, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, ParentElement as _,
+    Render, Role, Styled as _, Subscription, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{
@@ -27,6 +28,7 @@ use super::{
 pub(super) enum SessionsPaneEvent {
     Navigate(CenterNavigationTarget),
     Refresh,
+    SetProjectCollapsed { group_id: String, collapsed: bool },
     Rename(String, String),
     CloseSession(String),
     Dismiss,
@@ -71,7 +73,8 @@ impl SessionsPane {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search projects and sessions…"));
         let search_subscription =
             cx.subscribe_in(&search_input, window, |_, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -179,6 +182,109 @@ fn relative_session_time(updated_at: &str, now: OffsetDateTime) -> String {
     }
 }
 
+fn visible_project_groups(
+    groups: &[ProjectCatalogGroup],
+    normalized_search: &str,
+) -> Vec<ProjectCatalogGroup> {
+    if normalized_search.is_empty() {
+        return groups.to_vec();
+    }
+    groups
+        .iter()
+        .filter_map(|group| {
+            let mut group = group.clone();
+            if !workspace_matches_query(&group.workspace, normalized_search) {
+                group
+                    .sessions
+                    .retain(|session| session_matches_query(session, normalized_search));
+            }
+            if group.sessions.is_empty() {
+                return None;
+            }
+            group.collapsed = false;
+            Some(group)
+        })
+        .collect()
+}
+
+fn semantic_status_priority(status: SemanticStatus) -> u8 {
+    match status {
+        SemanticStatus::Error => 5,
+        SemanticStatus::Authorization => 4,
+        SemanticStatus::Running => 3,
+        SemanticStatus::Warning => 2,
+        SemanticStatus::Idle => 1,
+    }
+}
+
+fn runtime_status_label(status: Option<SemanticStatus>, contains_active: bool) -> String {
+    match status {
+        Some(SemanticStatus::Idle) if contains_active => "current".into(),
+        Some(status) => status.label().to_lowercase(),
+        None => "available".into(),
+    }
+}
+
+fn session_runtime_status(
+    session_id: &str,
+    active_session_id: &str,
+    active_status: SemanticStatus,
+    runtime_states: &[SessionRuntimeState],
+) -> Option<SemanticStatus> {
+    if session_id == active_session_id {
+        return Some(active_status);
+    }
+    runtime_states
+        .iter()
+        .find(|state| state.session_id.as_ref() == session_id)
+        .map(|state| state.status)
+}
+
+fn project_runtime_summary(
+    group: &ProjectCatalogGroup,
+    active_session_id: &str,
+    active_status: SemanticStatus,
+    runtime_states: &[SessionRuntimeState],
+) -> (Option<SemanticStatus>, bool) {
+    let contains_active = group
+        .sessions
+        .iter()
+        .any(|session| session.session_id == active_session_id);
+    let status = group
+        .sessions
+        .iter()
+        .filter_map(|session| {
+            session_runtime_status(
+                &session.session_id,
+                active_session_id,
+                active_status,
+                runtime_states,
+            )
+        })
+        .max_by_key(|status| semantic_status_priority(*status));
+    (status, contains_active)
+}
+
+fn project_title(group: &ProjectCatalogGroup) -> String {
+    match group.workspace.kind {
+        CodingAgentWorkspaceKind::Projectless => "无项目".into(),
+        CodingAgentWorkspaceKind::Legacy if group.workspace.display_name.trim().is_empty() => {
+            "Legacy sessions".into()
+        }
+        CodingAgentWorkspaceKind::Project | CodingAgentWorkspaceKind::Legacy => {
+            group.workspace.display_name.clone()
+        }
+    }
+}
+
+fn count_label(count: usize, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
+
+fn is_keyboard_activation(event: &KeyDownEvent) -> bool {
+    matches!(event.keystroke.key.as_str(), "enter" | "space")
+}
+
 impl Render for SessionsPane {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let Some(view_model) = self.view_model.clone() else {
@@ -206,238 +312,435 @@ impl Render for SessionsPane {
         let runtime_states = Arc::clone(&view_model.runtime_states);
         let refresh_target = cx.entity().downgrade();
         let now = OffsetDateTime::now_utc();
-        let catalog_rows = view_model
-            .project_groups
+        let visible_groups = visible_project_groups(&view_model.project_groups, &search);
+        let visible_project_count = visible_groups.len();
+        let visible_session_count = visible_groups
             .iter()
-            .flat_map(|group| {
-                group
-                    .sessions
-                    .iter()
-                    .map(move |session| (&group.workspace, session))
-            })
-            .filter(|(workspace, session)| {
-                search.is_empty()
-                    || workspace_matches_query(workspace, &search)
-                    || session_matches_query(session, &search)
-            })
-            .collect::<Vec<_>>();
-        let visible_session_count = catalog_rows.len();
-        let session_rows = catalog_rows
+            .map(|group| group.sessions.len())
+            .sum::<usize>();
+        let mut session_index = 0usize;
+        let project_group_elements = visible_groups
             .into_iter()
             .enumerate()
-            .map(|(index, (_, session))| {
-                let target = session.session_id.clone();
-                let active = target == active_session_id;
-                let selected = active && !view_model.skills_active;
-                let semantic_name = session
-                    .name
-                    .as_deref()
-                    .map(|name| truncate_label(name, 24))
-                    .unwrap_or_else(|| "Untitled".to_owned());
-                let relative_time = relative_session_time(&session.updated_at, now);
-                let row_status = runtime_states
-                    .iter()
-                    .find(|state| state.session_id.as_ref() == target)
-                    .map(|state| state.status);
-                let (status_glyph, status, status_color) = if active || row_status.is_some() {
-                    let semantic_status = if active {
-                        active_semantic_status
-                    } else {
-                        row_status.unwrap_or(desktop::shell::SemanticStatus::Idle)
-                    };
-                    let label = semantic_status.label();
-                    (
-                        semantic_status.glyph(),
-                        if active && label == "Idle" {
-                            "current".to_owned()
-                        } else {
-                            label.to_lowercase()
-                        },
-                        semantic_status_color(semantic_status),
-                    )
-                } else {
-                    ("○", "available".to_owned(), rgb(theme.muted_text.value()))
+            .map(|(group_index, group)| {
+                let group_id = group.workspace.group_id.clone();
+                let expanded = !group.collapsed;
+                let title = project_title(&group);
+                let (project_status, contains_active) = project_runtime_summary(
+                    &group,
+                    active_session_id,
+                    active_semantic_status,
+                    &runtime_states,
+                );
+                let project_status_label = runtime_status_label(project_status, contains_active);
+                let project_status_color = project_status
+                    .map_or_else(|| rgb(theme.muted_text.value()), semantic_status_color);
+                let scope_detail = match group.workspace.kind {
+                    CodingAgentWorkspaceKind::Project => group
+                        .workspace
+                        .display_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "Project path unavailable".into()),
+                    CodingAgentWorkspaceKind::Projectless => "Global config only".into(),
+                    CodingAgentWorkspaceKind::Legacy => "Legacy scope · migration required".into(),
                 };
-                let accessible_label =
-                    format!("{semantic_name}, {status}, updated {relative_time}");
-                let close_label = format!("Close {semantic_name}");
-                let row = DesktopActionRow::new(
-                    ("session-row", index),
-                    semantic_name.clone(),
-                    accessible_label,
+                let session_count_label = count_label(group.sessions.len(), "session");
+                let project_detail =
+                    format!("{scope_detail} · {session_count_label} · {project_status_label}");
+                let project_accessible_label = format!(
+                    "{title}, {project_detail}, {}",
+                    if expanded { "expanded" } else { "collapsed" }
+                );
+                let disclosure = if expanded {
+                    DesktopIcon::ChevronDown
+                } else {
+                    DesktopIcon::ChevronRight
+                };
+                let keyboard_group_id = group_id.clone();
+                let project_row = DesktopActionRow::new(
+                    ("project-group", group_index),
+                    truncate_label(&title, 24),
+                    project_accessible_label,
                 )
-                .state(DesktopRowState {
-                    selected,
-                    disabled: selected
-                        || composer_running
-                        || awaiting_prompt_start
-                        || session_pending,
-                    focus_visible: false,
-                })
                 .size(DesktopControlSize::Critical)
-                .leading(div().text_color(status_color).child(status_glyph));
-                // The docked panel is intentionally compact: preserve the
-                // primary session name and close action. The wide overlay has
-                // enough room to add cwd metadata and relative time.
-                let row = if presented_as_drawer {
-                    row.detail(format!("{} · {status}", truncate_label(&target, 28)))
-                        .trailing(
-                            div()
-                                .w(px(60.))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_token(DesignText::Metadata)
-                                .text_color(rgb(theme.muted_text.value()))
-                                .child(relative_time),
-                            60.,
-                        )
-                } else {
-                    row.detail(truncate_label(&target, 14))
-                };
-                let row = row
-                    .build(theme)
-                    .debug_selector(move || format!("desktop-session-row-{index}"))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(SessionsPaneEvent::Navigate(
-                            CenterNavigationTarget::Session(target.clone()),
-                        ));
-                    }));
-                let close_target = session.session_id.clone();
-                let rename_target = session.session_id.clone();
-                let rename_name = session.name.clone();
-                let rename_event_target = cx.entity().downgrade();
-                if renaming_session_id.as_deref() == Some(session.session_id.as_str()) {
-                    return div()
-                        .debug_selector(move || format!("desktop-session-rename-{index}"))
-                        .w_full()
-                        .h(px(DesktopControlSize::Critical.pixels()))
+                .expanded(expanded)
+                .leading(
+                    div()
                         .flex()
                         .items_center()
                         .gap_token(DesignSpace::Xs)
                         .child(
                             div()
-                                .flex_1()
+                                .text_color(rgb(theme.muted_text.value()))
+                                .child(Icon::new(disclosure.name()).small()),
+                        )
+                        .child(
+                            div()
+                                .text_color(project_status_color)
+                                .child(Icon::new(DesktopIcon::ProjectDirectory.name()).small()),
+                        ),
+                )
+                .detail(project_detail)
+                .build(theme)
+                .debug_selector(move || format!("desktop-project-row-{group_index}"))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(SessionsPaneEvent::SetProjectCollapsed {
+                        group_id: group_id.clone(),
+                        collapsed: expanded,
+                    });
+                }))
+                .on_key_down(cx.listener(
+                    move |_, event: &KeyDownEvent, window, cx| {
+                        if !is_keyboard_activation(event) {
+                            return;
+                        }
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        cx.emit(SessionsPaneEvent::SetProjectCollapsed {
+                            group_id: keyboard_group_id.clone(),
+                            collapsed: expanded,
+                        });
+                    },
+                ));
+
+                let mut nested_sessions = Vec::with_capacity(group.sessions.len());
+                let group_session_start = session_index;
+                session_index = session_index.saturating_add(group.sessions.len());
+                if expanded {
+                    for (group_session_index, session) in group.sessions.iter().enumerate() {
+                        let index = group_session_start.saturating_add(group_session_index);
+                        let target = session.session_id.clone();
+                        let active = target == active_session_id;
+                        let selected = active && !view_model.skills_active;
+                        let semantic_name = session
+                            .name
+                            .as_deref()
+                            .map(|name| truncate_label(name, 24))
+                            .unwrap_or_else(|| "Untitled".to_owned());
+                        let relative_time = relative_session_time(&session.updated_at, now);
+                        let row_status = session_runtime_status(
+                            &target,
+                            active_session_id,
+                            active_semantic_status,
+                            &runtime_states,
+                        );
+                        let (status_glyph, status, status_color) = if active || row_status.is_some()
+                        {
+                            let semantic_status = if active {
+                                active_semantic_status
+                            } else {
+                                row_status.unwrap_or(desktop::shell::SemanticStatus::Idle)
+                            };
+                            (
+                                semantic_status.glyph(),
+                                runtime_status_label(Some(semantic_status), active),
+                                semantic_status_color(semantic_status),
+                            )
+                        } else {
+                            (
+                                "○",
+                                runtime_status_label(None, false),
+                                rgb(theme.muted_text.value()),
+                            )
+                        };
+                        let accessible_label =
+                            format!("{semantic_name}, {status}, updated {relative_time}");
+                        let row = DesktopActionRow::new(
+                            ("session-row", index),
+                            semantic_name.clone(),
+                            accessible_label,
+                        )
+                        .state(DesktopRowState {
+                            selected,
+                            disabled: selected
+                                || composer_running
+                                || awaiting_prompt_start
+                                || session_pending,
+                            focus_visible: false,
+                        })
+                        .size(DesktopControlSize::Critical)
+                        .leading(div().text_color(status_color).child(status_glyph));
+                        // The docked tree keeps status and time visible; the drawer
+                        // additionally exposes the full session identity.
+                        let row = if presented_as_drawer {
+                            row.detail(format!("{} · {status}", truncate_label(&target, 28)))
+                                .trailing(
+                                    div()
+                                        .w(px(60.))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_token(DesignText::Metadata)
+                                        .text_color(rgb(theme.muted_text.value()))
+                                        .child(relative_time),
+                                    60.,
+                                )
+                        } else {
+                            row.detail(format!("{status} · {relative_time}"))
+                        };
+                        let keyboard_target = target.clone();
+                        let row = row
+                            .build(theme)
+                            .debug_selector(move || format!("desktop-session-row-{index}"))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(SessionsPaneEvent::Navigate(
+                                    CenterNavigationTarget::Session(target.clone()),
+                                ));
+                            }))
+                            .on_key_down(cx.listener(
+                                move |_, event: &KeyDownEvent, window, cx| {
+                                    if !is_keyboard_activation(event) {
+                                        return;
+                                    }
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                    cx.emit(SessionsPaneEvent::Navigate(
+                                        CenterNavigationTarget::Session(keyboard_target.clone()),
+                                    ));
+                                },
+                            ));
+                        let rename_target = session.session_id.clone();
+                        let rename_name = session.name.clone();
+                        let rename_event_target = cx.entity().downgrade();
+                        if renaming_session_id.as_deref() == Some(session.session_id.as_str()) {
+                            nested_sessions.push(
+                                div()
+                                    .id(("session-tree-item", index))
+                                    .role(Role::ListItem)
+                                    .debug_selector(move || {
+                                        format!("desktop-session-rename-{index}")
+                                    })
+                                    .w_full()
+                                    .h(px(DesktopControlSize::Critical.pixels()))
+                                    .flex()
+                                    .items_center()
+                                    .gap_token(DesignSpace::Xs)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(Input::new(&rename_input).appearance(false)),
+                                    )
+                                    .child(
+                                        DesktopIconButton::new(
+                                            ("commit-session-rename", index),
+                                            DesktopIcon::Submit,
+                                            "Save session name",
+                                        )
+                                        .build()
+                                        .debug_selector(move || {
+                                            format!("desktop-hit-commit-session-rename-{index}")
+                                        })
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.commit_rename(cx)),
+                                        ),
+                                    )
+                                    .child(
+                                        DesktopIconButton::new(
+                                            ("cancel-session-rename", index),
+                                            DesktopIcon::Close,
+                                            "Cancel session rename",
+                                        )
+                                        .build()
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.cancel_rename(cx)),
+                                        ),
+                                    )
+                                    .into_any_element(),
+                            );
+                            continue;
+                        }
+                        let session_actions_target = cx.entity().downgrade();
+                        let close_target = session.session_id.clone();
+                        nested_sessions.push(
+                            div()
+                                .id(("session-tree-item", index))
+                                .role(Role::ListItem)
+                                .w_full()
                                 .min_w_0()
-                                .child(Input::new(&rename_input).appearance(false)),
-                        )
-                        .child(
-                            DesktopIconButton::new(
-                                ("commit-session-rename", index),
-                                DesktopIcon::Submit,
-                                "Save session name",
-                            )
-                            .build()
-                            .debug_selector(move || {
-                                format!("desktop-hit-commit-session-rename-{index}")
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.commit_rename(cx))),
-                        )
-                        .child(
-                            DesktopIconButton::new(
-                                ("cancel-session-rename", index),
-                                DesktopIcon::Close,
-                                "Cancel session rename",
-                            )
-                            .build()
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))),
-                        )
-                        .into_any_element();
+                                .h(px(DesktopControlSize::Critical.pixels()))
+                                .flex()
+                                .items_center()
+                                .gap_token(DesignSpace::Xs)
+                                .child(div().flex_1().min_w_0().child(row))
+                                .child(
+                                    DesktopIconButton::new(
+                                        ("session-actions", index),
+                                        DesktopIcon::Overflow,
+                                        format!("More actions for {semantic_name}"),
+                                    )
+                                    .size(DesktopControlSize::Compact)
+                                    .build()
+                                    .debug_selector(move || {
+                                        format!("desktop-hit-session-actions-{index}")
+                                    })
+                                    .dropdown_menu(
+                                        move |menu, _, _| {
+                                            let event_target = rename_event_target.clone();
+                                            let target = rename_target.clone();
+                                            let name = rename_name.clone();
+                                            let close_event_target = session_actions_target.clone();
+                                            let close_target = close_target.clone();
+                                            menu.item(
+                                                PopupMenuItem::new("Rename session").on_click(
+                                                    move |_, window, cx| {
+                                                        if let Some(event_target) =
+                                                            event_target.upgrade()
+                                                        {
+                                                            event_target.update(cx, |pane, cx| {
+                                                                pane.begin_rename(
+                                                                    target.clone(),
+                                                                    name.clone(),
+                                                                    window,
+                                                                    cx,
+                                                                )
+                                                            });
+                                                        }
+                                                    },
+                                                ),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new("Close session").on_click(
+                                                    move |_, _, cx| {
+                                                        if let Some(event_target) =
+                                                            close_event_target.upgrade()
+                                                        {
+                                                            event_target.update(cx, |_, cx| {
+                                                                cx.emit(
+                                                                    SessionsPaneEvent::CloseSession(
+                                                                        close_target.clone(),
+                                                                    ),
+                                                                );
+                                                            });
+                                                        }
+                                                    },
+                                                ),
+                                            )
+                                        },
+                                    ),
+                                )
+                                .into_any_element(),
+                        );
+                    }
                 }
+
                 div()
+                    .id(("project-tree-item", group_index))
+                    .role(Role::ListItem)
                     .w_full()
                     .min_w_0()
-                    .h(px(DesktopControlSize::Critical.pixels()))
                     .flex()
-                    .items_center()
+                    .flex_col()
                     .gap_token(DesignSpace::Xs)
-                    .child(div().flex_1().min_w_0().child(row))
-                    .child(
-                        DesktopIconButton::new(
-                            ("rename-session", index),
-                            DesktopIcon::Overflow,
-                            format!("Rename {semantic_name}"),
+                    .child(project_row)
+                    .when(expanded, |project| {
+                        project.child(
+                            div()
+                                .id(("project-session-list", group_index))
+                                .debug_selector(move || {
+                                    format!("desktop-project-sessions-{group_index}")
+                                })
+                                .role(Role::List)
+                                .aria_label(format!("Sessions in {title}"))
+                                .w_full()
+                                .min_w_0()
+                                .pl_token(DesignSpace::Lg)
+                                .flex()
+                                .flex_col()
+                                .gap_token(DesignSpace::Xs)
+                                .children(nested_sessions),
                         )
-                        .size(DesktopControlSize::Tool)
-                        .build()
-                        .debug_selector(move || format!("desktop-hit-rename-session-{index}"))
-                        .dropdown_menu(move |menu, _, _| {
-                            let event_target = rename_event_target.clone();
-                            let target = rename_target.clone();
-                            let name = rename_name.clone();
-                            menu.item(PopupMenuItem::new("Rename session").on_click(
-                                move |_, window, cx| {
-                                    if let Some(event_target) = event_target.upgrade() {
-                                        event_target.update(cx, |pane, cx| {
-                                            pane.begin_rename(
-                                                target.clone(),
-                                                name.clone(),
-                                                window,
-                                                cx,
-                                            )
-                                        });
-                                    }
-                                },
-                            ))
-                        }),
-                    )
-                    // A GPUI Button cannot contain another Button. Keep the
-                    // trailing tool as a fixed-width sibling. The docked row
-                    // reserves 36 px; the overlay additionally reserves 60 px
-                    // for time, keeping both responsive layouts stable.
-                    .child(
-                        DesktopIconButton::new(
-                            ("close-session", index),
-                            DesktopIcon::Close,
-                            close_label,
-                        )
-                        .size(DesktopControlSize::Tool)
-                        .build()
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.stop_propagation();
-                            cx.emit(SessionsPaneEvent::CloseSession(close_target.clone()));
-                        })),
-                    )
+                    })
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let empty_state = if visible_session_count > 0 {
-            None
-        } else if session_catalog_pending && view_model.project_groups.is_empty() {
-            Some("Loading sessions…".to_owned())
-        } else if !search.is_empty() {
-            Some(format!(
-                "No sessions match “{}”.",
-                truncate_label(&search, 24)
+        let catalog_group_count = view_model.project_groups.len();
+        let (catalog_status, catalog_status_color) = match &view_model.catalog_state {
+            ProjectCatalogState::NotLoaded => ("Not loaded".to_owned(), theme.muted_text),
+            ProjectCatalogState::Loading => ("Loading".to_owned(), theme.accent),
+            ProjectCatalogState::Ready => (
+                count_label(catalog_group_count, "project"),
+                theme.muted_text,
+            ),
+            ProjectCatalogState::Error { .. } => ("Error".to_owned(), theme.danger),
+            ProjectCatalogState::Stale { .. } => ("Stale".to_owned(), theme.warning),
+        };
+        let catalog_notice = if !search.is_empty()
+            && visible_project_count == 0
+            && !view_model.project_groups.is_empty()
+        {
+            Some((
+                "search-empty",
+                "No matching projects".to_owned(),
+                Some(format!(
+                    "No project or session matches “{}”.",
+                    truncate_label(&search, 24)
+                )),
+                theme.muted_text,
             ))
         } else {
-            Some(match &view_model.catalog_state {
-                ProjectCatalogState::NotLoaded => {
-                    "Refresh to load projects and session history.".to_owned()
-                }
-                ProjectCatalogState::Error { message } => format!(
-                    "Session history unavailable: {}. Use Refresh to retry.",
-                    truncate_label(
-                        view_model.catalog_state.error_message().unwrap_or(message),
-                        72
-                    )
-                ),
+            match &view_model.catalog_state {
+                ProjectCatalogState::NotLoaded => Some((
+                    "not-loaded",
+                    "Projects not loaded".to_owned(),
+                    Some("Refresh when you want to load project and session history.".into()),
+                    theme.muted_text,
+                )),
+                ProjectCatalogState::Loading if view_model.project_groups.is_empty() => Some((
+                    "loading",
+                    "Loading projects…".to_owned(),
+                    Some("The current Home draft remains available.".into()),
+                    theme.accent,
+                )),
+                ProjectCatalogState::Loading => Some((
+                    "loading",
+                    "Refreshing projects…".to_owned(),
+                    Some("The previous project tree remains available while loading.".into()),
+                    theme.accent,
+                )),
+                ProjectCatalogState::Error { message } => Some((
+                    "error",
+                    "Projects unavailable".to_owned(),
+                    Some(format!(
+                        "{}. Use Refresh to retry.",
+                        truncate_label(
+                            view_model.catalog_state.error_message().unwrap_or(message),
+                            72
+                        )
+                    )),
+                    theme.danger,
+                )),
                 ProjectCatalogState::Stale {
                     error: Some(message),
-                } => format!(
-                    "Session history is stale: {}. Use Refresh to retry.",
-                    truncate_label(
-                        view_model.catalog_state.error_message().unwrap_or(message),
-                        72
-                    )
-                ),
-                ProjectCatalogState::Loading
-                | ProjectCatalogState::Ready
-                | ProjectCatalogState::Stale { error: None } => {
-                    "No recent sessions yet. Create one to begin.".to_owned()
-                }
-            })
+                } => Some((
+                    "stale",
+                    "Project history may be stale".to_owned(),
+                    Some(format!(
+                        "{}. Refresh to reconcile the tree.",
+                        truncate_label(
+                            view_model.catalog_state.error_message().unwrap_or(message),
+                            72
+                        )
+                    )),
+                    theme.warning,
+                )),
+                ProjectCatalogState::Stale { error: None } => Some((
+                    "stale",
+                    "Project history changed locally".to_owned(),
+                    Some("Refresh to reconcile with durable history.".into()),
+                    theme.warning,
+                )),
+                ProjectCatalogState::Ready if view_model.project_groups.is_empty() => Some((
+                    "empty",
+                    "No projects yet".to_owned(),
+                    Some("Start a conversation to create the first session.".into()),
+                    theme.muted_text,
+                )),
+                ProjectCatalogState::Ready => None,
+            }
         };
+        let show_search = !view_model.project_groups.is_empty();
         let new_conversation_row = DesktopActionRow::new(
             "new-conversation",
             "New conversation",
@@ -472,7 +775,7 @@ impl Render for SessionsPane {
         div()
             .id("sessions-panel")
             .role(Role::Navigation)
-            .aria_label("Sessions")
+            .aria_label("Evo workspace navigation")
             .debug_selector(|| "desktop-sessions-panel".into())
             .track_focus(&self.focus)
             .when(presented_as_drawer, |panel| panel.w_full())
@@ -498,64 +801,44 @@ impl Render for SessionsPane {
                     .justify_between()
                     .border_b_1()
                     .border_color(rgb(theme.divider.value()))
-                    .child("SESSIONS")
                     .child(
                         div()
+                            .debug_selector(|| "desktop-sidebar-evo-mark".into())
                             .flex()
                             .items_center()
                             .gap_token(DesignSpace::Xs)
                             .child(
-                                DesktopIconButton::new(
-                                    "sessions-overflow",
-                                    DesktopIcon::Overflow,
-                                    "More Sessions actions",
-                                )
-                                .busy(session_catalog_pending)
-                                .build()
-                                .debug_selector(|| "desktop-hit-sessions-overflow".into())
-                                .dropdown_menu(
-                                    move |menu, _, _| {
-                                        let refresh_target = refresh_target.clone();
-                                        menu.item(
-                                            PopupMenuItem::new(if session_catalog_pending {
-                                                "Loading sessions…"
-                                            } else {
-                                                "Refresh sessions"
-                                            })
-                                            .disabled(session_catalog_pending || composer_running)
-                                            .on_click(move |_, _, cx| {
-                                                if let Some(target) = refresh_target.upgrade() {
-                                                    target.update(cx, |_, cx| {
-                                                        cx.emit(SessionsPaneEvent::Refresh);
-                                                    });
-                                                }
-                                            }),
-                                        )
-                                    },
-                                ),
+                                div()
+                                    .text_token(DesignText::Title)
+                                    .text_color(rgb(theme.text.value()))
+                                    .child("evo"),
                             )
-                            .when(presented_as_drawer, |actions| {
-                                actions.child(
-                                    DesktopIconButton::new(
-                                        "close-narrow-sessions",
-                                        DesktopIcon::Close,
-                                        "Close Sessions",
-                                    )
-                                    .build()
-                                    .debug_selector(|| "desktop-hit-close-narrow-sessions".into())
-                                    .on_click(cx.listener(
-                                        |_, _, _, cx| {
-                                            cx.emit(SessionsPaneEvent::Dismiss);
-                                        },
-                                    )),
-                                )
-                            }),
-                    ),
+                            .child(
+                                div()
+                                    .text_token(DesignText::Metadata)
+                                    .text_color(rgb(theme.muted_text.value()))
+                                    .child("workspace"),
+                            ),
+                    )
+                    .when(presented_as_drawer, |header| {
+                        header.child(
+                            DesktopIconButton::new(
+                                "close-narrow-sessions",
+                                DesktopIcon::Close,
+                                "Close workspace navigation",
+                            )
+                            .build()
+                            .debug_selector(|| "desktop-hit-close-narrow-sessions".into())
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(SessionsPaneEvent::Dismiss);
+                            })),
+                        )
+                    }),
             )
             .child(
                 div()
                     .id("sessions-list")
-                    .aria_label("New conversation, Skills, Projects, and session history")
+                    .aria_label("New conversation, Skills, Projects, and nested sessions")
                     .w_full()
                     .flex_1()
                     .min_h_0()
@@ -576,7 +859,7 @@ impl Render for SessionsPane {
                                 div()
                                     .text_token(DesignText::Metadata)
                                     .text_color(rgb(theme.muted_text.value()))
-                                    .child("NEW CONVERSATION"),
+                                    .child("WORKSPACE"),
                             )
                             .child(
                                 new_conversation_row
@@ -586,7 +869,19 @@ impl Render for SessionsPane {
                                         cx.emit(SessionsPaneEvent::Navigate(
                                             CenterNavigationTarget::NewConversation,
                                         ));
-                                    })),
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        |_, event: &KeyDownEvent, window, cx| {
+                                            if !is_keyboard_activation(event) {
+                                                return;
+                                            }
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                            cx.emit(SessionsPaneEvent::Navigate(
+                                                CenterNavigationTarget::NewConversation,
+                                            ));
+                                        },
+                                    )),
                             )
                             .child(
                                 skills_row
@@ -596,15 +891,25 @@ impl Render for SessionsPane {
                                         cx.emit(SessionsPaneEvent::Navigate(
                                             CenterNavigationTarget::Skills,
                                         ));
-                                    })),
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        |_, event: &KeyDownEvent, window, cx| {
+                                            if !is_keyboard_activation(event) {
+                                                return;
+                                            }
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                            cx.emit(SessionsPaneEvent::Navigate(
+                                                CenterNavigationTarget::Skills,
+                                            ));
+                                        },
+                                    )),
                             ),
                     )
                     .child(
                         div()
-                            .id("session-history-section")
-                            .debug_selector(|| "desktop-session-history-section".into())
-                            .role(Role::List)
-                            .aria_label("Session history")
+                            .id("projects-section")
+                            .debug_selector(|| "desktop-projects-section".into())
                             .w_full()
                             .flex()
                             .flex_col()
@@ -614,16 +919,70 @@ impl Render for SessionsPane {
                             .py_token(DesignSpace::Lg)
                             .child(
                                 div()
-                                    .text_token(DesignText::Metadata)
-                                    .text_color(rgb(theme.muted_text.value()))
-                                    .child("HISTORY"),
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_token(DesignSpace::Sm)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_token(DesignSpace::Xs)
+                                            .child(
+                                                div()
+                                                    .text_token(DesignText::Metadata)
+                                                    .text_color(rgb(theme.muted_text.value()))
+                                                    .child("PROJECTS"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("projects-catalog-status")
+                                                    .debug_selector(|| {
+                                                        "desktop-projects-status".into()
+                                                    })
+                                                    .role(Role::Status)
+                                                    .aria_label(format!(
+                                                        "Project catalog status: {catalog_status}"
+                                                    ))
+                                                    .text_token(DesignText::Metadata)
+                                                    .text_color(rgb(
+                                                        catalog_status_color.value(),
+                                                    ))
+                                                    .child(catalog_status),
+                                            ),
+                                    )
+                                    .child(
+                                        DesktopIconButton::new(
+                                            "refresh-projects",
+                                            DesktopIcon::Refresh,
+                                            if session_catalog_pending {
+                                                "Loading projects"
+                                            } else {
+                                                "Refresh projects and sessions"
+                                            },
+                                        )
+                                        .size(DesktopControlSize::Compact)
+                                        .busy(session_catalog_pending)
+                                        .disabled(session_catalog_pending || composer_running)
+                                        .build()
+                                        .debug_selector(|| {
+                                            "desktop-hit-refresh-projects".into()
+                                        })
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(target) = refresh_target.upgrade() {
+                                                target.update(cx, |_, cx| {
+                                                    cx.emit(SessionsPaneEvent::Refresh);
+                                                });
+                                            }
+                                        }),
+                                    ),
                             )
-                            .child(
+                            .when(show_search, |section| section.child(
                                 div()
                                     .id("sessions-search")
                                     .debug_selector(|| "sessions-search".into())
                                     .role(Role::Search)
-                                    .aria_label("Search sessions")
+                                    .aria_label("Search projects and sessions")
                                     .child(
                                         Input::new(&search_input)
                                             .role(Role::SearchInput)
@@ -649,24 +1008,71 @@ impl Render for SessionsPane {
                                             })
                                             .appearance(false),
                                     ),
-                            )
-                            .children(session_rows)
-                            .when_some(empty_state, |section, message| {
+                            ))
+                            .when_some(catalog_notice, |section, notice| {
+                                let (selector, title, detail, color) = notice;
+                                let debug_selector = format!("desktop-projects-state-{selector}");
                                 section.child(
                                     div()
-                                        .debug_selector(|| "desktop-sessions-empty-state".into())
+                                        .id("projects-state-notice")
+                                        .debug_selector(move || debug_selector.clone())
+                                        .role(Role::Status)
+                                        .aria_label(detail.as_ref().map_or_else(
+                                            || title.clone(),
+                                            |detail| format!("{title}. {detail}"),
+                                        ))
                                         .p_token(DesignSpace::Sm)
-                                        .text_color(rgb(theme.muted_text.value()))
-                                        .child(message),
+                                        .border_l_2()
+                                        .border_color(rgb(color.value()))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_token(DesignSpace::Xs)
+                                        .child(
+                                            div()
+                                                .text_token(DesignText::Body)
+                                                .text_color(rgb(theme.text.value()))
+                                                .child(title),
+                                        )
+                                        .when_some(detail, |notice, detail| {
+                                            notice.child(
+                                                div()
+                                                    .text_token(DesignText::Metadata)
+                                                    .text_color(rgb(theme.muted_text.value()))
+                                                    .child(detail),
+                                            )
+                                        }),
+                                )
+                            })
+                            .when(visible_project_count > 0, |section| {
+                                section.child(
+                                    div()
+                                        .id("projects-tree")
+                                        .debug_selector(|| "desktop-projects-tree".into())
+                                        .role(Role::List)
+                                        .aria_label(format!(
+                                            "{visible_project_count} projects containing {visible_session_count} sessions"
+                                        ))
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_token(DesignSpace::Sm)
+                                        .children(project_group_elements),
                                 )
                             })
                             .when(omitted_sessions > 0, |section| {
                                 section.child(
                                     div()
-                                        .text_token(DesignText::Body)
+                                        .id("projects-omitted-notice")
+                                        .debug_selector(|| "desktop-projects-state-omitted".into())
+                                        .role(Role::Status)
+                                        .aria_label(format!(
+                                            "{omitted_sessions} older sessions omitted from the project tree"
+                                        ))
+                                        .text_token(DesignText::Metadata)
                                         .text_color(rgb(theme.warning.value()))
                                         .child(format!(
-                                            "+ {omitted_sessions} older session(s) omitted"
+                                            "+ {omitted_sessions} older session(s) omitted from this view"
                                         )),
                                 )
                             }),
@@ -679,6 +1085,38 @@ impl Render for SessionsPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coding_agent::api::view::CodingAgentWorkspaceOverview;
+    use desktop::runtime::DesktopSessionCatalogEntry;
+    use std::path::PathBuf;
+
+    fn project_group(
+        group_id: &str,
+        kind: CodingAgentWorkspaceKind,
+        display_name: &str,
+        session_ids: &[&str],
+        collapsed: bool,
+    ) -> ProjectCatalogGroup {
+        let workspace = CodingAgentWorkspaceOverview {
+            group_id: group_id.into(),
+            kind,
+            display_name: display_name.into(),
+            display_path: (kind == CodingAgentWorkspaceKind::Project)
+                .then(|| PathBuf::from(format!("/work/{display_name}"))),
+        };
+        ProjectCatalogGroup {
+            sessions: session_ids
+                .iter()
+                .map(|session_id| DesktopSessionCatalogEntry {
+                    session_id: (*session_id).into(),
+                    name: Some(format!("{display_name} session")),
+                    workspace: workspace.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            workspace,
+            collapsed,
+        }
+    }
 
     #[test]
     fn relative_session_time_is_stable_and_bounded() {
@@ -695,5 +1133,165 @@ mod tests {
             "2026-06-01"
         );
         assert_eq!(relative_session_time("malformed", now), "malformed");
+    }
+
+    #[test]
+    fn project_tree_exposes_four_concurrent_runtime_presentations() {
+        let groups = [
+            project_group(
+                "project:current",
+                CodingAgentWorkspaceKind::Project,
+                "Current",
+                &["current-session"],
+                false,
+            ),
+            project_group(
+                "project:running",
+                CodingAgentWorkspaceKind::Project,
+                "Running",
+                &["running-session"],
+                false,
+            ),
+            project_group(
+                "project:error",
+                CodingAgentWorkspaceKind::Project,
+                "Error",
+                &["error-session"],
+                false,
+            ),
+            project_group(
+                "project:available",
+                CodingAgentWorkspaceKind::Project,
+                "Available",
+                &["available-session"],
+                false,
+            ),
+        ];
+        let runtime_states: Arc<[SessionRuntimeState]> = Arc::from([
+            SessionRuntimeState {
+                session_id: Arc::from("running-session"),
+                status: SemanticStatus::Running,
+            },
+            SessionRuntimeState {
+                session_id: Arc::from("error-session"),
+                status: SemanticStatus::Error,
+            },
+        ]);
+
+        let labels = groups
+            .iter()
+            .map(|group| {
+                let (status, contains_active) = project_runtime_summary(
+                    group,
+                    "current-session",
+                    SemanticStatus::Idle,
+                    &runtime_states,
+                );
+                runtime_status_label(status, contains_active)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, ["current", "running", "error", "available"]);
+        assert_eq!(
+            session_runtime_status(
+                "current-session",
+                "current-session",
+                SemanticStatus::Idle,
+                &runtime_states,
+            ),
+            Some(SemanticStatus::Idle)
+        );
+        assert_eq!(
+            session_runtime_status(
+                "available-session",
+                "current-session",
+                SemanticStatus::Idle,
+                &runtime_states,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn project_status_uses_highest_attention_descendant() {
+        let group = project_group(
+            "project:mixed",
+            CodingAgentWorkspaceKind::Project,
+            "Mixed",
+            &["idle", "running", "error"],
+            false,
+        );
+        let runtime_states: Arc<[SessionRuntimeState]> = Arc::from([
+            SessionRuntimeState {
+                session_id: Arc::from("idle"),
+                status: SemanticStatus::Idle,
+            },
+            SessionRuntimeState {
+                session_id: Arc::from("running"),
+                status: SemanticStatus::Running,
+            },
+            SessionRuntimeState {
+                session_id: Arc::from("error"),
+                status: SemanticStatus::Error,
+            },
+        ]);
+
+        assert_eq!(
+            project_runtime_summary(&group, "elsewhere", SemanticStatus::Idle, &runtime_states),
+            (Some(SemanticStatus::Error), false)
+        );
+    }
+
+    #[test]
+    fn search_reveals_matching_descendants_without_mutating_disclosure_state() {
+        let group = project_group(
+            "project:search",
+            CodingAgentWorkspaceKind::Project,
+            "Compiler",
+            &["matching-session"],
+            true,
+        );
+
+        let visible = visible_project_groups(std::slice::from_ref(&group), "matching-session");
+
+        assert_eq!(visible.len(), 1);
+        assert!(!visible[0].collapsed);
+        assert!(group.collapsed);
+        assert!(visible_project_groups(std::slice::from_ref(&group), "absent").is_empty());
+    }
+
+    #[test]
+    fn projectless_and_legacy_groups_have_explicit_titles() {
+        let projectless = project_group(
+            "projectless:global",
+            CodingAgentWorkspaceKind::Projectless,
+            "Managed scratch path",
+            &["projectless-session"],
+            false,
+        );
+        let legacy = project_group(
+            "legacy:unscoped",
+            CodingAgentWorkspaceKind::Legacy,
+            "",
+            &["legacy-session"],
+            false,
+        );
+
+        assert_eq!(project_title(&projectless), "无项目");
+        assert_eq!(project_title(&legacy), "Legacy sessions");
+    }
+
+    #[test]
+    fn project_tree_keyboard_activation_is_limited_to_enter_and_space() {
+        let mut enter = KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        assert!(is_keyboard_activation(&enter));
+        enter.keystroke = gpui::Keystroke::parse("space").unwrap();
+        assert!(is_keyboard_activation(&enter));
+        enter.keystroke = gpui::Keystroke::parse("down").unwrap();
+        assert!(!is_keyboard_activation(&enter));
     }
 }

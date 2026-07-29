@@ -66,6 +66,7 @@ pub(super) enum DesktopIcon {
     Overflow,
     /// Disclosure affordance for a row that toggles as a whole.
     ChevronDown,
+    ChevronRight,
     ChevronUp,
     /// A value the user can change, as opposed to an action they invoke.
     SelectorCaret,
@@ -73,6 +74,7 @@ pub(super) enum DesktopIcon {
     Expand,
     OpenExternal,
     Search,
+    Refresh,
     Clear,
     Close,
     Plus,
@@ -94,12 +96,14 @@ impl DesktopIcon {
             Self::PanelRightClose => IconName::PanelRightClose,
             Self::Overflow => IconName::Ellipsis,
             Self::ChevronDown => IconName::ChevronDown,
+            Self::ChevronRight => IconName::ChevronRight,
             Self::ChevronUp => IconName::ChevronUp,
             Self::SelectorCaret => IconName::ChevronsUpDown,
             Self::Copy => IconName::Copy,
             Self::Expand => IconName::Maximize,
             Self::OpenExternal => IconName::ExternalLink,
             Self::Search => IconName::Search,
+            Self::Refresh => IconName::Redo2,
             Self::Clear => IconName::CircleX,
             Self::Close => IconName::Close,
             Self::Plus => IconName::Plus,
@@ -483,6 +487,7 @@ pub(super) struct DesktopRowState {
 pub(super) struct DesktopActionRow {
     id: ElementId,
     accessible_label: SharedString,
+    expanded: Option<bool>,
     state: DesktopRowState,
     size: DesktopControlSize,
     leading: Option<gpui::AnyElement>,
@@ -503,6 +508,7 @@ impl DesktopActionRow {
         Self {
             id: id.into(),
             accessible_label: accessible_label.into(),
+            expanded: None,
             state: DesktopRowState::default(),
             size: DesktopControlSize::Standard,
             leading: None,
@@ -520,6 +526,12 @@ impl DesktopActionRow {
 
     pub(super) const fn size(mut self, size: DesktopControlSize) -> Self {
         self.size = size;
+        self
+    }
+
+    /// Expose disclosure state on the row's accessible action surface.
+    pub(super) const fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = Some(expanded);
         self
     }
 
@@ -549,6 +561,7 @@ impl DesktopActionRow {
         let content_id = (self.id.clone(), "content");
         let accessible_label = self.accessible_label.clone();
         let selected = self.state.selected;
+        let expanded = self.expanded;
         Button::new(self.id)
             .ghost()
             .selected(self.state.selected)
@@ -566,6 +579,9 @@ impl DesktopActionRow {
                     .role(Role::Button)
                     .aria_label(accessible_label)
                     .aria_selected(selected)
+                    .when_some(expanded, |content, expanded| {
+                        content.aria_expanded(expanded)
+                    })
                     .flex()
                     .flex_row()
                     .items_center()
@@ -644,12 +660,14 @@ mod tests {
             DesktopIcon::PanelRightClose,
             DesktopIcon::Overflow,
             DesktopIcon::ChevronDown,
+            DesktopIcon::ChevronRight,
             DesktopIcon::ChevronUp,
             DesktopIcon::SelectorCaret,
             DesktopIcon::Copy,
             DesktopIcon::Expand,
             DesktopIcon::OpenExternal,
             DesktopIcon::Search,
+            DesktopIcon::Refresh,
             DesktopIcon::Clear,
             DesktopIcon::Close,
             DesktopIcon::Plus,

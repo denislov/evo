@@ -151,10 +151,6 @@ impl ProjectCatalogController {
             .collect()
     }
 
-    #[allow(
-        dead_code,
-        reason = "DSK-631 owns disclosure state before VUI-410 adds the project-row toggle event"
-    )]
     pub(super) fn set_group_collapsed(&mut self, group_id: &str, collapsed: bool) -> bool {
         if !self
             .catalog

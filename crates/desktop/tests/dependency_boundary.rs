@@ -600,6 +600,7 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(!sessions.contains("CodingAgentResourceCommand"));
     assert!(!sessions.contains("global_skills"));
     assert!(sessions.contains("SessionsPaneEvent::Navigate"));
+    assert!(sessions.contains("SessionsPaneEvent::SetProjectCollapsed"));
     assert!(sessions.contains("CenterNavigationTarget::NewConversation"));
     assert!(sessions.contains("CenterNavigationTarget::Skills"));
     assert!(sessions.contains("CenterNavigationTarget::Session"));
@@ -607,6 +608,7 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(center_navigation.contains("enum CenterSurface"));
     assert!(shell.contains("fn navigate_center("));
     assert!(shell.contains("SessionsPaneEvent::Navigate(target)"));
+    assert!(shell.contains("SessionsPaneEvent::SetProjectCollapsed"));
 
     for forbidden in [
         "CodingAgentResourceCommand",
@@ -646,8 +648,20 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(project_catalog.contains("struct ProjectCatalogGroup"));
     assert!(project_catalog.contains("collapsed_group_ids: HashSet<String>"));
     assert!(project_catalog.contains("fn filtered_project_groups"));
+    assert!(project_catalog.contains("fn set_group_collapsed"));
     assert!(sessions.contains("project_groups: Arc<[ProjectCatalogGroup]>"));
     assert!(sessions.contains("catalog_state: ProjectCatalogState"));
+    assert!(sessions.contains("desktop-projects-section"));
+    assert!(sessions.contains("desktop-projects-tree"));
+    assert!(sessions.contains("desktop-hit-refresh-projects"));
+    assert!(sessions.contains("desktop-hit-session-actions"));
+    assert!(sessions.contains("session-tree-item"));
+    assert!(sessions.contains(".role(Role::ListItem)"));
+    assert!(sessions.contains(".expanded(expanded)"));
+    assert!(sessions.contains("fn is_keyboard_activation"));
+    assert!(sessions.contains(".on_key_down(cx.listener("));
+    assert!(desktop_controls.contains("expanded: Option<bool>"));
+    assert!(desktop_controls.contains("content.aria_expanded(expanded)"));
     assert!(!sessions.contains("pub(super) catalog: Arc<[DesktopSessionCatalogEntry]>"));
     assert!(!project_catalog.contains("refresh_deadline: Option<Instant>"));
     assert!(!project_catalog.contains("fn schedule_session_catalog_refresh"));
