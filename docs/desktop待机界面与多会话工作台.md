@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -983,6 +983,35 @@ active:   HashMap<SessionId, ActivePrompt>
 - 新增测试：第 5 个会话被拒绝且已有会话不受影响；
 - 新增测试：关闭其中一个会话不影响另一个的 active prompt；
 - 两组 performance gate 无回归。
+
+**实施记录（2026-07-29）**
+
+- runtime 线程仍是单个 Tokio current-thread executor；所有权从单一
+  `RuntimeState.session + Option<ActivePrompt>` 改为按 session id 索引的 idle session 表和
+  active prompt 表，主循环用 `FuturesUnordered` 同时等待最多 4 个 prompt 的 ProductEvent
+  receiver 与 task completion。没有引入 per-session OS thread，也没有改变单个 session 内部的
+  connect / prepare / run / ack / reconnect / recovery 链。
+- 会话级 `DesktopRuntimeCommand` 现在携带目标 session id；`None` 仅作为现有单工作台调用面的
+  兼容入口：无会话 Submit 仍原子建会话，已有唯一/聚焦会话时确定性解析，多会话且无可解析目标时
+  返回 `session_target`，不猜测 HashMap 迭代结果。Create / Open 的在场 session 总数硬限制为 4，
+  第 5 个返回类型化 `session_limit_reached`；显式 routed prompt / steer / follow-up / abort 已接到
+  当前 shell projection，为 DSK-512 的多工作台调用面保留稳定协议。
+- ProductEvent update envelope 独立携带来源 session id，不能再依赖产品事件 payload 本身一定有
+  session id；priority / data 双通道只在同一 session 内比较 sequence，不会拿 A 的 sequence 与
+  B 的 sequence 排序。每个 active prompt 独立维护 operation id、cursor、reconnect source、ack
+  和 terminal drain，command id 的接受、启动与完成保持原关联。
+- 新增 `CloseSession`：idle owner 直接 shutdown；active owner 先发 abort、在既有
+  `RUNTIME_SHUTDOWN_DEADLINE` 内等待 task、排空并转发 terminal ProductEvent、detach client 后
+  shutdown session。关闭失败返回拒绝而不伪报 `SessionClosed`；应用退出按排序后的 session id
+  依次关闭全部 active 与 idle owner，因此一个会话关闭不影响其余 active prompt。
+- 测试覆盖双 prompt 并行且事件/session/operation/command completion 不串流、第五会话拒绝后原有
+  4 个仍在场、关闭 A 时 B 正常完成，以及跨 session 的 priority/data merge 不比较 sequence。
+  验证通过：Desktop `209 passed / 5 ignored`、dependency boundary `16/16`、all-target check、
+  严格 Clippy、fmt 与 `git diff --check`。`desktop-native-perf-gate.sh` 通过（frame p95
+  `5732µs`、input p95 `8365µs`、steady RSS growth `151552B`、markdown p95 `115µs`）；
+  `desktop-perf-gate.sh` 通过（10k blocks hydration `2515µs`、headless frame p95 `2807µs`、
+  input roundtrip p95 `5648µs`，200 events/s streaming p95 `5µs`）。本任务不新增 UI surface；
+  per-session projection、草稿、Inspector 与后台静默刷新仍明确属于 DSK-512。
 
 **建议提交**
 

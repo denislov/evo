@@ -265,7 +265,10 @@ impl DesktopRuntimeBridge {
 
     #[cfg(test)]
     pub fn try_resync(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::Resync { command_id })
+        self.try_send(DesktopRuntimeCommand::Resync {
+            command_id,
+            session_id: None,
+        })
     }
 
     #[cfg(test)]
@@ -281,6 +284,19 @@ impl DesktopRuntimeBridge {
     ) -> Result<(), DesktopCommandAdmissionError> {
         validate_session_id(session_id)?;
         self.try_send(DesktopRuntimeCommand::OpenSession {
+            command_id,
+            session_id: session_id.to_owned(),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn try_close_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        self.try_send(DesktopRuntimeCommand::CloseSession {
             command_id,
             session_id: session_id.to_owned(),
         })
@@ -313,6 +329,7 @@ impl DesktopRuntimeBridge {
         validate_selection_id("profile", profile_id)?;
         self.try_send(DesktopRuntimeCommand::SelectSessionProfile {
             command_id,
+            session_id: None,
             profile_id: profile_id.to_owned(),
         })
     }
@@ -327,6 +344,25 @@ impl DesktopRuntimeBridge {
         validate_prompt(prompt)?;
         self.try_send(DesktopRuntimeCommand::SubmitPrompt {
             command_id,
+            session_id: None,
+            prompt: prompt.to_owned(),
+            thinking_level,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn try_submit_prompt_for_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+        prompt: &str,
+        thinking_level: Option<CodingAgentThinkingLevel>,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        validate_prompt(prompt)?;
+        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
+            command_id,
+            session_id: Some(session_id.to_owned()),
             prompt: prompt.to_owned(),
             thinking_level,
         })
@@ -334,7 +370,10 @@ impl DesktopRuntimeBridge {
 
     #[cfg(test)]
     pub fn try_abort(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::Abort { command_id })
+        self.try_send(DesktopRuntimeCommand::Abort {
+            command_id,
+            session_id: None,
+        })
     }
 
     #[cfg(test)]
@@ -346,6 +385,7 @@ impl DesktopRuntimeBridge {
         validate_control_text(text)?;
         self.try_send(DesktopRuntimeCommand::Steer {
             command_id,
+            session_id: None,
             text: text.to_owned(),
         })
     }
@@ -359,6 +399,7 @@ impl DesktopRuntimeBridge {
         validate_control_text(text)?;
         self.try_send(DesktopRuntimeCommand::FollowUp {
             command_id,
+            session_id: None,
             text: text.to_owned(),
         })
     }
@@ -373,6 +414,7 @@ impl DesktopRuntimeBridge {
         validate_authorization_identity(identity)?;
         self.try_send(DesktopRuntimeCommand::DecideToolAuthorization {
             command_id,
+            session_id: None,
             identity: identity.clone(),
             decision,
         })
@@ -387,6 +429,7 @@ impl DesktopRuntimeBridge {
         validate_recovery_identity(identity)?;
         self.try_send(DesktopRuntimeCommand::RetryRecovery {
             command_id,
+            session_id: None,
             identity: identity.clone(),
         })
     }
@@ -401,6 +444,7 @@ impl DesktopRuntimeBridge {
         validate_recovery_identity(identity)?;
         self.try_send(DesktopRuntimeCommand::ResolveRecovery {
             command_id,
+            session_id: None,
             identity: identity.clone(),
             resolution,
         })
@@ -664,7 +708,10 @@ impl DesktopRuntimeCommandHandle {
     }
 
     pub fn try_resync(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::Resync { command_id })
+        self.try_send(DesktopRuntimeCommand::Resync {
+            command_id,
+            session_id: None,
+        })
     }
 
     pub fn try_create_session(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
@@ -678,6 +725,22 @@ impl DesktopRuntimeCommandHandle {
     ) -> Result<(), DesktopCommandAdmissionError> {
         validate_session_id(session_id)?;
         self.try_send(DesktopRuntimeCommand::OpenSession {
+            command_id,
+            session_id: session_id.to_owned(),
+        })
+    }
+
+    #[allow(
+        dead_code,
+        reason = "DSK-512 will wire the routed close action into the session workbench"
+    )]
+    pub fn try_close_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        self.try_send(DesktopRuntimeCommand::CloseSession {
             command_id,
             session_id: session_id.to_owned(),
         })
@@ -707,6 +770,7 @@ impl DesktopRuntimeCommandHandle {
         validate_selection_id("profile", profile_id)?;
         self.try_send(DesktopRuntimeCommand::SelectSessionProfile {
             command_id,
+            session_id: None,
             profile_id: profile_id.to_owned(),
         })
     }
@@ -720,15 +784,50 @@ impl DesktopRuntimeCommandHandle {
         validate_prompt(prompt)?;
         self.try_send(DesktopRuntimeCommand::SubmitPrompt {
             command_id,
+            session_id: None,
             prompt: prompt.to_owned(),
             thinking_level,
         })
     }
 
-    pub fn try_abort(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::Abort { command_id })
+    pub fn try_submit_prompt_for_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+        prompt: &str,
+        thinking_level: Option<CodingAgentThinkingLevel>,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        validate_prompt(prompt)?;
+        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
+            command_id,
+            session_id: Some(session_id.to_owned()),
+            prompt: prompt.to_owned(),
+            thinking_level,
+        })
     }
 
+    #[allow(dead_code, reason = "single-session adapter compatibility")]
+    pub fn try_abort(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
+        self.try_send(DesktopRuntimeCommand::Abort {
+            command_id,
+            session_id: None,
+        })
+    }
+
+    pub fn try_abort_for_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        self.try_send(DesktopRuntimeCommand::Abort {
+            command_id,
+            session_id: Some(session_id.to_owned()),
+        })
+    }
+
+    #[allow(dead_code, reason = "single-session adapter compatibility")]
     pub fn try_steer(
         &self,
         command_id: u64,
@@ -737,10 +836,27 @@ impl DesktopRuntimeCommandHandle {
         validate_control_text(text)?;
         self.try_send(DesktopRuntimeCommand::Steer {
             command_id,
+            session_id: None,
             text: text.to_owned(),
         })
     }
 
+    pub fn try_steer_for_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+        text: &str,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        validate_control_text(text)?;
+        self.try_send(DesktopRuntimeCommand::Steer {
+            command_id,
+            session_id: Some(session_id.to_owned()),
+            text: text.to_owned(),
+        })
+    }
+
+    #[allow(dead_code, reason = "single-session adapter compatibility")]
     pub fn try_follow_up(
         &self,
         command_id: u64,
@@ -749,6 +865,22 @@ impl DesktopRuntimeCommandHandle {
         validate_control_text(text)?;
         self.try_send(DesktopRuntimeCommand::FollowUp {
             command_id,
+            session_id: None,
+            text: text.to_owned(),
+        })
+    }
+
+    pub fn try_follow_up_for_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+        text: &str,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        validate_control_text(text)?;
+        self.try_send(DesktopRuntimeCommand::FollowUp {
+            command_id,
+            session_id: Some(session_id.to_owned()),
             text: text.to_owned(),
         })
     }
@@ -762,6 +894,7 @@ impl DesktopRuntimeCommandHandle {
         validate_authorization_identity(identity)?;
         self.try_send(DesktopRuntimeCommand::DecideToolAuthorization {
             command_id,
+            session_id: None,
             identity: identity.clone(),
             decision,
         })
@@ -775,6 +908,7 @@ impl DesktopRuntimeCommandHandle {
         validate_recovery_identity(identity)?;
         self.try_send(DesktopRuntimeCommand::RetryRecovery {
             command_id,
+            session_id: None,
             identity: identity.clone(),
         })
     }
@@ -788,6 +922,7 @@ impl DesktopRuntimeCommandHandle {
         validate_recovery_identity(identity)?;
         self.try_send(DesktopRuntimeCommand::ResolveRecovery {
             command_id,
+            session_id: None,
             identity: identity.clone(),
             resolution,
         })
@@ -801,6 +936,7 @@ impl DesktopRuntimeCommandHandle {
         validate_file_review_request(request)?;
         self.try_send(DesktopRuntimeCommand::ReviewChangedFile {
             command_id,
+            session_id: None,
             request: request.clone(),
         })
     }
@@ -818,6 +954,7 @@ impl DesktopRuntimeCommandHandle {
         )?;
         self.try_send(DesktopRuntimeCommand::OpenExternalEditor {
             command_id,
+            session_id: None,
             target: target.clone(),
             editor: editor.clone(),
         })
@@ -834,26 +971,26 @@ impl DesktopRuntimeCommandHandle {
 }
 
 fn data_precedes_priority(data: &DesktopRuntimeUpdate, priority: &DesktopRuntimeUpdate) -> bool {
-    match (
-        product_event_sequence(data),
-        product_event_sequence(priority),
-    ) {
-        (Some(data_sequence), Some(priority_sequence)) => data_sequence < priority_sequence,
-        (Some(_), None)
-            if matches!(
-                priority,
-                DesktopRuntimeUpdate::PromptFinished { .. } | DesktopRuntimeUpdate::Stopped
-            ) =>
-        {
-            true
+    match (product_event_route(data), product_event_route(priority)) {
+        (Some((data_session, data_sequence)), Some((priority_session, priority_sequence))) => {
+            data_session == priority_session && data_sequence < priority_sequence
         }
+        (Some((data_session, _)), None) => match priority {
+            DesktopRuntimeUpdate::PromptFinished { snapshot, .. } => {
+                data_session == snapshot.session.session.session_id
+            }
+            DesktopRuntimeUpdate::Stopped => true,
+            _ => false,
+        },
         _ => false,
     }
 }
 
-fn product_event_sequence(update: &DesktopRuntimeUpdate) -> Option<u64> {
+fn product_event_route(update: &DesktopRuntimeUpdate) -> Option<(&str, u64)> {
     match update {
-        DesktopRuntimeUpdate::ProductEvent { event } => Some(event.sequence()),
+        DesktopRuntimeUpdate::ProductEvent { session_id, event } => {
+            Some((session_id, event.sequence()))
+        }
         _ => None,
     }
 }
@@ -861,7 +998,7 @@ fn product_event_sequence(update: &DesktopRuntimeUpdate) -> Option<u64> {
 fn is_streaming_data_update(update: &DesktopRuntimeUpdate) -> bool {
     matches!(
         update,
-        DesktopRuntimeUpdate::ProductEvent { event }
+        DesktopRuntimeUpdate::ProductEvent { event, .. }
             if event.delivery_class() == CodingAgentProductEventDeliveryClass::Data
     )
 }

@@ -1869,11 +1869,26 @@ impl NativeShell {
             }
         };
         let thinking_level = self.thinking_selection.explicit();
+        let session_id = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.clone());
         let admission = self.runtime.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
-                runtime
-                    .try_submit_prompt(command_id, &payload, thinking_level)
+                session_id
+                    .as_deref()
+                    .map_or_else(
+                        || runtime.try_submit_prompt(command_id, &payload, thinking_level),
+                        |session_id| {
+                            runtime.try_submit_prompt_for_session(
+                                command_id,
+                                session_id,
+                                &payload,
+                                thinking_level,
+                            )
+                        },
+                    )
                     .map_err(|error| error.to_string())
             },
         );
@@ -1940,12 +1955,23 @@ impl NativeShell {
                 return;
             }
         };
+        let session_id = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.clone());
         let admission = self.runtime.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
+                let Some(session_id) = session_id.as_deref() else {
+                    return Err("desktop session is unavailable".to_owned());
+                };
                 let result = match kind {
-                    ComposerSubmissionKind::Steer => runtime.try_steer(command_id, &payload),
-                    ComposerSubmissionKind::FollowUp => runtime.try_follow_up(command_id, &payload),
+                    ComposerSubmissionKind::Steer => {
+                        runtime.try_steer_for_session(command_id, session_id, &payload)
+                    }
+                    ComposerSubmissionKind::FollowUp => {
+                        runtime.try_follow_up_for_session(command_id, session_id, &payload)
+                    }
                     ComposerSubmissionKind::Prompt => {
                         unreachable!("prompt submission was rejected before runtime admission")
                     }
@@ -1980,6 +2006,14 @@ impl NativeShell {
             cx.notify();
             return;
         };
+        let session_id = self
+            .projection
+            .as_ref()
+            .expect("an active operation always belongs to a session projection")
+            .snapshot()
+            .session
+            .session_id
+            .clone();
         let intent = DesktopCommandIntent::Abort { operation_id };
         let Some(command_id) = self.reserve_command(intent.clone()) else {
             self.notify_status_bar(cx);
@@ -1990,7 +2024,7 @@ impl NativeShell {
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
-                    .try_abort(command_id)
+                    .try_abort_for_session(command_id, &session_id)
                     .map_err(|error| error.to_string())
             },
         );

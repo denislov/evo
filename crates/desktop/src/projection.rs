@@ -506,7 +506,7 @@ impl DesktopProjection {
             DesktopRuntimeUpdate::PromptFinished { snapshot, .. } => {
                 self.replace_runtime_snapshot(snapshot, false, None)
             }
-            DesktopRuntimeUpdate::ProductEvent { event } => self.apply_product_event(event),
+            DesktopRuntimeUpdate::ProductEvent { event, .. } => self.apply_product_event(event),
             DesktopRuntimeUpdate::ResyncRequired { reason, snapshot } => {
                 self.replace_product_snapshot(snapshot, Some(reason))
             }
@@ -524,6 +524,13 @@ impl DesktopProjection {
             }
             DesktopRuntimeUpdate::Stopped => {
                 self.lifecycle = DesktopProjectionLifecycle::Stopped;
+                DesktopProjectionApply::NoChange
+            }
+            DesktopRuntimeUpdate::SessionClosed {
+                command_id,
+                session_id,
+            } => {
+                tracing::trace!(command_id, session_id, "desktop.session.closed");
                 DesktopProjectionApply::NoChange
             }
             DesktopRuntimeUpdate::PromptAccepted { .. }

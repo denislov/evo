@@ -15,6 +15,7 @@ use crate::file_review::{DesktopExternalEditorConfig, DesktopExternalEditorLaunc
 pub const DESKTOP_COMMAND_QUEUE_CAPACITY: usize = 64;
 pub const DESKTOP_UPDATE_QUEUE_CAPACITY: usize = 128;
 pub const DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY: usize = 64;
+pub const MAX_CONCURRENT_DESKTOP_SESSIONS: usize = 4;
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 pub const MAX_CONTROL_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_DESKTOP_SESSION_CATALOG: usize = 128;
@@ -33,11 +34,16 @@ pub(super) enum DesktopRuntimeCommand {
     },
     Resync {
         command_id: u64,
+        session_id: Option<String>,
     },
     CreateSession {
         command_id: u64,
     },
     OpenSession {
+        command_id: u64,
+        session_id: String,
+    },
+    CloseSession {
         command_id: u64,
         session_id: String,
     },
@@ -50,44 +56,54 @@ pub(super) enum DesktopRuntimeCommand {
     },
     SelectSessionProfile {
         command_id: u64,
+        session_id: Option<String>,
         profile_id: String,
     },
     SubmitPrompt {
         command_id: u64,
+        session_id: Option<String>,
         prompt: String,
         thinking_level: Option<CodingAgentThinkingLevel>,
     },
     Abort {
         command_id: u64,
+        session_id: Option<String>,
     },
     Steer {
         command_id: u64,
+        session_id: Option<String>,
         text: String,
     },
     FollowUp {
         command_id: u64,
+        session_id: Option<String>,
         text: String,
     },
     DecideToolAuthorization {
         command_id: u64,
+        session_id: Option<String>,
         identity: ToolAuthorizationIdentity,
         decision: ToolAuthorizationDecision,
     },
     RetryRecovery {
         command_id: u64,
+        session_id: Option<String>,
         identity: DesktopRecoveryIdentity,
     },
     ResolveRecovery {
         command_id: u64,
+        session_id: Option<String>,
         identity: DesktopRecoveryIdentity,
         resolution: CodingAgentRecoveryResolution,
     },
     ReviewChangedFile {
         command_id: u64,
+        session_id: Option<String>,
         request: CodingAgentFileReviewRequest,
     },
     OpenExternalEditor {
         command_id: u64,
+        session_id: Option<String>,
         target: CodingAgentExternalEditorTarget,
         editor: DesktopExternalEditorConfig,
     },
@@ -97,14 +113,15 @@ impl DesktopRuntimeCommand {
     pub(super) const fn command_id(&self) -> u64 {
         match self {
             Self::Reload { command_id }
-            | Self::Resync { command_id }
+            | Self::Resync { command_id, .. }
             | Self::CreateSession { command_id }
             | Self::OpenSession { command_id, .. }
+            | Self::CloseSession { command_id, .. }
             | Self::ListSessions { command_id }
             | Self::SelectModel { command_id, .. }
             | Self::SelectSessionProfile { command_id, .. }
             | Self::SubmitPrompt { command_id, .. }
-            | Self::Abort { command_id }
+            | Self::Abort { command_id, .. }
             | Self::Steer { command_id, .. }
             | Self::FollowUp { command_id, .. }
             | Self::DecideToolAuthorization { command_id, .. }
@@ -121,6 +138,7 @@ impl DesktopRuntimeCommand {
             Self::Resync { .. } => DesktopRuntimeCommandKind::Resync,
             Self::CreateSession { .. } => DesktopRuntimeCommandKind::CreateSession,
             Self::OpenSession { .. } => DesktopRuntimeCommandKind::OpenSession,
+            Self::CloseSession { .. } => DesktopRuntimeCommandKind::CloseSession,
             Self::ListSessions { .. } => DesktopRuntimeCommandKind::ListSessions,
             Self::SelectModel { .. } => DesktopRuntimeCommandKind::SelectModel,
             Self::SelectSessionProfile { .. } => DesktopRuntimeCommandKind::SelectSessionProfile,
@@ -137,6 +155,29 @@ impl DesktopRuntimeCommand {
             Self::OpenExternalEditor { .. } => DesktopRuntimeCommandKind::OpenExternalEditor,
         }
     }
+
+    pub(super) fn target_session_id(&self) -> Option<&str> {
+        match self {
+            Self::OpenSession { session_id, .. } | Self::CloseSession { session_id, .. } => {
+                Some(session_id)
+            }
+            Self::Resync { session_id, .. }
+            | Self::SelectSessionProfile { session_id, .. }
+            | Self::SubmitPrompt { session_id, .. }
+            | Self::Abort { session_id, .. }
+            | Self::Steer { session_id, .. }
+            | Self::FollowUp { session_id, .. }
+            | Self::DecideToolAuthorization { session_id, .. }
+            | Self::RetryRecovery { session_id, .. }
+            | Self::ResolveRecovery { session_id, .. }
+            | Self::ReviewChangedFile { session_id, .. }
+            | Self::OpenExternalEditor { session_id, .. } => session_id.as_deref(),
+            Self::Reload { .. }
+            | Self::CreateSession { .. }
+            | Self::ListSessions { .. }
+            | Self::SelectModel { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +186,7 @@ pub enum DesktopRuntimeCommandKind {
     Resync,
     CreateSession,
     OpenSession,
+    CloseSession,
     ListSessions,
     SelectModel,
     SelectSessionProfile,
@@ -251,6 +293,10 @@ pub(super) enum DesktopBridgeError {
     Session { message: String },
     #[error("desktop runtime is busy: {operation}")]
     Busy { operation: String },
+    #[error("desktop session target is ambiguous: {message}")]
+    SessionTarget { message: String },
+    #[error("desktop session limit of {limit} has been reached")]
+    SessionLimit { limit: usize },
     #[error("{0}")]
     Product(CodingAgentPublicError),
     #[error("external editor launch failed")]
@@ -302,6 +348,10 @@ pub enum DesktopRuntimeUpdate {
         command_id: u64,
         snapshot: DesktopRuntimeHydratedSnapshot,
     },
+    SessionClosed {
+        command_id: u64,
+        session_id: String,
+    },
     SessionsListed {
         command_id: u64,
         sessions: Vec<DesktopSessionCatalogEntry>,
@@ -331,6 +381,7 @@ pub enum DesktopRuntimeUpdate {
         metadata: DesktopRuntimeMetadataSnapshot,
     },
     ProductEvent {
+        session_id: String,
         event: CodingAgentProductEvent,
     },
     ResyncRequired {
@@ -380,11 +431,20 @@ pub enum DesktopRuntimeUpdate {
 }
 
 impl DesktopRuntimeUpdate {
+    pub(crate) fn product_event(event: CodingAgentProductEvent) -> Self {
+        let session_id = event
+            .session_id()
+            .unwrap_or_else(|| event.stream_id())
+            .to_owned();
+        Self::ProductEvent { session_id, event }
+    }
+
     pub(crate) const fn kind_label(&self) -> &'static str {
         match self {
             Self::Reloaded { .. } => "reloaded",
             Self::Resynced { .. } => "resynced",
             Self::SessionChanged { .. } => "session_changed",
+            Self::SessionClosed { .. } => "session_closed",
             Self::SessionsListed { .. } => "sessions_listed",
             Self::SelectionChanged { .. } => "selection_changed",
             Self::PromptAccepted { .. } => "prompt_accepted",
@@ -478,6 +538,13 @@ impl DesktopRuntimeErrorSource for DesktopBridgeError {
             DesktopBridgeError::Busy { .. } => {
                 local_runtime_error("busy", "The desktop runtime is busy.")
             }
+            DesktopBridgeError::SessionTarget { message } => {
+                local_runtime_error("session_target", message)
+            }
+            DesktopBridgeError::SessionLimit { limit } => local_runtime_error(
+                "session_limit_reached",
+                &format!("At most {limit} desktop sessions can be open at once."),
+            ),
             DesktopBridgeError::ExternalEditor => local_runtime_error(
                 "external_editor_unavailable",
                 "The configured external editor could not be started.",

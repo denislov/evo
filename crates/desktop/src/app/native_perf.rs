@@ -663,7 +663,7 @@ fn apply_visual_running_tool(projection: &mut DesktopProjection) -> Result<(), S
         let event = serde_json::from_value(value)
             .map_err(|error| format!("could not decode visual product event: {error}"))?;
         if !matches!(
-            projection.apply(DesktopRuntimeUpdate::ProductEvent { event }),
+            projection.apply(DesktopRuntimeUpdate::product_event(event)),
             crate::projection::DesktopProjectionApply::Applied(_)
         ) {
             return Err("visual running-tool event did not apply to the projection".into());

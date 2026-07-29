@@ -818,7 +818,7 @@ fn desktop_metadata_deliveries_cannot_hydrate_or_replace_the_transcript() {
     let active_prompt = driver
         .split("struct ActivePrompt")
         .nth(1)
-        .and_then(|tail| tail.split("enum ActiveSignal").next())
+        .and_then(|tail| tail.split("enum ActivePromptSignal").next())
         .expect("active prompt owner should remain explicit");
     assert!(
         !active_prompt.contains("transcript:"),
@@ -834,15 +834,15 @@ fn desktop_metadata_deliveries_cannot_hydrate_or_replace_the_transcript() {
         "metadata snapshot construction must not read durable transcript or recovery payloads"
     );
     for command_path in [
-        "reload.map(|()| state.metadata_snapshot())",
-        ".map(|()| state.metadata_snapshot())\n            .map(|metadata| DesktopRuntimeUpdate::SelectionChanged",
+        "metadata: state.metadata_snapshot(None)",
+        "state.metadata_snapshot(Some(&session_id))",
     ] {
         assert!(
             dispatch.contains(command_path),
             "metadata command must use the narrow snapshot path: {command_path}"
         );
     }
-    assert!(driver.contains("self.metadata_snapshot()"));
+    assert!(driver.contains("self.metadata_snapshot(Some(session_id))"));
 
     let recovery_snapshot = driver
         .split("fn recovery_snapshot")
@@ -920,9 +920,12 @@ fn desktop_runtime_delivery_awaits_events_without_an_idle_poll_loop() {
     assert!(driver.contains("RUNTIME_SHUTDOWN_DEADLINE"));
     assert!(driver.contains("shutdown_deadline_exceeded"));
     assert!(!driver.contains("let result = match command {"));
-    assert!(dispatch.contains("async fn dispatch_idle_command("));
+    assert!(dispatch.contains("async fn dispatch_command_with_updates("));
+    assert!(dispatch.contains("async fn dispatch_command_inner("));
     assert!(dispatch.contains("fn dispatch_active_command("));
-    assert!(dispatch.matches("let result = match command {").count() == 2);
+    assert!(dispatch.matches("match command {").count() == 2);
+    assert!(driver.contains("FuturesUnordered"));
+    assert!(driver.contains("HashMap<String, ActivePrompt>"));
     for forbidden in [
         "tokio::select!",
         "CodingAgentReconnectDelivery",
@@ -1016,7 +1019,8 @@ fn desktop_file_review_uses_product_authority_and_argument_safe_adapter_bounds()
     ] {
         assert!(review.contains(bound), "file review omitted bound {bound}");
     }
-    assert!(runtime_dispatch.contains(".review_changed_file(request)"));
+    assert!(runtime_dispatch.contains(".review_changed_file(&session_id, request)"));
+    assert!(runtime_driver.contains(".review_changed_file(request)"));
     assert!(
         runtime_driver.contains("session.revalidate_external_editor_target(&target)"),
         "external launch must revalidate the opaque product target immediately before spawn"

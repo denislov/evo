@@ -33,7 +33,7 @@ use crate::projection::{
 };
 
 use super::bridge::build_desktop_runtime;
-use super::dispatch::{dispatch_active_command, dispatch_idle_command};
+use super::dispatch::{dispatch_active_command, dispatch_command};
 use super::driver::*;
 use super::protocol::*;
 use super::*;
@@ -700,7 +700,7 @@ async fn prompt_submission_forwards_product_events_and_returns_the_session_owner
                     assert_eq!(command_id, 10);
                     started_operation_id = Some(operation_id);
                 }
-                DesktopRuntimeUpdate::ProductEvent { event } => {
+                DesktopRuntimeUpdate::ProductEvent { event, .. } => {
                     saw_product_event = true;
                     if let Some(previous) = last_product_event_sequence {
                         assert!(
@@ -749,6 +749,176 @@ async fn prompt_submission_forwards_product_events_and_returns_the_session_owner
         bridge.next_update().await,
         Some(DesktopRuntimeUpdate::SessionChanged { command_id: 11, .. })
     ));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_prompts_route_events_and_completions_to_their_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, first) = start_runtime(options).await;
+    let first_session = first.session.session.session_id;
+    bridge.try_create_session(101).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionChanged {
+        snapshot: second, ..
+    }) = bridge.next_update().await
+    else {
+        panic!("second session should be created");
+    };
+    let second_session = second.session.session.session_id;
+
+    bridge
+        .try_submit_prompt_for_session(102, &first_session, "first concurrent prompt", None)
+        .unwrap();
+    bridge
+        .try_submit_prompt_for_session(103, &second_session, "second concurrent prompt", None)
+        .unwrap();
+
+    let mut accepted = std::collections::BTreeSet::new();
+    let mut started = std::collections::BTreeMap::new();
+    let mut finished = std::collections::BTreeMap::new();
+    let mut last_sequence = std::collections::BTreeMap::<String, u64>::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while finished.len() < 2 {
+            match bridge.next_update().await.unwrap() {
+                DesktopRuntimeUpdate::PromptAccepted { command_id } => {
+                    assert!(matches!(command_id, 102 | 103));
+                    accepted.insert(command_id);
+                }
+                DesktopRuntimeUpdate::PromptStarted {
+                    command_id,
+                    operation_id,
+                    metadata,
+                } => {
+                    let session_id = metadata
+                        .session
+                        .expect("prompt start is session-scoped")
+                        .session
+                        .session_id;
+                    started.insert(command_id, (session_id, operation_id));
+                }
+                DesktopRuntimeUpdate::ProductEvent { session_id, event } => {
+                    assert!(session_id == first_session || session_id == second_session);
+                    if let Some(previous) = last_sequence.insert(session_id, event.sequence()) {
+                        assert!(event.sequence() > previous);
+                    }
+                }
+                DesktopRuntimeUpdate::PromptFinished {
+                    command_id,
+                    operation_id,
+                    snapshot,
+                    ..
+                } => {
+                    let session_id = snapshot.session.session.session_id;
+                    let (started_session, started_operation) = started
+                        .get(&command_id)
+                        .expect("each completion must match its own start");
+                    assert_eq!(&session_id, started_session);
+                    assert_eq!(&operation_id, started_operation);
+                    finished.insert(command_id, session_id);
+                }
+                DesktopRuntimeUpdate::ResyncRequired { .. } => {}
+                update => panic!("unexpected concurrent prompt update: {update:?}"),
+            }
+        }
+    })
+    .await
+    .expect("both offline prompts should finish concurrently");
+
+    assert_eq!(accepted, std::collections::BTreeSet::from([102, 103]));
+    assert_eq!(finished.get(&102), Some(&first_session));
+    assert_eq!(finished.get(&103), Some(&second_session));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fifth_open_session_is_rejected_without_disturbing_the_existing_four() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, first) = start_runtime(options).await;
+    let first_session = first.session.session.session_id;
+    for command_id in 111..114 {
+        bridge.try_create_session(command_id).unwrap();
+        assert!(matches!(
+            bridge.next_update().await,
+            Some(DesktopRuntimeUpdate::SessionChanged { command_id: completed, .. })
+                if completed == command_id
+        ));
+    }
+
+    bridge.try_create_session(114).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 114,
+            command: DesktopRuntimeCommandKind::CreateSession,
+            ref code,
+            ..
+        }) if code == "session_limit_reached"
+    ));
+
+    bridge.try_close_session(115, &first_session).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::SessionClosed {
+            command_id: 115,
+            session_id,
+        }) if session_id == first_session
+    ));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn closing_one_active_session_does_not_interrupt_another_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, first) = start_runtime(options).await;
+    let first_session = first.session.session.session_id;
+    bridge.try_create_session(121).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionChanged {
+        snapshot: second, ..
+    }) = bridge.next_update().await
+    else {
+        panic!("second session should be created");
+    };
+    let second_session = second.session.session.session_id;
+    bridge
+        .try_submit_prompt_for_session(122, &first_session, "close this prompt", None)
+        .unwrap();
+    bridge
+        .try_submit_prompt_for_session(123, &second_session, "keep this prompt", None)
+        .unwrap();
+    bridge.try_close_session(124, &first_session).unwrap();
+
+    let mut closed = false;
+    let mut second_finished = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !closed || !second_finished {
+            match bridge.next_update().await.unwrap() {
+                DesktopRuntimeUpdate::SessionClosed {
+                    command_id: 124,
+                    session_id,
+                } => {
+                    assert_eq!(session_id, first_session);
+                    closed = true;
+                }
+                DesktopRuntimeUpdate::PromptFinished {
+                    command_id: 123,
+                    snapshot,
+                    ..
+                } => {
+                    assert_eq!(snapshot.session.session.session_id, second_session);
+                    second_finished = true;
+                }
+                DesktopRuntimeUpdate::RuntimeFailed { error } => {
+                    panic!("closing one session failed the shared runtime: {error:?}")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the surviving prompt should finish after the other session closes");
     bridge.shutdown().await.unwrap();
 }
 
@@ -906,16 +1076,18 @@ async fn prompt_start_failure_reports_the_session_that_was_already_created() {
     let context = CodingAgentEmbeddingContext::load(options).unwrap();
     let mut state = RuntimeState {
         context,
-        session: None,
+        sessions: std::collections::HashMap::new(),
+        focused_session_id: None,
         fail_next_prompt_start: true,
     };
-    let mut active = None;
+    let mut active = std::collections::HashMap::new();
 
-    let update = dispatch_idle_command(
+    let update = dispatch_command(
         &mut state,
         &mut active,
         DesktopRuntimeCommand::SubmitPrompt {
             command_id: 16,
+            session_id: None,
             prompt: "prompt start failure".into(),
             thinking_level: None,
         },
@@ -936,14 +1108,20 @@ async fn prompt_start_failure_reports_the_session_that_was_already_created() {
         metadata.session.as_ref().unwrap().session.session_id,
         snapshot.session.session.session_id
     );
-    assert!(active.is_none());
+    assert!(active.is_empty());
+    let retained_session_id = snapshot.session.session.session_id.clone();
     assert_eq!(
-        state.session.as_ref().unwrap().view().session_id,
+        state
+            .sessions
+            .get(&retained_session_id)
+            .unwrap()
+            .view()
+            .session_id,
         snapshot.session.session.session_id
     );
     assert_eq!(state.session_catalog().unwrap().0.len(), 1);
 
-    let mut session = state.session.take().unwrap();
+    let mut session = state.sessions.remove(&retained_session_id).unwrap();
     session.shutdown().await.unwrap();
 }
 
@@ -979,7 +1157,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
             if let DesktopRuntimeUpdate::Resynced { command_id: 41, .. } = &update {
                 saw_active_resync = true;
             }
-            if let DesktopRuntimeUpdate::ProductEvent { event } = &update
+            if let DesktopRuntimeUpdate::ProductEvent { event, .. } = &update
                 && !exercised_strict_reducer
             {
                 let mut baseline = projection.clone();
@@ -999,13 +1177,11 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                 );
                 assert!(
                     baseline
-                        .apply(DesktopRuntimeUpdate::ProductEvent {
-                            event: valid.clone(),
-                        })
+                        .apply(DesktopRuntimeUpdate::product_event(valid.clone()))
                         .is_applied()
                 );
                 assert_eq!(
-                    baseline.apply(DesktopRuntimeUpdate::ProductEvent { event: valid }),
+                    baseline.apply(DesktopRuntimeUpdate::product_event(valid)),
                     DesktopProjectionApply::IgnoredDuplicate
                 );
 
@@ -1019,7 +1195,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                     submitted_operation.as_deref(),
                 );
                 assert_eq!(
-                    gap_projection.apply(DesktopRuntimeUpdate::ProductEvent { event: gap }),
+                    gap_projection.apply(DesktopRuntimeUpdate::product_event(gap)),
                     DesktopProjectionApply::NeedsResync
                 );
                 assert_eq!(gap_projection.cursor(), &original_cursor);
@@ -1053,7 +1229,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                     submitted_operation.as_deref(),
                 );
                 assert_eq!(
-                    wrong_session.apply(DesktopRuntimeUpdate::ProductEvent { event: mismatched }),
+                    wrong_session.apply(DesktopRuntimeUpdate::product_event(mismatched)),
                     DesktopProjectionApply::NeedsResync
                 );
                 assert_eq!(
@@ -1070,7 +1246,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                     submitted_operation.as_deref(),
                 );
                 assert_eq!(
-                    wrong_stream.apply(DesktopRuntimeUpdate::ProductEvent { event: mismatched }),
+                    wrong_stream.apply(DesktopRuntimeUpdate::product_event(mismatched)),
                     DesktopProjectionApply::NeedsResync
                 );
                 assert_eq!(
@@ -1095,8 +1271,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                 );
                 let mismatched = serde_json::from_value(value).unwrap();
                 assert_eq!(
-                    wrong_generation
-                        .apply(DesktopRuntimeUpdate::ProductEvent { event: mismatched }),
+                    wrong_generation.apply(DesktopRuntimeUpdate::product_event(mismatched)),
                     DesktopProjectionApply::NeedsResync
                 );
                 assert_eq!(
@@ -1114,8 +1289,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                         Some("unrelated-operation"),
                     );
                     assert_eq!(
-                        wrong_operation
-                            .apply(DesktopRuntimeUpdate::ProductEvent { event: mismatched }),
+                        wrong_operation.apply(DesktopRuntimeUpdate::product_event(mismatched)),
                         DesktopProjectionApply::NeedsResync
                     );
                     assert_eq!(
@@ -1189,7 +1363,7 @@ async fn shared_cross_adapter_fixture_matches_desktop_product_state_exactly() {
             CodingAgentClientProjectionApply::Applied(_)
         ));
         let terminal = event.terminal_operation().is_some();
-        let outcome = desktop.apply(DesktopRuntimeUpdate::ProductEvent { event });
+        let outcome = desktop.apply(DesktopRuntimeUpdate::product_event(event));
         assert!(outcome.is_applied());
         assert_eq!(outcome.delta().unwrap().terminal, terminal);
     }
@@ -1301,7 +1475,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: started });
+    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(started));
     assert!(outcome.is_applied());
     let delta = outcome.delta().unwrap();
     assert!(delta.cursor);
@@ -1329,7 +1503,7 @@ fn assert_bounded_streaming_overlays(
     );
     assert!(
         overlays
-            .apply(DesktopRuntimeUpdate::ProductEvent { event: delta })
+            .apply(DesktopRuntimeUpdate::product_event(delta))
             .is_applied()
     );
 
@@ -1364,7 +1538,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: completed });
+    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(completed));
     assert!(outcome.is_applied());
     let delta = outcome.delta().unwrap();
     assert!(delta.conversation);
@@ -1415,7 +1589,7 @@ fn assert_bounded_streaming_overlays(
         );
         assert!(
             overlays
-                .apply(DesktopRuntimeUpdate::ProductEvent { event: completed })
+                .apply(DesktopRuntimeUpdate::product_event(completed))
                 .is_applied()
         );
     }
@@ -1442,9 +1616,7 @@ fn assert_bounded_streaming_overlays(
     );
     assert!(
         overlays
-            .apply(DesktopRuntimeUpdate::ProductEvent {
-                event: tool_started,
-            })
+            .apply(DesktopRuntimeUpdate::product_event(tool_started))
             .is_applied()
     );
     sequence += 1;
@@ -1466,9 +1638,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent {
-        event: tool_completed,
-    });
+    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(tool_completed));
     assert!(outcome.is_applied());
     let delta = outcome.delta().unwrap();
     assert!(delta.tools);
@@ -1507,7 +1677,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: delegation });
+    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(delegation));
     assert!(outcome.is_applied());
     let delta = outcome.delta().unwrap();
     assert!(delta.context.contains(ContextDirtyFlags::DELEGATIONS));
@@ -1547,7 +1717,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: recovery });
+    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(recovery));
     assert!(outcome.is_applied());
     assert!(outcome.delta().unwrap().recoveries);
     assert_eq!(
@@ -1576,7 +1746,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::ProductEvent { event: diagnostic });
+    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(diagnostic));
     assert!(outcome.is_applied());
     assert!(outcome.delta().unwrap().diagnostics);
     assert_eq!(
@@ -1690,17 +1860,13 @@ async fn streaming_batch_waits_only_for_data_and_flushes_on_priority_delivery() 
         .expect("fixture must contain an immediate event");
 
     data_tx
-        .send(DesktopRuntimeUpdate::ProductEvent {
-            event: data.clone(),
-        })
+        .send(DesktopRuntimeUpdate::product_event(data.clone()))
         .await
         .unwrap();
     let priority_task = tokio::spawn(async move {
         tokio::task::yield_now().await;
         priority_tx
-            .send(DesktopRuntimeUpdate::ProductEvent {
-                event: priority.clone(),
-            })
+            .send(DesktopRuntimeUpdate::product_event(priority.clone()))
             .await
             .unwrap();
         priority
@@ -1711,11 +1877,59 @@ async fn streaming_batch_waits_only_for_data_and_flushes_on_priority_delivery() 
     assert_eq!(batch.len(), 2);
     assert!(matches!(
         &batch[0],
-        DesktopRuntimeUpdate::ProductEvent { event } if event == &data
+        DesktopRuntimeUpdate::ProductEvent { event, .. } if event == &data
     ));
     assert!(matches!(
         &batch[1],
-        DesktopRuntimeUpdate::ProductEvent { event } if event == &priority
+        DesktopRuntimeUpdate::ProductEvent { event, .. } if event == &priority
+    ));
+}
+
+#[tokio::test]
+async fn priority_and_data_merge_never_compares_sequences_across_sessions() {
+    let (priority_tx, priority_updates) = mpsc::channel(DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY);
+    let (data_tx, data_updates) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
+    let fixture = cross_adapter_fixture_events();
+    let data = fixture
+        .iter()
+        .find(|event| event.delivery_class() == CodingAgentProductEventDeliveryClass::Data)
+        .cloned()
+        .unwrap();
+    let priority = fixture
+        .iter()
+        .find(|event| event.delivery_class() != CodingAgentProductEventDeliveryClass::Data)
+        .cloned()
+        .unwrap();
+    data_tx
+        .send(DesktopRuntimeUpdate::ProductEvent {
+            session_id: "session-data".into(),
+            event: data,
+        })
+        .await
+        .unwrap();
+    priority_tx
+        .send(DesktopRuntimeUpdate::ProductEvent {
+            session_id: "session-priority".into(),
+            event: priority,
+        })
+        .await
+        .unwrap();
+    let mut events = DesktopRuntimeEventStream {
+        priority_updates,
+        data_updates,
+        pending_priority_update: None,
+        pending_data_update: None,
+    };
+
+    assert!(matches!(
+        events.next_update().await,
+        Some(DesktopRuntimeUpdate::ProductEvent { session_id, .. })
+            if session_id == "session-priority"
+    ));
+    assert!(matches!(
+        events.next_update().await,
+        Some(DesktopRuntimeUpdate::ProductEvent { session_id, .. })
+            if session_id == "session-data"
     ));
 }
 
@@ -1728,7 +1942,7 @@ fn streaming_batch_timer_does_not_require_a_tokio_reactor() {
         .find(|event| event.delivery_class() == CodingAgentProductEventDeliveryClass::Data)
         .expect("fixture must contain a coalescible data event");
     data_tx
-        .try_send(DesktopRuntimeUpdate::ProductEvent { event: data })
+        .try_send(DesktopRuntimeUpdate::product_event(data))
         .unwrap();
     let mut events = DesktopRuntimeEventStream {
         priority_updates,
@@ -2003,6 +2217,7 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
     let (events, pending_recovery) = reconnect_event_source(&connection, requested_after).unwrap();
     let task = task::spawn(std::future::pending::<PromptTaskOutput>());
     let active = ActivePrompt {
+        session_id: session.view().session_id.clone(),
         command_id: 30,
         operation_id: Some("stuck-operation".into()),
         project: context.snapshot().clone(),
@@ -2036,6 +2251,7 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
         (
             DesktopRuntimeCommand::SelectSessionProfile {
                 command_id: 33,
+                session_id: None,
                 profile_id: "review".into(),
             },
             DesktopRuntimeCommandKind::SelectSessionProfile,
@@ -2054,6 +2270,7 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
         &active,
         DesktopRuntimeCommand::DecideToolAuthorization {
             command_id: 34,
+            session_id: None,
             identity: ToolAuthorizationIdentity {
                 authorization_id: "already-resolved".into(),
                 operation_id: "stuck-operation".into(),

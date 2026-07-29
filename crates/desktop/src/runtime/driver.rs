@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
@@ -26,19 +26,20 @@ use coding_agent::api::runtime::{
     CodingAgentRecoveryResolutionRequest, CodingAgentRecoveryRetryRequest, CodingAgentSession,
 };
 use coding_agent::api::view::ProfileId;
+use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{mpsc, watch};
 use tokio::task;
 
 use crate::file_review::{DesktopExternalEditorConfig, launch_external_editor};
 
-use super::dispatch::{dispatch_active_command, dispatch_idle_command};
+use super::dispatch::dispatch_command_with_updates;
 use super::protocol::{
     DESKTOP_UPDATE_QUEUE_CAPACITY, DesktopBridgeError, DesktopRecoveryIdentity,
     DesktopRuntimeCommand, DesktopRuntimeError, DesktopRuntimeErrorSource,
     DesktopRuntimeHydratedSnapshot, DesktopRuntimeMetadataSnapshot, DesktopRuntimeReadySnapshot,
     DesktopRuntimeRecoverySnapshot, DesktopRuntimeUpdate, DesktopSessionCatalogEntry,
-    MAX_DESKTOP_SESSION_CATALOG, MAX_SESSION_ID_BYTES, bounded_utf8_prefix, local_runtime_error,
-    runtime_error,
+    MAX_CONCURRENT_DESKTOP_SESSIONS, MAX_DESKTOP_SESSION_CATALOG, MAX_SESSION_ID_BYTES,
+    bounded_utf8_prefix, local_runtime_error, runtime_error,
 };
 
 const RUNTIME_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
@@ -46,25 +47,35 @@ pub(super) const DESKTOP_CLIENT_ID: &str = "evo-desktop";
 
 pub(super) struct RuntimeState {
     pub(super) context: CodingAgentEmbeddingContext,
-    pub(super) session: Option<CodingAgentSession>,
+    pub(super) sessions: HashMap<String, CodingAgentSession>,
+    pub(super) focused_session_id: Option<String>,
     #[cfg(test)]
     pub(super) fail_next_prompt_start: bool,
 }
 
 impl RuntimeState {
-    pub(super) fn metadata_snapshot(&self) -> DesktopRuntimeMetadataSnapshot {
+    pub(super) fn metadata_snapshot(
+        &self,
+        session_id: Option<&str>,
+    ) -> DesktopRuntimeMetadataSnapshot {
+        let session_id = session_id.or(self.focused_session_id.as_deref());
         DesktopRuntimeMetadataSnapshot {
             project: self.context.snapshot().clone(),
-            session: self.session.as_ref().map(CodingAgentSession::snapshot),
+            session: session_id
+                .and_then(|session_id| self.sessions.get(session_id))
+                .map(CodingAgentSession::snapshot),
         }
     }
 
-    pub(super) fn snapshot(&self) -> Result<DesktopRuntimeHydratedSnapshot, DesktopBridgeError> {
+    pub(super) fn snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<DesktopRuntimeHydratedSnapshot, DesktopBridgeError> {
         let session = self
-            .session
-            .as_ref()
+            .sessions
+            .get(session_id)
             .ok_or_else(|| DesktopBridgeError::Session {
-                message: "desktop runtime has no idle session owner".into(),
+                message: format!("desktop runtime has no idle owner for session {session_id}"),
             })?;
         Ok(DesktopRuntimeHydratedSnapshot {
             project: self.context.snapshot().clone(),
@@ -101,12 +112,15 @@ impl RuntimeState {
         Ok((sessions, omitted))
     }
 
-    fn recovery_snapshot(&self) -> Result<DesktopRuntimeRecoverySnapshot, DesktopBridgeError> {
+    fn recovery_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<DesktopRuntimeRecoverySnapshot, DesktopBridgeError> {
         let session = self
-            .session
-            .as_ref()
+            .sessions
+            .get(session_id)
             .ok_or_else(|| DesktopBridgeError::Session {
-                message: "desktop runtime has no idle session owner".into(),
+                message: format!("desktop runtime has no idle owner for session {session_id}"),
             })?;
         Ok(DesktopRuntimeRecoverySnapshot {
             project: self.context.snapshot().clone(),
@@ -117,11 +131,12 @@ impl RuntimeState {
 
     pub(super) async fn review_changed_file(
         &self,
+        session_id: &str,
         request: CodingAgentFileReviewRequest,
     ) -> Result<CodingAgentFileReview, DesktopBridgeError> {
         let session = self
-            .session
-            .as_ref()
+            .sessions
+            .get(session_id)
             .ok_or_else(|| DesktopBridgeError::Session {
                 message: "desktop runtime has no idle session owner".into(),
             })?;
@@ -133,12 +148,13 @@ impl RuntimeState {
 
     pub(super) async fn open_external_editor(
         &self,
+        session_id: &str,
         target: CodingAgentExternalEditorTarget,
         editor: DesktopExternalEditorConfig,
     ) -> Result<String, DesktopBridgeError> {
         let session = self
-            .session
-            .as_ref()
+            .sessions
+            .get(session_id)
             .ok_or_else(|| DesktopBridgeError::Session {
                 message: "desktop runtime has no idle session owner".into(),
             })?;
@@ -152,14 +168,15 @@ impl RuntimeState {
 
     pub(super) fn retry_recovery(
         &mut self,
+        session_id: &str,
         identity: DesktopRecoveryIdentity,
     ) -> Result<(String, DesktopRuntimeRecoverySnapshot), DesktopBridgeError> {
-        let session = self
-            .session
-            .as_mut()
-            .ok_or_else(|| DesktopBridgeError::Session {
-                message: "desktop runtime has no idle session owner".into(),
-            })?;
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| DesktopBridgeError::Session {
+                    message: "desktop runtime has no idle session owner".into(),
+                })?;
         let result = session.retry_recovery(CodingAgentRecoveryRetryRequest {
             operation_id: identity.operation_id,
             recovery_id: identity.recovery_id,
@@ -170,11 +187,12 @@ impl RuntimeState {
             schedule_with_backoff: false,
         })?;
         let recovery_id = result.recovery_id;
-        Ok((recovery_id, self.recovery_snapshot()?))
+        Ok((recovery_id, self.recovery_snapshot(session_id)?))
     }
 
     pub(super) fn resolve_recovery(
         &mut self,
+        session_id: &str,
         identity: DesktopRecoveryIdentity,
         resolution: CodingAgentRecoveryResolution,
     ) -> Result<(String, DesktopRuntimeRecoverySnapshot), DesktopBridgeError> {
@@ -182,12 +200,12 @@ impl RuntimeState {
             CodingAgentRecoveryResolution::Failed => "marked failed",
             CodingAgentRecoveryResolution::Aborted => "aborted",
         };
-        let session = self
-            .session
-            .as_mut()
-            .ok_or_else(|| DesktopBridgeError::Session {
-                message: "desktop runtime has no idle session owner".into(),
-            })?;
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| DesktopBridgeError::Session {
+                    message: "desktop runtime has no idle session owner".into(),
+                })?;
         let result = session.resolve_recovery(CodingAgentRecoveryResolutionRequest {
             operation_id: identity.operation_id,
             recovery_id: identity.recovery_id,
@@ -199,11 +217,12 @@ impl RuntimeState {
             reason: format!("native desktop operator {action} uncertain operation"),
         })?;
         let recovery_id = result.recovery_id;
-        Ok((recovery_id, self.recovery_snapshot()?))
+        Ok((recovery_id, self.recovery_snapshot(session_id)?))
     }
 
     pub(super) async fn select_session_profile(
         &mut self,
+        session_id: &str,
         profile_id: String,
     ) -> Result<DesktopRuntimeMetadataSnapshot, DesktopBridgeError> {
         if !self
@@ -221,12 +240,12 @@ impl RuntimeState {
             ProfileId::new(profile_id).map_err(|message| DesktopBridgeError::Input {
                 message: format!("invalid desktop session profile: {message}"),
             })?;
-        let session = self
-            .session
-            .as_mut()
-            .ok_or_else(|| DesktopBridgeError::Busy {
-                operation: "desktop_profile_selection".into(),
-            })?;
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| DesktopBridgeError::Busy {
+                    operation: "desktop_profile_selection".into(),
+                })?;
         let outcome = session
             .run(CodingAgentOperation::SetDefaultAgentProfile { profile_id })
             .await?;
@@ -238,35 +257,40 @@ impl RuntimeState {
                 message: "desktop profile selection returned an unexpected outcome".into(),
             });
         }
-        Ok(self.metadata_snapshot())
+        Ok(self.metadata_snapshot(Some(session_id)))
     }
 
-    pub(super) async fn replace_with_new_session(&mut self) -> Result<(), DesktopBridgeError> {
-        let replacement = self.context.create_session().await?;
-        self.shutdown_idle_session().await?;
-        self.session = Some(replacement);
-        Ok(())
+    pub(super) async fn create_session(
+        &mut self,
+        open_session_count: usize,
+    ) -> Result<String, DesktopBridgeError> {
+        self.ensure_capacity(open_session_count)?;
+        let session = self.context.create_session().await?;
+        let session_id = session.view().session_id.clone();
+        self.sessions.insert(session_id.clone(), session);
+        self.focused_session_id = Some(session_id.clone());
+        Ok(session_id)
     }
 
-    pub(super) async fn replace_with_open_session(
+    pub(super) async fn open_session(
         &mut self,
         session_id: String,
-    ) -> Result<(), DesktopBridgeError> {
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.view().session_id == session_id)
-        {
-            return Ok(());
+        open_session_count: usize,
+    ) -> Result<String, DesktopBridgeError> {
+        if self.sessions.contains_key(&session_id) {
+            self.focused_session_id = Some(session_id.clone());
+            return Ok(session_id);
         }
-        let replacement = self.context.open_session(session_id).await?;
-        self.shutdown_idle_session().await?;
-        self.session = Some(replacement);
-        Ok(())
+        self.ensure_capacity(open_session_count)?;
+        let session = self.context.open_session(session_id.clone()).await?;
+        self.sessions.insert(session_id.clone(), session);
+        self.focused_session_id = Some(session_id.clone());
+        Ok(session_id)
     }
 
     pub(super) fn start_prompt(
         &mut self,
+        session_id: &str,
         command_id: u64,
         prompt: String,
         thinking_level: Option<CodingAgentThinkingLevel>,
@@ -277,16 +301,16 @@ impl RuntimeState {
                 message: "injected desktop prompt start failure".into(),
             });
         }
-        let mut session = self
-            .session
-            .take()
-            .ok_or_else(|| DesktopBridgeError::Busy {
-                operation: "desktop_prompt".into(),
-            })?;
+        let mut session =
+            self.sessions
+                .remove(session_id)
+                .ok_or_else(|| DesktopBridgeError::Busy {
+                    operation: "desktop_prompt".into(),
+                })?;
         let connection = match session.connect(CodingAgentClientId::new(DESKTOP_CLIENT_ID)) {
             Ok(connection) => connection,
             Err(error) => {
-                self.session = Some(session);
+                self.sessions.insert(session_id.to_owned(), session);
                 return Err(error.into());
             }
         };
@@ -302,7 +326,7 @@ impl RuntimeState {
             Ok(submission) => submission,
             Err(error) => {
                 let _ = connection.detach();
-                self.session = Some(session);
+                self.sessions.insert(session_id.to_owned(), session);
                 return Err(error.into());
             }
         };
@@ -311,7 +335,7 @@ impl RuntimeState {
             Err(error) => {
                 let cleanup = submission.discard(&mut session);
                 let _ = connection.detach();
-                self.session = Some(session);
+                self.sessions.insert(session_id.to_owned(), session);
                 if let Err(cleanup) = cleanup {
                     return Err(cleanup.into());
                 }
@@ -324,7 +348,7 @@ impl RuntimeState {
             Err(error) => {
                 let cleanup = submission.discard(&mut session);
                 let _ = connection.detach();
-                self.session = Some(session);
+                self.sessions.insert(session_id.to_owned(), session);
                 if let Err(cleanup) = cleanup {
                     return Err(cleanup.into());
                 }
@@ -340,6 +364,7 @@ impl RuntimeState {
             (session, result)
         });
         Ok(ActivePrompt {
+            session_id: session_id.to_owned(),
             command_id,
             operation_id: None,
             project,
@@ -351,9 +376,42 @@ impl RuntimeState {
         })
     }
 
-    async fn shutdown_idle_session(&mut self) -> Result<(), DesktopBridgeError> {
-        if let Some(mut session) = self.session.take() {
-            session.shutdown().await?;
+    pub(super) fn insert_idle_session(&mut self, session: CodingAgentSession) {
+        self.sessions
+            .insert(session.view().session_id.clone(), session);
+    }
+
+    pub(super) async fn close_idle_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(), DesktopBridgeError> {
+        let mut session =
+            self.sessions
+                .remove(session_id)
+                .ok_or_else(|| DesktopBridgeError::SessionTarget {
+                    message: format!("session {session_id} is not open"),
+                })?;
+        session.shutdown().await?;
+        if self.focused_session_id.as_deref() == Some(session_id) {
+            self.focused_session_id = self.sessions.keys().min().cloned();
+        }
+        Ok(())
+    }
+
+    async fn shutdown_idle_sessions(&mut self) -> Result<(), DesktopBridgeError> {
+        let mut session_ids = self.sessions.keys().cloned().collect::<Vec<_>>();
+        session_ids.sort();
+        for session_id in session_ids {
+            self.close_idle_session(&session_id).await?;
+        }
+        Ok(())
+    }
+
+    fn ensure_capacity(&self, open_session_count: usize) -> Result<(), DesktopBridgeError> {
+        if open_session_count >= MAX_CONCURRENT_DESKTOP_SESSIONS {
+            return Err(DesktopBridgeError::SessionLimit {
+                limit: MAX_CONCURRENT_DESKTOP_SESSIONS,
+            });
         }
         Ok(())
     }
@@ -365,6 +423,7 @@ pub(super) type PromptTaskOutput = (
 );
 
 pub(super) struct ActivePrompt {
+    pub(super) session_id: String,
     pub(super) command_id: u64,
     pub(super) operation_id: Option<String>,
     pub(super) project: CodingAgentEmbeddingSnapshot,
@@ -375,10 +434,17 @@ pub(super) struct ActivePrompt {
     pub(super) task: task::JoinHandle<PromptTaskOutput>,
 }
 
-enum ActiveSignal {
-    Command(Option<DesktopRuntimeCommand>),
+enum ActivePromptSignal {
     Event(Box<Result<CodingAgentReconnectDelivery, DesktopBridgeError>>),
     Finished(Box<Result<PromptTaskOutput, task::JoinError>>),
+}
+
+enum RuntimeSignal {
+    Command(Option<DesktopRuntimeCommand>),
+    Active {
+        session_id: String,
+        signal: ActivePromptSignal,
+    },
     Shutdown,
 }
 
@@ -399,7 +465,8 @@ pub(super) async fn run_runtime(
     };
     let mut state = RuntimeState {
         context,
-        session: None,
+        sessions: HashMap::new(),
+        focused_session_id: None,
         #[cfg(test)]
         fail_next_prompt_start: false,
     };
@@ -407,13 +474,18 @@ pub(super) async fn run_runtime(
         project: state.context.snapshot().clone(),
     };
     if ready.send(Ok(initial)).is_err() {
-        let _ = state.shutdown_idle_session().await;
+        let _ = state.shutdown_idle_sessions().await;
         return;
     }
 
-    let mut active: Option<ActivePrompt> = None;
+    let mut active = HashMap::<String, ActivePrompt>::new();
     loop {
-        if let Some(active_prompt) = active.as_mut() {
+        let mut active_ids = active.keys().cloned().collect::<Vec<_>>();
+        active_ids.sort();
+        for session_id in active_ids {
+            let active_prompt = active
+                .get_mut(&session_id)
+                .expect("collected active session must remain present");
             if let Some(recovery) = active_prompt.pending_recovery.take() {
                 active_prompt.last_forwarded_sequence = recovery.fresh_cursor.last_event_sequence;
                 if priority_updates
@@ -421,40 +493,59 @@ pub(super) async fn run_runtime(
                     .await
                     .is_err()
                 {
-                    shutdown_active_prompt(active.take(), &priority_updates).await;
+                    shutdown_all_active_prompts(&mut active, &priority_updates).await;
                     return;
                 }
             }
-            let signal = tokio::select! {
+        }
+
+        let signal = if active.is_empty() {
+            tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
                     let _ = changed;
-                    ActiveSignal::Shutdown
+                    RuntimeSignal::Shutdown
                 }
-                command = commands.recv() => ActiveSignal::Command(command),
-                result = &mut active_prompt.task => ActiveSignal::Finished(Box::new(result)),
-                event = recv_product_event(&mut active_prompt.events) => {
-                    ActiveSignal::Event(Box::new(event))
-                },
-            };
-            match signal {
-                ActiveSignal::Shutdown | ActiveSignal::Command(None) => {
-                    shutdown_active_prompt(active.take(), &priority_updates).await;
+                command = commands.recv() => RuntimeSignal::Command(command),
+            }
+        } else {
+            let next_active = next_active_signal(&mut active);
+            tokio::pin!(next_active);
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    let _ = changed;
+                    RuntimeSignal::Shutdown
+                }
+                command = commands.recv() => RuntimeSignal::Command(command),
+                active_signal = &mut next_active => {
+                    let (session_id, signal) = active_signal
+                        .expect("non-empty active prompt set must produce a signal");
+                    RuntimeSignal::Active { session_id, signal }
+                }
+            }
+        };
+        match signal {
+            RuntimeSignal::Shutdown | RuntimeSignal::Command(None) => break,
+            RuntimeSignal::Command(Some(command)) => {
+                let update = dispatch_command_with_updates(
+                    &mut state,
+                    &mut active,
+                    Some(&priority_updates),
+                    Some(&data_updates),
+                    command,
+                )
+                .await;
+                if priority_updates.send(update).await.is_err() {
                     break;
                 }
-                ActiveSignal::Command(Some(command)) => {
-                    let update = dispatch_active_command(
-                        active.as_ref().expect("active prompt exists"),
-                        command,
-                    );
-                    if priority_updates.send(update).await.is_err() {
-                        shutdown_active_prompt(active.take(), &priority_updates).await;
-                        return;
-                    }
-                }
-                ActiveSignal::Event(event) => match *event {
+            }
+            RuntimeSignal::Active { session_id, signal } => match signal {
+                ActivePromptSignal::Event(event) => match *event {
                     Ok(CodingAgentReconnectDelivery::Event(event)) => {
-                        let active_prompt = active.as_mut().expect("active prompt exists");
+                        let active_prompt = active
+                            .get_mut(&session_id)
+                            .expect("signaled active prompt must remain present");
                         let sequence = event.sequence();
                         let candidate_operation_id = event.operation_id().map(str::to_owned);
                         if !ensure_operation_started(
@@ -464,8 +555,9 @@ pub(super) async fn run_runtime(
                         )
                         .await
                         {
-                            shutdown_active_prompt(active.take(), &priority_updates).await;
-                            return;
+                            shutdown_active_prompt(active.remove(&session_id), &priority_updates)
+                                .await;
+                            continue;
                         }
                         if !publish_product_event(
                             event,
@@ -475,19 +567,23 @@ pub(super) async fn run_runtime(
                         )
                         .await
                         {
-                            shutdown_active_prompt(active.take(), &priority_updates).await;
-                            return;
+                            shutdown_active_prompt(active.remove(&session_id), &priority_updates)
+                                .await;
+                            continue;
                         }
                         if !acknowledge_product_event(active_prompt, sequence, &priority_updates)
                             .await
                         {
-                            shutdown_active_prompt(active.take(), &priority_updates).await;
-                            return;
+                            shutdown_active_prompt(active.remove(&session_id), &priority_updates)
+                                .await;
+                            continue;
                         }
                         active_prompt.last_forwarded_sequence = sequence;
                     }
                     Ok(CodingAgentReconnectDelivery::FreshSnapshotRequired(recovery)) => {
-                        let active_prompt = active.as_mut().expect("active prompt exists");
+                        let active_prompt = active
+                            .get_mut(&session_id)
+                            .expect("signaled active prompt must remain present");
                         active_prompt.last_forwarded_sequence =
                             recovery.fresh_cursor.last_event_sequence;
                         if priority_updates
@@ -495,36 +591,41 @@ pub(super) async fn run_runtime(
                             .await
                             .is_err()
                         {
-                            shutdown_active_prompt(active.take(), &priority_updates).await;
-                            return;
+                            shutdown_active_prompt(active.remove(&session_id), &priority_updates)
+                                .await;
+                            continue;
                         }
                     }
                     Err(error) => {
-                        let active_prompt = active.as_mut().expect("active prompt exists");
+                        let active_prompt = active
+                            .get_mut(&session_id)
+                            .expect("signaled active prompt must remain present");
                         if !recover_product_event_source(active_prompt, error, &priority_updates)
                             .await
                         {
-                            shutdown_active_prompt(active.take(), &priority_updates).await;
-                            return;
+                            shutdown_active_prompt(active.remove(&session_id), &priority_updates)
+                                .await;
                         }
                     }
                 },
-                ActiveSignal::Finished(result) => {
+                ActivePromptSignal::Finished(result) => {
                     let result = *result;
-                    let mut completed = active.take().expect("active prompt exists");
+                    let mut completed = active
+                        .remove(&session_id)
+                        .expect("signaled active prompt must remain present");
                     if !drain_product_events(&mut completed, &priority_updates, &data_updates).await
                     {
                         shutdown_active_prompt(Some(completed), &priority_updates).await;
-                        return;
+                        continue;
                     }
                     let _ = completed.connection.detach();
                     match result {
                         Ok((session, operation_result)) => {
-                            state.session = Some(session);
+                            state.insert_idle_session(session);
                             if !ensure_operation_started(&mut completed, None, &priority_updates)
                                 .await
                             {
-                                break;
+                                continue;
                             }
                             let Some(operation_id) = completed.operation_id.take() else {
                                 let _ = priority_updates
@@ -536,9 +637,9 @@ pub(super) async fn run_runtime(
                                         },
                                     })
                                     .await;
-                                break;
+                                continue;
                             };
-                            let snapshot = match state.snapshot() {
+                            let snapshot = match state.snapshot(&session_id) {
                                 Ok(snapshot) => snapshot,
                                 Err(error) => {
                                     let _ = priority_updates
@@ -546,7 +647,7 @@ pub(super) async fn run_runtime(
                                             error: runtime_error(&error),
                                         })
                                         .await;
-                                    break;
+                                    continue;
                                 }
                             };
                             let error = operation_result.err().map(|error| runtime_error(&error));
@@ -560,7 +661,7 @@ pub(super) async fn run_runtime(
                                 .await
                                 .is_err()
                             {
-                                break;
+                                continue;
                             }
                         }
                         Err(_) => {
@@ -572,33 +673,52 @@ pub(super) async fn run_runtime(
                                     ),
                                 })
                                 .await;
-                            break;
+                            continue;
                         }
                     }
                 }
-            }
-            continue;
-        }
-
-        let command = tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                let _ = changed;
-                None
-            }
-            command = commands.recv() => command,
-        };
-        let Some(command) = command else {
-            break;
-        };
-        let update = dispatch_idle_command(&mut state, &mut active, command).await;
-        if priority_updates.send(update).await.is_err() {
-            break;
+            },
         }
     }
 
-    let _ = state.shutdown_idle_session().await;
+    shutdown_all_active_prompts(&mut active, &priority_updates).await;
+    let _ = state.shutdown_idle_sessions().await;
     let _ = priority_updates.send(DesktopRuntimeUpdate::Stopped).await;
+}
+
+async fn next_active_signal(
+    active: &mut HashMap<String, ActivePrompt>,
+) -> Option<(String, ActivePromptSignal)> {
+    let pending = active
+        .iter_mut()
+        .map(|(session_id, prompt)| {
+            let session_id = session_id.clone();
+            async move {
+                let signal = tokio::select! {
+                    biased;
+                    result = &mut prompt.task => {
+                        ActivePromptSignal::Finished(Box::new(result))
+                    }
+                    event = recv_product_event(&mut prompt.events) => {
+                        ActivePromptSignal::Event(Box::new(event))
+                    }
+                };
+                (session_id, signal)
+            }
+        })
+        .collect::<FuturesUnordered<_>>();
+    pending.into_future().await.0
+}
+
+async fn shutdown_all_active_prompts(
+    active: &mut HashMap<String, ActivePrompt>,
+    priority_updates: &mpsc::Sender<DesktopRuntimeUpdate>,
+) {
+    let mut session_ids = active.keys().cloned().collect::<Vec<_>>();
+    session_ids.sort();
+    for session_id in session_ids {
+        shutdown_active_prompt(active.remove(&session_id), priority_updates).await;
+    }
 }
 
 async fn recv_product_event(
@@ -826,12 +946,18 @@ async fn publish_product_event(
     }
     if is_priority_event(&event) {
         return priority_updates
-            .send(DesktopRuntimeUpdate::ProductEvent { event })
+            .send(DesktopRuntimeUpdate::ProductEvent {
+                session_id: active.session_id.clone(),
+                event,
+            })
             .await
             .is_ok();
     }
     publish_data_update(
-        DesktopRuntimeUpdate::ProductEvent { event },
+        DesktopRuntimeUpdate::ProductEvent {
+            session_id: active.session_id.clone(),
+            event,
+        },
         || active.connection.state(),
         priority_updates,
         data_updates,
@@ -993,7 +1119,61 @@ fn is_priority_event(event: &CodingAgentProductEvent) -> bool {
     )
 }
 
-async fn shutdown_active_prompt(
+pub(super) async fn close_active_prompt(
+    mut active: ActivePrompt,
+    priority_updates: &mpsc::Sender<DesktopRuntimeUpdate>,
+    data_updates: &mpsc::Sender<DesktopRuntimeUpdate>,
+) -> Result<(), DesktopBridgeError> {
+    let operation_id = active.operation_id.clone().or_else(|| {
+        active
+            .connection
+            .state()
+            .ok()
+            .and_then(|snapshot| snapshot.submitted_operation)
+            .map(|operation| operation.operation_id)
+    });
+    if let Some(operation_id) = operation_id.as_deref() {
+        let control = active.connection.prompt_control(operation_id);
+        let _ = control.abort(
+            CodingAgentControlId("desktop-session-close".into()),
+            "desktop session close",
+        );
+    }
+    match tokio::time::timeout(RUNTIME_SHUTDOWN_DEADLINE, &mut active.task).await {
+        Ok(Ok((mut session, _))) => {
+            if !drain_product_events(&mut active, priority_updates, data_updates).await {
+                let _ = active.connection.detach();
+                let _ = session.shutdown().await;
+                return Err(DesktopBridgeError::Session {
+                    message: "desktop session close could not drain terminal ProductEvents".into(),
+                });
+            }
+            let _ = active.connection.detach();
+            session.shutdown().await?;
+            Ok(())
+        }
+        Ok(Err(_)) => {
+            let _ = active.connection.detach();
+            Err(DesktopBridgeError::Session {
+                message: "desktop session prompt task stopped unexpectedly".into(),
+            })
+        }
+        Err(_) => {
+            active.task.abort();
+            let _ = active.task.await;
+            let _ = active.connection.detach();
+            Err(DesktopBridgeError::Session {
+                message: format!(
+                    "prompt operation {} did not stop within {} seconds",
+                    operation_id.as_deref().unwrap_or("<starting>"),
+                    RUNTIME_SHUTDOWN_DEADLINE.as_secs_f64()
+                ),
+            })
+        }
+    }
+}
+
+pub(super) async fn shutdown_active_prompt(
     active: Option<ActivePrompt>,
     priority_updates: &mpsc::Sender<DesktopRuntimeUpdate>,
 ) {
