@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -540,10 +540,10 @@ CenterDrawerHost
 > Projectless 仅解析到受管 scratch execution cwd，不把 scratch 暴露为 UI 项目身份。稳定 group id、
 > typed path error、workspace id 越界/逃逸和 scratch symlink 防护均有定向测试。
 >
-> 过渡债务：CAG-202 已让持久化记录写入并迁移 typed scope，DSK-613 也已让 Desktop open
-> 直接消费 product-owned open target，不再从 overview 的展示 cwd 反推 workspace；旧
-> `CodingAgentSessionOverview.cwd` 兼容字段仍保留，须在完整计划收敛前删除。新 session selection
-> 不允许构造 `Legacy`。
+> 债务清偿：CAG-202 已让持久化记录写入并迁移 typed scope，DSK-613 也已让 Desktop open
+> 直接消费 product-owned open target，不再从 overview 的展示 cwd 反推 workspace；DSK-631 已让
+> Desktop catalog 直接透传 typed workspace overview/migration，并删除旧
+> `CodingAgentSessionOverview.cwd` 兼容字段。新 session selection 不允许构造 `Legacy`。
 >
 > Gate：格式、diff、Clippy、API compile-pass 与新增的 7 个 workspace tests 通过；`coding-agent`
 > 767 个 library tests 全部通过，boundary 仍严格保持 DSK-600 登记的 3 个既有失败；TUI 全量通过。
@@ -718,9 +718,9 @@ CenterDrawerHost
 >
 > 债务清偿：DSK-612 已清偿首次 prompt 的原子创建与失败恢复；DSK-613 已清偿 persisted session
 > 从 Home options 建 context 的错误路径，历史 session 现在先从 durable manifest 取得完整 scope，
-> 再建立目标 workspace context；DSK-630 已把 session query 收敛为严格用户驱动。DSK-631 仍负责
-> 按项目分组的 catalog。产品层 raw-cwd options 与可空 workspace snapshot 仍按 CAG-204 债务在计划
-> 收敛前删除。
+> 再建立目标 workspace context；DSK-630 已把 session query 收敛为严格用户驱动，DSK-631 已完成
+> product-owned identity 驱动的项目分组 catalog。产品层 raw-cwd options 与可空 workspace snapshot
+> 仍按 CAG-204 债务在计划收敛前删除。
 >
 > Gate：Desktop 246 个 tests 通过、5 个既有用例保持 ignored，17 个 dependency boundary tests
 > 全部通过；严格 Clippy、格式、CodeGraph 与 `ast-grep outline` owner/call-path 审计通过。
@@ -864,6 +864,35 @@ CenterDrawerHost
 完成标准：启动后和静置测试中 ListSessions command count 为 0；只有模拟点击 refresh 后变为 1。
 
 #### DSK-631：ProjectCatalogController
+
+> 状态：已完成。`SessionController` 已重构为 `ProjectCatalogController`；Desktop catalog DTO 不再
+> 保存或推断展示 cwd，而是直接透传产品层 `CodingAgentWorkspaceOverview` +
+> `CodingAgentWorkspaceMigration`，同时删除 `CodingAgentSessionOverview.cwd` 兼容字段。Controller
+> 严格按 product-owned `group_id` 聚合项目：同名但 identity/path 不同的项目保持独立，Projectless
+> 与 Legacy 使用各自 typed kind，不会把受管 scratch 伪装成项目。
+>
+> Catalog 现在显式维护 `NotLoaded / Loading / Ready / Error / Stale` 状态。首次刷新失败进入 Error；
+> 已有服务端快照或本地增量数据时刷新失败进入 Stale；runtime admission/rejection/failure/stop 都会
+> 结束 Loading，且 rejection 状态只保留安全 command kind/code，不复制 runtime 私有 message。
+> 成功快照保留服务端 recent order，项目顺序由各组首次出现位置决定，组内顺序保持同一 recent
+> order；create/rename/remove 继续本地增量更新并遵守目录上限与 omitted 计数。
+>
+> 搜索统一匹配 workspace identity/name/path 与 session id/name/updated time；匹配结果临时展开但不
+> 修改 disclosure state。折叠 group id 集合与 catalog 快照完全分离，包含空快照在内的 refresh 都
+> 不会重置用户折叠偏好。`SessionsPaneViewModel` 已消费 typed project groups 与 catalog state；本阶段
+> 为保持 Phase 4/视觉任务边界仍将 groups 扁平渲染，真实 project row/tree 与 toggle event 留给后续
+> pane 重构。
+>
+> 完成标准验证：4 个 Controller 纯逻辑测试覆盖同名项目、Projectless、Legacy、empty、omitted、
+> workspace/session search、折叠状态跨空刷新、server/group recent order、insert/rename/remove 与
+> bounds；纯逻辑与 GPUI/runtime 回归共同覆盖 NotLoaded→Loading→Ready、初次失败 Error、带旧数据
+> 失败 Stale、admission/rejection 错误收敛，以及 typed workspace 从产品层到 Desktop 的端到端映射。
+>
+> Gate：Desktop library 261 个 tests 通过、5 个既有 release 性能用例保持 ignored，18 个 dependency
+> boundary tests 与严格 Clippy 通过；`coding-agent` 786 个 library tests、API contract 14/14 与严格
+> Clippy 通过；格式、diff、旧符号扫描、CodeGraph call-path 与 `ast-grep-outline` 变更后结构审计通过。
+> `coding-agent` boundary 为 64/67，仍严格保持 DSK-600 登记的 frozen write count、session naming
+> operation id、session method ledger 三个既有失败，没有新增回归。
 
 工作：
 
