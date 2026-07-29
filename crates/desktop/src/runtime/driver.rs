@@ -9,9 +9,9 @@ use coding_agent::api::client::{
     CodingAgentSubmissionDraft,
 };
 use coding_agent::api::embedding::{
-    CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentThinkingLevel,
-    CodingAgentThinkingLevelSanitization, CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
-    sanitize_thinking_level,
+    CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentSessionOpenTarget,
+    CodingAgentThinkingLevel, CodingAgentThinkingLevelSanitization, CodingAgentWorkspaceScope,
+    CodingAgentWorkspaceSelection, sanitize_thinking_level,
 };
 use coding_agent::api::event::{
     CodingAgentProductEvent, CodingAgentProductEventDeliveryClass, CodingAgentProductEventFamily,
@@ -474,12 +474,54 @@ impl RuntimeState {
             return Ok(session_id);
         }
         self.ensure_capacity(open_session_count)?;
-        let context = self.home.load_session_context()?;
-        let session = context.open_session(session_id.clone()).await?;
+        let target = self
+            .home
+            .context
+            .session_query()?
+            .open_target(&session_id)?;
+        let context = self.context_for_open_target(&target)?;
+        let session = context.open_session(target.session_id.clone()).await?;
         let workspace = RuntimeSessionWorkspace::new(context, session)?;
-        self.workspaces.insert(session_id.clone(), workspace);
-        self.focused_session_id = Some(session_id.clone());
-        Ok(session_id)
+        self.workspaces.insert(target.session_id.clone(), workspace);
+        self.focused_session_id = Some(target.session_id.clone());
+        Ok(target.session_id)
+    }
+
+    fn context_for_open_target(
+        &self,
+        target: &CodingAgentSessionOpenTarget,
+    ) -> Result<CodingAgentEmbeddingContext, DesktopBridgeError> {
+        let selection = match &target.workspace_scope {
+            CodingAgentWorkspaceScope::Project { cwd } => {
+                CodingAgentWorkspaceSelection::project(cwd)
+            }
+            CodingAgentWorkspaceScope::Projectless { workspace_id } => {
+                CodingAgentWorkspaceSelection::projectless(workspace_id)
+            }
+            CodingAgentWorkspaceScope::Legacy { .. } => {
+                return Err(DesktopBridgeError::WorkspaceUnavailable {
+                    message: target
+                        .workspace_migration
+                        .diagnostic
+                        .clone()
+                        .unwrap_or_else(|| "Legacy session workspace is unavailable.".into()),
+                });
+            }
+        };
+        let unavailable = target
+            .workspace_migration
+            .diagnostic
+            .clone()
+            .unwrap_or_else(|| "Session workspace is unavailable.".into());
+        let mut options = CodingAgentEmbeddingOptions::for_workspace(selection).map_err(|_| {
+            DesktopBridgeError::WorkspaceUnavailable {
+                message: unavailable,
+            }
+        })?;
+        if let Some(session_root) = self.home.context.snapshot().settings.session_dir.as_ref() {
+            options = options.with_session_dir(session_root);
+        }
+        CodingAgentEmbeddingContext::load(options).map_err(DesktopBridgeError::from)
     }
 
     pub(super) fn start_prompt(

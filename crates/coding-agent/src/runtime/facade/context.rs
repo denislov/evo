@@ -277,6 +277,18 @@ pub struct CodingAgentSessionOverview {
     pub active_leaf_id: Option<String>,
 }
 
+/// Product-owned workspace identity required to open one durable session.
+///
+/// Unlike the authority-free list overview, this target retains the complete
+/// typed scope needed to build an isolated embedding context. Legacy identity
+/// is migrated before this value is returned whenever recovery is possible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodingAgentSessionOpenTarget {
+    pub session_id: String,
+    pub workspace_scope: CodingAgentWorkspaceScope,
+    pub workspace_migration: CodingAgentWorkspaceMigration,
+}
+
 /// Complete read-only transcript projection for the current session leaf.
 ///
 /// This DTO contains presentation facts only. It does not expose repository

@@ -428,6 +428,8 @@ pub(super) enum DesktopBridgeError {
     SessionTarget { message: String },
     #[error("desktop session limit of {limit} has been reached")]
     SessionLimit { limit: usize },
+    #[error("desktop session workspace is unavailable: {message}")]
+    WorkspaceUnavailable { message: String },
     #[error("{0}")]
     Product(CodingAgentPublicError),
     #[error("external editor launch failed")]
@@ -686,6 +688,9 @@ impl DesktopRuntimeErrorSource for DesktopBridgeError {
                 "session_limit_reached",
                 &format!("At most {limit} desktop sessions can be open at once."),
             ),
+            DesktopBridgeError::WorkspaceUnavailable { message } => {
+                local_runtime_error("workspace_unavailable", message)
+            }
             DesktopBridgeError::ExternalEditor => local_runtime_error(
                 "external_editor_unavailable",
                 "The configured external editor could not be started.",

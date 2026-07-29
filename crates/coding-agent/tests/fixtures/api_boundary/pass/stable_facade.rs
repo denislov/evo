@@ -18,7 +18,8 @@ use coding_agent::api::embedding::{
     CodingAgentModelCatalogEntry, CodingAgentModelChoice, CodingAgentPreparedPrompt,
     CodingAgentProfileCatalog, CodingAgentProfileDelegationSummary, CodingAgentPromptImage,
     CodingAgentProviderAuthKind, CodingAgentProviderAuthState, CodingAgentResourceCommand,
-    CodingAgentResourceCommandKind, CodingAgentSessionQuery, CodingAgentSessionSelection,
+    CodingAgentResourceCommandKind, CodingAgentSessionOpenTarget, CodingAgentSessionQuery,
+    CodingAgentSessionSelection,
     CodingAgentTeamProfileCatalogEntry, CodingAgentThinkingCapability, CodingAgentThinkingLevel,
     CodingAgentThinkingLevelSanitization, CodingAgentToolExecutionMode,
     CodingAgentWorkspaceResolutionError, CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
@@ -117,6 +118,7 @@ fn session_queries(context: &CodingAgentEmbeddingContext) -> Result<(), CodingAg
     let overview_catalog: CodingAgentSessionOverviewCatalog = query.overviews()?;
     let _: Option<CodingAgentSessionOverview> = overview_catalog.overviews.into_iter().next();
     let _: CodingAgentWorkspaceMigration = query.migrate_workspace("session")?;
+    let _: CodingAgentSessionOpenTarget = query.open_target("session")?;
     let _: Option<CodingAgentSessionSnapshot> = None;
     let _: Option<CodingAgentSessionTreeSnapshot> = None;
     let _: Option<CodingAgentSessionTreeNode> = None;

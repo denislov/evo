@@ -953,7 +953,7 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
             .unwrap()
             .with_session_dir(&sessions)
             .with_model_id("claude-sonnet-4-5");
-    let (mut bridge, _) = DesktopRuntimeBridge::spawn(options)
+    let (mut bridge, _) = DesktopRuntimeBridge::spawn(options.clone())
         .unwrap()
         .wait_blocking()
         .unwrap();
@@ -1097,6 +1097,329 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
         "project-b"
     );
 
+    bridge.shutdown().await.unwrap();
+
+    let (mut reopened, _) = DesktopRuntimeBridge::spawn(options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+    for (command_id, session_id, project, prompt, skill, thinking) in [
+        (
+            109,
+            session_a.as_str(),
+            canonical_a.as_path(),
+            "project a prompt",
+            "project-a-skill",
+            "low",
+        ),
+        (
+            110,
+            session_b.as_str(),
+            canonical_b.as_path(),
+            "project b prompt",
+            "project-b-skill",
+            "high",
+        ),
+        (
+            111,
+            session_a.as_str(),
+            canonical_a.as_path(),
+            "project a prompt",
+            "project-a-skill",
+            "low",
+        ),
+    ] {
+        reopened.try_open_session(command_id, session_id).unwrap();
+        let Some(DesktopRuntimeUpdate::SessionChanged {
+            command_id: changed,
+            snapshot,
+        }) = reopened.next_update().await
+        else {
+            panic!("persisted cross-project session should reopen");
+        };
+        assert_eq!(changed, command_id);
+        assert_eq!(snapshot.project.cwd, project);
+        assert_eq!(
+            snapshot.project.settings.default_thinking_level.as_deref(),
+            Some(thinking)
+        );
+        assert!(
+            snapshot
+                .project
+                .resources
+                .skill_names
+                .iter()
+                .any(|name| name == skill)
+        );
+        assert!(snapshot.transcript.items.iter().any(|item| matches!(
+            item,
+            CodingAgentSessionTranscriptItem::User { text } if text == prompt
+        )));
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let home = temp.path().join("home");
+    let project = temp.path().join("shared-project");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    write_workspace_fixture(&project, "shared-project", "high");
+    let _env = ProcessEnvGuard::isolated(&global);
+    let project_context = CodingAgentEmbeddingContext::load(
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(
+            &project,
+        ))
+        .unwrap()
+        .with_session_dir(&sessions)
+        .with_model_id("claude-sonnet-4-5"),
+    )
+    .unwrap();
+    let mut first = project_context.create_session().await.unwrap();
+    let first_id = first.view().session_id;
+    first.shutdown().await.unwrap();
+    let mut second = project_context.create_session().await.unwrap();
+    let second_id = second.view().session_id;
+    second.shutdown().await.unwrap();
+    let home_options =
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(&home))
+            .unwrap()
+            .with_session_dir(&sessions)
+            .with_model_id("claude-sonnet-4-5");
+    let (mut bridge, _) = DesktopRuntimeBridge::spawn(home_options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+
+    bridge.try_open_session(112, &first_id).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. })
+            if snapshot.project.cwd == project.canonicalize().unwrap()
+    ));
+    bridge
+        .try_select_model(113, session_owner_target(&first_id), "gpt-5")
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::SelectionChanged { metadata, .. })
+            if metadata.project.selected_model_id == "gpt-5"
+    ));
+    bridge
+        .try_select_session_profile(114, session_owner_target(&first_id), "shared-project")
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::SelectionChanged { metadata, .. })
+            if metadata
+                .session
+                .as_ref()
+                .is_some_and(|session| session.session.default_agent_profile_id.as_str()
+                    == "shared-project")
+    ));
+    bridge.try_open_session(115, &second_id).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionChanged {
+        snapshot: second_snapshot,
+        ..
+    }) = bridge.next_update().await
+    else {
+        panic!("second session in the same project should receive an owner");
+    };
+    assert_eq!(
+        second_snapshot.project.selected_model_id,
+        "claude-sonnet-4-5"
+    );
+    assert_eq!(
+        second_snapshot
+            .session
+            .session
+            .default_agent_profile_id
+            .as_str(),
+        "default"
+    );
+    bridge.try_open_session(116, &first_id).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. })
+            if snapshot.project.selected_model_id == "gpt-5"
+                && snapshot.session.session.default_agent_profile_id.as_str()
+                    == "shared-project"
+    ));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn persisted_projectless_session_restores_its_managed_scratch_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let home = temp.path().join("home");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let _env = ProcessEnvGuard::isolated(&global);
+    let scratch_options = CodingAgentEmbeddingOptions::for_workspace(
+        CodingAgentWorkspaceSelection::projectless("workspace-reopen"),
+    )
+    .unwrap()
+    .with_session_dir(&sessions)
+    .with_model_id("claude-sonnet-4-5");
+    let scratch = scratch_options.cwd().to_path_buf();
+    let scratch_context = CodingAgentEmbeddingContext::load(scratch_options).unwrap();
+    let mut session = scratch_context.create_session().await.unwrap();
+    let session_id = session.view().session_id;
+    session.shutdown().await.unwrap();
+    std::fs::remove_dir(&scratch).unwrap();
+    let home_options =
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(&home))
+            .unwrap()
+            .with_session_dir(&sessions)
+            .with_model_id("claude-sonnet-4-5");
+    let (mut bridge, _) = DesktopRuntimeBridge::spawn(home_options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+
+    bridge.try_open_session(116, &session_id).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. }) = bridge.next_update().await
+    else {
+        panic!("projectless session should recreate and reopen its managed scratch");
+    };
+    assert_eq!(snapshot.project.cwd, scratch);
+    assert!(scratch.is_dir());
+    assert!(matches!(
+        snapshot.project.workspace.as_ref().map(|workspace| &workspace.scope),
+        Some(coding_agent::api::embedding::CodingAgentWorkspaceScope::Projectless {
+            workspace_id
+        }) if workspace_id == "workspace-reopen"
+    ));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn deleted_project_session_open_is_recoverably_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let home = temp.path().join("home");
+    let project = temp.path().join("deleted-project");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let _env = ProcessEnvGuard::isolated(&global);
+    let context = CodingAgentEmbeddingContext::load(
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(
+            &project,
+        ))
+        .unwrap()
+        .with_session_dir(&sessions),
+    )
+    .unwrap();
+    let mut session = context.create_session().await.unwrap();
+    let session_id = session.view().session_id;
+    session.shutdown().await.unwrap();
+    std::fs::remove_dir(&project).unwrap();
+    let home_options =
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(&home))
+            .unwrap()
+            .with_session_dir(&sessions);
+    let (mut bridge, _) = DesktopRuntimeBridge::spawn(home_options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+
+    bridge.try_open_session(117, &session_id).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 117,
+            command: DesktopRuntimeCommandKind::OpenSession,
+            code,
+            message,
+        }) if code == "workspace_unavailable"
+            && message == "Project workspace directory is unavailable."
+    ));
+    bridge.try_resync(118).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 118,
+            command: DesktopRuntimeCommandKind::Resync,
+            ..
+        })
+    ));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_session_scope_is_migrated_before_desktop_builds_its_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let home = temp.path().join("home");
+    let project = temp.path().join("legacy-project");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    write_workspace_fixture(&project, "legacy-project", "high");
+    let _env = ProcessEnvGuard::isolated(&global);
+    let context = CodingAgentEmbeddingContext::load(
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(
+            &project,
+        ))
+        .unwrap()
+        .with_session_dir(&sessions),
+    )
+    .unwrap();
+    let mut session = context.create_session().await.unwrap();
+    let session_id = session.view().session_id;
+    session.shutdown().await.unwrap();
+    let manifest_path = sessions.join(&session_id).join("session.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["version"] = serde_json::json!(1);
+    manifest.as_object_mut().unwrap().remove("workspace_scope");
+    manifest
+        .as_object_mut()
+        .unwrap()
+        .remove("workspace_migrated_from_legacy");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let home_options =
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(&home))
+            .unwrap()
+            .with_session_dir(&sessions);
+    let (mut bridge, _) = DesktopRuntimeBridge::spawn(home_options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+
+    bridge.try_open_session(119, &session_id).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. }) = bridge.next_update().await
+    else {
+        panic!("recoverable legacy project session should reopen");
+    };
+    assert_eq!(snapshot.project.cwd, project.canonicalize().unwrap());
+    assert!(
+        snapshot
+            .project
+            .resources
+            .skill_names
+            .iter()
+            .any(|name| name == "legacy-project-skill")
+    );
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(migrated["version"], 2);
+    assert_eq!(migrated["workspace_scope"]["kind"], "project");
+    assert_eq!(migrated["workspace_migrated_from_legacy"], true);
     bridge.shutdown().await.unwrap();
 }
 

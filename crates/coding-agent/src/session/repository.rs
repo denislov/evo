@@ -1031,7 +1031,7 @@ pub(crate) struct SessionSummary {
 }
 
 impl SessionSummary {
-    fn from_handle(handle: &SessionHandle) -> Self {
+    pub(crate) fn from_handle(handle: &SessionHandle) -> Self {
         Self {
             session_id: handle.manifest.session_id.clone(),
             name: handle.manifest.name.clone(),

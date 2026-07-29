@@ -55,6 +55,7 @@ pub mod api {
             CodingAgentProfileDelegationSummary, CodingAgentTeamProfileCatalogEntry,
         };
         pub use crate::app::session::CodingAgentSessionQuery;
+        pub use crate::runtime::facade::CodingAgentSessionOpenTarget;
         pub use crate::workspace::{
             CodingAgentResolvedWorkspace, CodingAgentWorkspaceResolutionError,
             CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,

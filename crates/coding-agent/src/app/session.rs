@@ -4,8 +4,8 @@ use crate::app::prompt_runtime::PromptRuntimeOptions;
 use crate::authorization::ToolAuthorizationMode;
 use crate::runtime::facade::{
     CodingAgentPublicError, CodingAgentSession, CodingAgentSessionHydration,
-    CodingAgentSessionOptions, CodingAgentSessionOverview, CodingAgentSessionTranscriptItem,
-    CodingAgentSessionTree, CodingSessionError, ProfileId,
+    CodingAgentSessionOpenTarget, CodingAgentSessionOptions, CodingAgentSessionOverview,
+    CodingAgentSessionTranscriptItem, CodingAgentSessionTree, CodingSessionError, ProfileId,
 };
 use agent_core::api::transcript::{SessionEntry, SessionTreeNode};
 use ai::api::client::AiClient;
@@ -501,6 +501,20 @@ impl CodingAgentSessionQuery {
             .options_for_session(session_id.as_ref())
             .map_err(CodingAgentPublicError::from)?;
         crate::session::service::SessionService::migrate_workspace(&options)
+            .map_err(CodingAgentPublicError::from)
+    }
+
+    /// Resolve and, when possible, migrate the typed workspace needed to open
+    /// one durable session. This reads no transcript state and exposes no
+    /// session repository path.
+    pub fn open_target(
+        &self,
+        session_id: impl AsRef<str>,
+    ) -> Result<CodingAgentSessionOpenTarget, CodingAgentPublicError> {
+        let options = self
+            .options_for_session(session_id.as_ref())
+            .map_err(CodingAgentPublicError::from)?;
+        crate::session::service::SessionService::open_target(&options)
             .map_err(CodingAgentPublicError::from)
     }
 
@@ -1557,6 +1571,56 @@ mod tests {
         assert_eq!(manifest["version"], 2);
         assert_eq!(manifest["workspace_scope"]["kind"], "project");
         assert_eq!(manifest["workspace_migrated_from_legacy"], true);
+    }
+
+    #[tokio::test]
+    async fn open_target_returns_complete_projectless_scope() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let scratch = global.join("scratch/workspace-query-target");
+        let root = temp.path().join("sessions");
+        std::fs::create_dir_all(&scratch).unwrap();
+        env.set_evo_dir(&global);
+        let workspace =
+            crate::workspace::CodingAgentWorkspaceSelection::projectless("workspace-query-target")
+                .resolve(&global)
+                .unwrap();
+        let session = CodingAgentSession::create_internal(
+            CodingAgentSessionOptions::new()
+                .with_resolved_workspace(workspace)
+                .with_session_id("sess_open_target")
+                .with_session_log_root(&root)
+                .with_default_agent_profile_id(ProfileId::from("default")),
+        )
+        .await
+        .unwrap();
+        drop(session);
+        let query = CodingAgentSessionQuery::from_session_root(&root);
+
+        let target = query.open_target("sess_open_target").unwrap();
+
+        assert_eq!(target.session_id, "sess_open_target");
+        assert_eq!(
+            target.workspace_scope,
+            crate::workspace::CodingAgentWorkspaceScope::Projectless {
+                workspace_id: "workspace-query-target".into(),
+            }
+        );
+        assert_eq!(
+            target.workspace_migration.outcome,
+            crate::workspace::CodingAgentWorkspaceMigrationOutcome::NotRequired
+        );
+        assert_eq!(target.workspace_migration.diagnostic, None);
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("sess_open_target/session.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["workspace_scope"]["kind"], "projectless");
+        assert_eq!(
+            manifest["workspace_scope"]["workspace_id"],
+            "workspace-query-target"
+        );
     }
 
     fn downgrade_query_fixture_manifest_to_v1(root: &Path, session_id: &str) {

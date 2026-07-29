@@ -20,6 +20,7 @@ use crate::operations::prompt::context::{
 use crate::runtime::capability::OperationCapabilitySnapshot;
 #[cfg(test)]
 use crate::runtime::capability::SessionWriteCapability;
+use crate::runtime::facade::CodingAgentSessionOpenTarget;
 use crate::runtime::facade::{
     CodingAgentSessionDiagnostic, CodingAgentSessionHydration, CodingAgentSessionOptions,
     CodingAgentSessionOverview, CodingAgentSessionSummary, CodingAgentSessionTranscriptItem,
@@ -555,6 +556,31 @@ impl SessionService {
             workspace_global_config_dir(options).as_path(),
         )
         .map(|(_, migration)| migration)
+    }
+
+    pub(crate) fn open_target(
+        options: &CodingAgentSessionOptions,
+    ) -> Result<CodingAgentSessionOpenTarget, CodingSessionError> {
+        let root = resolve_session_log_root(options)?;
+        let store = SessionLogStore::new(root);
+        let target = open_target(options)?;
+        let handle = store.open_session(&target)?;
+        let (handle, _) = migrate_workspace_handle(
+            &store,
+            handle,
+            workspace_global_config_dir(options).as_path(),
+        )?;
+        let summary = SessionSummary::from_handle(&handle);
+        let workspace = workspace_facts_for_summary(
+            &store,
+            &summary,
+            workspace_global_config_dir(options).as_path(),
+        )?;
+        Ok(CodingAgentSessionOpenTarget {
+            session_id: summary.session_id,
+            workspace_scope: workspace.scope,
+            workspace_migration: workspace.migration,
+        })
     }
 
     pub(crate) fn hydrate(
