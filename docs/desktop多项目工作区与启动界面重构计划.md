@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410、VUI-411 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -1131,6 +1131,24 @@ CenterDrawerHost
 完成标准：宽 sidebar、最小 sidebar、drawer、键盘导航、屏幕阅读顺序和 4 个并存 runtime 状态通过。
 
 #### VUI-411：Evo Loop 矢量资产
+
+> 状态：已完成。新增 full wordmark 与为小尺寸单独绘制的 compact open-loop mark；主体和上扬
+> feedback terminal 分成 4 个 path-only SVG alpha mask，由 `DesktopAssets` 与 pinned
+> `gpui-component-assets` 组合后在 application bootstrap 一次注册。资产不包含 `<text>`、字体、raster、
+> script、filter 或 animation，设计几何、禁止项与 `assets.rs` / `evo_brand.rs` ownership 已记录在品牌
+> README。
+>
+> `EvoBrand` 统一持有 Wordmark/Compact variant、360:128 与 1:1 尺寸合同、image role/aria label 以及
+> dark/light/monochrome 的 foreground/accent token；GPUI 以两层同位 SVG mask 着色，monochrome 把 accent
+> 映射回主体颜色而不改变轮廓。Sidebar 已用 24 px production compact mark 替换文字占位，full wordmark
+> 已可供 VUI-412 的 Home hero 直接消费，不在本项提前改变 Home 构图。
+>
+> Gate：专用 replay 已实际生成并人工检查 dark/light/monochrome 三张 production-rendered fixture，覆盖
+> compact 16/24/32 px 与 wordmark 200/360 px；16 px 开放环、no-color silhouette 和 HiDPI 缩放均清晰。
+> 主界面 wide、narrow drawer 与 no-color review 也确认 Sidebar 对齐稳定；golden 仍留给 VUI-412 完成 Home
+> 构图后统一安装。Desktop 287 个 library tests 通过、5 个既有 release 性能用例保持 ignored，20 个
+> dependency boundary tests 与严格 all-target/all-features Clippy 通过；格式、diff、CodeGraph 与
+> `ast-grep-outline` owner 审计通过。
 
 交付：
 
