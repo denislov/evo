@@ -19,8 +19,8 @@ use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel, PreferenceW
 use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
 use desktop::runtime::{
     DesktopPromptTarget, DesktopRecoveryAction, DesktopRecoveryIdentity, DesktopRuntimeBridge,
-    DesktopRuntimeCommandHandle, DesktopRuntimeSelectionKind, MAX_PROMPT_ATTACHMENTS,
-    validate_prompt_attachments,
+    DesktopRuntimeCommandHandle, DesktopRuntimeOwnerTarget, DesktopRuntimeSelectionKind,
+    MAX_PROMPT_ATTACHMENTS, validate_prompt_attachments,
 };
 use desktop::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH, FocusState, FocusTarget,
@@ -338,6 +338,14 @@ impl SessionWorkspace {
             self.project.selected_model_id.clone(),
             self.project.default_agent_profile_id.as_str(),
         )
+    }
+
+    fn runtime_owner_target(&self) -> DesktopRuntimeOwnerTarget {
+        self.projection
+            .as_ref()
+            .map_or_else(DesktopRuntimeOwnerTarget::home, |projection| {
+                DesktopRuntimeOwnerTarget::session(projection.snapshot().session.session_id.clone())
+            })
     }
 
     fn set_preference_notice(&mut self, message: String) {
@@ -2614,11 +2622,12 @@ impl NativeShell {
             cx.notify();
             return;
         };
+        let target = self.runtime_owner_target();
         let admission = self.runtime.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
-                    .try_reload(command_id)
+                    .try_reload(command_id, target)
                     .map_err(|error| error.to_string())
             },
         );
@@ -2755,13 +2764,16 @@ impl NativeShell {
             cx.notify();
             return;
         };
+        let target = self.runtime_owner_target();
         let admission = self.runtime.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 let result = match selection {
-                    DesktopRuntimeSelectionKind::Model => runtime.try_select_model(command_id, &id),
+                    DesktopRuntimeSelectionKind::Model => {
+                        runtime.try_select_model(command_id, target, &id)
+                    }
                     DesktopRuntimeSelectionKind::SessionProfile => {
-                        runtime.try_select_session_profile(command_id, &id)
+                        runtime.try_select_session_profile(command_id, target, &id)
                     }
                 };
                 result.map_err(|error| error.to_string())
@@ -3183,13 +3195,24 @@ impl NativeShell {
             cx.notify();
             return;
         };
+        let Some(session_id) = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.clone())
+        else {
+            self.command_ledger.complete(command_id, &intent);
+            self.set_preference_notice("File review requires an open session.".into());
+            self.notify_inspector_pane(cx);
+            cx.notify();
+            return;
+        };
         let admission = self
             .runtime
             .as_ref()
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
             .and_then(|runtime| {
                 runtime
-                    .try_review_changed_file(command_id, &request)
+                    .try_review_changed_file(command_id, &session_id, &request)
                     .map_err(|error| error.to_string())
             });
         match admission {
@@ -3274,13 +3297,24 @@ impl NativeShell {
             cx.notify();
             return;
         };
+        let Some(session_id) = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.clone())
+        else {
+            self.command_ledger.complete(command_id, &intent);
+            self.set_preference_notice("External editor requires an open session.".into());
+            self.notify_inspector_pane(cx);
+            cx.notify();
+            return;
+        };
         let admission = self
             .runtime
             .as_ref()
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
             .and_then(|runtime| {
                 runtime
-                    .try_open_external_editor(command_id, &target, &editor)
+                    .try_open_external_editor(command_id, &session_id, &target, &editor)
                     .map_err(|error| error.to_string())
             });
         match admission {
@@ -6691,7 +6725,7 @@ mod tests {
             runtime_harness.drain_selections(),
             [(
                 desktop::runtime::DesktopRuntimeCommandKind::SelectModel,
-                None,
+                DesktopRuntimeOwnerTarget::home(),
                 "exact-target-model".into(),
             )]
         );
@@ -6733,7 +6767,7 @@ mod tests {
             runtime_harness.drain_selections(),
             [(
                 desktop::runtime::DesktopRuntimeCommandKind::SelectSessionProfile,
-                None,
+                DesktopRuntimeOwnerTarget::home(),
                 "exact-reviewer".into(),
             )]
         );

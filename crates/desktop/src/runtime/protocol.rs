@@ -38,6 +38,7 @@ pub(super) const MAX_PROMPT_ATTACHMENT_PATH_TOTAL_BYTES: usize = 64 * 1024;
 pub(super) enum DesktopRuntimeCommand {
     Reload {
         command_id: u64,
+        target: DesktopRuntimeOwnerTarget,
     },
     Resync {
         command_id: u64,
@@ -64,11 +65,12 @@ pub(super) enum DesktopRuntimeCommand {
     },
     SelectModel {
         command_id: u64,
+        target: DesktopRuntimeOwnerTarget,
         model_id: String,
     },
     SelectSessionProfile {
         command_id: u64,
-        session_id: Option<String>,
+        target: DesktopRuntimeOwnerTarget,
         profile_id: String,
     },
     SubmitPrompt {
@@ -111,15 +113,56 @@ pub(super) enum DesktopRuntimeCommand {
     },
     ReviewChangedFile {
         command_id: u64,
-        session_id: Option<String>,
+        session_id: String,
         request: CodingAgentFileReviewRequest,
     },
     OpenExternalEditor {
         command_id: u64,
-        session_id: Option<String>,
+        session_id: String,
         target: CodingAgentExternalEditorTarget,
         editor: DesktopExternalEditorConfig,
     },
+}
+
+/// Explicit owner for context-level desktop commands.
+#[derive(Clone, PartialEq, Eq)]
+pub enum DesktopRuntimeOwnerTarget {
+    Home,
+    Session { session_id: String },
+}
+
+impl DesktopRuntimeOwnerTarget {
+    pub const fn home() -> Self {
+        Self::Home
+    }
+
+    pub fn session(session_id: impl Into<String>) -> Self {
+        Self::Session {
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Home => None,
+            Self::Session { session_id } => Some(session_id),
+        }
+    }
+}
+
+impl fmt::Debug for DesktopRuntimeOwnerTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DesktopRuntimeOwnerTarget")
+            .field(
+                "kind",
+                &match self {
+                    Self::Home => "home",
+                    Self::Session { .. } => "session",
+                },
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 /// Explicit target for a desktop prompt submission.
@@ -198,7 +241,7 @@ impl fmt::Debug for DesktopRuntimeCommand {
 impl DesktopRuntimeCommand {
     pub(super) const fn command_id(&self) -> u64 {
         match self {
-            Self::Reload { command_id }
+            Self::Reload { command_id, .. }
             | Self::Resync { command_id, .. }
             | Self::CreateSession { command_id }
             | Self::OpenSession { command_id, .. }
@@ -249,21 +292,20 @@ impl DesktopRuntimeCommand {
             Self::OpenSession { session_id, .. }
             | Self::CloseSession { session_id, .. }
             | Self::RenameSession { session_id, .. } => Some(session_id),
+            Self::Reload { target, .. }
+            | Self::SelectModel { target, .. }
+            | Self::SelectSessionProfile { target, .. } => target.session_id(),
             Self::SubmitPrompt { target, .. } => target.existing_session_id(),
+            Self::ReviewChangedFile { session_id, .. }
+            | Self::OpenExternalEditor { session_id, .. } => Some(session_id),
             Self::Resync { session_id, .. }
-            | Self::SelectSessionProfile { session_id, .. }
             | Self::Abort { session_id, .. }
             | Self::Steer { session_id, .. }
             | Self::FollowUp { session_id, .. }
             | Self::DecideToolAuthorization { session_id, .. }
             | Self::RetryRecovery { session_id, .. }
-            | Self::ResolveRecovery { session_id, .. }
-            | Self::ReviewChangedFile { session_id, .. }
-            | Self::OpenExternalEditor { session_id, .. } => session_id.as_deref(),
-            Self::Reload { .. }
-            | Self::CreateSession { .. }
-            | Self::ListSessions { .. }
-            | Self::SelectModel { .. } => None,
+            | Self::ResolveRecovery { session_id, .. } => session_id.as_deref(),
+            Self::CreateSession { .. } | Self::ListSessions { .. } => None,
         }
     }
 }
@@ -724,6 +766,15 @@ pub(super) fn validate_prompt_target(
                     message: bounded_utf8_prefix(&error.to_string(), 1024),
                 })
         }
+    }
+}
+
+pub(super) fn validate_runtime_owner_target(
+    target: &DesktopRuntimeOwnerTarget,
+) -> Result<(), DesktopCommandAdmissionError> {
+    match target {
+        DesktopRuntimeOwnerTarget::Home => Ok(()),
+        DesktopRuntimeOwnerTarget::Session { session_id } => validate_session_id(session_id),
     }
 }
 

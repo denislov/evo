@@ -9,8 +9,8 @@ use coding_agent::api::client::{
     CodingAgentSubmissionDraft,
 };
 use coding_agent::api::embedding::{
-    CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentEmbeddingSnapshot,
-    CodingAgentThinkingLevel,
+    CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentThinkingLevel,
+    CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
 };
 use coding_agent::api::event::{
     CodingAgentProductEvent, CodingAgentProductEventDeliveryClass, CodingAgentProductEventFamily,
@@ -43,9 +43,85 @@ use super::protocol::{
 const RUNTIME_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 pub(super) const DESKTOP_CLIENT_ID: &str = "evo-desktop";
 
-pub(super) struct RuntimeState {
+pub(super) struct HomeRuntimeContext {
     pub(super) context: CodingAgentEmbeddingContext,
-    pub(super) sessions: HashMap<String, CodingAgentSession>,
+    options: CodingAgentEmbeddingOptions,
+}
+
+impl HomeRuntimeContext {
+    pub(super) fn load(options: CodingAgentEmbeddingOptions) -> Result<Self, DesktopBridgeError> {
+        let context = CodingAgentEmbeddingContext::load(options.clone())?;
+        if context.snapshot().workspace.is_none() {
+            return Err(DesktopBridgeError::Session {
+                message: "desktop runtime requires typed workspace embedding options".into(),
+            });
+        }
+        Ok(Self { context, options })
+    }
+
+    fn load_session_context(&self) -> Result<CodingAgentEmbeddingContext, DesktopBridgeError> {
+        CodingAgentEmbeddingContext::load(self.options.clone()).map_err(DesktopBridgeError::from)
+    }
+
+    pub(super) fn select_model(&mut self, model_id: String) -> Result<(), DesktopBridgeError> {
+        self.context.select_model(model_id.clone())?;
+        self.options = self.options.clone().with_model_id(model_id);
+        Ok(())
+    }
+
+    pub(super) fn select_profile(&mut self, profile_id: String) -> Result<(), DesktopBridgeError> {
+        if !self
+            .context
+            .snapshot()
+            .profiles
+            .iter()
+            .any(|profile| profile.id.as_str() == profile_id)
+        {
+            return Err(DesktopBridgeError::Input {
+                message: format!("unknown desktop Home profile {profile_id}"),
+            });
+        }
+        let options = self
+            .options
+            .clone()
+            .with_default_agent_profile_id(profile_id);
+        let context = CodingAgentEmbeddingContext::load(options.clone())?;
+        self.options = options;
+        self.context = context;
+        Ok(())
+    }
+}
+
+pub(super) struct RuntimeSessionWorkspace {
+    pub(super) scope: CodingAgentWorkspaceScope,
+    pub(super) context: CodingAgentEmbeddingContext,
+    pub(super) session: CodingAgentSession,
+}
+
+impl RuntimeSessionWorkspace {
+    fn new(
+        context: CodingAgentEmbeddingContext,
+        session: CodingAgentSession,
+    ) -> Result<Self, DesktopBridgeError> {
+        let scope = context
+            .snapshot()
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.scope.clone())
+            .ok_or_else(|| DesktopBridgeError::Session {
+                message: "desktop session context has no typed workspace scope".into(),
+            })?;
+        Ok(Self {
+            scope,
+            context,
+            session,
+        })
+    }
+}
+
+pub(super) struct RuntimeState {
+    pub(super) home: HomeRuntimeContext,
+    pub(super) workspaces: HashMap<String, RuntimeSessionWorkspace>,
     pub(super) focused_session_id: Option<String>,
     #[cfg(test)]
     pub(super) fail_next_prompt_start: bool,
@@ -57,11 +133,15 @@ impl RuntimeState {
         session_id: Option<&str>,
     ) -> DesktopRuntimeMetadataSnapshot {
         let session_id = session_id.or(self.focused_session_id.as_deref());
-        DesktopRuntimeMetadataSnapshot {
-            project: self.context.snapshot().clone(),
-            session: session_id
-                .and_then(|session_id| self.sessions.get(session_id))
-                .map(CodingAgentSession::snapshot),
+        match session_id.and_then(|session_id| self.workspaces.get(session_id)) {
+            Some(workspace) => DesktopRuntimeMetadataSnapshot {
+                project: workspace.context.snapshot().clone(),
+                session: Some(workspace.session.snapshot()),
+            },
+            None => DesktopRuntimeMetadataSnapshot {
+                project: self.home.context.snapshot().clone(),
+                session: None,
+            },
         }
     }
 
@@ -69,24 +149,24 @@ impl RuntimeState {
         &self,
         session_id: &str,
     ) -> Result<DesktopRuntimeHydratedSnapshot, DesktopBridgeError> {
-        let session = self
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| DesktopBridgeError::Session {
-                message: format!("desktop runtime has no idle owner for session {session_id}"),
-            })?;
+        let workspace =
+            self.workspaces
+                .get(session_id)
+                .ok_or_else(|| DesktopBridgeError::Session {
+                    message: format!("desktop runtime has no idle owner for session {session_id}"),
+                })?;
         Ok(DesktopRuntimeHydratedSnapshot {
-            project: self.context.snapshot().clone(),
-            session: session.snapshot(),
-            transcript: session.transcript_snapshot()?,
-            pending_recoveries: session.recovery_pending()?,
+            project: workspace.context.snapshot().clone(),
+            session: workspace.session.snapshot(),
+            transcript: workspace.session.transcript_snapshot()?,
+            pending_recoveries: workspace.session.recovery_pending()?,
         })
     }
 
     pub(super) fn session_catalog(
         &self,
     ) -> Result<(Vec<DesktopSessionCatalogEntry>, usize), DesktopBridgeError> {
-        let catalog = self.context.session_query()?.overviews()?;
+        let catalog = self.home.context.session_query()?.overviews()?;
         let omitted = catalog
             .overviews
             .len()
@@ -114,16 +194,16 @@ impl RuntimeState {
         &self,
         session_id: &str,
     ) -> Result<DesktopRuntimeRecoverySnapshot, DesktopBridgeError> {
-        let session = self
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| DesktopBridgeError::Session {
-                message: format!("desktop runtime has no idle owner for session {session_id}"),
-            })?;
+        let workspace =
+            self.workspaces
+                .get(session_id)
+                .ok_or_else(|| DesktopBridgeError::Session {
+                    message: format!("desktop runtime has no idle owner for session {session_id}"),
+                })?;
         Ok(DesktopRuntimeRecoverySnapshot {
-            project: self.context.snapshot().clone(),
-            session: session.snapshot(),
-            pending_recoveries: session.recovery_pending()?,
+            project: workspace.context.snapshot().clone(),
+            session: workspace.session.snapshot(),
+            pending_recoveries: workspace.session.recovery_pending()?,
         })
     }
 
@@ -132,13 +212,14 @@ impl RuntimeState {
         session_id: &str,
         request: CodingAgentFileReviewRequest,
     ) -> Result<CodingAgentFileReview, DesktopBridgeError> {
-        let session = self
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| DesktopBridgeError::Session {
-                message: "desktop runtime has no idle session owner".into(),
-            })?;
-        session
+        let workspace =
+            self.workspaces
+                .get(session_id)
+                .ok_or_else(|| DesktopBridgeError::Session {
+                    message: "desktop runtime has no idle session owner".into(),
+                })?;
+        workspace
+            .session
             .review_changed_file(request)
             .await
             .map_err(DesktopBridgeError::from)
@@ -150,13 +231,16 @@ impl RuntimeState {
         target: CodingAgentExternalEditorTarget,
         editor: DesktopExternalEditorConfig,
     ) -> Result<String, DesktopBridgeError> {
-        let session = self
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| DesktopBridgeError::Session {
-                message: "desktop runtime has no idle session owner".into(),
-            })?;
-        session.revalidate_external_editor_target(&target).await?;
+        let workspace =
+            self.workspaces
+                .get(session_id)
+                .ok_or_else(|| DesktopBridgeError::Session {
+                    message: "desktop runtime has no idle session owner".into(),
+                })?;
+        workspace
+            .session
+            .revalidate_external_editor_target(&target)
+            .await?;
         let project_relative_path = target.project_relative_path().to_owned();
         task::spawn_blocking(move || launch_external_editor(&editor, &target))
             .await
@@ -169,12 +253,13 @@ impl RuntimeState {
         session_id: &str,
         identity: DesktopRecoveryIdentity,
     ) -> Result<(String, DesktopRuntimeRecoverySnapshot), DesktopBridgeError> {
-        let session =
-            self.sessions
-                .get_mut(session_id)
-                .ok_or_else(|| DesktopBridgeError::Session {
-                    message: "desktop runtime has no idle session owner".into(),
-                })?;
+        let session = &mut self
+            .workspaces
+            .get_mut(session_id)
+            .ok_or_else(|| DesktopBridgeError::Session {
+                message: "desktop runtime has no idle session owner".into(),
+            })?
+            .session;
         let result = session.retry_recovery(CodingAgentRecoveryRetryRequest {
             operation_id: identity.operation_id,
             recovery_id: identity.recovery_id,
@@ -198,12 +283,13 @@ impl RuntimeState {
             CodingAgentRecoveryResolution::Failed => "marked failed",
             CodingAgentRecoveryResolution::Aborted => "aborted",
         };
-        let session =
-            self.sessions
-                .get_mut(session_id)
-                .ok_or_else(|| DesktopBridgeError::Session {
-                    message: "desktop runtime has no idle session owner".into(),
-                })?;
+        let session = &mut self
+            .workspaces
+            .get_mut(session_id)
+            .ok_or_else(|| DesktopBridgeError::Session {
+                message: "desktop runtime has no idle session owner".into(),
+            })?
+            .session;
         let result = session.resolve_recovery(CodingAgentRecoveryResolutionRequest {
             operation_id: identity.operation_id,
             recovery_id: identity.recovery_id,
@@ -223,7 +309,13 @@ impl RuntimeState {
         session_id: &str,
         profile_id: String,
     ) -> Result<DesktopRuntimeMetadataSnapshot, DesktopBridgeError> {
-        if !self
+        let workspace =
+            self.workspaces
+                .get_mut(session_id)
+                .ok_or_else(|| DesktopBridgeError::Busy {
+                    operation: "desktop_profile_selection".into(),
+                })?;
+        if !workspace
             .context
             .snapshot()
             .profiles
@@ -238,13 +330,8 @@ impl RuntimeState {
             ProfileId::new(profile_id).map_err(|message| DesktopBridgeError::Input {
                 message: format!("invalid desktop session profile: {message}"),
             })?;
-        let session =
-            self.sessions
-                .get_mut(session_id)
-                .ok_or_else(|| DesktopBridgeError::Busy {
-                    operation: "desktop_profile_selection".into(),
-                })?;
-        let outcome = session
+        let outcome = workspace
+            .session
             .run(CodingAgentOperation::SetDefaultAgentProfile { profile_id })
             .await?;
         if !matches!(
@@ -263,12 +350,13 @@ impl RuntimeState {
         session_id: &str,
         name: Option<String>,
     ) -> Result<(Option<String>, String), DesktopBridgeError> {
-        let session =
-            self.sessions
-                .get_mut(session_id)
-                .ok_or_else(|| DesktopBridgeError::Busy {
-                    operation: "desktop_session_rename".into(),
-                })?;
+        let session = &mut self
+            .workspaces
+            .get_mut(session_id)
+            .ok_or_else(|| DesktopBridgeError::Busy {
+                operation: "desktop_session_rename".into(),
+            })?
+            .session;
         let outcome = session
             .run(CodingAgentOperation::SetSessionName { name })
             .await?;
@@ -285,9 +373,39 @@ impl RuntimeState {
         open_session_count: usize,
     ) -> Result<String, DesktopBridgeError> {
         self.ensure_capacity(open_session_count)?;
-        let session = self.context.create_session().await?;
+        let context = self.home.load_session_context()?;
+        self.create_session_in_context(context).await
+    }
+
+    pub(super) async fn create_session_for_workspace(
+        &mut self,
+        workspace: CodingAgentWorkspaceSelection,
+        model_id: String,
+        profile_id: String,
+        open_session_count: usize,
+    ) -> Result<String, DesktopBridgeError> {
+        self.ensure_capacity(open_session_count)?;
+        let mut options = CodingAgentEmbeddingOptions::for_workspace(workspace)
+            .map_err(|error| DesktopBridgeError::Input {
+                message: format!("desktop workspace could not be resolved: {error}"),
+            })?
+            .with_model_id(model_id)
+            .with_default_agent_profile_id(profile_id);
+        if let Some(session_root) = self.home.context.snapshot().settings.session_dir.as_ref() {
+            options = options.with_session_dir(session_root);
+        }
+        let context = CodingAgentEmbeddingContext::load(options)?;
+        self.create_session_in_context(context).await
+    }
+
+    async fn create_session_in_context(
+        &mut self,
+        context: CodingAgentEmbeddingContext,
+    ) -> Result<String, DesktopBridgeError> {
+        let session = context.create_session().await?;
         let session_id = session.view().session_id.clone();
-        self.sessions.insert(session_id.clone(), session);
+        let workspace = RuntimeSessionWorkspace::new(context, session)?;
+        self.workspaces.insert(session_id.clone(), workspace);
         self.focused_session_id = Some(session_id.clone());
         Ok(session_id)
     }
@@ -297,13 +415,15 @@ impl RuntimeState {
         session_id: String,
         open_session_count: usize,
     ) -> Result<String, DesktopBridgeError> {
-        if self.sessions.contains_key(&session_id) {
+        if self.workspaces.contains_key(&session_id) {
             self.focused_session_id = Some(session_id.clone());
             return Ok(session_id);
         }
         self.ensure_capacity(open_session_count)?;
-        let session = self.context.open_session(session_id.clone()).await?;
-        self.sessions.insert(session_id.clone(), session);
+        let context = self.home.load_session_context()?;
+        let session = context.open_session(session_id.clone()).await?;
+        let workspace = RuntimeSessionWorkspace::new(context, session)?;
+        self.workspaces.insert(session_id.clone(), workspace);
         self.focused_session_id = Some(session_id.clone());
         Ok(session_id)
     }
@@ -322,23 +442,38 @@ impl RuntimeState {
                 message: "injected desktop prompt start failure".into(),
             });
         }
-        let prepared = self
-            .context
-            .prepare_prompt_with_attachments(&prompt, &attachments)?;
-        let display_text = prepared.display_text().to_owned();
-        let operation = self
-            .context
-            .prepared_prompt_operation(prepared, thinking_level);
-        let mut session =
-            self.sessions
-                .remove(session_id)
+        let workspace =
+            self.workspaces
+                .get(session_id)
                 .ok_or_else(|| DesktopBridgeError::Busy {
                     operation: "desktop_prompt".into(),
                 })?;
+        let prepared = workspace
+            .context
+            .prepare_prompt_with_attachments(&prompt, &attachments)?;
+        let display_text = prepared.display_text().to_owned();
+        let operation = workspace
+            .context
+            .prepared_prompt_operation(prepared, thinking_level);
+        let RuntimeSessionWorkspace {
+            scope,
+            context,
+            mut session,
+        } = self
+            .workspaces
+            .remove(session_id)
+            .expect("validated idle workspace must remain present");
         let connection = match session.connect(CodingAgentClientId::new(DESKTOP_CLIENT_ID)) {
             Ok(connection) => connection,
             Err(error) => {
-                self.sessions.insert(session_id.to_owned(), session);
+                self.workspaces.insert(
+                    session_id.to_owned(),
+                    RuntimeSessionWorkspace {
+                        scope,
+                        context,
+                        session,
+                    },
+                );
                 return Err(error.into());
             }
         };
@@ -351,7 +486,14 @@ impl RuntimeState {
             Ok(submission) => submission,
             Err(error) => {
                 let _ = connection.detach();
-                self.sessions.insert(session_id.to_owned(), session);
+                self.workspaces.insert(
+                    session_id.to_owned(),
+                    RuntimeSessionWorkspace {
+                        scope,
+                        context,
+                        session,
+                    },
+                );
                 return Err(error.into());
             }
         };
@@ -360,7 +502,14 @@ impl RuntimeState {
             Err(error) => {
                 let cleanup = submission.discard(&mut session);
                 let _ = connection.detach();
-                self.sessions.insert(session_id.to_owned(), session);
+                self.workspaces.insert(
+                    session_id.to_owned(),
+                    RuntimeSessionWorkspace {
+                        scope,
+                        context,
+                        session,
+                    },
+                );
                 if let Err(cleanup) = cleanup {
                     return Err(cleanup.into());
                 }
@@ -373,14 +522,20 @@ impl RuntimeState {
             Err(error) => {
                 let cleanup = submission.discard(&mut session);
                 let _ = connection.detach();
-                self.sessions.insert(session_id.to_owned(), session);
+                self.workspaces.insert(
+                    session_id.to_owned(),
+                    RuntimeSessionWorkspace {
+                        scope,
+                        context,
+                        session,
+                    },
+                );
                 if let Err(cleanup) = cleanup {
                     return Err(cleanup.into());
                 }
                 return Err(error);
             }
         };
-        let project = self.context.snapshot().clone();
         let task = task::spawn(async move {
             let result = submission
                 .run(&mut session)
@@ -392,7 +547,8 @@ impl RuntimeState {
             session_id: session_id.to_owned(),
             command_id,
             operation_id: None,
-            project,
+            scope,
+            context,
             connection,
             events,
             pending_recovery,
@@ -401,30 +557,37 @@ impl RuntimeState {
         })
     }
 
-    pub(super) fn insert_idle_session(&mut self, session: CodingAgentSession) {
-        self.sessions
-            .insert(session.view().session_id.clone(), session);
+    pub(super) fn insert_idle_workspace(
+        &mut self,
+        scope: CodingAgentWorkspaceScope,
+        context: CodingAgentEmbeddingContext,
+        session: CodingAgentSession,
+    ) {
+        self.workspaces.insert(
+            session.view().session_id.clone(),
+            RuntimeSessionWorkspace {
+                scope,
+                context,
+                session,
+            },
+        );
     }
 
     pub(super) async fn close_idle_session(
         &mut self,
         session_id: &str,
     ) -> Result<(), DesktopBridgeError> {
-        let mut session =
-            self.sessions
-                .remove(session_id)
-                .ok_or_else(|| DesktopBridgeError::SessionTarget {
-                    message: format!("session {session_id} is not open"),
-                })?;
-        session.shutdown().await?;
-        if self.focused_session_id.as_deref() == Some(session_id) {
-            self.focused_session_id = self.sessions.keys().min().cloned();
-        }
+        let mut workspace = self.workspaces.remove(session_id).ok_or_else(|| {
+            DesktopBridgeError::SessionTarget {
+                message: format!("session {session_id} is not open"),
+            }
+        })?;
+        workspace.session.shutdown().await?;
         Ok(())
     }
 
     async fn shutdown_idle_sessions(&mut self) -> Result<(), DesktopBridgeError> {
-        let mut session_ids = self.sessions.keys().cloned().collect::<Vec<_>>();
+        let mut session_ids = self.workspaces.keys().cloned().collect::<Vec<_>>();
         session_ids.sort();
         for session_id in session_ids {
             self.close_idle_session(&session_id).await?;
@@ -451,7 +614,8 @@ pub(super) struct ActivePrompt {
     pub(super) session_id: String,
     pub(super) command_id: u64,
     pub(super) operation_id: Option<String>,
-    pub(super) project: CodingAgentEmbeddingSnapshot,
+    pub(super) scope: CodingAgentWorkspaceScope,
+    pub(super) context: CodingAgentEmbeddingContext,
     pub(super) connection: CodingAgentClientConnection,
     pub(super) events: DesktopProductEventSource,
     pub(super) pending_recovery: Option<CodingAgentFreshSnapshotRecovery>,
@@ -481,22 +645,22 @@ pub(super) async fn run_runtime(
     data_updates: mpsc::Sender<DesktopRuntimeUpdate>,
     ready: std_mpsc::SyncSender<Result<DesktopRuntimeReadySnapshot, DesktopRuntimeError>>,
 ) {
-    let context = match CodingAgentEmbeddingContext::load(options) {
-        Ok(context) => context,
+    let home = match HomeRuntimeContext::load(options) {
+        Ok(home) => home,
         Err(error) => {
             let _ = ready.send(Err(runtime_error(&error)));
             return;
         }
     };
     let mut state = RuntimeState {
-        context,
-        sessions: HashMap::new(),
+        home,
+        workspaces: HashMap::new(),
         focused_session_id: None,
         #[cfg(test)]
         fail_next_prompt_start: false,
     };
     let initial = DesktopRuntimeReadySnapshot {
-        project: state.context.snapshot().clone(),
+        project: state.home.context.snapshot().clone(),
     };
     if ready.send(Ok(initial)).is_err() {
         let _ = state.shutdown_idle_sessions().await;
@@ -646,13 +810,20 @@ pub(super) async fn run_runtime(
                     let _ = completed.connection.detach();
                     match result {
                         Ok((session, operation_result)) => {
-                            state.insert_idle_session(session);
-                            if !ensure_operation_started(&mut completed, None, &priority_updates)
-                                .await
-                            {
+                            let operation_started =
+                                ensure_operation_started(&mut completed, None, &priority_updates)
+                                    .await;
+                            let operation_id = completed.operation_id.take();
+                            let command_id = completed.command_id;
+                            state.insert_idle_workspace(
+                                completed.scope,
+                                completed.context,
+                                session,
+                            );
+                            if !operation_started {
                                 continue;
                             }
-                            let Some(operation_id) = completed.operation_id.take() else {
+                            let Some(operation_id) = operation_id else {
                                 let _ = priority_updates
                                     .send(DesktopRuntimeUpdate::RuntimeFailed {
                                         error: DesktopRuntimeError {
@@ -678,7 +849,7 @@ pub(super) async fn run_runtime(
                             let error = operation_result.err().map(|error| runtime_error(&error));
                             if priority_updates
                                 .send(DesktopRuntimeUpdate::PromptFinished {
-                                    command_id: completed.command_id,
+                                    command_id,
                                     operation_id,
                                     snapshot,
                                     error,
@@ -1080,7 +1251,7 @@ async fn ensure_operation_started(
             command_id: active.command_id,
             operation_id,
             metadata: DesktopRuntimeMetadataSnapshot {
-                project: active.project.clone(),
+                project: active.context.snapshot().clone(),
                 session: Some(snapshot),
             },
         })

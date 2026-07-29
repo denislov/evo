@@ -6,8 +6,8 @@ use coding_agent::api::event::CodingAgentRecoveryResolution;
 use super::driver::{ActivePrompt, RuntimeState, close_active_prompt, shutdown_active_prompt};
 use super::protocol::{
     DesktopBridgeError, DesktopPromptTarget, DesktopRecoveryAction, DesktopRuntimeCommand,
-    DesktopRuntimeMetadataSnapshot, DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind,
-    DesktopRuntimeUpdate, runtime_error,
+    DesktopRuntimeMetadataSnapshot, DesktopRuntimeOwnerTarget, DesktopRuntimeResyncSnapshot,
+    DesktopRuntimeSelectionKind, DesktopRuntimeUpdate, runtime_error,
 };
 
 #[cfg(test)]
@@ -50,11 +50,31 @@ async fn dispatch_command_inner(
 ) -> Result<DesktopRuntimeUpdate, DesktopBridgeError> {
     let command_id = command.command_id();
     match command {
-        DesktopRuntimeCommand::Reload { .. } => {
-            state.context.reload_local_resources()?;
+        DesktopRuntimeCommand::Reload { target, .. } => {
+            let metadata = match target {
+                DesktopRuntimeOwnerTarget::Home => {
+                    state.home.context.reload_local_resources()?;
+                    state.metadata_snapshot(None)
+                }
+                DesktopRuntimeOwnerTarget::Session { session_id } => {
+                    let session_id = resolve_target(state, active, Some(&session_id))?;
+                    if let Some(prompt) = active.get_mut(&session_id) {
+                        prompt.context.reload_local_resources()?;
+                        active_metadata_snapshot(prompt)?
+                    } else {
+                        state
+                            .workspaces
+                            .get_mut(&session_id)
+                            .expect("resolved idle workspace must remain present")
+                            .context
+                            .reload_local_resources()?;
+                        state.metadata_snapshot(Some(&session_id))
+                    }
+                }
+            };
             Ok(DesktopRuntimeUpdate::Reloaded {
                 command_id,
-                metadata: state.metadata_snapshot(None),
+                metadata,
             })
         }
         DesktopRuntimeCommand::ListSessions { .. } => {
@@ -77,12 +97,34 @@ async fn dispatch_command_inner(
                 updated_at,
             })
         }
-        DesktopRuntimeCommand::SelectModel { model_id, .. } => {
-            state.context.select_model(model_id)?;
+        DesktopRuntimeCommand::SelectModel {
+            target, model_id, ..
+        } => {
+            let metadata = match target {
+                DesktopRuntimeOwnerTarget::Home => {
+                    state.home.select_model(model_id)?;
+                    state.metadata_snapshot(None)
+                }
+                DesktopRuntimeOwnerTarget::Session { session_id } => {
+                    let session_id = resolve_target(state, active, Some(&session_id))?;
+                    if let Some(prompt) = active.get_mut(&session_id) {
+                        prompt.context.select_model(model_id)?;
+                        active_metadata_snapshot(prompt)?
+                    } else {
+                        state
+                            .workspaces
+                            .get_mut(&session_id)
+                            .expect("resolved idle workspace must remain present")
+                            .context
+                            .select_model(model_id)?;
+                        state.metadata_snapshot(Some(&session_id))
+                    }
+                }
+            };
             Ok(DesktopRuntimeUpdate::SelectionChanged {
                 command_id,
                 selection: DesktopRuntimeSelectionKind::Model,
-                metadata: state.metadata_snapshot(None),
+                metadata,
             })
         }
         DesktopRuntimeCommand::CreateSession { .. } => {
@@ -125,6 +167,10 @@ async fn dispatch_command_inner(
             } else {
                 state.close_idle_session(&session_id).await?;
             }
+            if state.focused_session_id.as_deref() == Some(session_id.as_str()) {
+                state.focused_session_id =
+                    state.workspaces.keys().chain(active.keys()).min().cloned();
+            }
             Ok(DesktopRuntimeUpdate::SessionClosed {
                 command_id,
                 session_id,
@@ -138,7 +184,7 @@ async fn dispatch_command_inner(
                     command_id,
                     replacement: DesktopRuntimeResyncSnapshot::Metadata(
                         DesktopRuntimeMetadataSnapshot {
-                            project: prompt.project.clone(),
+                            project: prompt.context.snapshot().clone(),
                             session: Some(session),
                         },
                     ),
@@ -160,9 +206,18 @@ async fn dispatch_command_inner(
             ..
         } => {
             let (created, session_id) = match target {
-                DesktopPromptTarget::New { .. } => {
+                DesktopPromptTarget::New {
+                    workspace,
+                    model_id,
+                    profile_id,
+                } => {
                     let session_id = state
-                        .create_session(open_session_count(state, active))
+                        .create_session_for_workspace(
+                            workspace,
+                            model_id,
+                            profile_id,
+                            open_session_count(state, active),
+                        )
                         .await?;
                     (Some(session_id.clone()), session_id)
                 }
@@ -203,14 +258,20 @@ async fn dispatch_command_inner(
             }
         }
         DesktopRuntimeCommand::SelectSessionProfile {
-            session_id,
-            profile_id,
-            ..
+            target, profile_id, ..
         } => {
-            let session_id = resolve_idle_target(state, active, session_id.as_deref())?;
-            let metadata = state
-                .select_session_profile(&session_id, profile_id)
-                .await?;
+            let metadata = match target {
+                DesktopRuntimeOwnerTarget::Home => {
+                    state.home.select_profile(profile_id)?;
+                    state.metadata_snapshot(None)
+                }
+                DesktopRuntimeOwnerTarget::Session { session_id } => {
+                    let session_id = resolve_idle_target(state, active, Some(&session_id))?;
+                    state
+                        .select_session_profile(&session_id, profile_id)
+                        .await?
+                }
+            };
             Ok(DesktopRuntimeUpdate::SelectionChanged {
                 command_id,
                 selection: DesktopRuntimeSelectionKind::SessionProfile,
@@ -256,7 +317,7 @@ async fn dispatch_command_inner(
             request,
             ..
         } => {
-            let session_id = resolve_idle_target(state, active, session_id.as_deref())?;
+            let session_id = resolve_idle_target(state, active, Some(&session_id))?;
             let review = state.review_changed_file(&session_id, request).await?;
             Ok(DesktopRuntimeUpdate::FileReviewed { command_id, review })
         }
@@ -266,7 +327,7 @@ async fn dispatch_command_inner(
             editor,
             ..
         } => {
-            let session_id = resolve_idle_target(state, active, session_id.as_deref())?;
+            let session_id = resolve_idle_target(state, active, Some(&session_id))?;
             let project_relative_path = state
                 .open_external_editor(&session_id, target, editor)
                 .await?;
@@ -292,7 +353,16 @@ async fn dispatch_command_inner(
 }
 
 fn open_session_count(state: &RuntimeState, active: &HashMap<String, ActivePrompt>) -> usize {
-    state.sessions.len() + active.len()
+    state.workspaces.len() + active.len()
+}
+
+fn active_metadata_snapshot(
+    prompt: &ActivePrompt,
+) -> Result<DesktopRuntimeMetadataSnapshot, DesktopBridgeError> {
+    Ok(DesktopRuntimeMetadataSnapshot {
+        project: prompt.context.snapshot().clone(),
+        session: Some(prompt.connection.state()?),
+    })
 }
 
 fn resolve_target(
@@ -301,7 +371,7 @@ fn resolve_target(
     requested: Option<&str>,
 ) -> Result<String, DesktopBridgeError> {
     if let Some(session_id) = requested {
-        if state.sessions.contains_key(session_id) || active.contains_key(session_id) {
+        if state.workspaces.contains_key(session_id) || active.contains_key(session_id) {
             return Ok(session_id.to_owned());
         }
         return Err(DesktopBridgeError::SessionTarget {
@@ -309,11 +379,16 @@ fn resolve_target(
         });
     }
     if let Some(session_id) = state.focused_session_id.as_deref()
-        && (state.sessions.contains_key(session_id) || active.contains_key(session_id))
+        && (state.workspaces.contains_key(session_id) || active.contains_key(session_id))
     {
         return Ok(session_id.to_owned());
     }
-    let mut session_ids = state.sessions.keys().chain(active.keys()).take(2).cloned();
+    let mut session_ids = state
+        .workspaces
+        .keys()
+        .chain(active.keys())
+        .take(2)
+        .cloned();
     let Some(session_id) = session_ids.next() else {
         return Err(DesktopBridgeError::Session {
             message: "desktop runtime has no idle session owner".into(),

@@ -21,11 +21,12 @@ use super::protocol::{
     DESKTOP_COMMAND_QUEUE_CAPACITY, DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY,
     DESKTOP_UPDATE_QUEUE_CAPACITY, DesktopCommandAdmissionError, DesktopPromptTarget,
     DesktopRecoveryIdentity, DesktopRuntimeCommand, DesktopRuntimeError,
-    DesktopRuntimeHydratedSnapshot, DesktopRuntimeReadySnapshot, DesktopRuntimeShutdownError,
-    DesktopRuntimeStartError, DesktopRuntimeUpdate, local_runtime_error,
-    validate_authorization_identity, validate_control_text, validate_file_review_request,
-    validate_prompt_target, validate_prompt_with_attachments, validate_recovery_identity,
-    validate_selection_id, validate_session_id, validate_session_name,
+    DesktopRuntimeHydratedSnapshot, DesktopRuntimeOwnerTarget, DesktopRuntimeReadySnapshot,
+    DesktopRuntimeShutdownError, DesktopRuntimeStartError, DesktopRuntimeUpdate,
+    local_runtime_error, validate_authorization_identity, validate_control_text,
+    validate_file_review_request, validate_prompt_target, validate_prompt_with_attachments,
+    validate_recovery_identity, validate_runtime_owner_target, validate_selection_id,
+    validate_session_id, validate_session_name,
 };
 use super::run_runtime;
 
@@ -279,8 +280,13 @@ impl DesktopRuntimeBridge {
     }
 
     #[cfg(test)]
-    pub fn try_reload(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::Reload { command_id })
+    pub fn try_reload(
+        &self,
+        command_id: u64,
+        target: DesktopRuntimeOwnerTarget,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_runtime_owner_target(&target)?;
+        self.try_send(DesktopRuntimeCommand::Reload { command_id, target })
     }
 
     #[cfg(test)]
@@ -350,11 +356,14 @@ impl DesktopRuntimeBridge {
     pub fn try_select_model(
         &self,
         command_id: u64,
+        target: DesktopRuntimeOwnerTarget,
         model_id: &str,
     ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_runtime_owner_target(&target)?;
         validate_selection_id("model", model_id)?;
         self.try_send(DesktopRuntimeCommand::SelectModel {
             command_id,
+            target,
             model_id: model_id.to_owned(),
         })
     }
@@ -363,12 +372,14 @@ impl DesktopRuntimeBridge {
     pub fn try_select_session_profile(
         &self,
         command_id: u64,
+        target: DesktopRuntimeOwnerTarget,
         profile_id: &str,
     ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_runtime_owner_target(&target)?;
         validate_selection_id("profile", profile_id)?;
         self.try_send(DesktopRuntimeCommand::SelectSessionProfile {
             command_id,
-            session_id: None,
+            target,
             profile_id: profile_id.to_owned(),
         })
     }
@@ -610,21 +621,21 @@ impl DesktopRuntimeTestHarness {
 
     pub(crate) fn drain_selections(
         &mut self,
-    ) -> Vec<(DesktopRuntimeCommandKind, Option<String>, String)> {
+    ) -> Vec<(DesktopRuntimeCommandKind, DesktopRuntimeOwnerTarget, String)> {
         let mut selections = Vec::new();
         while let Ok(command) = self.commands.try_recv() {
             match command {
-                DesktopRuntimeCommand::SelectModel { model_id, .. } => {
-                    selections.push((DesktopRuntimeCommandKind::SelectModel, None, model_id));
+                DesktopRuntimeCommand::SelectModel {
+                    target, model_id, ..
+                } => {
+                    selections.push((DesktopRuntimeCommandKind::SelectModel, target, model_id));
                 }
                 DesktopRuntimeCommand::SelectSessionProfile {
-                    session_id,
-                    profile_id,
-                    ..
+                    target, profile_id, ..
                 } => {
                     selections.push((
                         DesktopRuntimeCommandKind::SelectSessionProfile,
-                        session_id,
+                        target,
                         profile_id,
                     ));
                 }
@@ -822,8 +833,13 @@ impl DesktopRuntimeShutdownGuard {
 }
 
 impl DesktopRuntimeCommandHandle {
-    pub fn try_reload(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::Reload { command_id })
+    pub fn try_reload(
+        &self,
+        command_id: u64,
+        target: DesktopRuntimeOwnerTarget,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_runtime_owner_target(&target)?;
+        self.try_send(DesktopRuntimeCommand::Reload { command_id, target })
     }
 
     pub fn try_resync(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
@@ -886,11 +902,14 @@ impl DesktopRuntimeCommandHandle {
     pub fn try_select_model(
         &self,
         command_id: u64,
+        target: DesktopRuntimeOwnerTarget,
         model_id: &str,
     ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_runtime_owner_target(&target)?;
         validate_selection_id("model", model_id)?;
         self.try_send(DesktopRuntimeCommand::SelectModel {
             command_id,
+            target,
             model_id: model_id.to_owned(),
         })
     }
@@ -898,12 +917,14 @@ impl DesktopRuntimeCommandHandle {
     pub fn try_select_session_profile(
         &self,
         command_id: u64,
+        target: DesktopRuntimeOwnerTarget,
         profile_id: &str,
     ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_runtime_owner_target(&target)?;
         validate_selection_id("profile", profile_id)?;
         self.try_send(DesktopRuntimeCommand::SelectSessionProfile {
             command_id,
-            session_id: None,
+            target,
             profile_id: profile_id.to_owned(),
         })
     }
@@ -1066,12 +1087,14 @@ impl DesktopRuntimeCommandHandle {
     pub fn try_review_changed_file(
         &self,
         command_id: u64,
+        session_id: &str,
         request: &CodingAgentFileReviewRequest,
     ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
         validate_file_review_request(request)?;
         self.try_send(DesktopRuntimeCommand::ReviewChangedFile {
             command_id,
-            session_id: None,
+            session_id: session_id.to_owned(),
             request: request.clone(),
         })
     }
@@ -1079,6 +1102,7 @@ impl DesktopRuntimeCommandHandle {
     pub fn try_open_external_editor(
         &self,
         command_id: u64,
+        session_id: &str,
         target: &CodingAgentExternalEditorTarget,
         editor: &DesktopExternalEditorConfig,
     ) -> Result<(), DesktopCommandAdmissionError> {
@@ -1089,7 +1113,7 @@ impl DesktopRuntimeCommandHandle {
         )?;
         self.try_send(DesktopRuntimeCommand::OpenExternalEditor {
             command_id,
-            session_id: None,
+            session_id: session_id.to_owned(),
             target: target.clone(),
             editor: editor.clone(),
         })

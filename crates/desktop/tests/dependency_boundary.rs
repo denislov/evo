@@ -446,7 +446,10 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
     );
 
     assert!(runtime_protocol.contains("ListSessions"));
-    assert!(runtime_driver.contains("self.context.session_query()?.overviews()?"));
+    assert!(
+        runtime_driver.contains("self.home.context.session_query()?.overviews()?"),
+        "the session catalog must remain a bounded query through the Home context owner"
+    );
     assert!(runtime_protocol.contains("MAX_DESKTOP_SESSION_CATALOG"));
 }
 
@@ -922,7 +925,7 @@ fn desktop_metadata_deliveries_cannot_hydrate_or_replace_the_transcript() {
         "metadata snapshot construction must not read durable transcript or recovery payloads"
     );
     for command_path in [
-        "metadata: state.metadata_snapshot(None)",
+        "state.metadata_snapshot(None)",
         "state.metadata_snapshot(Some(&session_id))",
     ] {
         assert!(
@@ -1112,8 +1115,18 @@ fn desktop_file_review_uses_product_authority_and_argument_safe_adapter_bounds()
     }
     assert!(runtime_dispatch.contains(".review_changed_file(&session_id, request)"));
     assert!(runtime_driver.contains(".review_changed_file(request)"));
+    let external_editor = runtime_driver
+        .split("async fn open_external_editor")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) fn retry_recovery").next())
+        .expect("external editor adapter should remain isolated in the runtime driver");
     assert!(
-        runtime_driver.contains("session.revalidate_external_editor_target(&target)"),
+        external_editor.contains(".session")
+            && external_editor.contains(".revalidate_external_editor_target(&target)")
+            && external_editor
+                .find(".revalidate_external_editor_target(&target)")
+                .zip(external_editor.find("task::spawn_blocking"))
+                .is_some_and(|(revalidate, spawn)| revalidate < spawn),
         "external launch must revalidate the opaque product target immediately before spawn"
     );
     assert!(review.contains("args.push(validated_path.as_os_str().to_owned())"));

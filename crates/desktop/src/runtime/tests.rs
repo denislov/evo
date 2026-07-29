@@ -92,9 +92,12 @@ fn isolated_options(temp: &tempfile::TempDir) -> (ProcessEnvGuard, CodingAgentEm
     std::fs::create_dir_all(&global).unwrap();
     std::fs::create_dir_all(&project).unwrap();
     let env = ProcessEnvGuard::isolated(&global);
-    let options = CodingAgentEmbeddingOptions::new(&project)
-        .with_session_dir(&sessions)
-        .with_model_id("claude-sonnet-4-5");
+    let options = CodingAgentEmbeddingOptions::for_workspace(
+        CodingAgentWorkspaceSelection::project(&project),
+    )
+    .unwrap()
+    .with_session_dir(&sessions)
+    .with_model_id("claude-sonnet-4-5");
     (env, options)
 }
 
@@ -108,6 +111,39 @@ fn new_project_prompt_target(temp: &tempfile::TempDir) -> DesktopPromptTarget {
 
 fn existing_prompt_target(session_id: impl Into<String>) -> DesktopPromptTarget {
     DesktopPromptTarget::existing(session_id)
+}
+
+fn home_owner_target() -> DesktopRuntimeOwnerTarget {
+    DesktopRuntimeOwnerTarget::home()
+}
+
+fn session_owner_target(session_id: impl Into<String>) -> DesktopRuntimeOwnerTarget {
+    DesktopRuntimeOwnerTarget::session(session_id)
+}
+
+fn write_workspace_fixture(project: &std::path::Path, id: &str, thinking: &str) {
+    let skill_dir = project.join(".evo/skills").join(format!("{id}-skill"));
+    let agents_dir = project.join(".evo/agents");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        project.join(".evo/settings.toml"),
+        format!("default_thinking_level = \"{thinking}\"\n"),
+    )
+    .unwrap();
+    std::fs::write(project.join("AGENTS.md"), format!("{id} context")).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            "---\nname: {id}-skill\ndescription: {id} skill description\n---\n{id} skill body\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        agents_dir.join(format!("{id}.toml")),
+        format!("schema_version = 1\nid = \"{id}\"\ndisplay_name = \"{id}\"\n"),
+    )
+    .unwrap();
 }
 
 async fn start_runtime(
@@ -170,7 +206,7 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
     assert_eq!(ready.project.selected_model_id, "claude-sonnet-4-5");
     assert!(!sessions_dir.exists());
 
-    bridge.try_reload(1).unwrap();
+    bridge.try_reload(1, home_owner_target()).unwrap();
     let Some(DesktopRuntimeUpdate::Reloaded {
         command_id: 1,
         metadata,
@@ -191,7 +227,9 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
     };
     assert!(sessions.is_empty());
 
-    bridge.try_select_model(3, "claude-haiku-4-5").unwrap();
+    bridge
+        .try_select_model(3, home_owner_target(), "claude-haiku-4-5")
+        .unwrap();
     let Some(DesktopRuntimeUpdate::SelectionChanged {
         command_id: 3,
         selection: DesktopRuntimeSelectionKind::Model,
@@ -201,6 +239,20 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
         panic!("sessionless model selection should return project metadata");
     };
     assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
+    assert!(metadata.session.is_none());
+
+    bridge
+        .try_select_session_profile(30, home_owner_target(), "review")
+        .unwrap();
+    let Some(DesktopRuntimeUpdate::SelectionChanged {
+        command_id: 30,
+        selection: DesktopRuntimeSelectionKind::SessionProfile,
+        metadata,
+    }) = bridge.next_update().await
+    else {
+        panic!("sessionless profile selection should return Home metadata");
+    };
+    assert_eq!(metadata.project.default_agent_profile_id.as_str(), "review");
     assert!(metadata.session.is_none());
 
     bridge.try_resync(4).unwrap();
@@ -223,7 +275,9 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
         CodingAgentFileRevision::new(1),
     );
     let (commands, mut events, shutdown) = bridge.into_parts();
-    commands.try_review_changed_file(5, &review).unwrap();
+    commands
+        .try_review_changed_file(5, "missing-session", &review)
+        .unwrap();
     assert!(matches!(
         events.next_update().await,
         Some(DesktopRuntimeUpdate::CommandRejected {
@@ -231,7 +285,7 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
             command: DesktopRuntimeCommandKind::ReviewChangedFile,
             code,
             message,
-        }) if code == "session" && message == "desktop runtime has no idle session owner"
+        }) if code == "session_target" && message == "session missing-session is not open"
     ));
 
     let recovery = DesktopRecoveryIdentity {
@@ -329,7 +383,9 @@ async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
     assert_eq!(command_id, 3);
     assert_eq!(command, DesktopRuntimeCommandKind::OpenSession);
 
-    bridge.try_reload(4).unwrap();
+    bridge
+        .try_reload(4, session_owner_target(&initial_session_id))
+        .unwrap();
     let DesktopRuntimeUpdate::Reloaded {
         command_id,
         metadata,
@@ -385,7 +441,8 @@ async fn changed_file_review_command_is_typed_and_preserves_product_error_codes(
 
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (bridge, _) = start_runtime(options).await;
+    let (bridge, initial) = start_runtime(options).await;
+    let session_id = initial.session.session.session_id;
     let (commands, mut events, shutdown) = bridge.into_parts();
     let request = CodingAgentFileReviewRequest::new(
         CodingAgentFileChangeIdentity {
@@ -396,7 +453,9 @@ async fn changed_file_review_command_is_typed_and_preserves_product_error_codes(
         CodingAgentFileRevision::new(7),
     );
 
-    commands.try_review_changed_file(41, &request).unwrap();
+    commands
+        .try_review_changed_file(41, &session_id, &request)
+        .unwrap();
     let update = events.next_update().await.unwrap();
     assert!(matches!(
         update,
@@ -411,7 +470,7 @@ async fn changed_file_review_command_is_typed_and_preserves_product_error_codes(
     let mut oversized = request;
     oversized.change.path = "x".repeat(MAX_FILE_REVIEW_PATH_BYTES + 1);
     assert!(matches!(
-        commands.try_review_changed_file(42, &oversized),
+        commands.try_review_changed_file(42, &session_id, &oversized),
         Err(DesktopCommandAdmissionError::InvalidFileReview { .. })
     ));
 
@@ -423,8 +482,11 @@ async fn changed_file_review_command_is_typed_and_preserves_product_error_codes(
 async fn failed_reload_retains_the_previous_runtime_context() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, _) = isolated_options(&temp);
-    let options = CodingAgentEmbeddingOptions::new(temp.path().join("project"))
-        .with_session_dir(temp.path().join("sessions"));
+    let options = CodingAgentEmbeddingOptions::for_workspace(
+        CodingAgentWorkspaceSelection::project(temp.path().join("project")),
+    )
+    .unwrap()
+    .with_session_dir(temp.path().join("sessions"));
     let (mut bridge, initial) = start_runtime(options).await;
     std::fs::write(
         temp.path().join("global").join("settings.toml"),
@@ -432,7 +494,9 @@ async fn failed_reload_retains_the_previous_runtime_context() {
     )
     .unwrap();
 
-    bridge.try_reload(6).unwrap();
+    bridge
+        .try_reload(6, session_owner_target(&initial.session.session.session_id))
+        .unwrap();
     let reload_update = bridge.next_update().await;
     assert!(
         matches!(
@@ -489,7 +553,9 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     assert_eq!(projection.snapshot(), &product_snapshot);
     assert_eq!(projection.conversation(), &conversation);
 
-    bridge.try_select_model(8, "claude-haiku-4-5").unwrap();
+    bridge
+        .try_select_model(8, session_owner_target(&session_id), "claude-haiku-4-5")
+        .unwrap();
     let update = bridge.next_update().await.unwrap();
     let DesktopRuntimeUpdate::SelectionChanged {
         command_id: 8,
@@ -507,7 +573,9 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     assert!(projection.apply(update).is_replaced());
     assert_eq!(projection.conversation(), &conversation);
 
-    bridge.try_select_session_profile(9, "review").unwrap();
+    bridge
+        .try_select_session_profile(9, session_owner_target(&session_id), "review")
+        .unwrap();
     let update = bridge.next_update().await.unwrap();
     let DesktopRuntimeUpdate::SelectionChanged {
         command_id: 9,
@@ -532,7 +600,11 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     assert_eq!(projection.conversation(), &conversation);
 
     bridge
-        .try_select_model(10, "missing-desktop-model")
+        .try_select_model(
+            10,
+            session_owner_target(&session_id),
+            "missing-desktop-model",
+        )
         .unwrap();
     assert!(matches!(
         bridge.next_update().await,
@@ -543,7 +615,7 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
         })
     ));
     bridge
-        .try_select_session_profile(11, "missing-profile")
+        .try_select_session_profile(11, session_owner_target(&session_id), "missing-profile")
         .unwrap();
     assert!(matches!(
         bridge.next_update().await,
@@ -861,6 +933,173 @@ async fn concurrent_prompts_route_events_and_completions_to_their_session() {
 }
 
 #[tokio::test]
+async fn project_workspace_owners_isolate_context_model_profile_and_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let home = temp.path().join("home");
+    let project_a = temp.path().join("project-a");
+    let project_b = temp.path().join("project-b");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project_a).unwrap();
+    std::fs::create_dir_all(&project_b).unwrap();
+    write_workspace_fixture(&project_a, "project-a", "low");
+    write_workspace_fixture(&project_b, "project-b", "high");
+    let _env = ProcessEnvGuard::isolated(&global);
+    let options =
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(&home))
+            .unwrap()
+            .with_session_dir(&sessions)
+            .with_model_id("claude-sonnet-4-5");
+    let (mut bridge, _) = DesktopRuntimeBridge::spawn(options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+
+    bridge
+        .try_submit_prompt(
+            104,
+            DesktopPromptTarget::new(
+                CodingAgentWorkspaceSelection::project(&project_a),
+                "claude-sonnet-4-5",
+                "project-a",
+            ),
+            "project a prompt",
+            None,
+        )
+        .unwrap();
+    bridge
+        .try_submit_prompt(
+            105,
+            DesktopPromptTarget::new(
+                CodingAgentWorkspaceSelection::project(&project_b),
+                "claude-haiku-4-5",
+                "project-b",
+            ),
+            "project b prompt",
+            None,
+        )
+        .unwrap();
+
+    let mut accepted = std::collections::BTreeMap::new();
+    let mut finished = std::collections::BTreeMap::new();
+    let mut event_sessions = std::collections::BTreeSet::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while finished.len() < 2 {
+            match bridge.next_update().await.unwrap() {
+                DesktopRuntimeUpdate::PromptAcceptedWithSession {
+                    command_id,
+                    snapshot,
+                } => {
+                    accepted.insert(command_id, snapshot);
+                }
+                DesktopRuntimeUpdate::PromptStarted { .. }
+                | DesktopRuntimeUpdate::ResyncRequired { .. } => {}
+                DesktopRuntimeUpdate::ProductEvent { session_id, .. } => {
+                    event_sessions.insert(session_id);
+                }
+                DesktopRuntimeUpdate::PromptFinished {
+                    command_id,
+                    snapshot,
+                    ..
+                } => {
+                    finished.insert(command_id, snapshot.session.session.session_id);
+                }
+                update => panic!("unexpected multi-project prompt update: {update:?}"),
+            }
+        }
+    })
+    .await
+    .expect("both project-scoped prompts should finish");
+
+    let accepted_a = accepted.get(&104).expect("project A must be accepted");
+    let accepted_b = accepted.get(&105).expect("project B must be accepted");
+    let canonical_a = project_a.canonicalize().unwrap();
+    let canonical_b = project_b.canonicalize().unwrap();
+    assert_eq!(accepted_a.project.cwd, canonical_a);
+    assert_eq!(accepted_b.project.cwd, canonical_b);
+    assert_eq!(accepted_a.project.selected_model_id, "claude-sonnet-4-5");
+    assert_eq!(accepted_b.project.selected_model_id, "claude-haiku-4-5");
+    assert_eq!(
+        accepted_a.project.default_agent_profile_id.as_str(),
+        "project-a"
+    );
+    assert_eq!(
+        accepted_b.project.default_agent_profile_id.as_str(),
+        "project-b"
+    );
+    assert!(
+        accepted_a
+            .project
+            .resources
+            .skill_names
+            .iter()
+            .any(|name| name == "project-a-skill")
+    );
+    assert!(
+        !accepted_a
+            .project
+            .resources
+            .skill_names
+            .iter()
+            .any(|name| name == "project-b-skill")
+    );
+    assert!(
+        accepted_b
+            .project
+            .resources
+            .context_files
+            .contains(&canonical_b.join("AGENTS.md"))
+    );
+    assert!(
+        !accepted_b
+            .project
+            .resources
+            .context_files
+            .contains(&canonical_a.join("AGENTS.md"))
+    );
+    let session_a = accepted_a.session.session.session_id.clone();
+    let session_b = accepted_b.session.session.session_id.clone();
+    assert_eq!(finished.get(&104), Some(&session_a));
+    assert_eq!(finished.get(&105), Some(&session_b));
+    assert_eq!(
+        event_sessions,
+        std::collections::BTreeSet::from([session_a.clone(), session_b.clone()])
+    );
+
+    bridge.try_open_session(106, &session_a).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. }) = bridge.next_update().await
+    else {
+        panic!("project A owner should be focusable after prompt completion");
+    };
+    assert_eq!(snapshot.project.cwd, canonical_a);
+    bridge
+        .try_select_model(107, session_owner_target(&session_a), "gpt-5")
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::SelectionChanged { metadata, .. })
+            if metadata.project.cwd == canonical_a
+                && metadata.project.selected_model_id == "gpt-5"
+    ));
+
+    bridge.try_open_session(108, &session_b).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. }) = bridge.next_update().await
+    else {
+        panic!("project B owner should remain independently focusable");
+    };
+    assert_eq!(snapshot.project.cwd, canonical_b);
+    assert_eq!(snapshot.project.selected_model_id, "claude-haiku-4-5");
+    assert_eq!(
+        snapshot.session.session.default_agent_profile_id.as_str(),
+        "project-b"
+    );
+
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn fifth_open_session_is_rejected_without_disturbing_the_existing_four() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
@@ -1070,10 +1309,12 @@ async fn projectless_first_prompt_records_the_global_only_scratch_cwd() {
     )
     .unwrap();
     let _env = ProcessEnvGuard::isolated(&global);
-    let options = CodingAgentEmbeddingOptions::new(&scratch)
-        .with_global_config_only()
-        .with_session_dir(&sessions)
-        .with_model_id("claude-sonnet-4-5");
+    let options = CodingAgentEmbeddingOptions::for_workspace(
+        CodingAgentWorkspaceSelection::projectless("workspace-runtime-test"),
+    )
+    .unwrap()
+    .with_session_dir(&sessions)
+    .with_model_id("claude-sonnet-4-5");
     let (mut bridge, ready) = DesktopRuntimeBridge::spawn(options)
         .unwrap()
         .wait_blocking()
@@ -1113,9 +1354,11 @@ async fn projectless_first_prompt_records_the_global_only_scratch_cwd() {
         .find(|overview| overview.session_id == session_id)
         .expect("the scratch session should be visible in the durable overview");
     assert_eq!(
-        overview.cwd.as_deref(),
-        Some(scratch.to_string_lossy().as_ref())
+        overview.workspace.kind,
+        coding_agent::api::view::CodingAgentWorkspaceKind::Projectless
     );
+    assert_eq!(overview.workspace.display_path, None);
+    assert_eq!(overview.cwd, None);
 
     bridge.shutdown().await.unwrap();
 }
@@ -1126,9 +1369,12 @@ async fn session_creation_failure_rejects_the_first_prompt_without_an_active_own
     let (_env, _) = isolated_options(&temp);
     let blocked_session_root = temp.path().join("blocked-session-root");
     std::fs::write(&blocked_session_root, "not a directory").unwrap();
-    let options = CodingAgentEmbeddingOptions::new(temp.path().join("project"))
-        .with_session_dir(&blocked_session_root)
-        .with_model_id("claude-sonnet-4-5");
+    let options = CodingAgentEmbeddingOptions::for_workspace(
+        CodingAgentWorkspaceSelection::project(temp.path().join("project")),
+    )
+    .unwrap()
+    .with_session_dir(&blocked_session_root)
+    .with_model_id("claude-sonnet-4-5");
     let (mut bridge, _) = DesktopRuntimeBridge::spawn(options)
         .unwrap()
         .wait_blocking()
@@ -1158,10 +1404,9 @@ async fn session_creation_failure_rejects_the_first_prompt_without_an_active_own
 async fn prompt_start_failure_reports_the_session_that_was_already_created() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let context = CodingAgentEmbeddingContext::load(options).unwrap();
     let mut state = RuntimeState {
-        context,
-        sessions: std::collections::HashMap::new(),
+        home: HomeRuntimeContext::load(options).unwrap(),
+        workspaces: std::collections::HashMap::new(),
         focused_session_id: None,
         fail_next_prompt_start: true,
     };
@@ -1198,17 +1443,18 @@ async fn prompt_start_failure_reports_the_session_that_was_already_created() {
     let retained_session_id = snapshot.session.session.session_id.clone();
     assert_eq!(
         state
-            .sessions
+            .workspaces
             .get(&retained_session_id)
             .unwrap()
+            .session
             .view()
             .session_id,
         snapshot.session.session.session_id
     );
     assert_eq!(state.session_catalog().unwrap().0.len(), 1);
 
-    let mut session = state.sessions.remove(&retained_session_id).unwrap();
-    session.shutdown().await.unwrap();
+    let mut workspace = state.workspaces.remove(&retained_session_id).unwrap();
+    workspace.session.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1907,15 +2153,15 @@ async fn command_queue_full_and_closed_are_typed_without_runtime_timing() {
     };
 
     for command_id in 0..DESKTOP_COMMAND_QUEUE_CAPACITY as u64 {
-        bridge.try_reload(command_id).unwrap();
+        bridge.try_reload(command_id, home_owner_target()).unwrap();
     }
     assert_eq!(
-        bridge.try_reload(u64::MAX),
+        bridge.try_reload(u64::MAX, home_owner_target()),
         Err(DesktopCommandAdmissionError::QueueFull)
     );
     drop(_command_rx);
     assert_eq!(
-        bridge.try_reload(u64::MAX),
+        bridge.try_reload(u64::MAX, home_owner_target()),
         Err(DesktopCommandAdmissionError::RuntimeClosed)
     );
 }
@@ -2274,7 +2520,9 @@ async fn split_runtime_owners_deliver_commands_then_shutdown_and_join() {
     let initial_session_id = initial.session.session.session_id;
     let (commands, mut events, shutdown) = bridge.into_parts();
 
-    commands.try_reload(60).unwrap();
+    commands
+        .try_reload(60, session_owner_target(&initial_session_id))
+        .unwrap();
     let DesktopRuntimeUpdate::Reloaded {
         command_id,
         metadata,
@@ -2290,7 +2538,7 @@ async fn split_runtime_owners_deliver_commands_then_shutdown_and_join() {
 
     shutdown.shutdown(&mut events).await.unwrap();
     assert_eq!(
-        commands.try_reload(61),
+        commands.try_reload(61, session_owner_target(&initial_session_id)),
         Err(DesktopCommandAdmissionError::RuntimeClosed),
         "a successful shutdown join must close the independently held command sender"
     );
@@ -2308,11 +2556,13 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
     let requested_after = connection.state().unwrap().cursor.last_event_sequence;
     let (events, pending_recovery) = reconnect_event_source(&connection, requested_after).unwrap();
     let task = task::spawn(std::future::pending::<PromptTaskOutput>());
+    let scope = context.snapshot().workspace.as_ref().unwrap().scope.clone();
     let active = ActivePrompt {
         session_id: session.view().session_id.clone(),
         command_id: 30,
         operation_id: Some("stuck-operation".into()),
-        project: context.snapshot().clone(),
+        scope,
+        context,
         connection,
         events,
         pending_recovery,
@@ -2336,6 +2586,7 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
         (
             DesktopRuntimeCommand::SelectModel {
                 command_id: 32,
+                target: session_owner_target(active.session_id.clone()),
                 model_id: "claude-haiku-4-5".into(),
             },
             DesktopRuntimeCommandKind::SelectModel,
@@ -2343,7 +2594,7 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
         (
             DesktopRuntimeCommand::SelectSessionProfile {
                 command_id: 33,
-                session_id: None,
+                target: session_owner_target(active.session_id.clone()),
                 profile_id: "review".into(),
             },
             DesktopRuntimeCommandKind::SelectSessionProfile,
