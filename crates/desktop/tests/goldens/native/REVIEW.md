@@ -1,5 +1,20 @@
 # Native visual golden review
 
+VUI-422 closes the Inspector dock/drawer interaction contract without changing
+the reviewed shell pixels. All ten deterministic captures compare at normalized
+RMSE `0`, so this task does not replace any golden image.
+
+- Wide keeps the independent docked Inspector header and resize boundary;
+  medium and narrow keep the drawer host below the center Header.
+- Dedicated GPUI hit tests click the Header Profile selector while the Inspector
+  drawer is open at `1000x900` and `700x900`, select the exact project profile,
+  and prove the typed session command reaches the runtime owner.
+- The same interaction coverage proves Profile selection does not dismiss the
+  drawer, the auxiliary close restores Composer focus, Sessions and Inspector
+  switch in place, and outside-click/Escape share the restore path.
+- Wide, medium, and narrow captures were visually inspected for unclipped Header
+  controls, stable body geometry, and the drawer boundary below the selectors.
+
 VUI-421 makes the Header Thinking selector capability-driven. The ten
 deterministic captures were reviewed at wide, medium, narrow, idle,
 authorization, reduced-motion, keyboard-focus, and no-color variants and are

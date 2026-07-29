@@ -7200,6 +7200,27 @@ mod tests {
             narrow_scroll
         );
 
+        let inspector_toggle = cx
+            .debug_bounds("desktop-hit-toggle-inspector")
+            .expect("the Header keeps the primary Inspector toggle above either drawer");
+        cx.simulate_click(inspector_toggle.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_drawer),
+            Some(CenterDrawerKind::Inspector)
+        );
+        assert!(cx.debug_bounds("desktop-sessions-drawer").is_none());
+        assert!(cx.debug_bounds("desktop-inspector-drawer").is_some());
+
+        cx.simulate_click(sessions_toggle.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_drawer),
+            Some(CenterDrawerKind::Sessions)
+        );
+        assert!(cx.debug_bounds("desktop-inspector-drawer").is_none());
+        assert!(cx.debug_bounds("desktop-sessions-drawer").is_some());
+
         cx.dispatch_action(EscapeHierarchy);
         cx.run_until_parked();
         assert_eq!(shell.read_with(cx, |shell, _| shell.active_drawer), None);
@@ -7207,6 +7228,85 @@ mod tests {
             shell.read_with(cx, |shell, _| shell.focus.active()),
             FocusTarget::Composer
         );
+    }
+
+    fn assert_profile_dropdown_usable_with_inspector_drawer(
+        cx: &mut TestAppContext,
+        viewport_width: f32,
+    ) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, visual_test_projection());
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        cx.simulate_resize(size(px(viewport_width), px(900.)));
+        settle_visual_measurements(cx);
+
+        let inspector_toggle = cx
+            .debug_bounds("desktop-hit-toggle-inspector")
+            .expect("the center Header exposes the primary Inspector toggle");
+        cx.simulate_click(inspector_toggle.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_drawer),
+            Some(CenterDrawerKind::Inspector)
+        );
+        let center_header = cx
+            .debug_bounds("desktop-conversation-header")
+            .expect("the center Header remains mounted above the drawer host");
+        let inspector_drawer = cx
+            .debug_bounds("desktop-inspector-drawer")
+            .expect("Inspector opens as a center-body drawer");
+        assert!(center_header.bottom() <= inspector_drawer.top());
+        assert!(inspector_toggle.bottom() <= inspector_drawer.top());
+        assert_minimum_hit_target(cx, "desktop-hit-close-inspector");
+
+        let profile_selector = cx
+            .debug_bounds("desktop-header-profile-selector")
+            .expect("the Profile selector stays exposed while Inspector is open");
+        assert!(profile_selector.bottom() <= inspector_drawer.top());
+        cx.simulate_click(profile_selector.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        choose_popup_item(cx, 1);
+
+        assert_eq!(
+            runtime_harness.drain_selections(),
+            [(
+                desktop::runtime::DesktopRuntimeCommandKind::SelectSessionProfile,
+                DesktopRuntimeOwnerTarget::session("desktop-visual-test"),
+                "exact-reviewer".into(),
+                None,
+            )]
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_drawer),
+            Some(CenterDrawerKind::Inspector),
+            "Profile selection must not implicitly close the non-modal drawer"
+        );
+
+        let close = cx
+            .debug_bounds("desktop-hit-close-inspector")
+            .expect("the drawer exposes its auxiliary close control");
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_drawer), None);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Composer,
+            "the auxiliary close control restores the pre-drawer focus owner"
+        );
+    }
+
+    #[gpui::test]
+    fn medium_profile_dropdown_remains_usable_with_inspector_drawer(cx: &mut TestAppContext) {
+        assert_profile_dropdown_usable_with_inspector_drawer(cx, 1_000.);
+    }
+
+    #[gpui::test]
+    fn narrow_profile_dropdown_remains_usable_with_inspector_drawer(cx: &mut TestAppContext) {
+        assert_profile_dropdown_usable_with_inspector_drawer(cx, 700.);
     }
 
     #[gpui::test]
