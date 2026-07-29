@@ -1,5 +1,23 @@
 # Native visual golden review
 
+VUI-421 makes the Header Thinking selector capability-driven. The ten
+deterministic captures were reviewed at wide, medium, narrow, idle,
+authorization, reduced-motion, keyboard-focus, and no-color variants and are
+accepted as the new closed-Header baseline.
+
+- The fixture reasoning model now presents `Thinking · Auto` / `T · Auto`;
+  selectors and panel actions remain on one line without clipping at all three
+  viewport widths.
+- The normalized diff is confined to the Header labels and their expected
+  horizontal redistribution. Conversation, Sidebar, Composer, overlay, focus,
+  and no-color geometry are unchanged.
+- Capability fixtures and GPUI hit tests separately cover `can_disable`,
+  explicit-level ordering, duplicate/illegal values, the non-reasoning hidden
+  selector, and the Header-local fallback status.
+- Model-switch tests prove that the exact model id and current Thinking value
+  enter one typed runtime transaction; unsupported values return as Auto and
+  update the session preference only after the accepted response.
+
 VUI-420 adds the Provider-grouped model popup while preserving the reviewed
 Desktop shell baseline. All ten deterministic captures compare at normalized
 RMSE `0`, so this task does not replace any golden image.
@@ -34,13 +52,13 @@ Generated from deterministic native GPUI replays. Review the paired images and d
 
 | Fixture | Size | Normalized RMSE | Before | After | Diff |
 | --- | ---: | ---: | --- | --- | --- |
-| `wide` | `2600x1656` | `0.14088` | `wide-before.png` | `wide-after.png` | `wide-diff.png` |
-| `medium` | `1800x1600` | `0.0615561` | `medium-before.png` | `medium-after.png` | `medium-diff.png` |
-| `narrow` | `1400x1600` | `0.126563` | `narrow-before.png` | `narrow-after.png` | `narrow-diff.png` |
-| `wide-idle` | `2600x1656` | `0.122258` | `wide-idle-before.png` | `wide-idle-after.png` | `wide-idle-diff.png` |
-| `medium-idle` | `1800x1600` | `0.134082` | `medium-idle-before.png` | `medium-idle-after.png` | `medium-idle-diff.png` |
-| `narrow-idle` | `1400x1600` | `0.137558` | `narrow-idle-before.png` | `narrow-idle-after.png` | `narrow-idle-diff.png` |
-| `wide-authorization` | `2600x1656` | `0.0246912` | `wide-authorization-before.png` | `wide-authorization-after.png` | `wide-authorization-diff.png` |
-| `wide-reduced-motion` | `2600x1656` | `0.139742` | `wide-reduced-motion-before.png` | `wide-reduced-motion-after.png` | `wide-reduced-motion-diff.png` |
-| `wide-keyboard-focus` | `2600x1656` | `0.139749` | `wide-keyboard-focus-before.png` | `wide-keyboard-focus-after.png` | `wide-keyboard-focus-diff.png` |
-| `wide-no-color` | `2600x1656` | `0.161142` | `wide-no-color-before.png` | `wide-no-color-after.png` | `wide-no-color-diff.png` |
+| `wide` | `2600x1656` | `0.0254532` | `wide-before.png` | `wide-after.png` | `wide-diff.png` |
+| `medium` | `1800x1600` | `0.0310425` | `medium-before.png` | `medium-after.png` | `medium-diff.png` |
+| `narrow` | `1400x1600` | `0.0279798` | `narrow-before.png` | `narrow-after.png` | `narrow-diff.png` |
+| `wide-idle` | `2600x1656` | `0.0254532` | `wide-idle-before.png` | `wide-idle-after.png` | `wide-idle-diff.png` |
+| `medium-idle` | `1800x1600` | `0.0310425` | `medium-idle-before.png` | `medium-idle-after.png` | `medium-idle-diff.png` |
+| `narrow-idle` | `1400x1600` | `0.0279798` | `narrow-idle-before.png` | `narrow-idle-after.png` | `narrow-idle-diff.png` |
+| `wide-authorization` | `2600x1656` | `0.00354707` | `wide-authorization-before.png` | `wide-authorization-after.png` | `wide-authorization-diff.png` |
+| `wide-reduced-motion` | `2600x1656` | `0.0254532` | `wide-reduced-motion-before.png` | `wide-reduced-motion-after.png` | `wide-reduced-motion-diff.png` |
+| `wide-keyboard-focus` | `2600x1656` | `0.0254532` | `wide-keyboard-focus-before.png` | `wide-keyboard-focus-after.png` | `wide-keyboard-focus-diff.png` |
+| `wide-no-color` | `2600x1656` | `0.0293705` | `wide-no-color-before.png` | `wide-no-color-after.png` | `wide-no-color-diff.png` |

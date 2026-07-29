@@ -358,6 +358,7 @@ impl DesktopRuntimeBridge {
         command_id: u64,
         target: DesktopRuntimeOwnerTarget,
         model_id: &str,
+        thinking_level: Option<CodingAgentThinkingLevel>,
     ) -> Result<(), DesktopCommandAdmissionError> {
         validate_runtime_owner_target(&target)?;
         validate_selection_id("model", model_id)?;
@@ -365,6 +366,7 @@ impl DesktopRuntimeBridge {
             command_id,
             target,
             model_id: model_id.to_owned(),
+            thinking_level,
         })
     }
 
@@ -621,14 +623,27 @@ impl DesktopRuntimeTestHarness {
 
     pub(crate) fn drain_selections(
         &mut self,
-    ) -> Vec<(DesktopRuntimeCommandKind, DesktopRuntimeOwnerTarget, String)> {
+    ) -> Vec<(
+        DesktopRuntimeCommandKind,
+        DesktopRuntimeOwnerTarget,
+        String,
+        Option<CodingAgentThinkingLevel>,
+    )> {
         let mut selections = Vec::new();
         while let Ok(command) = self.commands.try_recv() {
             match command {
                 DesktopRuntimeCommand::SelectModel {
-                    target, model_id, ..
+                    target,
+                    model_id,
+                    thinking_level,
+                    ..
                 } => {
-                    selections.push((DesktopRuntimeCommandKind::SelectModel, target, model_id));
+                    selections.push((
+                        DesktopRuntimeCommandKind::SelectModel,
+                        target,
+                        model_id,
+                        thinking_level,
+                    ));
                 }
                 DesktopRuntimeCommand::SelectSessionProfile {
                     target, profile_id, ..
@@ -637,6 +652,7 @@ impl DesktopRuntimeTestHarness {
                         DesktopRuntimeCommandKind::SelectSessionProfile,
                         target,
                         profile_id,
+                        None,
                     ));
                 }
                 _ => {}
@@ -904,6 +920,7 @@ impl DesktopRuntimeCommandHandle {
         command_id: u64,
         target: DesktopRuntimeOwnerTarget,
         model_id: &str,
+        thinking_level: Option<CodingAgentThinkingLevel>,
     ) -> Result<(), DesktopCommandAdmissionError> {
         validate_runtime_owner_target(&target)?;
         validate_selection_id("model", model_id)?;
@@ -911,6 +928,7 @@ impl DesktopRuntimeCommandHandle {
             command_id,
             target,
             model_id: model_id.to_owned(),
+            thinking_level,
         })
     }
 

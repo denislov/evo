@@ -81,6 +81,12 @@ pub(super) struct ConversationHeaderModelWarning {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConversationHeaderThinkingOption {
+    pub(super) selection: DesktopThinkingLevel,
+    pub(super) label: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConversationHeaderViewModel {
     pub(super) idle: bool,
     pub(super) status: SemanticStatus,
@@ -92,6 +98,8 @@ pub(super) struct ConversationHeaderViewModel {
     pub(super) profile: Arc<str>,
     pub(super) thinking: Arc<str>,
     pub(super) thinking_selection: DesktopThinkingLevel,
+    pub(super) thinking_options: Arc<[ConversationHeaderThinkingOption]>,
+    pub(super) thinking_hint: Option<Arc<str>>,
     pub(super) current_model_id: Arc<str>,
     pub(super) current_profile_id: Arc<str>,
     pub(super) model_groups: Arc<[ConversationHeaderModelGroup]>,
@@ -201,6 +209,7 @@ impl Render for ConversationHeader {
             .map(|group| group.options.len())
             .sum::<usize>();
         let profile_options = Arc::clone(&view_model.profile_options);
+        let thinking_hint = view_model.thinking_hint.clone();
         let current_model_id = Arc::clone(&view_model.current_model_id);
         let current_profile_id = Arc::clone(&view_model.current_profile_id);
         let selector_disabled = view_model.selector_disabled;
@@ -269,8 +278,18 @@ impl Render for ConversationHeader {
                             .child(
                                 div()
                                     .text_token(DesignText::Metadata)
-                                    .text_color(rgb(theme.subtle_text.value()))
-                                    .child(view_model.project_name.to_string()),
+                                    .text_color(rgb(if view_model.thinking_hint.is_some() {
+                                        theme.warning.value()
+                                    } else {
+                                        theme.subtle_text.value()
+                                    }))
+                                    .child(
+                                        view_model
+                                            .thinking_hint
+                                            .as_deref()
+                                            .unwrap_or(&view_model.project_name)
+                                            .to_string(),
+                                    ),
                             ),
                     )),
             )
@@ -411,32 +430,41 @@ impl Render for ConversationHeader {
                                 }
                             }
                             menu
-                        }),
+                            }),
                     )
-                    .child(
+                    .when_some(thinking_hint, |actions, hint| {
+                        actions.child(
+                            div()
+                                .id("header-thinking-hint")
+                                .debug_selector(|| "desktop-header-thinking-hint".into())
+                                .role(Role::Status)
+                                .aria_label(hint.to_string())
+                                .max_w(px(148.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_token(DesignText::Metadata)
+                                .text_color(rgb(theme.warning.value()))
+                                .child("Thinking · Auto"),
+                        )
+                    })
+                    .when(!view_model.thinking_options.is_empty(), |actions| actions.child(
                         DesktopSelector::new(
                             "header-thinking-selector",
                             thinking_label,
                             thinking_accessible_label,
                         )
+                        .disabled(selector_disabled)
                         .build()
                         .debug_selector(|| "desktop-header-thinking-selector".into())
                         .dropdown_menu(move |menu, _, _| {
-                            DesktopThinkingLevel::ALL.iter().fold(
+                            view_model.thinking_options.iter().fold(
                                 menu.min_w(px(180.)).max_w(px(280.)),
-                                |menu, level| {
+                                |menu, option| {
                                     let target = thinking_target.clone();
-                                    let level = *level;
+                                    let level = option.selection;
                                     menu.item(
-                                        PopupMenuItem::new(match level {
-                                            DesktopThinkingLevel::Default => "Default",
-                                            DesktopThinkingLevel::Off => "Off",
-                                            DesktopThinkingLevel::Minimal => "Minimal",
-                                            DesktopThinkingLevel::Low => "Low",
-                                            DesktopThinkingLevel::Medium => "Medium",
-                                            DesktopThinkingLevel::High => "High",
-                                            DesktopThinkingLevel::XHigh => "XHigh",
-                                        })
+                                        PopupMenuItem::new(option.label)
                                         .checked(level == view_model.thinking_selection)
                                         .on_click(move |_, _, cx| {
                                             if let Some(target) = target.upgrade() {
@@ -453,7 +481,7 @@ impl Render for ConversationHeader {
                                 },
                             )
                         }),
-                    )
+                    ))
                     .child(
                         DesktopSelector::new(
                             "header-profile-selector",

@@ -42,18 +42,6 @@ pub(crate) enum DesktopThinkingLevel {
     Default,
 }
 
-impl DesktopThinkingLevel {
-    pub(crate) const ALL: [Self; 7] = [
-        Self::Default,
-        Self::Off,
-        Self::Minimal,
-        Self::Low,
-        Self::Medium,
-        Self::High,
-        Self::XHigh,
-    ];
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowGeometry {

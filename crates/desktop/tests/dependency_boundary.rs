@@ -1082,13 +1082,22 @@ fn desktop_new_prompt_transaction_preserves_scope_through_tools_and_authorizatio
     assert!(ordered_stage(
         new_context,
         "CodingAgentEmbeddingContext::load(options)?",
-        "sanitize_thinking_level(selected_model, requested)"
+        "admitted_model_thinking(&context"
     ));
     assert!(ordered_stage(
         new_context,
-        "sanitize_thinking_level(selected_model, requested)",
+        "admitted_model_thinking(&context",
         "self.create_session_in_context(context).await?"
     ));
+    let thinking_admission = driver
+        .split("pub(super) fn admitted_model_thinking")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub(super) struct RuntimeSessionWorkspace")
+                .next()
+        })
+        .expect("desktop Thinking admission should remain a typed runtime boundary");
+    assert!(thinking_admission.contains("sanitize_thinking_level(model, requested)"));
 
     let persistence = driver
         .split("async fn create_session_in_context")

@@ -186,18 +186,6 @@ impl ComposerRunningMode {
 }
 
 impl DesktopThinkingLevel {
-    const fn next(self) -> Self {
-        match self {
-            Self::Default => Self::Off,
-            Self::Off => Self::Minimal,
-            Self::Minimal => Self::Low,
-            Self::Low => Self::Medium,
-            Self::Medium => Self::High,
-            Self::High => Self::XHigh,
-            Self::XHigh => Self::Default,
-        }
-    }
-
     const fn explicit(self) -> Option<CodingAgentThinkingLevel> {
         match self {
             Self::Default => None,
@@ -207,6 +195,18 @@ impl DesktopThinkingLevel {
             Self::Medium => Some(CodingAgentThinkingLevel::Medium),
             Self::High => Some(CodingAgentThinkingLevel::High),
             Self::XHigh => Some(CodingAgentThinkingLevel::XHigh),
+        }
+    }
+
+    const fn from_explicit(level: Option<CodingAgentThinkingLevel>) -> Self {
+        match level {
+            None => Self::Default,
+            Some(CodingAgentThinkingLevel::Off) => Self::Off,
+            Some(CodingAgentThinkingLevel::Minimal) => Self::Minimal,
+            Some(CodingAgentThinkingLevel::Low) => Self::Low,
+            Some(CodingAgentThinkingLevel::Medium) => Self::Medium,
+            Some(CodingAgentThinkingLevel::High) => Self::High,
+            Some(CodingAgentThinkingLevel::XHigh) => Self::XHigh,
         }
     }
 
@@ -266,6 +266,7 @@ pub(super) struct SessionWorkspace {
     composer_attachments: Vec<PathBuf>,
     command_ledger: DesktopCommandLedger,
     thinking_selection: DesktopThinkingLevel,
+    thinking_hint: Option<Arc<str>>,
     file_review: Arc<DesktopFileReviewState>,
 }
 
@@ -313,6 +314,8 @@ impl SessionWorkspace {
         draft_workspace_selection: CodingAgentWorkspaceSelection,
     ) -> Self {
         let preference_notice_revision = u64::from(preference_notice.is_some());
+        let (thinking_selection, thinking_fallback) =
+            admitted_desktop_thinking_selection(&project, thinking_selection);
         Self {
             project,
             projection,
@@ -327,6 +330,8 @@ impl SessionWorkspace {
             composer_attachments: Vec::new(),
             command_ledger,
             thinking_selection,
+            thinking_hint: thinking_fallback
+                .then(|| Arc::from("Thinking reset to Auto for the selected model.")),
             file_review: Arc::new(DesktopFileReviewState::default()),
         }
     }
@@ -1139,7 +1144,8 @@ impl NativeShell {
             self.project = snapshot.project.clone();
             self.projection = Some(projection);
             self.thinking_selection = thinking_selection;
-            self.remember_thinking_selection(target_session_id, thinking_selection);
+            self.reconcile_thinking_selection_with_project();
+            self.remember_thinking_selection(target_session_id, self.thinking_selection);
             return true;
         }
         let target = SessionWorkspace::new_with_thinking(
@@ -1982,6 +1988,7 @@ impl NativeShell {
                 };
                 if let Some(hydrated) = hydrated {
                     self.project = hydrated.project.clone();
+                    self.reconcile_thinking_selection_with_project();
                     match DesktopProjection::new(hydrated.clone()) {
                         Ok(projection) => self.projection = Some(projection),
                         Err(issue) => {
@@ -2003,6 +2010,7 @@ impl NativeShell {
                 } {
                     self.project = metadata.project.clone();
                     self.home_project = metadata.project.clone();
+                    self.reconcile_thinking_selection_with_project();
                 }
             }
             if creates_session_from_prompt && self.projection.is_some() {
@@ -2040,6 +2048,7 @@ impl NativeShell {
             let active_operation_after = projection.snapshot().active_operation.is_some();
             let event_sequence_after = projection.cursor().last_event_sequence;
             self.project = project_after;
+            self.reconcile_thinking_selection_with_project();
             let dirty =
                 ProjectionDirtyRouting::for_projection(outcome.is_replaced(), outcome.delta());
             if dirty.root {
@@ -2338,6 +2347,23 @@ impl NativeShell {
             .set_thinking_level_for_session(session_id, selection)
         {
             self.schedule_preferences();
+        }
+    }
+
+    fn reconcile_thinking_selection_with_project(&mut self) {
+        let (selection, fallback) =
+            admitted_desktop_thinking_selection(&self.project, self.thinking_selection);
+        if !fallback {
+            return;
+        }
+        self.thinking_selection = selection;
+        self.thinking_hint = Some(Arc::from("Thinking reset to Auto for the selected model."));
+        let session_id = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.clone());
+        if let Some(session_id) = session_id.as_deref() {
+            self.remember_thinking_selection(session_id, selection);
         }
     }
 
@@ -3020,9 +3046,12 @@ impl NativeShell {
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 let result = match selection {
-                    DesktopRuntimeSelectionKind::Model => {
-                        runtime.try_select_model(command_id, target, &id)
-                    }
+                    DesktopRuntimeSelectionKind::Model => runtime.try_select_model(
+                        command_id,
+                        target,
+                        &id,
+                        self.thinking_selection.explicit(),
+                    ),
                     DesktopRuntimeSelectionKind::SessionProfile => {
                         runtime.try_select_session_profile(command_id, target, &id)
                     }
@@ -3045,10 +3074,20 @@ impl NativeShell {
     }
 
     fn select_thinking_level(&mut self, selection: DesktopThinkingLevel, cx: &mut Context<Self>) {
+        let options = conversation_header_thinking_menu(
+            self.project
+                .models
+                .iter()
+                .find(|model| model.id == self.project.selected_model_id),
+        );
+        if !options.iter().any(|option| option.selection == selection) {
+            return;
+        }
         if self.thinking_selection == selection {
             return;
         }
         self.thinking_selection = selection;
+        self.thinking_hint = None;
         let session_id = self
             .projection
             .as_ref()
@@ -3074,7 +3113,21 @@ impl NativeShell {
     }
 
     fn cycle_thinking_selection(&mut self, cx: &mut Context<Self>) {
-        self.select_thinking_level(self.thinking_selection.next(), cx);
+        let options = conversation_header_thinking_menu(
+            self.project
+                .models
+                .iter()
+                .find(|model| model.id == self.project.selected_model_id),
+        );
+        let Some(next) = options
+            .iter()
+            .position(|option| option.selection == self.thinking_selection)
+            .map(|index| options[(index + 1) % options.len()].selection)
+            .or_else(|| options.first().map(|option| option.selection))
+        else {
+            return;
+        };
+        self.select_thinking_level(next, cx);
     }
 
     fn decide_tool_authorization(
@@ -4643,6 +4696,10 @@ impl NativeShell {
             .find(|model| model.id == current_model_id)
             .map(|model| model.name.as_str())
             .unwrap_or(current_model_id);
+        let current_model = project
+            .models
+            .iter()
+            .find(|model| model.id == current_model_id);
         let profile = project
             .profiles
             .iter()
@@ -4690,13 +4747,16 @@ impl NativeShell {
                 || selection_pending,
             model: Arc::from(truncate_label(model, 10)),
             profile: Arc::from(truncate_label(profile, 9)),
-            thinking: Arc::from(truncate_label(
-                &self
-                    .thinking_selection
-                    .label(project.settings.default_thinking_level.as_deref()),
-                12,
-            )),
+            thinking: Arc::from(
+                if self.thinking_selection == DesktopThinkingLevel::Default {
+                    "Auto".to_owned()
+                } else {
+                    truncate_label(&self.thinking_selection.label(None), 12)
+                },
+            ),
             thinking_selection: self.thinking_selection,
+            thinking_options: conversation_header_thinking_menu(current_model).into(),
+            thinking_hint: self.thinking_hint.clone(),
             current_model_id: Arc::from(current_model_id),
             current_profile_id: Arc::from(current_profile_id),
             model_groups: model_groups.into(),
@@ -4714,6 +4774,69 @@ impl NativeShell {
 
     fn semantic_status(&self) -> SemanticStatus {
         workspace_semantic_status(&self.active_workspace)
+    }
+}
+
+fn conversation_header_thinking_menu(
+    model: Option<&CodingAgentModelChoice>,
+) -> Vec<ConversationHeaderThinkingOption> {
+    let Some(capability) = model.map(|model| &model.thinking_capability) else {
+        return Vec::new();
+    };
+    if !capability.supported {
+        return Vec::new();
+    }
+    let mut options = vec![ConversationHeaderThinkingOption {
+        selection: DesktopThinkingLevel::Default,
+        label: "Auto",
+    }];
+    if capability.can_disable {
+        options.push(ConversationHeaderThinkingOption {
+            selection: DesktopThinkingLevel::Off,
+            label: "Off",
+        });
+    }
+    for level in &capability.explicit_levels {
+        if *level == CodingAgentThinkingLevel::Off {
+            continue;
+        }
+        let selection = DesktopThinkingLevel::from_explicit(Some(*level));
+        if options.iter().any(|option| option.selection == selection) {
+            continue;
+        }
+        options.push(ConversationHeaderThinkingOption {
+            selection,
+            label: match level {
+                CodingAgentThinkingLevel::Off => "Off",
+                CodingAgentThinkingLevel::Minimal => "Minimal",
+                CodingAgentThinkingLevel::Low => "Low",
+                CodingAgentThinkingLevel::Medium => "Medium",
+                CodingAgentThinkingLevel::High => "High",
+                CodingAgentThinkingLevel::XHigh => "XHigh",
+            },
+        });
+    }
+    options
+}
+
+fn admitted_desktop_thinking_selection(
+    project: &CodingAgentEmbeddingSnapshot,
+    requested: DesktopThinkingLevel,
+) -> (DesktopThinkingLevel, bool) {
+    if requested == DesktopThinkingLevel::Default {
+        return (requested, false);
+    }
+    let model = project
+        .models
+        .iter()
+        .find(|model| model.id == project.selected_model_id);
+    if conversation_header_thinking_menu(model)
+        .iter()
+        .any(|option| option.selection == requested)
+    {
+        (requested, false)
+    } else {
+        (DesktopThinkingLevel::Default, true)
     }
 }
 
@@ -7798,6 +7921,7 @@ mod tests {
                 desktop::runtime::DesktopRuntimeCommandKind::SelectModel,
                 DesktopRuntimeOwnerTarget::home(),
                 "exact-target-model".into(),
+                None,
             )]
         );
     }
@@ -7937,6 +8061,7 @@ mod tests {
                 desktop::runtime::DesktopRuntimeCommandKind::SelectSessionProfile,
                 DesktopRuntimeOwnerTarget::home(),
                 "exact-reviewer".into(),
+                None,
             )]
         );
     }
@@ -8981,27 +9106,150 @@ mod tests {
     }
 
     #[test]
-    fn thinking_selection_cycles_and_maps_only_explicit_overrides() {
-        let mut selection = DesktopThinkingLevel::Default;
-        assert_eq!(selection.explicit(), None);
-        assert_eq!(selection.label(Some("xhigh")), "default:xhigh");
-
-        selection = selection.next();
-        assert_eq!(selection.explicit(), Some(CodingAgentThinkingLevel::Off));
-        selection = selection.next();
+    fn thinking_menu_exactly_matches_the_product_capability() {
+        let mut model = model_menu_fixture("reasoner", "Reasoner", "fixture", true, true);
+        model.thinking_capability = CodingAgentThinkingCapability {
+            supported: true,
+            explicit_levels: vec![
+                CodingAgentThinkingLevel::High,
+                CodingAgentThinkingLevel::Low,
+                CodingAgentThinkingLevel::High,
+                CodingAgentThinkingLevel::Off,
+            ],
+            can_disable: false,
+        };
+        let options = conversation_header_thinking_menu(Some(&model));
         assert_eq!(
-            selection.explicit(),
-            Some(CodingAgentThinkingLevel::Minimal)
+            options
+                .iter()
+                .map(|option| (option.selection, option.label))
+                .collect::<Vec<_>>(),
+            [
+                (DesktopThinkingLevel::Default, "Auto"),
+                (DesktopThinkingLevel::High, "High"),
+                (DesktopThinkingLevel::Low, "Low"),
+            ]
         );
-        selection = selection.next();
-        assert_eq!(selection.explicit(), Some(CodingAgentThinkingLevel::Low));
-        selection = selection.next();
-        assert_eq!(selection.explicit(), Some(CodingAgentThinkingLevel::Medium));
-        selection = selection.next();
-        assert_eq!(selection.explicit(), Some(CodingAgentThinkingLevel::High));
-        selection = selection.next();
-        assert_eq!(selection.explicit(), Some(CodingAgentThinkingLevel::XHigh));
-        assert_eq!(selection.next(), DesktopThinkingLevel::Default);
+
+        model.thinking_capability.can_disable = true;
+        assert_eq!(
+            conversation_header_thinking_menu(Some(&model))
+                .iter()
+                .map(|option| option.selection)
+                .collect::<Vec<_>>(),
+            [
+                DesktopThinkingLevel::Default,
+                DesktopThinkingLevel::Off,
+                DesktopThinkingLevel::High,
+                DesktopThinkingLevel::Low,
+            ]
+        );
+        assert!(conversation_header_thinking_menu(None).is_empty());
+        model.thinking_capability = CodingAgentThinkingCapability::default();
+        assert!(conversation_header_thinking_menu(Some(&model)).is_empty());
+    }
+
+    #[gpui::test]
+    fn unsupported_thinking_cannot_be_selected_outside_the_menu(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+        shell.update(cx, |shell, cx| {
+            let selected_model_id = shell.project.selected_model_id.clone();
+            let selected = shell
+                .project
+                .models
+                .iter_mut()
+                .find(|model| model.id == selected_model_id)
+                .expect("the fixture selected model exists");
+            selected.thinking_capability = CodingAgentThinkingCapability {
+                supported: true,
+                explicit_levels: vec![CodingAgentThinkingLevel::Low],
+                can_disable: false,
+            };
+
+            shell.select_thinking_level(DesktopThinkingLevel::High, cx);
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::Default);
+            shell.select_thinking_level(DesktopThinkingLevel::Off, cx);
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::Default);
+            shell.select_thinking_level(DesktopThinkingLevel::Low, cx);
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::Low);
+        });
+    }
+
+    #[gpui::test]
+    fn model_switch_fallback_commits_auto_and_uses_a_header_local_hint(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, visual_test_projection());
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        shell.update(cx, |shell, cx| {
+            shell.select_thinking_level(DesktopThinkingLevel::High, cx);
+            shell.submit_selection(
+                DesktopRuntimeSelectionKind::Model,
+                "adjacent-model".into(),
+                cx,
+            );
+        });
+        assert_eq!(
+            runtime_harness.drain_selections(),
+            [(
+                desktop::runtime::DesktopRuntimeCommandKind::SelectModel,
+                DesktopRuntimeOwnerTarget::session("desktop-visual-test"),
+                "adjacent-model".into(),
+                Some(CodingAgentThinkingLevel::High),
+            )]
+        );
+
+        shell.update(cx, |shell, cx| {
+            let mut snapshot = visual_test_snapshot();
+            snapshot.project.selected_model_id = "adjacent-model".into();
+            for model in &mut snapshot.project.models {
+                model.selected = model.id == "adjacent-model";
+            }
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::SelectionChanged {
+                    command_id: 1,
+                    selection: DesktopRuntimeSelectionKind::Model,
+                    thinking_level: None,
+                    thinking_fallback: true,
+                    metadata: desktop::runtime::DesktopRuntimeMetadataSnapshot {
+                        project: snapshot.project,
+                        session: Some(snapshot.session),
+                    },
+                },
+            );
+            shell.poll_runtime(cx);
+
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::Default);
+            assert_eq!(
+                shell
+                    .preferences
+                    .thinking_level_for_session("desktop-visual-test"),
+                DesktopThinkingLevel::Default
+            );
+            assert_eq!(
+                shell.thinking_hint.as_deref(),
+                Some("Thinking reset to Auto for the selected model.")
+            );
+            assert!(
+                !shell
+                    .preference_notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("Thinking") || notice.contains("Auto"))
+            );
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("desktop-header-thinking-selector")
+                .is_none()
+        );
+        assert!(cx.debug_bounds("desktop-header-thinking-hint").is_some());
     }
 
     #[gpui::test]
@@ -10738,7 +10986,9 @@ mod tests {
         assert!(header.contains("Current model unavailable"));
         assert!(!header.contains("not configured"));
         assert!(!header.contains("no text input"));
-        assert!(header.contains("DesktopThinkingLevel::ALL.iter().fold("));
+        assert!(header.contains("view_model.thinking_options.iter().fold("));
+        assert!(header.contains("!view_model.thinking_options.is_empty()"));
+        assert!(header.contains("PopupMenuItem::new(option.label)"));
         assert!(header.contains(".checked(level == view_model.thinking_selection)"));
         for owner in [shell, header, actions] {
             assert!(!owner.contains(&old_model_cycle));
@@ -10767,6 +11017,8 @@ mod tests {
         assert!(!header.contains(".label(\"...\")"));
         assert!(header.contains("thinking: Arc<str>"));
         assert!(header.contains("thinking_selection: DesktopThinkingLevel"));
+        assert!(header.contains("thinking_options: Arc<[ConversationHeaderThinkingOption]>"));
+        assert!(header.contains("thinking_hint: Option<Arc<str>>"));
         assert!(!header.contains("conversation_controller.render_dirty_sequences"));
     }
 
@@ -10967,7 +11219,8 @@ use conversation_header::header_runtime_status_slot_width;
 use conversation_header::{
     ConversationHeader, ConversationHeaderEvent, ConversationHeaderModelGroup,
     ConversationHeaderModelOption, ConversationHeaderModelWarning,
-    ConversationHeaderSelectorOption, ConversationHeaderViewModel,
+    ConversationHeaderSelectorOption, ConversationHeaderThinkingOption,
+    ConversationHeaderViewModel,
 };
 #[cfg(test)]
 use conversation_pane::CONVERSATION_RAIL_WIDTH;

@@ -64,10 +64,15 @@ impl HomeRuntimeContext {
         CodingAgentEmbeddingContext::load(self.options.clone()).map_err(DesktopBridgeError::from)
     }
 
-    pub(super) fn select_model(&mut self, model_id: String) -> Result<(), DesktopBridgeError> {
+    pub(super) fn select_model(
+        &mut self,
+        model_id: String,
+        thinking_level: Option<CodingAgentThinkingLevel>,
+    ) -> Result<(Option<CodingAgentThinkingLevel>, bool), DesktopBridgeError> {
+        let thinking = admitted_model_thinking(&self.context, &model_id, thinking_level)?;
         self.context.select_model(model_id.clone())?;
         self.options = self.options.clone().with_model_id(model_id);
-        Ok(())
+        Ok(thinking)
     }
 
     pub(super) fn select_profile(&mut self, profile_id: String) -> Result<(), DesktopBridgeError> {
@@ -91,6 +96,28 @@ impl HomeRuntimeContext {
         self.context = context;
         Ok(())
     }
+}
+
+pub(super) fn admitted_model_thinking(
+    context: &CodingAgentEmbeddingContext,
+    model_id: &str,
+    requested: Option<CodingAgentThinkingLevel>,
+) -> Result<(Option<CodingAgentThinkingLevel>, bool), DesktopBridgeError> {
+    let model = context
+        .snapshot()
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .ok_or_else(|| DesktopBridgeError::Input {
+            message: format!("unknown desktop model {model_id}"),
+        })?;
+    Ok(match requested {
+        Some(requested) => match sanitize_thinking_level(model, requested) {
+            CodingAgentThinkingLevelSanitization::Explicit(level) => (Some(level), false),
+            CodingAgentThinkingLevelSanitization::AutoFallback => (None, true),
+        },
+        None => (None, false),
+    })
 }
 
 pub(super) struct RuntimeSessionWorkspace {
@@ -412,23 +439,9 @@ impl RuntimeState {
             options = options.with_session_dir(session_root);
         }
         let context = CodingAgentEmbeddingContext::load(options)?;
-        let thinking_level = match thinking_level {
-            Some(requested) => {
-                let snapshot = context.snapshot();
-                let selected_model = snapshot
-                    .models
-                    .iter()
-                    .find(|model| model.id == snapshot.selected_model_id)
-                    .ok_or_else(|| DesktopBridgeError::Session {
-                        message: "desktop prompt context has no selected model capability".into(),
-                    })?;
-                match sanitize_thinking_level(selected_model, requested) {
-                    CodingAgentThinkingLevelSanitization::Explicit(level) => Some(level),
-                    CodingAgentThinkingLevelSanitization::AutoFallback => None,
-                }
-            }
-            None => None,
-        };
+        let selected_model_id = context.snapshot().selected_model_id.clone();
+        let (thinking_level, _) =
+            admitted_model_thinking(&context, &selected_model_id, thinking_level)?;
         let (session_id, snapshot) = self.create_session_in_context(context).await?;
         Ok(NewPromptSession {
             session_id,
@@ -539,6 +552,9 @@ impl RuntimeState {
                 .ok_or_else(|| DesktopBridgeError::Busy {
                     operation: "desktop_prompt".into(),
                 })?;
+        let selected_model_id = workspace.context.snapshot().selected_model_id.clone();
+        let (thinking_level, _) =
+            admitted_model_thinking(&workspace.context, &selected_model_id, thinking_level)?;
         let prepared = workspace
             .context
             .prepare_prompt_with_attachments(&prompt, &attachments)?;

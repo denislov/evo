@@ -122,7 +122,12 @@ pub(super) fn reconcile_direct_update(
 
 pub(super) struct ProjectionCommandCompletions {
     reload: Option<(u64, usize, usize, usize)>,
-    selection: Option<(u64, DesktopRuntimeSelectionKind)>,
+    selection: Option<(
+        u64,
+        DesktopRuntimeSelectionKind,
+        Option<CodingAgentThinkingLevel>,
+        bool,
+    )>,
     recovery: Option<(u64, DesktopRecoveryAction, String)>,
     resync: Option<u64>,
     session: Option<(String, u64, DesktopCommandIntent)>,
@@ -151,12 +156,14 @@ impl ProjectionCommandCompletions {
             DesktopRuntimeUpdate::SelectionChanged {
                 command_id,
                 selection,
+                thinking_level,
+                thinking_fallback,
                 ..
             } if shell
                 .command_ledger
                 .matches(*command_id, &DesktopCommandIntent::Selection(*selection)) =>
             {
-                Some((*command_id, *selection))
+                Some((*command_id, *selection, *thinking_level, *thinking_fallback))
             }
             _ => None,
         };
@@ -270,11 +277,24 @@ impl ProjectionCommandCompletions {
                 "Reload response failed projection validation; resync is required.".into()
             });
         }
-        if let Some((command_id, selection)) = self.selection
+        if let Some((command_id, selection, thinking_level, thinking_fallback)) = self.selection
             && shell
                 .command_ledger
                 .complete(command_id, &DesktopCommandIntent::Selection(selection))
         {
+            if projection_replaced && selection == DesktopRuntimeSelectionKind::Model {
+                let thinking_selection = DesktopThinkingLevel::from_explicit(thinking_level);
+                shell.thinking_selection = thinking_selection;
+                shell.thinking_hint = thinking_fallback
+                    .then(|| Arc::from("Thinking reset to Auto for the selected model."));
+                let session_id = shell
+                    .projection
+                    .as_ref()
+                    .map(|projection| projection.snapshot().session.session_id.clone());
+                if let Some(session_id) = session_id.as_deref() {
+                    shell.remember_thinking_selection(session_id, thinking_selection);
+                }
+            }
             let notice = if projection_replaced {
                 match selection {
                     DesktopRuntimeSelectionKind::Model => format!(

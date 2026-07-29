@@ -98,32 +98,61 @@ async fn dispatch_command_inner(
             })
         }
         DesktopRuntimeCommand::SelectModel {
-            target, model_id, ..
+            target,
+            model_id,
+            thinking_level,
+            ..
         } => {
-            let metadata = match target {
+            let (metadata, thinking_level, thinking_fallback) = match target {
                 DesktopRuntimeOwnerTarget::Home => {
-                    state.home.select_model(model_id)?;
-                    state.metadata_snapshot(None)
+                    let (thinking_level, thinking_fallback) =
+                        state.home.select_model(model_id, thinking_level)?;
+                    (
+                        state.metadata_snapshot(None),
+                        thinking_level,
+                        thinking_fallback,
+                    )
                 }
                 DesktopRuntimeOwnerTarget::Session { session_id } => {
                     let session_id = resolve_target(state, active, Some(&session_id))?;
                     if let Some(prompt) = active.get_mut(&session_id) {
+                        let (thinking_level, thinking_fallback) =
+                            super::driver::admitted_model_thinking(
+                                &prompt.context,
+                                &model_id,
+                                thinking_level,
+                            )?;
                         prompt.context.select_model(model_id)?;
-                        active_metadata_snapshot(prompt)?
+                        (
+                            active_metadata_snapshot(prompt)?,
+                            thinking_level,
+                            thinking_fallback,
+                        )
                     } else {
-                        state
+                        let workspace = state
                             .workspaces
                             .get_mut(&session_id)
-                            .expect("resolved idle workspace must remain present")
-                            .context
-                            .select_model(model_id)?;
-                        state.metadata_snapshot(Some(&session_id))
+                            .expect("resolved idle workspace must remain present");
+                        let (thinking_level, thinking_fallback) =
+                            super::driver::admitted_model_thinking(
+                                &workspace.context,
+                                &model_id,
+                                thinking_level,
+                            )?;
+                        workspace.context.select_model(model_id)?;
+                        (
+                            state.metadata_snapshot(Some(&session_id)),
+                            thinking_level,
+                            thinking_fallback,
+                        )
                     }
                 }
             };
             Ok(DesktopRuntimeUpdate::SelectionChanged {
                 command_id,
                 selection: DesktopRuntimeSelectionKind::Model,
+                thinking_level,
+                thinking_fallback,
                 metadata,
             })
         }
@@ -275,6 +304,8 @@ async fn dispatch_command_inner(
             Ok(DesktopRuntimeUpdate::SelectionChanged {
                 command_id,
                 selection: DesktopRuntimeSelectionKind::SessionProfile,
+                thinking_level: None,
+                thinking_fallback: false,
                 metadata,
             })
         }

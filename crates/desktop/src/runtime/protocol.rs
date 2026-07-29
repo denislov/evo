@@ -70,6 +70,7 @@ pub(super) enum DesktopRuntimeCommand {
         command_id: u64,
         target: DesktopRuntimeOwnerTarget,
         model_id: String,
+        thinking_level: Option<CodingAgentThinkingLevel>,
     },
     SelectSessionProfile {
         command_id: u64,
@@ -525,6 +526,8 @@ pub enum DesktopRuntimeUpdate {
     SelectionChanged {
         command_id: u64,
         selection: DesktopRuntimeSelectionKind,
+        thinking_level: Option<CodingAgentThinkingLevel>,
+        thinking_fallback: bool,
         metadata: DesktopRuntimeMetadataSnapshot,
     },
     PromptAccepted {

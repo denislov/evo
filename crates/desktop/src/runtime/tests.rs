@@ -229,18 +229,30 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
     assert!(sessions.is_empty());
 
     bridge
-        .try_select_model(3, home_owner_target(), "claude-haiku-4-5")
+        .try_select_model(
+            3,
+            home_owner_target(),
+            "claude-3-5-haiku-latest",
+            Some(CodingAgentThinkingLevel::High),
+        )
         .unwrap();
     let Some(DesktopRuntimeUpdate::SelectionChanged {
         command_id: 3,
         selection: DesktopRuntimeSelectionKind::Model,
+        thinking_level,
+        thinking_fallback,
         metadata,
     }) = bridge.next_update().await
     else {
         panic!("sessionless model selection should return project metadata");
     };
-    assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
+    assert_eq!(
+        metadata.project.selected_model_id,
+        "claude-3-5-haiku-latest"
+    );
     assert!(metadata.session.is_none());
+    assert_eq!(thinking_level, None);
+    assert!(thinking_fallback);
 
     bridge
         .try_select_session_profile(30, home_owner_target(), "review")
@@ -249,6 +261,7 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
         command_id: 30,
         selection: DesktopRuntimeSelectionKind::SessionProfile,
         metadata,
+        ..
     }) = bridge.next_update().await
     else {
         panic!("sessionless profile selection should return Home metadata");
@@ -555,18 +568,30 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     assert_eq!(projection.conversation(), &conversation);
 
     bridge
-        .try_select_model(8, session_owner_target(&session_id), "claude-haiku-4-5")
+        .try_select_model(
+            8,
+            session_owner_target(&session_id),
+            "claude-3-5-haiku-latest",
+            Some(CodingAgentThinkingLevel::High),
+        )
         .unwrap();
     let update = bridge.next_update().await.unwrap();
     let DesktopRuntimeUpdate::SelectionChanged {
         command_id: 8,
         selection: DesktopRuntimeSelectionKind::Model,
+        thinking_level,
+        thinking_fallback,
         metadata,
     } = &update
     else {
         panic!("idle model selection must return a typed replacement snapshot");
     };
-    assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
+    assert_eq!(
+        metadata.project.selected_model_id,
+        "claude-3-5-haiku-latest"
+    );
+    assert_eq!(*thinking_level, None);
+    assert!(*thinking_fallback);
     assert_eq!(
         metadata.session.as_ref().unwrap().session.session_id,
         session_id
@@ -582,6 +607,7 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
         command_id: 9,
         selection: DesktopRuntimeSelectionKind::SessionProfile,
         metadata,
+        ..
     } = &update
     else {
         panic!("idle profile selection must return a typed replacement snapshot");
@@ -596,7 +622,10 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
             .as_str(),
         "review"
     );
-    assert_eq!(metadata.project.selected_model_id, "claude-haiku-4-5");
+    assert_eq!(
+        metadata.project.selected_model_id,
+        "claude-3-5-haiku-latest"
+    );
     assert!(projection.apply(update).is_replaced());
     assert_eq!(projection.conversation(), &conversation);
 
@@ -605,6 +634,7 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
             10,
             session_owner_target(&session_id),
             "missing-desktop-model",
+            None,
         )
         .unwrap();
     assert!(matches!(
@@ -635,12 +665,41 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     let DesktopRuntimeResyncSnapshot::Hydrated(snapshot) = replacement else {
         panic!("idle resync must hydrate durable state");
     };
-    assert_eq!(snapshot.project.selected_model_id, "claude-haiku-4-5");
+    assert_eq!(
+        snapshot.project.selected_model_id,
+        "claude-3-5-haiku-latest"
+    );
     assert_eq!(
         snapshot.session.session.default_agent_profile_id.as_str(),
         "review"
     );
     bridge.shutdown().await.unwrap();
+}
+
+#[test]
+fn runtime_model_thinking_admission_never_retains_an_unsupported_explicit_level() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let context = CodingAgentEmbeddingContext::load(options).unwrap();
+
+    let (thinking_level, fallback) = admitted_model_thinking(
+        &context,
+        "claude-3-5-haiku-latest",
+        Some(CodingAgentThinkingLevel::High),
+    )
+    .unwrap();
+    assert_eq!(thinking_level, None);
+    assert!(fallback);
+
+    let selected_model_id = context.snapshot().selected_model_id.clone();
+    let (thinking_level, fallback) = admitted_model_thinking(
+        &context,
+        &selected_model_id,
+        Some(CodingAgentThinkingLevel::High),
+    )
+    .unwrap();
+    assert_eq!(thinking_level, Some(CodingAgentThinkingLevel::High));
+    assert!(!fallback);
 }
 
 #[tokio::test]
@@ -695,11 +754,15 @@ async fn ten_mib_transcript_stays_single_hydration_across_metadata_commands() {
             1 => DesktopRuntimeUpdate::SelectionChanged {
                 command_id,
                 selection: DesktopRuntimeSelectionKind::Model,
+                thinking_level: None,
+                thinking_fallback: false,
                 metadata: metadata.clone(),
             },
             2 => DesktopRuntimeUpdate::SelectionChanged {
                 command_id,
                 selection: DesktopRuntimeSelectionKind::SessionProfile,
+                thinking_level: None,
+                thinking_fallback: false,
                 metadata: metadata.clone(),
             },
             _ => DesktopRuntimeUpdate::PromptStarted {
@@ -1076,7 +1139,7 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
     };
     assert_eq!(snapshot.project.cwd, canonical_a);
     bridge
-        .try_select_model(107, session_owner_target(&session_a), "gpt-5")
+        .try_select_model(107, session_owner_target(&session_a), "gpt-5", None)
         .unwrap();
     assert!(matches!(
         bridge.next_update().await,
@@ -1203,7 +1266,7 @@ async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() 
             if snapshot.project.cwd == project.canonicalize().unwrap()
     ));
     bridge
-        .try_select_model(113, session_owner_target(&first_id), "gpt-5")
+        .try_select_model(113, session_owner_target(&first_id), "gpt-5", None)
         .unwrap();
     assert!(matches!(
         bridge.next_update().await,
@@ -3134,6 +3197,7 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
                 command_id: 32,
                 target: session_owner_target(active.session_id.clone()),
                 model_id: "claude-haiku-4-5".into(),
+                thinking_level: None,
             },
             DesktopRuntimeCommandKind::SelectModel,
         ),
