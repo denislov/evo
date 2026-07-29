@@ -1264,6 +1264,31 @@ CenterDrawerHost
 
 #### VUI-422：Inspector dock/drawer 行为
 
+> 状态：已完成。现有 `ShellLayout` 的 docked Inspector 继续占据独立全高列，由 Inspector 自己渲染 header，
+> Root 仅在列边界提供 resize handle；responsive Inspector 则统一由 `CenterDrawerHost` 挂在
+> `desktop-center-body` 的绝对定位层中，drawer 顶边与 center body 顶边一致，始终低于
+> `desktop-conversation-header`，不会覆盖 Model、Thinking、Profile selector 或 Header toggle。Header toggle
+> 仍是主入口，drawer 内 close 仅在 `presented_as_drawer` 时出现并保留至少 `32x32` hit target。
+>
+> Drawer 的 typed state 仍只有一个 `active_drawer`：Sessions/Inspector 切换直接替换 active kind，并保留首次
+> 打开前的 `drawer_restore_focus`；outside-click、Escape 和 drawer 内 close 最终都经过
+> `dismiss_drawer(..., true)`。新增回归在 narrow 下执行 Sessions → Inspector → Sessions 双向切换，并验证
+> Escape 回到 Composer；既有 outside-click、authorization modal 抢占和 resize reconcile 回归继续覆盖其余
+> 生命周期。CodeGraph 审计确认 Header、center body 与 docked Inspector 的 owner/调用路径未产生第二套状态；
+> `ast-grep-outline` 的变更后复核确认新增内容仅位于 NativeShell 测试模块，没有把 runtime/product authority
+> 下放给 drawer host 或 pane。
+>
+> 完成标准已由两个独立 GPUI hit-test 闭环：在 `1000x900`（medium）和 `700x900`（narrow）分别从 Header
+> 点击 Inspector toggle，再点击 Profile selector 并选择 `exact-reviewer`；断言精确的
+> `SelectSessionProfile` command 到达 `desktop-visual-test` session owner，drawer 不被选择动作误关，辅助
+> close 随后恢复 Composer 焦点。Desktop 304 个 library tests 中 299 个通过、5 个既有 release 性能用例保持
+> ignored，20 个 dependency boundary tests 与严格 all-target/all-features Clippy 通过；格式和 diff 检查通过。
+> 10 张 deterministic native fixture 已复核，normalized RMSE 全部为 `0`，因此没有替换 golden；native gate
+> 的 GPU frame P95 为 `5.073 ms`、input dispatch-to-post-render P95 为 `8.354 ms`、steady RSS growth 为
+> `172032 B`，headless gate 的 10k-row CPU frame P95 为 `2.290 ms`、input roundtrip P95 为 `4.945 ms`、
+> change-to-render P95 为 `340 us`。9.5 完整 visual matrix 仍需加入持久化的 medium/narrow Inspector-open
+> fixture；本项已完成交互/hit-test，计划最终收敛前不得遗漏该执行债务。
+
 工作：
 
 - Docked Inspector 保持独立 header/resize。
