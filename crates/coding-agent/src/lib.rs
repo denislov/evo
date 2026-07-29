@@ -38,9 +38,10 @@ pub mod api {
             CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentEmbeddingSnapshot,
             CodingAgentModelCatalogEntry, CodingAgentModelChoice, CodingAgentProfileChoice,
             CodingAgentResourceCommand, CodingAgentResourceCommandKind, CodingAgentResourceSummary,
-            CodingAgentSettingsSummary, CodingAgentThinkingLevel, configured_model_catalog,
+            CodingAgentSettingsSummary, CodingAgentThinkingCapability, CodingAgentThinkingLevel,
+            CodingAgentThinkingLevelSanitization, configured_model_catalog,
             global_config_directory, global_skill_catalog, model_catalog,
-            model_catalog_entry_by_id,
+            model_catalog_entry_by_id, sanitize_thinking_level,
         };
         pub use crate::app::interactive::{
             CodingAgentApplicationStartup, CodingAgentInteractiveStartup,

@@ -14,7 +14,7 @@ use coding_agent::api::client::{
 use coding_agent::api::embedding::{
     CodingAgentEmbeddingSnapshot, CodingAgentModelChoice, CodingAgentProfileChoice,
     CodingAgentResourceCommand, CodingAgentResourceCommandKind, CodingAgentResourceSummary,
-    CodingAgentSettingsSummary,
+    CodingAgentSettingsSummary, CodingAgentThinkingCapability, CodingAgentThinkingLevel,
 };
 use coding_agent::api::event::CodingAgentProductEvent;
 use coding_agent::api::view::{
@@ -741,6 +741,17 @@ fn hydrated_snapshot(
                     name: "Performance Fixture".into(),
                     provider: "fixture".into(),
                     reasoning: true,
+                    thinking_capability: CodingAgentThinkingCapability {
+                        supported: true,
+                        explicit_levels: vec![
+                            CodingAgentThinkingLevel::Minimal,
+                            CodingAgentThinkingLevel::Low,
+                            CodingAgentThinkingLevel::Medium,
+                            CodingAgentThinkingLevel::High,
+                            CodingAgentThinkingLevel::XHigh,
+                        ],
+                        can_disable: true,
+                    },
                     supports_text: true,
                     supports_images: true,
                     context_window: 200_000,
@@ -753,6 +764,7 @@ fn hydrated_snapshot(
                     name: "Review Fixture".into(),
                     provider: "fixture".into(),
                     reasoning: false,
+                    thinking_capability: CodingAgentThinkingCapability::default(),
                     supports_text: true,
                     supports_images: false,
                     context_window: 100_000,
@@ -765,6 +777,7 @@ fn hydrated_snapshot(
                     name: "Image Fixture".into(),
                     provider: "fixture".into(),
                     reasoning: false,
+                    thinking_capability: CodingAgentThinkingCapability::default(),
                     supports_text: false,
                     supports_images: true,
                     context_window: 32_000,

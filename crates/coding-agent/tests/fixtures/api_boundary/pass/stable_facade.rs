@@ -19,10 +19,12 @@ use coding_agent::api::embedding::{
     CodingAgentProfileCatalog, CodingAgentProfileDelegationSummary, CodingAgentPromptImage,
     CodingAgentProviderAuthKind, CodingAgentProviderAuthState, CodingAgentResourceCommand,
     CodingAgentResourceCommandKind, CodingAgentSessionQuery, CodingAgentSessionSelection,
-    CodingAgentTeamProfileCatalogEntry, CodingAgentThinkingLevel, CodingAgentToolExecutionMode,
+    CodingAgentTeamProfileCatalogEntry, CodingAgentThinkingCapability, CodingAgentThinkingLevel,
+    CodingAgentThinkingLevelSanitization, CodingAgentToolExecutionMode,
     CodingAgentWorkspaceResolutionError, CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
     CodingAgentResolvedWorkspace, configured_model_catalog, global_auth_snapshot,
     global_config_directory, global_skill_catalog, model_catalog, model_catalog_entry_by_id,
+    sanitize_thinking_level,
 };
 use coding_agent::api::error::{CodingAgentPublicDiagnostic, CodingAgentPublicError};
 use coding_agent::api::event::PRODUCT_EVENT_PROTOCOL_VERSION;
@@ -76,6 +78,15 @@ fn workspace_contract() {
     let _: Option<CodingAgentWorkspaceMigration> = None;
     let _: CodingAgentWorkspaceMigrationOutcome = CodingAgentWorkspaceMigrationOutcome::Pending;
     touch(selection);
+}
+
+fn thinking_contract(model: &CodingAgentModelChoice) {
+    let capability: &CodingAgentThinkingCapability = &model.thinking_capability;
+    touch(capability.supported);
+    touch(capability.supports(CodingAgentThinkingLevel::High));
+    let outcome: CodingAgentThinkingLevelSanitization =
+        sanitize_thinking_level(model, CodingAgentThinkingLevel::High);
+    touch(outcome);
 }
 
 fn resolved_session_options(

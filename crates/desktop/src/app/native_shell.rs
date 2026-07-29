@@ -4737,7 +4737,7 @@ mod tests {
     };
     use coding_agent::api::embedding::{
         CodingAgentEmbeddingSnapshot, CodingAgentModelChoice, CodingAgentProfileChoice,
-        CodingAgentResourceSummary, CodingAgentSettingsSummary,
+        CodingAgentResourceSummary, CodingAgentSettingsSummary, CodingAgentThinkingCapability,
     };
     use coding_agent::api::review::CodingAgentFileReview;
     use coding_agent::api::view::{
@@ -4770,6 +4770,17 @@ mod tests {
                         name: "Test Model".into(),
                         provider: "fixture".into(),
                         reasoning: true,
+                        thinking_capability: CodingAgentThinkingCapability {
+                            supported: true,
+                            explicit_levels: vec![
+                                CodingAgentThinkingLevel::Minimal,
+                                CodingAgentThinkingLevel::Low,
+                                CodingAgentThinkingLevel::Medium,
+                                CodingAgentThinkingLevel::High,
+                                CodingAgentThinkingLevel::XHigh,
+                            ],
+                            can_disable: true,
+                        },
                         supports_text: true,
                         supports_images: true,
                         context_window: 200_000,
@@ -4782,6 +4793,7 @@ mod tests {
                         name: "Adjacent Model".into(),
                         provider: "fixture".into(),
                         reasoning: false,
+                        thinking_capability: CodingAgentThinkingCapability::default(),
                         supports_text: true,
                         supports_images: false,
                         context_window: 80_000,
@@ -4794,6 +4806,7 @@ mod tests {
                         name: "Exact Target".into(),
                         provider: "fixture".into(),
                         reasoning: false,
+                        thinking_capability: CodingAgentThinkingCapability::default(),
                         supports_text: true,
                         supports_images: false,
                         context_window: 100_000,
@@ -4806,6 +4819,7 @@ mod tests {
                         name: "Image Only".into(),
                         provider: "fixture".into(),
                         reasoning: false,
+                        thinking_capability: CodingAgentThinkingCapability::default(),
                         supports_text: false,
                         supports_images: true,
                         context_window: 32_000,

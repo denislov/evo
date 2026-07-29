@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use agent_core::api::agent::ThinkingLevel;
 use agent_core::api::resources::{AgentResources, Skill, load_skills};
+use ai::api::compatibility::{ModelCompat, ThinkingFormat, ThinkingLevelMap, ThinkingLevelValue};
 use ai::api::model::{Model, ModelInput};
 
 use crate::app::auth::{CodingAgentAuthController, load_global_auth_store};
@@ -122,6 +123,7 @@ pub struct CodingAgentModelChoice {
     pub name: String,
     pub provider: String,
     pub reasoning: bool,
+    pub thinking_capability: CodingAgentThinkingCapability,
     pub supports_text: bool,
     pub supports_images: bool,
     pub context_window: u32,
@@ -143,10 +145,56 @@ pub struct CodingAgentModelCatalogEntry {
     pub api: String,
     pub provider: String,
     pub reasoning: bool,
+    pub thinking_capability: CodingAgentThinkingCapability,
     pub supports_text: bool,
     pub supports_images: bool,
     pub context_window: u32,
     pub max_output_tokens: u32,
+}
+
+/// Provider-neutral thinking controls supported by one model.
+///
+/// `supported` distinguishes reasoning models that only support Auto from
+/// non-reasoning models that should hide the thinking selector entirely.
+/// `explicit_levels` excludes [`CodingAgentThinkingLevel::Off`]; callers use
+/// `can_disable` to decide whether an explicit Off choice is legal. An empty
+/// level list means the model has no user-selectable thinking intensity, even
+/// when the underlying catalog marks it as a reasoning model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodingAgentThinkingCapability {
+    pub supported: bool,
+    pub explicit_levels: Vec<CodingAgentThinkingLevel>,
+    pub can_disable: bool,
+}
+
+impl CodingAgentThinkingCapability {
+    pub fn supports(&self, level: CodingAgentThinkingLevel) -> bool {
+        match level {
+            CodingAgentThinkingLevel::Off => self.can_disable,
+            _ => self.explicit_levels.contains(&level),
+        }
+    }
+}
+
+/// Result of reconciling an explicit thinking request with a model catalog
+/// capability. Unsupported requests fall back to product-controlled Auto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodingAgentThinkingLevelSanitization {
+    Explicit(CodingAgentThinkingLevel),
+    AutoFallback,
+}
+
+/// Keep a supported explicit level or return an Auto fallback without exposing
+/// provider compatibility details to application adapters.
+pub fn sanitize_thinking_level(
+    model: &CodingAgentModelChoice,
+    requested: CodingAgentThinkingLevel,
+) -> CodingAgentThinkingLevelSanitization {
+    if model.thinking_capability.supports(requested) {
+        CodingAgentThinkingLevelSanitization::Explicit(requested)
+    } else {
+        CodingAgentThinkingLevelSanitization::AutoFallback
+    }
 }
 
 /// Return the stable, product-owned model catalog in provider/id order.
@@ -783,6 +831,7 @@ fn build_snapshot(
                 name: model.name,
                 provider: model.provider,
                 reasoning: model.reasoning,
+                thinking_capability: model.thinking_capability,
                 supports_text: model.supports_text,
                 supports_images: model.supports_images,
                 context_window: model.context_window,
@@ -903,6 +952,152 @@ mod tests {
     use crate::app::settings::global_settings_snapshot;
     use crate::config::AuthStore;
     use crate::runtime::facade::CodingAgentErrorCategory;
+    use ai::api::compatibility::{
+        AnthropicMessagesCompat, OpenAICompletionsCompat, ThinkingLevelValue,
+    };
+    use ai::api::model::ModelCost;
+
+    fn thinking_model(api: &str, reasoning: bool) -> Model {
+        Model {
+            id: format!("{api}-test-model"),
+            name: "Thinking Test Model".into(),
+            api: api.into(),
+            provider: "test-provider".into(),
+            base_url: String::new(),
+            reasoning,
+            thinking_level_map: None,
+            input: vec![ModelInput::Text],
+            cost: ModelCost::default(),
+            context_window: 128_000,
+            max_tokens: 16_000,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    #[test]
+    fn anthropic_capability_exposes_budget_levels_and_explicit_disable() {
+        let mut model = thinking_model("anthropic-messages", true);
+        model.thinking_level_map = Some(ThinkingLevelMap {
+            xhigh: Some(ThinkingLevelValue::String("max".into())),
+            ..Default::default()
+        });
+        model.compat = Some(ModelCompat::AnthropicMessages(AnthropicMessagesCompat {
+            force_adaptive_thinking: Some(true),
+            ..Default::default()
+        }));
+
+        let entry = model_catalog_entry(&model);
+
+        assert_eq!(
+            entry.thinking_capability.explicit_levels,
+            EXPLICIT_THINKING_LEVELS
+        );
+        assert!(entry.thinking_capability.supported);
+        assert!(entry.thinking_capability.can_disable);
+    }
+
+    #[test]
+    fn openai_capability_filters_explicit_null_mapping_and_cannot_disable() {
+        let mut model = thinking_model("openai-responses", true);
+        model.thinking_level_map = Some(ThinkingLevelMap {
+            minimal: Some(ThinkingLevelValue::Null),
+            xhigh: Some(ThinkingLevelValue::String("xhigh".into())),
+            ..Default::default()
+        });
+
+        let entry = model_catalog_entry(&model);
+
+        assert_eq!(
+            entry.thinking_capability.explicit_levels,
+            vec![
+                CodingAgentThinkingLevel::Low,
+                CodingAgentThinkingLevel::Medium,
+                CodingAgentThinkingLevel::High,
+                CodingAgentThinkingLevel::XHigh,
+            ]
+        );
+        assert!(!entry.thinking_capability.can_disable);
+        assert!(entry.thinking_capability.supported);
+    }
+
+    #[test]
+    fn reasoning_api_without_a_level_map_uses_its_complete_default_matrix() {
+        let model = thinking_model("openai-responses", true);
+
+        assert_eq!(
+            model_catalog_entry(&model)
+                .thinking_capability
+                .explicit_levels,
+            EXPLICIT_THINKING_LEVELS
+        );
+    }
+
+    #[test]
+    fn non_reasoning_model_has_no_thinking_controls() {
+        let model = thinking_model("anthropic-messages", false);
+
+        assert_eq!(
+            model_catalog_entry(&model).thinking_capability,
+            CodingAgentThinkingCapability::default()
+        );
+    }
+
+    #[test]
+    fn reasoning_model_without_tunable_api_keeps_auto_only_capability() {
+        let model = thinking_model("openai-completions", true);
+
+        assert_eq!(
+            model_catalog_entry(&model).thinking_capability,
+            CodingAgentThinkingCapability {
+                supported: true,
+                explicit_levels: Vec::new(),
+                can_disable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn openai_deepseek_compatibility_allows_explicit_disable() {
+        let mut model = thinking_model("openai-completions", true);
+        model.compat = Some(ModelCompat::OpenAICompletions(OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::DeepSeek),
+            ..Default::default()
+        }));
+
+        let capability = model_catalog_entry(&model).thinking_capability;
+
+        assert_eq!(capability.explicit_levels, EXPLICIT_THINKING_LEVELS);
+        assert!(capability.can_disable);
+    }
+
+    #[test]
+    fn unsupported_explicit_thinking_request_falls_back_to_auto() {
+        let model = thinking_model("openai-responses", true);
+        let entry = model_catalog_entry(&model);
+        let choice = CodingAgentModelChoice {
+            id: entry.id,
+            name: entry.name,
+            provider: entry.provider,
+            reasoning: entry.reasoning,
+            thinking_capability: entry.thinking_capability,
+            supports_text: entry.supports_text,
+            supports_images: entry.supports_images,
+            context_window: entry.context_window,
+            max_output_tokens: entry.max_output_tokens,
+            configured: true,
+            selected: true,
+        };
+
+        assert_eq!(
+            sanitize_thinking_level(&choice, CodingAgentThinkingLevel::High),
+            CodingAgentThinkingLevelSanitization::Explicit(CodingAgentThinkingLevel::High)
+        );
+        assert_eq!(
+            sanitize_thinking_level(&choice, CodingAgentThinkingLevel::Off),
+            CodingAgentThinkingLevelSanitization::AutoFallback
+        );
+    }
 
     #[test]
     fn embedding_prepares_explicit_file_attachments_with_product_bounds() {
@@ -1133,10 +1328,90 @@ pub(crate) fn model_catalog_entry(model: &Model) -> CodingAgentModelCatalogEntry
         api: model.api.clone(),
         provider: model.provider.clone(),
         reasoning: model.reasoning,
+        thinking_capability: thinking_capability(model),
         supports_text: model.input.contains(&ModelInput::Text),
         supports_images: model.input.contains(&ModelInput::Image),
         context_window: model.context_window,
         max_output_tokens: model.max_tokens,
+    }
+}
+
+const EXPLICIT_THINKING_LEVELS: [CodingAgentThinkingLevel; 5] = [
+    CodingAgentThinkingLevel::Minimal,
+    CodingAgentThinkingLevel::Low,
+    CodingAgentThinkingLevel::Medium,
+    CodingAgentThinkingLevel::High,
+    CodingAgentThinkingLevel::XHigh,
+];
+
+fn thinking_capability(model: &Model) -> CodingAgentThinkingCapability {
+    if !model.reasoning {
+        return CodingAgentThinkingCapability::default();
+    }
+
+    CodingAgentThinkingCapability {
+        supported: true,
+        explicit_levels: if api_supports_explicit_thinking(model) {
+            EXPLICIT_THINKING_LEVELS
+                .into_iter()
+                .filter(|level| thinking_level_is_mapped(model.thinking_level_map.as_ref(), *level))
+                .collect()
+        } else {
+            Vec::new()
+        },
+        can_disable: api_can_disable_thinking(model),
+    }
+}
+
+fn thinking_level_is_mapped(
+    mapping: Option<&ThinkingLevelMap>,
+    level: CodingAgentThinkingLevel,
+) -> bool {
+    let Some(mapping) = mapping else {
+        return true;
+    };
+    let value = match level {
+        CodingAgentThinkingLevel::Minimal => mapping.minimal.as_ref(),
+        CodingAgentThinkingLevel::Low => mapping.low.as_ref(),
+        CodingAgentThinkingLevel::Medium => mapping.medium.as_ref(),
+        CodingAgentThinkingLevel::High => mapping.high.as_ref(),
+        CodingAgentThinkingLevel::XHigh => mapping.xhigh.as_ref(),
+        CodingAgentThinkingLevel::Off => return false,
+    };
+    !matches!(value, Some(ThinkingLevelValue::Null))
+}
+
+fn api_supports_explicit_thinking(model: &Model) -> bool {
+    match model.api.as_str() {
+        "anthropic-messages"
+        | "azure-openai-responses"
+        | "google-generative-ai"
+        | "mistral-conversations"
+        | "openai-codex-responses"
+        | "openai-responses" => true,
+        "openai-completions" => openai_completions_compat(model).is_some_and(|compat| {
+            compat.supports_reasoning_effort == Some(true)
+                || compat.thinking_format == Some(ThinkingFormat::DeepSeek)
+        }),
+        _ => false,
+    }
+}
+
+fn api_can_disable_thinking(model: &Model) -> bool {
+    match model.api.as_str() {
+        "anthropic-messages" | "mistral-conversations" => true,
+        "openai-completions" => openai_completions_compat(model)
+            .is_some_and(|compat| compat.thinking_format == Some(ThinkingFormat::DeepSeek)),
+        _ => false,
+    }
+}
+
+fn openai_completions_compat(
+    model: &Model,
+) -> Option<&ai::api::compatibility::OpenAICompletionsCompat> {
+    match model.compat.as_ref() {
+        Some(ModelCompat::OpenAICompletions(compat)) => Some(compat),
+        _ => None,
     }
 }
 
