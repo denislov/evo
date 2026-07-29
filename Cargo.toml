@@ -2,6 +2,9 @@
 members = [
   "crates/agent-core", 'crates/ai', "crates/cli", "crates/coding-agent", "crates/desktop", "crates/tui",
 ]
+# The vendored `gpui-component` checkout carries its own workspace; leave it to
+# resolve against that one rather than inheriting this manifest's settings.
+exclude = ["third-party"]
 
 [workspace.package]
 version = "0.7.2"
@@ -12,3 +15,13 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
+
+# Build `gpui-component` from a locally vendored checkout of the pinned upstream
+# revision plus the patches in `patches/gpui-component/`. The dependency
+# declarations in `crates/desktop/Cargo.toml` keep the upstream git + rev so the
+# base revision stays recorded and reviewable; this only redirects where the
+# source is read from. Run `scripts/vendor-gpui-component.sh` to recreate the
+# tree, which is deliberately untracked.
+[patch."https://github.com/longbridge/gpui-component.git"]
+gpui-component = { path = "third-party/gpui-component/crates/ui" }
+gpui-component-assets = { path = "third-party/gpui-component/crates/assets" }

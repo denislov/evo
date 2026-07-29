@@ -1,0 +1,137 @@
+From 502b7e08610ddb93b2713b031d160af0dae5c16d Mon Sep 17 00:00:00 2001
+From: evo <evo@local>
+Date: Wed, 29 Jul 2026 22:04:39 +0800
+Subject: [PATCH] text: seed the background parse accumulator from the
+ synchronous parse
+
+`TextViewState::increment_update` returns early on its synchronous
+full-replace branch (initial content and `set_text`) and never forwards
+the text to the background `UpdateFuture`. That task only ever learns
+about text it parsed itself, so its accumulator stays empty for a state
+that has only been `set_text`.
+
+The first `push_str` then appends onto nothing, and because the receive
+task assigns the result wholesale, the parse *replaces* the document with
+just the appended chunk instead of extending it. Mixing the two public
+APIs is therefore silently lossy.
+
+Hand the freshly parsed content to the background task as a `seed` so its
+accumulator matches what the state shows. A seed carries no pending text
+of its own, so `UpdateFuture` adopts it as the new base and reports
+nothing back; appends that coalesced behind it are then applied on top.
+
+This makes `set_text` + `push_str` composable, which is what lets a
+streaming consumer take the synchronous first parse (real geometry on the
+first layout) and still stream subsequent chunks through the incremental
+async path.
+---
+ crates/ui/src/text/state.rs | 44 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/crates/ui/src/text/state.rs b/crates/ui/src/text/state.rs
+index 63c299cc..67204f02 100644
+--- a/crates/ui/src/text/state.rs
++++ b/crates/ui/src/text/state.rs
+@@ -252,6 +252,7 @@ impl TextViewState {
+             pending_text: text.to_string(),
+             highlight_theme: cx.theme().highlight_theme.clone(),
+             markdown_extensions: self.markdown_extensions.clone(),
++            seed: None,
+         };
+ 
+         // Full-replace updates (initial content / `set_text`) parse
+@@ -271,6 +272,22 @@ impl TextViewState {
+                     if !self.is_selecting {
+                         self.reset_selection();
+                     }
++                    // Hand the freshly parsed content to the background task so
++                    // its accumulator matches what this state now shows. It only
++                    // ever learns about text it parsed itself, so without this a
++                    // state that has only been `set_text` leaves the accumulator
++                    // empty; the first `push_str` would then append to nothing
++                    // and its result would *replace* the document rather than
++                    // extend it, silently dropping everything set before it.
++                    let seed = self.parsed_content.clone();
++                    _ = self.tx.try_send(UpdateOptions {
++                        revision: self.revision,
++                        append: false,
++                        pending_text: String::new(),
++                        highlight_theme: update_options.highlight_theme.clone(),
++                        markdown_extensions: update_options.markdown_extensions.clone(),
++                        seed: Some(seed),
++                    });
+                 }
+                 Err(err) => {
+                     self.parsed_error = Some(err);
+@@ -521,6 +538,24 @@ impl Future for UpdateFuture {
+                     let hit_coalesce_budget =
+                         merge_pending_options(&mut options, self.rx.as_ref().get_ref());
+ 
++                    // A seed carries content the main thread already parsed, so
++                    // adopt it as the accumulator base instead of re-parsing it.
++                    // Anything appended after it merged into `pending_text`, and
++                    // still has to be applied on top.
++                    if let Some(seed) = options.seed.take() {
++                        self.content = seed;
++                        if options.pending_text.is_empty() {
++                            // The main thread already holds exactly this content,
++                            // so there is no result worth reporting back.
++                            if hit_coalesce_budget {
++                                cx.waker().wake_by_ref();
++                                return Poll::Pending;
++                            }
++                            continue;
++                        }
++                        options.append = true;
++                    }
++
+                     let res = parse_content(self.format, self.content.clone(), &options);
+                     if let Ok(content) = &res {
+                         self.content = content.clone();
+@@ -549,6 +584,11 @@ struct UpdateOptions {
+     append: bool,
+     highlight_theme: std::sync::Arc<HighlightTheme>,
+     markdown_extensions: Arc<MarkdownExtensions>,
++    /// Content already parsed synchronously on the main thread, handed over so
++    /// the background accumulator can keep building on it. Always carried by a
++    /// full-replace update, so [`UpdateOptions::merge`] treats it like any other
++    /// replacement and lets a later append extend it.
++    seed: Option<ParsedContent>,
+ }
+ 
+ impl UpdateOptions {
+@@ -669,6 +709,7 @@ mod tests {
+             append: true,
+             highlight_theme: theme.clone(),
+             markdown_extensions: Arc::default(),
++            seed: None,
+         };
+ 
+         options.merge(UpdateOptions {
+@@ -677,6 +718,7 @@ mod tests {
+             append: false,
+             highlight_theme: theme.clone(),
+             markdown_extensions: Arc::default(),
++            seed: None,
+         });
+         options.merge(UpdateOptions {
+             revision: 3,
+@@ -684,6 +726,7 @@ mod tests {
+             append: true,
+             highlight_theme: theme,
+             markdown_extensions: Arc::default(),
++            seed: None,
+         });
+ 
+         assert_eq!(options.revision, 3);
+@@ -705,6 +748,7 @@ mod tests {
+                 append: revision != 1,
+                 highlight_theme: theme.clone(),
+                 markdown_extensions: Arc::default(),
++                seed: None,
+             })
+             .unwrap();
+         }
+-- 
+2.47.3
+

@@ -1,3 +1,7 @@
 /target
 .codegraph
 .codex
+
+# Vendored upstream sources. Recreate with scripts/vendor-gpui-component.sh;
+# only patches/ and that script are tracked.
+/third-party

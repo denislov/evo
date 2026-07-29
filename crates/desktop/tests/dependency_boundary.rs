@@ -92,9 +92,9 @@ fn unstable_ui_dependencies_are_exactly_pinned() {
     assert!(lock.contains(
         "git+https://github.com/zed-industries/zed.git#30730a305ae235f3be44643d5895e142048ef701"
     ));
-    assert!(lock.contains(
-        "git+https://github.com/longbridge/gpui-component.git?rev=bc174a7ec4534b2a4174fddde314b38d30d69093#bc174a7ec4534b2a4174fddde314b38d30d69093"
-    ));
+    // The revision gpui-component actually resolves to is checked by
+    // `vendored_ui_patches_stay_anchored_to_the_pinned_revision`, which knows
+    // whether the workspace is currently redirecting it to a patched checkout.
 }
 
 #[test]
@@ -253,6 +253,80 @@ fn external_desktop_performance_gates_are_cross_platform_and_fail_closed() {
             "Python contract test suite failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn vendored_ui_patches_stay_anchored_to_the_pinned_revision() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates| crates.parent())
+        .expect("desktop crate sits two levels under the workspace root")
+        .to_path_buf();
+
+    let pinned_rev = manifest()["dependencies"]["gpui-component"]["rev"]
+        .as_str()
+        .expect("gpui-component is pinned by revision")
+        .to_owned();
+
+    // `gpui-component` is built from a vendored checkout of the pinned revision
+    // plus local patches, redirected by a workspace `[patch]` section so the
+    // crate manifest keeps recording the upstream base. The vendor script has to
+    // agree with that base: if a revision bump missed the script, the tree would
+    // be rebuilt from stale upstream source while every manifest claimed
+    // otherwise, and the mismatch would only surface as behaviour drift.
+    let root_manifest = fs::read_to_string(workspace_root.join("Cargo.toml"))
+        .expect("workspace manifest should be readable");
+    let patch_declared = root_manifest
+        .contains("[patch.\"https://github.com/longbridge/gpui-component.git\"]")
+        && root_manifest.contains("third-party/gpui-component/crates/ui");
+
+    let script_path = workspace_root.join("scripts/vendor-gpui-component.sh");
+    let script = fs::read_to_string(&script_path)
+        .expect("the vendor script should be committed and readable");
+    assert!(
+        script.contains(&format!("UPSTREAM_REV=\"{pinned_rev}\"")),
+        "scripts/vendor-gpui-component.sh must vendor the pinned revision {pinned_rev}"
+    );
+
+    let patch_dir = workspace_root.join("patches/gpui-component");
+    let patches = fs::read_dir(&patch_dir)
+        .expect("the patch archive directory should be committed")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "patch"))
+        .count();
+
+    // The patched fork and the plain upstream dependency are both valid states;
+    // what must never happen is claiming one and building the other.
+    let lock = fs::read_to_string(workspace_root.join("Cargo.lock"))
+        .expect("workspace lockfile should be readable");
+    let upstream_source = format!(
+        "git+https://github.com/longbridge/gpui-component.git?rev={pinned_rev}#{pinned_rev}"
+    );
+    if patch_declared {
+        assert!(
+            patches > 0,
+            "the workspace redirects gpui-component to third-party/gpui-component, \
+             so patches/gpui-component must archive the delta from {pinned_rev}"
+        );
+        assert!(
+            !lock.contains(&upstream_source),
+            "gpui-component still resolves to the upstream git source, so the \
+             [patch] redirect is not taking effect and the local patches are \
+             silently absent from the build"
+        );
+    } else {
+        assert_eq!(
+            patches, 0,
+            "patches/gpui-component still archives {patches} patch(es) but the \
+             workspace no longer redirects gpui-component, so they are silently \
+             not applied; delete them or restore the [patch] section"
+        );
+        assert!(
+            lock.contains(&upstream_source),
+            "without the [patch] redirect gpui-component must resolve to exactly \
+             {pinned_rev}"
         );
     }
 }

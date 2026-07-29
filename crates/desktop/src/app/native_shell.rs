@@ -8058,6 +8058,108 @@ mod tests {
         );
     }
 
+    /// The two properties the streaming rows need from the append path.
+    ///
+    /// A synchronous first parse gives the first layout real geometry; upstream
+    /// keeps `set_text` synchronous precisely because an async first parse would
+    /// leave `parsed_content` empty and let a `measure_all` list latch a ~0
+    /// height. Appends must then (1) retain the previous parse until the new one
+    /// lands, so a frame arriving mid-parse measures stale-but-valid geometry
+    /// rather than nothing, and (2) actually accumulate onto what came before.
+    ///
+    /// Property (2) only holds with `patches/gpui-component/0001-*.patch`
+    /// applied: upstream's `increment_update` returns early on its synchronous
+    /// branch and never seeds the background accumulator, so the first
+    /// `push_str` appends to nothing and *replaces* the document. This drives
+    /// the real `on_prepaint` hook the rows measure with, drawing frames without
+    /// draining the background parse.
+    #[gpui::test]
+    fn async_markdown_append_retains_and_accumulates(cx: &mut TestAppContext) {
+        struct ProbeRoot;
+        impl Render for ProbeRoot {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                div()
+            }
+        }
+
+        use gpui_component::{ElementExt as _, text::TextView};
+
+        initialize_visual_test(cx);
+        let (_, visual_cx) = cx.add_window_view(|_, _| ProbeRoot);
+        visual_cx.run_until_parked();
+
+        let body = "paragraph **bold** `code`\n\n".repeat(20);
+        let state = visual_cx.update(|_, cx| cx.new(|cx| TextViewState::markdown(&body, cx)));
+
+        fn measure(
+            visual_cx: &mut gpui::VisualTestContext,
+            state: &gpui::Entity<TextViewState>,
+        ) -> f32 {
+            let observed = Rc::new(RefCell::new(0.0f32));
+            let sink = Rc::clone(&observed);
+            let state = state.clone();
+            visual_cx.draw(
+                gpui::point(px(0.), px(0.)),
+                size(px(900.), px(4_000.)),
+                move |_, _| {
+                    div().w(px(900.)).child(
+                        div()
+                            .w_full()
+                            .on_prepaint(move |bounds, _, _| {
+                                *sink.borrow_mut() = f32::from(bounds.size.height);
+                            })
+                            .child(TextView::new(&state)),
+                    )
+                },
+            );
+            *observed.borrow()
+        }
+
+        // The constructor's full-replace parse is synchronous, so the very first
+        // frame already has real geometry.
+        let initial = measure(visual_cx, &state);
+        assert!(
+            initial > 200.,
+            "a synchronous first parse must produce real geometry: {initial}"
+        );
+
+        // A streaming delta. The parse is queued to the background and has not
+        // been drained, so this frame is exactly the one upstream warns about.
+        let appended = "paragraph **bold** `code`\n\n".repeat(5);
+        visual_cx.update(|_, cx| {
+            state.update(cx, |state, cx| state.push_str(&appended, cx));
+        });
+        let mid_parse = measure(visual_cx, &state);
+
+        visual_cx.run_until_parked();
+        let settled = measure(visual_cx, &state);
+
+        println!("desktop_probe\tinitial={initial}\tmid_parse={mid_parse}\tsettled={settled}");
+        assert_eq!(
+            mid_parse, initial,
+            "an appended row keeps its previous parse until the new one lands, so a \
+             frame arriving mid-parse measures stale-but-valid geometry"
+        );
+        // Accumulation: the appended chunk extends the seeded document instead
+        // of replacing it. Without the seed patch this collapses to just the
+        // appended chunk, silently dropping everything streamed before it.
+        let appended_height = settled - initial;
+        assert!(
+            appended_height > 0.,
+            "the append must extend the document, not replace it: \
+             {initial} -> {settled} (a drop here means the vendored patch is missing)"
+        );
+        assert!(
+            (appended_height - initial / 4.).abs() < initial / 8.,
+            "appending a quarter of the body should grow the row by about a \
+             quarter: {initial} -> {settled}"
+        );
+    }
+
     #[test]
     fn detail_toggle_holds_its_row_anchor_while_following_latest() {
         let mut snapshot = visual_test_snapshot();
@@ -8246,14 +8348,26 @@ mod tests {
     fn accessibility_dependencies_are_reproducibly_locked() {
         let manifest = include_str!("../../Cargo.toml");
         let lock = include_str!("../../../../Cargo.lock");
+        let workspace_manifest = include_str!("../../../../Cargo.toml");
+        let vendor_script = include_str!("../../../../scripts/vendor-gpui-component.sh");
         assert!(manifest.contains("rev = \"bc174a7ec4534b2a4174fddde314b38d30d69093\""));
         assert!(manifest.contains("https://github.com/zed-industries/zed.git"));
         assert!(lock.contains(
             "git+https://github.com/zed-industries/zed.git#30730a305ae235f3be44643d5895e142048ef701"
         ));
-        assert!(lock.contains(
-            "git+https://github.com/longbridge/gpui-component.git?rev=bc174a7ec4534b2a4174fddde314b38d30d69093#bc174a7ec4534b2a4174fddde314b38d30d69093"
-        ));
+        // `gpui-component` builds from a vendored checkout of that revision plus
+        // the archived patches, so the lockfile records a path rather than a git
+        // source. Reproducibility then rests on the revision above agreeing with
+        // the one the vendor script checks out; the boundary test
+        // `vendored_ui_patches_stay_anchored_to_the_pinned_revision` enforces
+        // that pair and the patched/unpatched coherence.
+        assert!(
+            workspace_manifest
+                .contains("[patch.\"https://github.com/longbridge/gpui-component.git\"]")
+        );
+        assert!(
+            vendor_script.contains("UPSTREAM_REV=\"bc174a7ec4534b2a4174fddde314b38d30d69093\"")
+        );
     }
 
     #[test]
