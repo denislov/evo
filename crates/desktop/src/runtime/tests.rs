@@ -13,7 +13,9 @@ use coding_agent::api::client::{
     CodingAgentClientProjectionApply, CodingAgentFreshSnapshotRecovery,
     CodingAgentReconnectDelivery, CodingAgentRecoveryPending, CodingAgentRecoveryReason,
 };
-use coding_agent::api::embedding::{CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions};
+use coding_agent::api::embedding::{
+    CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentWorkspaceSelection,
+};
 use coding_agent::api::error::{
     CodingAgentErrorCategory, CodingAgentErrorContext, CodingAgentPublicError,
 };
@@ -94,6 +96,18 @@ fn isolated_options(temp: &tempfile::TempDir) -> (ProcessEnvGuard, CodingAgentEm
         .with_session_dir(&sessions)
         .with_model_id("claude-sonnet-4-5");
     (env, options)
+}
+
+fn new_project_prompt_target(temp: &tempfile::TempDir) -> DesktopPromptTarget {
+    DesktopPromptTarget::new(
+        CodingAgentWorkspaceSelection::project(temp.path().join("project")),
+        "claude-sonnet-4-5",
+        "default",
+    )
+}
+
+fn existing_prompt_target(session_id: impl Into<String>) -> DesktopPromptTarget {
+    DesktopPromptTarget::existing(session_id)
 }
 
 async fn start_runtime(
@@ -681,7 +695,12 @@ async fn prompt_submission_forwards_product_events_and_returns_the_session_owner
     let session_id = initial.session.session.session_id;
 
     bridge
-        .try_submit_prompt(10, "offline desktop prompt", None)
+        .try_submit_prompt(
+            10,
+            existing_prompt_target(&session_id),
+            "offline desktop prompt",
+            None,
+        )
         .unwrap();
     let mut started_operation_id = None;
     let mut saw_product_event = false;
@@ -768,10 +787,20 @@ async fn concurrent_prompts_route_events_and_completions_to_their_session() {
     let second_session = second.session.session.session_id;
 
     bridge
-        .try_submit_prompt_for_session(102, &first_session, "first concurrent prompt", None)
+        .try_submit_prompt(
+            102,
+            existing_prompt_target(&first_session),
+            "first concurrent prompt",
+            None,
+        )
         .unwrap();
     bridge
-        .try_submit_prompt_for_session(103, &second_session, "second concurrent prompt", None)
+        .try_submit_prompt(
+            103,
+            existing_prompt_target(&second_session),
+            "second concurrent prompt",
+            None,
+        )
         .unwrap();
 
     let mut accepted = std::collections::BTreeSet::new();
@@ -883,10 +912,20 @@ async fn closing_one_active_session_does_not_interrupt_another_prompt() {
     };
     let second_session = second.session.session.session_id;
     bridge
-        .try_submit_prompt_for_session(122, &first_session, "close this prompt", None)
+        .try_submit_prompt(
+            122,
+            existing_prompt_target(&first_session),
+            "close this prompt",
+            None,
+        )
         .unwrap();
     bridge
-        .try_submit_prompt_for_session(123, &second_session, "keep this prompt", None)
+        .try_submit_prompt(
+            123,
+            existing_prompt_target(&second_session),
+            "keep this prompt",
+            None,
+        )
         .unwrap();
     bridge.try_close_session(124, &first_session).unwrap();
 
@@ -932,7 +971,12 @@ async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
         .unwrap();
 
     bridge
-        .try_submit_prompt(13, "first desktop prompt", None)
+        .try_submit_prompt(
+            13,
+            new_project_prompt_target(&temp),
+            "first desktop prompt",
+            None,
+        )
         .unwrap();
     let Some(DesktopRuntimeUpdate::PromptAcceptedWithSession {
         command_id: 13,
@@ -987,6 +1031,33 @@ async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
 }
 
 #[tokio::test]
+async fn explicit_new_prompt_target_creates_a_session_when_another_is_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (mut bridge, first) = start_runtime(options).await;
+    let first_session_id = first.session.session.session_id;
+
+    bridge
+        .try_submit_prompt(
+            14,
+            new_project_prompt_target(&temp),
+            "start a distinct conversation",
+            None,
+        )
+        .unwrap();
+    let Some(DesktopRuntimeUpdate::PromptAcceptedWithSession {
+        command_id: 14,
+        snapshot: second,
+    }) = bridge.next_update().await
+    else {
+        panic!("an explicit New target must publish the newly created session");
+    };
+    assert_ne!(second.session.session.session_id, first_session_id);
+
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn projectless_first_prompt_records_the_global_only_scratch_cwd() {
     let temp = tempfile::tempdir().unwrap();
     let global = temp.path().join("global");
@@ -1015,7 +1086,16 @@ async fn projectless_first_prompt_records_the_global_only_scratch_cwd() {
     );
 
     bridge
-        .try_submit_prompt(16, "scratch workspace prompt", None)
+        .try_submit_prompt(
+            16,
+            DesktopPromptTarget::new(
+                CodingAgentWorkspaceSelection::projectless("workspace-runtime-test"),
+                "claude-sonnet-4-5",
+                "default",
+            ),
+            "scratch workspace prompt",
+            None,
+        )
         .unwrap();
     let Some(DesktopRuntimeUpdate::PromptAcceptedWithSession { snapshot, .. }) =
         bridge.next_update().await
@@ -1055,7 +1135,12 @@ async fn session_creation_failure_rejects_the_first_prompt_without_an_active_own
         .unwrap();
 
     bridge
-        .try_submit_prompt(15, "cannot create this session", None)
+        .try_submit_prompt(
+            15,
+            new_project_prompt_target(&temp),
+            "cannot create this session",
+            None,
+        )
         .unwrap();
     assert!(matches!(
         bridge.next_update().await,
@@ -1087,7 +1172,7 @@ async fn prompt_start_failure_reports_the_session_that_was_already_created() {
         &mut active,
         DesktopRuntimeCommand::SubmitPrompt {
             command_id: 16,
-            session_id: None,
+            target: new_project_prompt_target(&temp),
             prompt: "prompt start failure".into(),
             attachments: Vec::new(),
             thinking_level: None,
@@ -1131,6 +1216,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
     let (mut bridge, initial) = start_runtime(options).await;
+    let session_id = initial.session.session.session_id.clone();
     let mut wrong_transcript = initial.clone();
     wrong_transcript.transcript.session_id = "wrong-session".into();
     assert_eq!(
@@ -1139,7 +1225,12 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
     );
     let mut projection = DesktopProjection::new(initial).unwrap();
     bridge
-        .try_submit_prompt(40, "projection cursor fixture", None)
+        .try_submit_prompt(
+            40,
+            existing_prompt_target(session_id),
+            "projection cursor fixture",
+            None,
+        )
         .unwrap();
 
     let mut exercised_strict_reducer = false;
@@ -2337,8 +2428,11 @@ async fn runtime_thread_panic_is_reported_during_join() {
 async fn abort_race_is_typed_and_window_close_is_non_blocking() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, _) = start_runtime(options).await;
-    bridge.try_submit_prompt(20, "abort race", None).unwrap();
+    let (mut bridge, initial) = start_runtime(options).await;
+    let session_id = initial.session.session.session_id;
+    bridge
+        .try_submit_prompt(20, existing_prompt_target(&session_id), "abort race", None)
+        .unwrap();
 
     let mut saw_control_result = false;
     let mut saw_prompt_finished = false;
@@ -2381,7 +2475,12 @@ async fn abort_race_is_typed_and_window_close_is_non_blocking() {
     ));
 
     bridge
-        .try_submit_prompt(22, "close during prompt", None)
+        .try_submit_prompt(
+            22,
+            existing_prompt_target(session_id),
+            "close during prompt",
+            None,
+        )
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -2408,9 +2507,15 @@ async fn abort_race_is_typed_and_window_close_is_non_blocking() {
 async fn steer_and_follow_up_races_keep_typed_command_association() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
-    let (mut bridge, _) = start_runtime(options).await;
+    let (mut bridge, initial) = start_runtime(options).await;
+    let session_id = initial.session.session.session_id;
     bridge
-        .try_submit_prompt(25, "control association race", None)
+        .try_submit_prompt(
+            25,
+            existing_prompt_target(session_id),
+            "control association race",
+            None,
+        )
         .unwrap();
 
     let mut controls_sent = false;
@@ -2669,33 +2774,126 @@ fn command_inputs_and_queue_capacities_are_bounded() {
 }
 
 #[test]
+fn prompt_target_admission_is_typed_bounded_and_debug_redacted() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("private-project-name");
+    std::fs::create_dir_all(&project).unwrap();
+    let valid = DesktopPromptTarget::new(
+        CodingAgentWorkspaceSelection::project(&project),
+        "private-model-id",
+        "private-profile-id",
+    );
+    assert!(validate_prompt_target(&valid).is_ok());
+    assert!(matches!(
+        validate_prompt_target(&DesktopPromptTarget::existing("")),
+        Err(DesktopCommandAdmissionError::InvalidSessionId { .. })
+    ));
+    assert!(matches!(
+        validate_prompt_target(&DesktopPromptTarget::new(
+            CodingAgentWorkspaceSelection::project(temp.path().join("missing-project")),
+            "model",
+            "profile",
+        )),
+        Err(DesktopCommandAdmissionError::InvalidPromptTarget { .. })
+    ));
+    let file = temp.path().join("not-a-project-directory");
+    std::fs::write(&file, "file").unwrap();
+    assert!(matches!(
+        validate_prompt_target(&DesktopPromptTarget::new(
+            CodingAgentWorkspaceSelection::project(file),
+            "model",
+            "profile",
+        )),
+        Err(DesktopCommandAdmissionError::InvalidPromptTarget { .. })
+    ));
+    assert!(matches!(
+        validate_prompt_target(&DesktopPromptTarget::new(
+            CodingAgentWorkspaceSelection::project("bad\0project"),
+            "model",
+            "profile",
+        )),
+        Err(DesktopCommandAdmissionError::InvalidPromptTarget { .. })
+    ));
+    assert!(matches!(
+        validate_prompt_target(&DesktopPromptTarget::new(
+            CodingAgentWorkspaceSelection::project(
+                std::path::PathBuf::from("x").join("y".repeat(MAX_WORKSPACE_PATH_BYTES))
+            ),
+            "model",
+            "profile",
+        )),
+        Err(DesktopCommandAdmissionError::InvalidPromptTarget { .. })
+    ));
+    assert!(matches!(
+        validate_prompt_target(&DesktopPromptTarget::new(
+            CodingAgentWorkspaceSelection::project(&project),
+            "",
+            "profile",
+        )),
+        Err(DesktopCommandAdmissionError::InvalidSelectionId { .. })
+    ));
+
+    let command = DesktopRuntimeCommand::SubmitPrompt {
+        command_id: 902,
+        target: valid,
+        prompt: "private prompt body".into(),
+        attachments: vec![std::path::PathBuf::from("private-attachment-name")],
+        thinking_level: None,
+    };
+    let debug = format!("{command:?}");
+    assert!(debug.contains("SubmitPrompt"));
+    assert!(debug.contains("new"));
+    for secret in [
+        "private-project-name",
+        "private-model-id",
+        "private-profile-id",
+        "private prompt body",
+        "private-attachment-name",
+    ] {
+        assert!(!debug.contains(secret));
+    }
+}
+
+#[test]
 fn attachment_commands_preserve_bounded_paths_and_session_target() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("project")).unwrap();
     let (bridge, mut harness) = DesktopRuntimeBridge::instrumented_for_test();
     let attachments = [
         std::path::PathBuf::from("screenshots/one.png"),
         std::path::PathBuf::from("notes/two.txt"),
     ];
     bridge
-        .try_submit_prompt_with_attachments_for_session(
+        .try_submit_prompt_with_attachments(
             900,
-            "session-attachment-test",
+            existing_prompt_target("session-attachment-test"),
             "inspect these",
             &attachments,
             None,
         )
         .unwrap();
     bridge
-        .try_submit_prompt_with_attachments(901, "inspect once more", &attachments[..1], None)
+        .try_submit_prompt_with_attachments(
+            901,
+            new_project_prompt_target(&temp),
+            "inspect once more",
+            &attachments[..1],
+            None,
+        )
         .unwrap();
     assert_eq!(
         harness.drain_prompt_attachments(),
         [
             (
-                Some("session-attachment-test".into()),
+                existing_prompt_target("session-attachment-test"),
                 "inspect these".into(),
                 attachments.to_vec(),
             ),
-            (None, "inspect once more".into(), attachments[..1].to_vec(),),
+            (
+                new_project_prompt_target(&temp),
+                "inspect once more".into(),
+                attachments[..1].to_vec(),
+            ),
         ]
     );
 }

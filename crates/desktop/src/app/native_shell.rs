@@ -3,6 +3,7 @@ use coding_agent::api::authorization::{ToolAuthorizationDecision, ToolAuthorizat
 use coding_agent::api::embedding::CodingAgentResourceCommandKind;
 use coding_agent::api::embedding::{
     CodingAgentEmbeddingSnapshot, CodingAgentResourceCommand, CodingAgentThinkingLevel,
+    CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
 };
 use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
@@ -17,7 +18,7 @@ use desktop::file_review::{DesktopFileReviewDocument, MAX_VISIBLE_FILE_CHANGES};
 use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel, PreferenceWriter};
 use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
 use desktop::runtime::{
-    DesktopRecoveryAction, DesktopRecoveryIdentity, DesktopRuntimeBridge,
+    DesktopPromptTarget, DesktopRecoveryAction, DesktopRecoveryIdentity, DesktopRuntimeBridge,
     DesktopRuntimeCommandHandle, DesktopRuntimeSelectionKind, MAX_PROMPT_ATTACHMENTS,
     validate_prompt_attachments,
 };
@@ -307,6 +308,36 @@ impl SessionWorkspace {
             .as_ref()
             .map(|projection| projection.snapshot().session.session_id.as_str())
             .unwrap_or(HOME_COMPOSER_SESSION_KEY)
+    }
+
+    fn prompt_target(&self) -> DesktopPromptTarget {
+        if let Some(projection) = self.projection.as_ref() {
+            return DesktopPromptTarget::existing(projection.snapshot().session.session_id.clone());
+        }
+        let workspace = match self
+            .project
+            .workspace
+            .as_ref()
+            .map(|workspace| &workspace.scope)
+        {
+            Some(CodingAgentWorkspaceScope::Project { cwd }) => {
+                CodingAgentWorkspaceSelection::project(cwd.clone())
+            }
+            Some(CodingAgentWorkspaceScope::Projectless { workspace_id }) => {
+                CodingAgentWorkspaceSelection::projectless(workspace_id.clone())
+            }
+            Some(CodingAgentWorkspaceScope::Legacy { cwd: Some(cwd) }) => {
+                CodingAgentWorkspaceSelection::project(cwd.clone())
+            }
+            Some(CodingAgentWorkspaceScope::Legacy { cwd: None }) | None => {
+                CodingAgentWorkspaceSelection::project(self.project.cwd.clone())
+            }
+        };
+        DesktopPromptTarget::new(
+            workspace,
+            self.project.selected_model_id.clone(),
+            self.project.default_agent_profile_id.as_str(),
+        )
     }
 
     fn set_preference_notice(&mut self, message: String) {
@@ -2305,33 +2336,17 @@ impl NativeShell {
             }
         };
         let thinking_level = self.thinking_selection.explicit();
-        let session_id = self
-            .projection
-            .as_ref()
-            .map(|projection| projection.snapshot().session.session_id.clone());
+        let target = self.prompt_target();
         let admission = self.runtime.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
-                session_id
-                    .as_deref()
-                    .map_or_else(
-                        || {
-                            runtime.try_submit_prompt_with_attachments(
-                                command_id,
-                                &payload,
-                                &self.composer_attachments,
-                                thinking_level,
-                            )
-                        },
-                        |session_id| {
-                            runtime.try_submit_prompt_with_attachments_for_session(
-                                command_id,
-                                session_id,
-                                &payload,
-                                &self.composer_attachments,
-                                thinking_level,
-                            )
-                        },
+                runtime
+                    .try_submit_prompt_with_attachments(
+                        command_id,
+                        target,
+                        &payload,
+                        &self.composer_attachments,
+                        thinking_level,
                     )
                     .map_err(|error| error.to_string())
             },
@@ -7650,7 +7665,7 @@ mod tests {
         assert_eq!(
             runtime_harness.drain_prompts(),
             [(
-                Some("desktop-visual-test".into()),
+                DesktopPromptTarget::existing("desktop-visual-test"),
                 "use the session thinking level".into(),
                 Some(CodingAgentThinkingLevel::High),
             )]
@@ -7691,7 +7706,7 @@ mod tests {
         assert_eq!(
             runtime_harness.drain_prompt_attachments(),
             [(
-                Some("desktop-visual-test".into()),
+                DesktopPromptTarget::existing("desktop-visual-test"),
                 "inspect the selected files".into(),
                 vec![
                     PathBuf::from("/desktop-visual-test/screenshot.png"),

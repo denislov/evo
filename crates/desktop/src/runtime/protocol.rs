@@ -3,12 +3,14 @@ use coding_agent::api::client::{
     CodingAgentControlReceipt, CodingAgentRecoveryPending, CodingAgentSnapshot,
 };
 use coding_agent::api::embedding::{CodingAgentEmbeddingSnapshot, CodingAgentThinkingLevel};
+use coding_agent::api::embedding::{CodingAgentWorkspaceSelection, global_config_directory};
 use coding_agent::api::error::CodingAgentPublicError;
 use coding_agent::api::event::{CodingAgentProductEvent, CodingAgentRecoveryResolution};
 use coding_agent::api::review::{
     CodingAgentExternalEditorTarget, CodingAgentFileReview, CodingAgentFileReviewRequest,
 };
 use coding_agent::api::view::CodingAgentTranscriptSnapshot;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::file_review::{DesktopExternalEditorConfig, DesktopExternalEditorLaunchError};
@@ -22,6 +24,7 @@ pub const MAX_PROMPT_ATTACHMENTS: usize = 16;
 pub const MAX_CONTROL_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_SESSION_NAME_BYTES: usize = 1024;
 pub const MAX_DESKTOP_SESSION_CATALOG: usize = 128;
+pub const MAX_WORKSPACE_PATH_BYTES: usize = 16 * 1024;
 
 pub(super) const MAX_SESSION_ID_BYTES: usize = 256;
 pub(super) const MAX_AUTHORIZATION_ID_BYTES: usize = 256;
@@ -32,7 +35,6 @@ pub(super) const MAX_FILE_REVIEW_PATH_BYTES: usize = 16 * 1024;
 pub(super) const MAX_PROMPT_ATTACHMENT_PATH_BYTES: usize = 16 * 1024;
 pub(super) const MAX_PROMPT_ATTACHMENT_PATH_TOTAL_BYTES: usize = 64 * 1024;
 
-#[derive(Debug)]
 pub(super) enum DesktopRuntimeCommand {
     Reload {
         command_id: u64,
@@ -71,7 +73,7 @@ pub(super) enum DesktopRuntimeCommand {
     },
     SubmitPrompt {
         command_id: u64,
-        session_id: Option<String>,
+        target: DesktopPromptTarget,
         prompt: String,
         attachments: Vec<PathBuf>,
         thinking_level: Option<CodingAgentThinkingLevel>,
@@ -118,6 +120,79 @@ pub(super) enum DesktopRuntimeCommand {
         target: CodingAgentExternalEditorTarget,
         editor: DesktopExternalEditorConfig,
     },
+}
+
+/// Explicit target for a desktop prompt submission.
+///
+/// New sessions must carry every Home selection needed to construct their
+/// future per-workspace runtime owner. Existing sessions carry only durable
+/// identity, so a cwd or workspace override cannot be represented.
+#[derive(Clone, PartialEq, Eq)]
+pub enum DesktopPromptTarget {
+    New {
+        workspace: CodingAgentWorkspaceSelection,
+        model_id: String,
+        profile_id: String,
+    },
+    Existing {
+        session_id: String,
+    },
+}
+
+impl DesktopPromptTarget {
+    pub fn new(
+        workspace: CodingAgentWorkspaceSelection,
+        model_id: impl Into<String>,
+        profile_id: impl Into<String>,
+    ) -> Self {
+        Self::New {
+            workspace,
+            model_id: model_id.into(),
+            profile_id: profile_id.into(),
+        }
+    }
+
+    pub fn existing(session_id: impl Into<String>) -> Self {
+        Self::Existing {
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn existing_session_id(&self) -> Option<&str> {
+        match self {
+            Self::New { .. } => None,
+            Self::Existing { session_id } => Some(session_id),
+        }
+    }
+
+    const fn kind_label(&self) -> &'static str {
+        match self {
+            Self::New { .. } => "new",
+            Self::Existing { .. } => "existing",
+        }
+    }
+}
+
+impl fmt::Debug for DesktopPromptTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DesktopPromptTarget")
+            .field("kind", &self.kind_label())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for DesktopRuntimeCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("DesktopRuntimeCommand");
+        debug
+            .field("kind", &self.kind())
+            .field("command_id", &self.command_id());
+        if let Self::SubmitPrompt { target, .. } = self {
+            debug.field("prompt_target", &target.kind_label());
+        }
+        debug.finish_non_exhaustive()
+    }
 }
 
 impl DesktopRuntimeCommand {
@@ -174,9 +249,9 @@ impl DesktopRuntimeCommand {
             Self::OpenSession { session_id, .. }
             | Self::CloseSession { session_id, .. }
             | Self::RenameSession { session_id, .. } => Some(session_id),
+            Self::SubmitPrompt { target, .. } => target.existing_session_id(),
             Self::Resync { session_id, .. }
             | Self::SelectSessionProfile { session_id, .. }
-            | Self::SubmitPrompt { session_id, .. }
             | Self::Abort { session_id, .. }
             | Self::Steer { session_id, .. }
             | Self::FollowUp { session_id, .. }
@@ -509,6 +584,8 @@ pub enum DesktopCommandAdmissionError {
     InvalidSessionId { message: String },
     #[error("invalid session name: {message}")]
     InvalidSessionName { message: String },
+    #[error("invalid prompt target: {message}")]
+    InvalidPromptTarget { message: String },
     #[error("invalid prompt: {message}")]
     InvalidPrompt { message: String },
     #[error("invalid control text: {message}")]
@@ -612,6 +689,42 @@ pub(super) fn validate_session_name(
         });
     }
     Ok(())
+}
+
+pub(super) fn validate_prompt_target(
+    target: &DesktopPromptTarget,
+) -> Result<(), DesktopCommandAdmissionError> {
+    match target {
+        DesktopPromptTarget::Existing { session_id } => validate_session_id(session_id),
+        DesktopPromptTarget::New {
+            workspace,
+            model_id,
+            profile_id,
+        } => {
+            validate_selection_id("model", model_id)?;
+            validate_selection_id("profile", profile_id)?;
+            if let CodingAgentWorkspaceSelection::Project { cwd } = workspace {
+                let display = cwd.to_string_lossy();
+                if display.len() > MAX_WORKSPACE_PATH_BYTES {
+                    return Err(DesktopCommandAdmissionError::InvalidPromptTarget {
+                        message: format!("project path exceeds {MAX_WORKSPACE_PATH_BYTES} bytes"),
+                    });
+                }
+                if display.contains('\0') {
+                    return Err(DesktopCommandAdmissionError::InvalidPromptTarget {
+                        message: "project path contains a NUL byte".into(),
+                    });
+                }
+            }
+            workspace
+                .clone()
+                .resolve(global_config_directory())
+                .map(|_| ())
+                .map_err(|error| DesktopCommandAdmissionError::InvalidPromptTarget {
+                    message: bounded_utf8_prefix(&error.to_string(), 1024),
+                })
+        }
+    }
 }
 
 pub(super) fn bounded_utf8_prefix(value: &str, max_bytes: usize) -> String {

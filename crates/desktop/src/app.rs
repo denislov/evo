@@ -4,7 +4,9 @@ mod native_shell;
 use std::sync::Arc;
 use std::time::Duration;
 
-use coding_agent::api::embedding::{CodingAgentEmbeddingOptions, global_config_directory};
+use coding_agent::api::embedding::{
+    CodingAgentEmbeddingOptions, CodingAgentWorkspaceSelection, global_config_directory,
+};
 use gpui::{
     App, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _, Window,
     WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
@@ -104,24 +106,37 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                     ),
                 };
                 let scratch_id_was_missing = loaded.preferences.scratch_workspace_id.is_none();
-                let embedding_options = if projectless {
-                    let scratch = match resolve_scratch_workspace(
-                        &global_config_dir,
-                        &mut loaded.preferences,
-                    ) {
-                        Ok(scratch) => scratch,
+                let workspace_selection = if projectless {
+                    if let Err(error) =
+                        resolve_scratch_workspace(&global_config_dir, &mut loaded.preferences)
+                    {
+                        let _ = open_failure(
+                            format!("scratch workspace initialization failed: {error}"),
+                            cx,
+                        );
+                        return;
+                    }
+                    CodingAgentWorkspaceSelection::projectless(
+                        loaded
+                            .preferences
+                            .scratch_workspace_id
+                            .clone()
+                            .expect("scratch resolution must persist its workspace id"),
+                    )
+                } else {
+                    CodingAgentWorkspaceSelection::project(cwd)
+                };
+                let embedding_options =
+                    match CodingAgentEmbeddingOptions::for_workspace(workspace_selection) {
+                        Ok(options) => options,
                         Err(error) => {
                             let _ = open_failure(
-                                format!("scratch workspace initialization failed: {error}"),
+                                format!("workspace initialization failed: {error}"),
                                 cx,
                             );
                             return;
                         }
                     };
-                    CodingAgentEmbeddingOptions::new(scratch).with_global_config_only()
-                } else {
-                    CodingAgentEmbeddingOptions::new(cwd)
-                };
                 let writer = match PreferenceWriter::spawn(store) {
                     Ok(writer) => Some(writer),
                     Err(error) => {

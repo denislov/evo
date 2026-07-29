@@ -19,18 +19,36 @@ use crate::file_review::DesktopExternalEditorConfig;
 use super::protocol::DesktopRuntimeCommandKind;
 use super::protocol::{
     DESKTOP_COMMAND_QUEUE_CAPACITY, DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY,
-    DESKTOP_UPDATE_QUEUE_CAPACITY, DesktopCommandAdmissionError, DesktopRecoveryIdentity,
-    DesktopRuntimeCommand, DesktopRuntimeError, DesktopRuntimeHydratedSnapshot,
-    DesktopRuntimeReadySnapshot, DesktopRuntimeShutdownError, DesktopRuntimeStartError,
-    DesktopRuntimeUpdate, local_runtime_error, validate_authorization_identity,
-    validate_control_text, validate_file_review_request, validate_prompt,
-    validate_prompt_with_attachments, validate_recovery_identity, validate_selection_id,
-    validate_session_id, validate_session_name,
+    DESKTOP_UPDATE_QUEUE_CAPACITY, DesktopCommandAdmissionError, DesktopPromptTarget,
+    DesktopRecoveryIdentity, DesktopRuntimeCommand, DesktopRuntimeError,
+    DesktopRuntimeHydratedSnapshot, DesktopRuntimeReadySnapshot, DesktopRuntimeShutdownError,
+    DesktopRuntimeStartError, DesktopRuntimeUpdate, local_runtime_error,
+    validate_authorization_identity, validate_control_text, validate_file_review_request,
+    validate_prompt_target, validate_prompt_with_attachments, validate_recovery_identity,
+    validate_selection_id, validate_session_id, validate_session_name,
 };
 use super::run_runtime;
 
 const STREAMING_DELIVERY_COALESCE_WINDOW: Duration = Duration::from_millis(16);
 const MAX_STREAMING_DELIVERIES_PER_BATCH: usize = 64;
+
+fn admitted_prompt_command(
+    command_id: u64,
+    target: DesktopPromptTarget,
+    prompt: &str,
+    attachments: &[PathBuf],
+    thinking_level: Option<CodingAgentThinkingLevel>,
+) -> Result<DesktopRuntimeCommand, DesktopCommandAdmissionError> {
+    validate_prompt_target(&target)?;
+    validate_prompt_with_attachments(prompt, attachments)?;
+    Ok(DesktopRuntimeCommand::SubmitPrompt {
+        command_id,
+        target,
+        prompt: prompt.to_owned(),
+        attachments: attachments.to_vec(),
+        thinking_level,
+    })
+}
 
 pub(super) fn build_desktop_runtime() -> std::io::Result<runtime::Runtime> {
     runtime::Builder::new_current_thread()
@@ -356,79 +374,38 @@ impl DesktopRuntimeBridge {
     }
 
     #[cfg(test)]
-    #[allow(dead_code, reason = "text-only desktop command compatibility")]
     pub fn try_submit_prompt(
         &self,
         command_id: u64,
+        target: DesktopPromptTarget,
         prompt: &str,
         thinking_level: Option<CodingAgentThinkingLevel>,
     ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_prompt(prompt)?;
-        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
+        self.try_send(admitted_prompt_command(
             command_id,
-            session_id: None,
-            prompt: prompt.to_owned(),
-            attachments: Vec::new(),
+            target,
+            prompt,
+            &[],
             thinking_level,
-        })
+        )?)
     }
 
     #[cfg(test)]
     pub fn try_submit_prompt_with_attachments(
         &self,
         command_id: u64,
+        target: DesktopPromptTarget,
         prompt: &str,
         attachments: &[PathBuf],
         thinking_level: Option<CodingAgentThinkingLevel>,
     ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_prompt_with_attachments(prompt, attachments)?;
-        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
+        self.try_send(admitted_prompt_command(
             command_id,
-            session_id: None,
-            prompt: prompt.to_owned(),
-            attachments: attachments.to_vec(),
+            target,
+            prompt,
+            attachments,
             thinking_level,
-        })
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code, reason = "text-only desktop command compatibility")]
-    pub fn try_submit_prompt_for_session(
-        &self,
-        command_id: u64,
-        session_id: &str,
-        prompt: &str,
-        thinking_level: Option<CodingAgentThinkingLevel>,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_session_id(session_id)?;
-        validate_prompt(prompt)?;
-        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
-            command_id,
-            session_id: Some(session_id.to_owned()),
-            prompt: prompt.to_owned(),
-            attachments: Vec::new(),
-            thinking_level,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_submit_prompt_with_attachments_for_session(
-        &self,
-        command_id: u64,
-        session_id: &str,
-        prompt: &str,
-        attachments: &[PathBuf],
-        thinking_level: Option<CodingAgentThinkingLevel>,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_session_id(session_id)?;
-        validate_prompt_with_attachments(prompt, attachments)?;
-        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
-            command_id,
-            session_id: Some(session_id.to_owned()),
-            prompt: prompt.to_owned(),
-            attachments: attachments.to_vec(),
-            thinking_level,
-        })
+        )?)
     }
 
     #[cfg(test)]
@@ -659,17 +636,21 @@ impl DesktopRuntimeTestHarness {
 
     pub(crate) fn drain_prompts(
         &mut self,
-    ) -> Vec<(Option<String>, String, Option<CodingAgentThinkingLevel>)> {
+    ) -> Vec<(
+        DesktopPromptTarget,
+        String,
+        Option<CodingAgentThinkingLevel>,
+    )> {
         let mut prompts = Vec::new();
         while let Ok(command) = self.commands.try_recv() {
             if let DesktopRuntimeCommand::SubmitPrompt {
-                session_id,
+                target,
                 prompt,
                 thinking_level,
                 ..
             } = command
             {
-                prompts.push((session_id, prompt, thinking_level));
+                prompts.push((target, prompt, thinking_level));
             }
         }
         prompts
@@ -677,17 +658,17 @@ impl DesktopRuntimeTestHarness {
 
     pub(crate) fn drain_prompt_attachments(
         &mut self,
-    ) -> Vec<(Option<String>, String, Vec<PathBuf>)> {
+    ) -> Vec<(DesktopPromptTarget, String, Vec<PathBuf>)> {
         let mut prompts = Vec::new();
         while let Ok(command) = self.commands.try_recv() {
             if let DesktopRuntimeCommand::SubmitPrompt {
-                session_id,
+                target,
                 prompt,
                 attachments,
                 ..
             } = command
             {
-                prompts.push((session_id, prompt, attachments));
+                prompts.push((target, prompt, attachments));
             }
         }
         prompts
@@ -927,76 +908,38 @@ impl DesktopRuntimeCommandHandle {
         })
     }
 
-    #[allow(dead_code, reason = "text-only desktop command compatibility")]
+    #[allow(dead_code, reason = "text-only typed desktop prompt API")]
     pub fn try_submit_prompt(
         &self,
         command_id: u64,
+        target: DesktopPromptTarget,
         prompt: &str,
         thinking_level: Option<CodingAgentThinkingLevel>,
     ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_prompt(prompt)?;
-        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
+        self.try_send(admitted_prompt_command(
             command_id,
-            session_id: None,
-            prompt: prompt.to_owned(),
-            attachments: Vec::new(),
+            target,
+            prompt,
+            &[],
             thinking_level,
-        })
+        )?)
     }
 
     pub fn try_submit_prompt_with_attachments(
         &self,
         command_id: u64,
+        target: DesktopPromptTarget,
         prompt: &str,
         attachments: &[PathBuf],
         thinking_level: Option<CodingAgentThinkingLevel>,
     ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_prompt_with_attachments(prompt, attachments)?;
-        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
+        self.try_send(admitted_prompt_command(
             command_id,
-            session_id: None,
-            prompt: prompt.to_owned(),
-            attachments: attachments.to_vec(),
+            target,
+            prompt,
+            attachments,
             thinking_level,
-        })
-    }
-
-    #[allow(dead_code, reason = "text-only desktop command compatibility")]
-    pub fn try_submit_prompt_for_session(
-        &self,
-        command_id: u64,
-        session_id: &str,
-        prompt: &str,
-        thinking_level: Option<CodingAgentThinkingLevel>,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_session_id(session_id)?;
-        validate_prompt(prompt)?;
-        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
-            command_id,
-            session_id: Some(session_id.to_owned()),
-            prompt: prompt.to_owned(),
-            attachments: Vec::new(),
-            thinking_level,
-        })
-    }
-
-    pub fn try_submit_prompt_with_attachments_for_session(
-        &self,
-        command_id: u64,
-        session_id: &str,
-        prompt: &str,
-        attachments: &[PathBuf],
-        thinking_level: Option<CodingAgentThinkingLevel>,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_session_id(session_id)?;
-        validate_prompt_with_attachments(prompt, attachments)?;
-        self.try_send(DesktopRuntimeCommand::SubmitPrompt {
-            command_id,
-            session_id: Some(session_id.to_owned()),
-            prompt: prompt.to_owned(),
-            attachments: attachments.to_vec(),
-            thinking_level,
-        })
+        )?)
     }
 
     #[allow(dead_code, reason = "single-session adapter compatibility")]

@@ -5,7 +5,7 @@ use coding_agent::api::event::CodingAgentRecoveryResolution;
 
 use super::driver::{ActivePrompt, RuntimeState, close_active_prompt, shutdown_active_prompt};
 use super::protocol::{
-    DesktopBridgeError, DesktopRecoveryAction, DesktopRuntimeCommand,
+    DesktopBridgeError, DesktopPromptTarget, DesktopRecoveryAction, DesktopRuntimeCommand,
     DesktopRuntimeMetadataSnapshot, DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind,
     DesktopRuntimeUpdate, runtime_error,
 };
@@ -153,20 +153,24 @@ async fn dispatch_command_inner(
             }
         }
         DesktopRuntimeCommand::SubmitPrompt {
-            session_id,
+            target,
             prompt,
             attachments,
             thinking_level,
             ..
         } => {
-            let created = if state.sessions.is_empty() && active.is_empty() && session_id.is_none()
-            {
-                Some(state.create_session(0).await?)
-            } else {
-                None
+            let (created, session_id) = match target {
+                DesktopPromptTarget::New { .. } => {
+                    let session_id = state
+                        .create_session(open_session_count(state, active))
+                        .await?;
+                    (Some(session_id.clone()), session_id)
+                }
+                DesktopPromptTarget::Existing { session_id } => {
+                    let session_id = resolve_target(state, active, Some(&session_id))?;
+                    (None, session_id)
+                }
             };
-            let session_id =
-                resolve_target(state, active, session_id.as_deref().or(created.as_deref()))?;
             if active.contains_key(&session_id) {
                 return Err(DesktopBridgeError::Busy {
                     operation: format!("session {session_id} already has an active prompt"),
