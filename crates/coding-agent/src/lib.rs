@@ -38,7 +38,8 @@ pub mod api {
             CodingAgentModelCatalogEntry, CodingAgentModelChoice, CodingAgentProfileChoice,
             CodingAgentResourceCommand, CodingAgentResourceCommandKind, CodingAgentResourceSummary,
             CodingAgentSettingsSummary, CodingAgentThinkingLevel, configured_model_catalog,
-            global_skill_catalog, model_catalog, model_catalog_entry_by_id,
+            global_config_directory, global_skill_catalog, model_catalog,
+            model_catalog_entry_by_id,
         };
         pub use crate::app::interactive::{
             CodingAgentApplicationStartup, CodingAgentInteractiveStartup,

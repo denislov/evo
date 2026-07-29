@@ -42,6 +42,7 @@ pub struct CodingAgentEmbeddingOptions {
     session_dir: Option<PathBuf>,
     model_id: Option<String>,
     default_agent_profile_id: ProfileId,
+    global_config_only: bool,
 }
 
 impl CodingAgentEmbeddingOptions {
@@ -52,6 +53,7 @@ impl CodingAgentEmbeddingOptions {
             session_dir: None,
             model_id: None,
             default_agent_profile_id: ProfileId::from("default"),
+            global_config_only: false,
         }
     }
 
@@ -75,6 +77,13 @@ impl CodingAgentEmbeddingOptions {
         self
     }
 
+    /// Resolve user-global configuration and resources without consulting the
+    /// working directory's `.evo` tree or ancestor context files.
+    pub fn with_global_config_only(mut self) -> Self {
+        self.global_config_only = true;
+        self
+    }
+
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }
@@ -94,6 +103,15 @@ impl CodingAgentEmbeddingOptions {
     pub fn default_agent_profile_id(&self) -> &ProfileId {
         &self.default_agent_profile_id
     }
+
+    pub fn global_config_only(&self) -> bool {
+        self.global_config_only
+    }
+}
+
+/// Return the product-resolved root for user-global configuration.
+pub fn global_config_directory() -> PathBuf {
+    crate::config::resolve_paths(Path::new(".")).global_dir
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -313,12 +331,13 @@ impl CodingAgentEmbeddingContext {
         options: CodingAgentEmbeddingOptions,
     ) -> Result<Self, CodingSessionError> {
         let model_override = options.model_id().map(resolve_model).transpose()?;
-        let run_options = crate::app::application::default_application_options(
+        let mut run_options = crate::app::application::default_application_options(
             options.cwd.clone(),
             model_override,
             options.session_mode.clone(),
             options.session_dir.clone(),
         )?;
+        run_options.global_config_only = options.global_config_only;
         let resolved = resolve_application_context_from_options(
             CodingAgentInvocationOptions::default(),
             run_options,
@@ -851,6 +870,69 @@ mod tests {
     use crate::app::settings::global_settings_snapshot;
     use crate::config::AuthStore;
     use crate::runtime::facade::CodingAgentErrorCategory;
+
+    #[test]
+    fn global_only_embedding_ignores_project_configuration_and_resources() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let scratch = temp.path().join("scratch/workspace-1");
+        std::fs::create_dir_all(global.join("skills/global-skill")).unwrap();
+        std::fs::create_dir_all(scratch.join(".evo/skills/project-skill")).unwrap();
+        std::fs::write(
+            global.join("settings.toml"),
+            "default_thinking_level = \"low\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            scratch.join(".evo/settings.toml"),
+            "default_thinking_level = \"high\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            global.join("skills/global-skill/SKILL.md"),
+            "---\nname: global-skill\ndescription: global\n---\nglobal\n",
+        )
+        .unwrap();
+        std::fs::write(
+            scratch.join(".evo/skills/project-skill/SKILL.md"),
+            "---\nname: project-skill\ndescription: project\n---\nproject\n",
+        )
+        .unwrap();
+        std::fs::write(global.join("AGENTS.md"), "global context").unwrap();
+        std::fs::write(scratch.join("AGENTS.md"), "scratch project context").unwrap();
+        env.set_evo_dir(&global);
+
+        let options = CodingAgentEmbeddingOptions::new(&scratch).with_global_config_only();
+        assert!(options.global_config_only());
+        let context = CodingAgentEmbeddingContext::load(options).unwrap();
+        let snapshot = context.snapshot();
+
+        assert_eq!(global_config_directory(), global);
+        assert_eq!(snapshot.cwd, scratch);
+        assert_eq!(
+            snapshot.settings.default_thinking_level.as_deref(),
+            Some("low")
+        );
+        assert!(
+            snapshot
+                .resources
+                .skill_names
+                .iter()
+                .any(|name| name == "global-skill")
+        );
+        assert!(
+            !snapshot
+                .resources
+                .skill_names
+                .iter()
+                .any(|name| name == "project-skill")
+        );
+        assert_eq!(
+            snapshot.resources.context_files,
+            vec![global.join("AGENTS.md")]
+        );
+    }
 
     #[test]
     fn cwd_free_catalogs_load_global_state_without_an_embedding_context() {

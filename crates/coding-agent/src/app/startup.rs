@@ -48,6 +48,7 @@ pub struct ResolvedApplicationContext {
     pub system_prompt: Option<String>,
     pub tools: Vec<agent_core::api::tool::AgentTool>,
     pub register_builtins: bool,
+    pub global_config_only: bool,
     pub ai_client: Option<AiClient>,
     pub session: Option<SessionRunOptions>,
     pub session_target: Option<ResolvedSessionTarget>,
@@ -73,8 +74,13 @@ pub fn resolve_application_context(
         project_dir: cwd.join(".evo"),
     };
     let mut config_diags = Vec::new();
+    let global_config_only = options.global_config_only;
     let config = Config {
-        settings: config::settings::load_settings(&config_paths, &mut config_diags),
+        settings: if global_config_only {
+            config::settings::load_global_settings(&config_paths, &mut config_diags)
+        } else {
+            config::settings::load_settings(&config_paths, &mut config_diags)
+        },
         auth: config::auth::AuthStore::load(&config_paths.global_auth(), &mut config_diags),
     };
     let mut diagnostics = config_diags
@@ -113,6 +119,7 @@ pub fn resolve_application_context(
                 paths
             },
             theme: config.settings.theme.clone(),
+            include_project_resources: !global_config_only,
         },
     )?;
     diagnostics.extend(
@@ -124,10 +131,11 @@ pub fn resolve_application_context(
 
     validate_selected_resources(&parsed, &loaded_resources)?;
 
-    let context_files = resources::discover_context_files(
+    let context_files = resources::discover_context_files_with_project(
         &cwd,
         &config_paths.global_dir,
         effective_no_context_files(&parsed, &config.settings),
+        !global_config_only,
     );
     let system_prompt = resolve_system_prompt(&parsed, &cwd, &context_files);
     let tools = tools::filter_tools(
@@ -161,6 +169,7 @@ pub fn resolve_application_context(
         system_prompt,
         tools,
         register_builtins: options.register_builtins,
+        global_config_only,
         ai_client: options.ai_client,
         session,
         session_target,
@@ -182,11 +191,14 @@ pub fn resolve_application_context_from_options(
 pub fn resolve_profile_registry(
     context: &ResolvedApplicationContext,
 ) -> Result<ProfileRegistry, ApplicationError> {
-    Ok(ProfileRegistry::load(
-        ProfileRegistryOptions::new()
-            .with_user_root(context.config_paths.global_dir.clone())
-            .with_project_root(context.config_paths.project_dir.clone()),
-    )?)
+    let options =
+        ProfileRegistryOptions::new().with_user_root(context.config_paths.global_dir.clone());
+    let options = if context.global_config_only {
+        options
+    } else {
+        options.with_project_root(context.config_paths.project_dir.clone())
+    };
+    Ok(ProfileRegistry::load(options)?)
 }
 
 pub fn resolve_provider_api_key(

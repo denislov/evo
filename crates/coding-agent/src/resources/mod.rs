@@ -17,7 +17,7 @@ pub struct ContextFile {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceLoadOptions {
     pub no_skills: bool,
     pub no_prompt_templates: bool,
@@ -26,6 +26,22 @@ pub struct ResourceLoadOptions {
     pub prompt_paths: Vec<String>,
     pub theme_paths: Vec<String>,
     pub theme: Option<String>,
+    pub include_project_resources: bool,
+}
+
+impl Default for ResourceLoadOptions {
+    fn default() -> Self {
+        Self {
+            no_skills: false,
+            no_prompt_templates: false,
+            no_themes: false,
+            skill_paths: Vec::new(),
+            prompt_paths: Vec::new(),
+            theme_paths: Vec::new(),
+            theme: None,
+            include_project_resources: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +72,17 @@ pub fn resolve_resource_paths(paths: &[String], cwd: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg(test)]
 pub fn discover_context_files(cwd: &Path, agent_dir: &Path, disabled: bool) -> Vec<ContextFile> {
+    discover_context_files_with_project(cwd, agent_dir, disabled, true)
+}
+
+pub fn discover_context_files_with_project(
+    cwd: &Path,
+    agent_dir: &Path,
+    disabled: bool,
+    include_project_context: bool,
+) -> Vec<ContextFile> {
     if disabled {
         return Vec::new();
     }
@@ -72,17 +98,19 @@ pub fn discover_context_files(cwd: &Path, agent_dir: &Path, disabled: bool) -> V
     }
 
     let mut ancestors = Vec::new();
-    let mut current = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    loop {
-        let remaining = MAX_CONTEXT_TOTAL_BYTES.saturating_sub(retained_bytes);
-        if let Some(file) = load_context_file_from_dir(&current, remaining)
-            && seen.insert(file.path.clone())
-        {
-            retained_bytes = retained_bytes.saturating_add(file.content.len());
-            ancestors.push(file);
-        }
-        if !current.pop() {
-            break;
+    if include_project_context {
+        let mut current = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        loop {
+            let remaining = MAX_CONTEXT_TOTAL_BYTES.saturating_sub(retained_bytes);
+            if let Some(file) = load_context_file_from_dir(&current, remaining)
+                && seen.insert(file.path.clone())
+            {
+                retained_bytes = retained_bytes.saturating_add(file.content.len());
+                ancestors.push(file);
+            }
+            if !current.pop() {
+                break;
+            }
         }
     }
     ancestors.reverse();
@@ -116,7 +144,9 @@ pub fn load_application_resources_with_options(
     let mut resolved_skills = Vec::new();
     if !options.no_skills {
         resolved_skills.push(agent_dir.join("skills"));
-        resolved_skills.push(cwd.join(".evo").join("skills"));
+        if options.include_project_resources {
+            resolved_skills.push(cwd.join(".evo").join("skills"));
+        }
         resolved_skills.extend(resolve_resource_paths(&options.skill_paths, cwd));
         resolved_skills.extend(resolve_resource_paths(skills_dirs, cwd));
     }
@@ -125,8 +155,10 @@ pub fn load_application_resources_with_options(
     if !options.no_prompt_templates {
         resolved_templates.push(agent_dir.join("prompts"));
         resolved_templates.push(agent_dir.join("prompt-templates"));
-        resolved_templates.push(cwd.join(".evo").join("prompts"));
-        resolved_templates.push(cwd.join(".evo").join("prompt-templates"));
+        if options.include_project_resources {
+            resolved_templates.push(cwd.join(".evo").join("prompts"));
+            resolved_templates.push(cwd.join(".evo").join("prompt-templates"));
+        }
         resolved_templates.extend(resolve_resource_paths(&options.prompt_paths, cwd));
         resolved_templates.extend(resolve_resource_paths(template_paths, cwd));
     }
@@ -134,7 +166,10 @@ pub fn load_application_resources_with_options(
     let resolved_themes = if options.no_themes {
         Vec::new()
     } else {
-        let mut paths = vec![agent_dir.join("themes"), cwd.join(".evo").join("themes")];
+        let mut paths = vec![agent_dir.join("themes")];
+        if options.include_project_resources {
+            paths.push(cwd.join(".evo").join("themes"));
+        }
         paths.extend(resolve_resource_paths(&options.theme_paths, cwd));
         paths
     };

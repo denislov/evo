@@ -20,7 +20,7 @@ use coding_agent::api::embedding::{
     CodingAgentProviderAuthKind, CodingAgentProviderAuthState, CodingAgentResourceCommand,
     CodingAgentResourceCommandKind, CodingAgentSessionQuery, CodingAgentSessionSelection,
     CodingAgentTeamProfileCatalogEntry, CodingAgentThinkingLevel, CodingAgentToolExecutionMode,
-    configured_model_catalog, global_auth_snapshot, global_skill_catalog, model_catalog,
+    configured_model_catalog, global_auth_snapshot, global_config_directory, global_skill_catalog, model_catalog,
     model_catalog_entry_by_id,
 };
 use coding_agent::api::error::{CodingAgentPublicDiagnostic, CodingAgentPublicError};
@@ -293,9 +293,11 @@ fn support_types() {
     touch(model_catalog_entry_by_id("gpt-5"));
     touch(configured_model_catalog());
     touch(global_auth_snapshot());
+    touch(global_config_directory());
     touch(global_skill_catalog());
     touch(global_settings_snapshot());
-    touch(CodingAgentEmbeddingOptions::new("."));
+    let global_only = CodingAgentEmbeddingOptions::new(".").with_global_config_only();
+    touch(global_only.global_config_only());
     touch(CodingAgentThinkingLevel::High);
     touch(PRODUCT_EVENT_PROTOCOL_VERSION);
     touch(UI_SNAPSHOT_PROTOCOL_VERSION);

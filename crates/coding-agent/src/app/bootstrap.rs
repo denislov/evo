@@ -68,6 +68,7 @@ pub(crate) struct ApplicationRunOptions {
     pub model_override: Option<Model>,
     pub tools: Vec<AgentTool>,
     pub register_builtins: bool,
+    pub global_config_only: bool,
     pub ai_client: Option<AiClient>,
     pub session: SessionRunOptions,
 }
@@ -78,6 +79,7 @@ impl Default for ApplicationRunOptions {
             model_override: None,
             tools: Vec::new(),
             register_builtins: true,
+            global_config_only: false,
             ai_client: None,
             session: SessionRunOptions::disabled(PathBuf::from(".")),
         }

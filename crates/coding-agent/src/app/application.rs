@@ -28,6 +28,7 @@ pub(crate) fn default_application_options(
         model_override,
         tools: builtin_tools(cwd)?,
         register_builtins: true,
+        global_config_only: false,
         ai_client: None,
         session,
     })
