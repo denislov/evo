@@ -15,6 +15,24 @@ pub(super) fn reconcile_direct_update(
     cx: &mut Context<NativeShell>,
 ) -> DirectCommandUpdate {
     match update {
+        DesktopRuntimeUpdate::SessionClosed {
+            command_id,
+            session_id,
+        } => {
+            let intent = DesktopCommandIntent::CloseSession {
+                session_id: session_id.clone(),
+            };
+            let sessions_dirty = shell.complete_workspace_command(&session_id, command_id, &intent);
+            if sessions_dirty {
+                shell.remove_closed_workspace(&session_id);
+                shell.preference_notice = Some("Session closed.".into());
+                shell.request_session_catalog(cx);
+            }
+            DirectCommandUpdate::Consumed {
+                sessions_dirty,
+                inspector_dirty: sessions_dirty,
+            }
+        }
         DesktopRuntimeUpdate::FileReviewed { command_id, review } => {
             let request = CodingAgentFileReviewRequest::new(review.change.clone(), review.revision);
             let inspector_dirty = shell.command_ledger.complete(

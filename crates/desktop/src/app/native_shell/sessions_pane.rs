@@ -25,7 +25,14 @@ pub(super) enum SessionsPaneEvent {
     Create,
     Refresh,
     Open(String),
-    Close,
+    CloseSession(String),
+    Dismiss,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SessionRuntimeState {
+    pub(super) session_id: Arc<str>,
+    pub(super) status: desktop::shell::SemanticStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +41,8 @@ pub(super) struct SessionsPaneViewModel {
     pub(super) catalog: Arc<[DesktopSessionCatalogEntry]>,
     pub(super) omitted_sessions: usize,
     pub(super) active_session_id: Arc<str>,
+    pub(super) runtime_states: Arc<[SessionRuntimeState]>,
+    pub(super) workspace_limit_reached: bool,
     pub(super) composer_running: bool,
     pub(super) awaiting_prompt_start: bool,
     pub(super) session_pending: bool,
@@ -115,6 +124,7 @@ impl Render for SessionsPane {
         let omitted_sessions = view_model.omitted_sessions;
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let active_semantic_status = view_model.active_status;
+        let runtime_states = Arc::clone(&view_model.runtime_states);
         let refresh_target = cx.entity().downgrade();
         let now = OffsetDateTime::now_utc();
         let visible_session_count = view_model
@@ -166,34 +176,49 @@ impl Render for SessionsPane {
                         }
                     });
                 let relative_time = relative_session_time(&session.updated_at, now);
-                let (status_glyph, status, status_color) = if active {
-                    let label = active_semantic_status.label();
+                let row_status = runtime_states
+                    .iter()
+                    .find(|state| state.session_id.as_ref() == target)
+                    .map(|state| state.status);
+                let (status_glyph, status, status_color) = if active || row_status.is_some() {
+                    let semantic_status = if active {
+                        active_semantic_status
+                    } else {
+                        row_status.unwrap_or(desktop::shell::SemanticStatus::Idle)
+                    };
+                    let label = semantic_status.label();
                     (
-                        active_semantic_status.glyph(),
-                        if label == "Idle" {
+                        semantic_status.glyph(),
+                        if active && label == "Idle" {
                             "current".to_owned()
                         } else {
                             label.to_lowercase()
                         },
-                        semantic_status_color(active_semantic_status),
+                        semantic_status_color(semantic_status),
                     )
                 } else {
                     ("○", "available".to_owned(), rgb(theme.muted_text.value()))
                 };
                 let accessible_label =
                     format!("{semantic_name}, {status}, updated {relative_time}");
-                DesktopActionRow::new(("session-row", index), semantic_name, accessible_label)
-                    .state(DesktopRowState {
-                        selected: active,
-                        disabled: active
-                            || composer_running
-                            || awaiting_prompt_start
-                            || session_pending,
-                        focus_visible: false,
-                    })
-                    .size(DesktopControlSize::Critical)
-                    .leading(div().text_color(status_color).child(status_glyph))
-                    .detail(format!(
+                let close_label = format!("Close {semantic_name}");
+                let row =
+                    DesktopActionRow::new(("session-row", index), semantic_name, accessible_label)
+                        .state(DesktopRowState {
+                            selected: active,
+                            disabled: active
+                                || composer_running
+                                || awaiting_prompt_start
+                                || session_pending,
+                            focus_visible: false,
+                        })
+                        .size(DesktopControlSize::Critical)
+                        .leading(div().text_color(status_color).child(status_glyph));
+                // The docked panel is intentionally compact: preserve the
+                // primary session name and close action. The wide overlay has
+                // enough room to add cwd metadata and relative time.
+                let row = if context_is_overlay {
+                    row.detail(format!(
                         "{} · {status}",
                         session
                             .cwd
@@ -203,16 +228,50 @@ impl Render for SessionsPane {
                     ))
                     .trailing(
                         div()
+                            .w(px(60.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_token(DesignText::Metadata)
                             .text_color(rgb(theme.muted_text.value()))
                             .child(relative_time),
-                        64.,
+                        60.,
                     )
+                } else {
+                    row
+                };
+                let row = row
                     .build(theme)
                     .debug_selector(move || format!("desktop-session-row-{index}"))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(SessionsPaneEvent::Open(target.clone()));
-                    }))
+                    }));
+                let close_target = session.session_id.clone();
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .h(px(DesktopControlSize::Critical.pixels()))
+                    .flex()
+                    .items_center()
+                    .gap_token(DesignSpace::Xs)
+                    .child(div().flex_1().min_w_0().child(row))
+                    // A GPUI Button cannot contain another Button. Keep the
+                    // trailing tool as a fixed-width sibling. The docked row
+                    // reserves 36 px; the overlay additionally reserves 60 px
+                    // for time, keeping both responsive layouts stable.
+                    .child(
+                        DesktopIconButton::new(
+                            ("close-session", index),
+                            DesktopIcon::Close,
+                            close_label,
+                        )
+                        .size(DesktopControlSize::Tool)
+                        .build()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(SessionsPaneEvent::CloseSession(close_target.clone()));
+                        })),
+                    )
             })
             .collect::<Vec<_>>();
         let empty_state = if visible_session_count > 0 {
@@ -268,12 +327,19 @@ impl Render for SessionsPane {
                                 DesktopIconButton::new(
                                     "create-session",
                                     DesktopIcon::Plus,
-                                    "Create a new session · Ctrl/Cmd+N",
+                                    if view_model.workspace_limit_reached {
+                                        "Session limit reached · close one first"
+                                    } else {
+                                        "Create a new session · Ctrl/Cmd+N"
+                                    },
                                 )
                                 .build()
                                 .debug_selector(|| "desktop-hit-create-session".into())
                                 .disabled(
-                                    composer_running || awaiting_prompt_start || session_pending,
+                                    composer_running
+                                        || awaiting_prompt_start
+                                        || session_pending
+                                        || view_model.workspace_limit_reached,
                                 )
                                 .on_click(cx.listener(
                                     |_, _, _, cx| {
@@ -322,7 +388,7 @@ impl Render for SessionsPane {
                                     .debug_selector(|| "desktop-hit-close-narrow-sessions".into())
                                     .on_click(cx.listener(
                                         |_, _, _, cx| {
-                                            cx.emit(SessionsPaneEvent::Close);
+                                            cx.emit(SessionsPaneEvent::Dismiss);
                                         },
                                     )),
                                 )
@@ -334,6 +400,7 @@ impl Render for SessionsPane {
                     .id("sessions-list")
                     .role(Role::List)
                     .aria_label("Recent coding sessions")
+                    .w_full()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

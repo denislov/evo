@@ -65,6 +65,13 @@ impl SessionController {
 
 impl NativeShell {
     pub(super) fn create_session(&mut self, cx: &mut Context<Self>) {
+        if self.open_workspace_count() >= MAX_SESSION_WORKSPACES {
+            self.preference_notice = Some(format!(
+                "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
+            ));
+            self.notify_sessions_pane(cx);
+            return;
+        }
         if self
             .projection
             .as_ref()
@@ -159,6 +166,15 @@ impl NativeShell {
     }
 
     pub(super) fn open_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let already_open = self.active_workspace.session_id() == session_id
+            || self.workspaces.contains_key(&session_id);
+        if !already_open && self.open_workspace_count() >= MAX_SESSION_WORKSPACES {
+            self.preference_notice = Some(format!(
+                "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
+            ));
+            self.notify_sessions_pane(cx);
+            return;
+        }
         if self
             .projection
             .as_ref()

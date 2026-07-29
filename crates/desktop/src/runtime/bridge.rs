@@ -730,10 +730,6 @@ impl DesktopRuntimeCommandHandle {
         })
     }
 
-    #[allow(
-        dead_code,
-        reason = "DSK-512 will wire the routed close action into the session workbench"
-    )]
     pub fn try_close_session(
         &self,
         command_id: u64,

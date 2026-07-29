@@ -18,6 +18,9 @@ pub(crate) enum DesktopCommandIntent {
     OpenSession {
         session_id: String,
     },
+    CloseSession {
+        session_id: String,
+    },
     ListSessions,
     Abort {
         operation_id: String,
@@ -49,6 +52,7 @@ impl DesktopCommandIntent {
             Self::Resync => DesktopRuntimeCommandKind::Resync,
             Self::CreateSession => DesktopRuntimeCommandKind::CreateSession,
             Self::OpenSession { .. } => DesktopRuntimeCommandKind::OpenSession,
+            Self::CloseSession { .. } => DesktopRuntimeCommandKind::CloseSession,
             Self::ListSessions => DesktopRuntimeCommandKind::ListSessions,
             Self::Abort { .. } => DesktopRuntimeCommandKind::Abort,
             Self::Reload => DesktopRuntimeCommandKind::Reload,
@@ -249,6 +253,14 @@ impl DesktopCommandLedger {
             pending: VecDeque::with_capacity(capacity),
             capacity,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn command_id_for(&self, intent: &DesktopCommandIntent) -> Option<u64> {
+        self.pending
+            .iter()
+            .find(|pending| &pending.intent == intent)
+            .map(|pending| pending.command_id)
     }
 }
 

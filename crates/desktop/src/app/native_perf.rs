@@ -365,7 +365,7 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             ..DesktopPreferences::default()
         };
         let shell = cx.new(|cx| {
-            NativeShell::new(
+            let mut shell = NativeShell::new(
                 NativeShellInit {
                     runtime: DesktopRuntimeBridge::disconnected_for_replay(),
                     project,
@@ -378,7 +378,11 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
                 },
                 window,
                 cx,
-            )
+            );
+            if matches!(request, NativeReplayRequest::Visual(_)) && !idle_replay {
+                shell.install_native_visual_session_fixture();
+            }
+            shell
         });
         if let Some(replay) = replay {
             schedule_frame(window, replay);

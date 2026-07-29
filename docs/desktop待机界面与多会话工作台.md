@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -1116,6 +1116,32 @@ refactor(desktop): own one workspace per concurrent session
 - 新增测试：上限拒绝有明确提示且不改变既有工作台；
 - 三档 viewport 的 golden 更新并附 review note。
 
+**实施记录（2026-07-29）**
+
+- Sessions pane 的 bounded view model 新增按 session id 排序的 `SessionRuntimeState`，数据同时来自
+  active 与 parked workspace 的 projection。每行独立映射 idle / running / authorization / warning /
+  error 语义；后台 B 运行时不再借用前台 A 的状态。状态仍以 glyph、文本 accessible label 和颜色共同
+  表达，无色模式不丢失含义。
+- 工作台上限统一按「持有 projection 的运行会话」计数，待机 Home 不占名额。Create 与尚未打开的
+  Open 在 4 个会话时均于发送 runtime command 前拒绝，保留既有 4 个 workspace，并明确提示
+  `close one first`；已打开 workspace 仍可切回。加号在达到上限时同步禁用并给出同义 tooltip。
+- 列表行新增 session-specific Close typed event/intent/runtime command。command id 仍由 shell 的 checked
+  全局序列分配，并记在目标 workspace ledger；`SessionClosed` 只移除对应 workspace。关闭前台时按
+  session id 稳定选择另一个 parked workspace，关闭最后一个会话则回到 Home，并保留可能仍待结算的
+  全局 command ledger，因此迟到的 catalog completion 不会失去 owner。
+- GPUI 的整行 `Button` 不能嵌套另一个 `Button`，因此关闭工具使用独立的固定宽度同级控件，避免被
+  disabled 行吞掉事件。docked panel 为关闭工具稳定保留 36 px，并优先显示 session 名；窄屏 overlay
+  额外保留 60 px relative-time 槽并展示 cwd/status detail。`DesktopActionRow` 的标题允许在预留尾部前
+  安全收缩，不与关闭工具重叠。
+- 新增 GPUI 回归覆盖后台 Running 状态、第五会话拒绝且不发 Open command、后台 Close command 的
+  target-ledger 归属与仅移除 owner；全量验证为 Desktop `211 passed / 5 ignored`、dependency boundary
+  `16/16`、all-target check、严格 Clippy、fmt 与 `git diff --check`。三档 viewport（含窄屏 Sessions
+  dialog）及 authorization / reduced-motion / keyboard-focus / no-color 视觉变体已审图、附 review note，
+  安装后 10 个 fixture 重放 RMSE 均为 `0`。
+- 两组性能门通过：native GPU/present frame p95 `5245µs`、input p95 `8368µs`、steady RSS growth
+  `20480B`、production Markdown p95 `119µs`；headless 10k hydration `2618µs`、frame p95 `2692µs`、
+  input roundtrip p95 `5485µs`，200 events/s streaming p95 `4µs`。
+
 **建议提交**
 
 ```text
@@ -1552,7 +1578,8 @@ accessibility 影响。
 3. **toast 的停留时长与是否堆叠？** 影响 VUI-302。
 4. **自动命名失败是否重试？** 还是一次失败即保持「未命名」，由用户手动改名。
    影响 CAG-106、VUI-306。
-5. **上限 4 是否包含待机态工作区？** 即待机态是否占用一个名额。影响 DSK-511、DSK-513。
+5. **已决策：上限 4 不包含待机态工作区。** 待机 Home 不持有 session projection，也不占运行会话
+   名额；DSK-513 已按此语义实现与验收。
 6. **本轮是否加入会话删除？** `coding-agent` 目前没有 delete API；一旦列表显示名称，
    用户会预期可以删除。若纳入，需新增 `CAG-107`。影响 DSK-513、VUI-306。
 

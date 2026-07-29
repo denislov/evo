@@ -304,6 +304,27 @@ impl SessionWorkspace {
     }
 }
 
+fn workspace_semantic_status(workspace: &SessionWorkspace) -> SemanticStatus {
+    let Some(projection) = workspace.projection.as_ref() else {
+        return SemanticStatus::Idle;
+    };
+    match projection.lifecycle() {
+        DesktopProjectionLifecycle::Failed | DesktopProjectionLifecycle::NeedsResync => {
+            SemanticStatus::Error
+        }
+        DesktopProjectionLifecycle::Stopped => SemanticStatus::Warning,
+        DesktopProjectionLifecycle::Running
+            if !projection.snapshot().pending_authorizations.is_empty() =>
+        {
+            SemanticStatus::Authorization
+        }
+        DesktopProjectionLifecycle::Running if projection.snapshot().active_operation.is_some() => {
+            SemanticStatus::Running
+        }
+        DesktopProjectionLifecycle::Running => SemanticStatus::Idle,
+    }
+}
+
 fn hydrated_session_id(snapshot: &desktop::runtime::DesktopRuntimeHydratedSnapshot) -> &str {
     &snapshot.session.session.session_id
 }
@@ -565,7 +586,10 @@ impl NativeShell {
                     SessionsPaneEvent::Open(session_id) => {
                         this.open_session(session_id.clone(), cx);
                     }
-                    SessionsPaneEvent::Close => {
+                    SessionsPaneEvent::CloseSession(session_id) => {
+                        this.close_session(session_id, cx);
+                    }
+                    SessionsPaneEvent::Dismiss => {
                         this.narrow_sessions_open = false;
                         this.dismiss_overlay(window, cx);
                     }
@@ -802,8 +826,7 @@ impl NativeShell {
     ) -> Option<String> {
         use desktop::runtime::{DesktopRuntimeResyncSnapshot, DesktopRuntimeUpdate};
         match update {
-            DesktopRuntimeUpdate::ProductEvent { session_id, .. }
-            | DesktopRuntimeUpdate::SessionClosed { session_id, .. } => Some(session_id.clone()),
+            DesktopRuntimeUpdate::ProductEvent { session_id, .. } => Some(session_id.clone()),
             update if runtime_update_hydrated_snapshot(update).is_some() => {
                 runtime_update_hydrated_snapshot(update)
                     .map(|snapshot| hydrated_session_id(snapshot).to_owned())
@@ -828,7 +851,8 @@ impl NativeShell {
             DesktopRuntimeUpdate::ResyncRequired { snapshot, .. } => {
                 Some(snapshot.session.session_id.clone())
             }
-            DesktopRuntimeUpdate::SessionsListed { .. } => None,
+            DesktopRuntimeUpdate::SessionsListed { .. }
+            | DesktopRuntimeUpdate::SessionClosed { .. } => None,
             _ => runtime_update_command_id(update)
                 .and_then(|command_id| self.command_owner_session_id(command_id)),
         }
@@ -858,9 +882,9 @@ impl NativeShell {
         if self.workspaces.contains_key(target_session_id) {
             return self.swap_active_workspace(target_session_id);
         }
-        if self.workspaces.len() + 1 >= MAX_SESSION_WORKSPACES {
+        if self.open_workspace_count() >= MAX_SESSION_WORKSPACES {
             self.preference_notice = Some(format!(
-                "Cannot open more than {MAX_SESSION_WORKSPACES} session workspaces."
+                "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
             ));
             return false;
         }
@@ -891,6 +915,105 @@ impl NativeShell {
         self.workspaces
             .insert(previous.session_id().to_owned(), previous);
         true
+    }
+
+    fn open_workspace_count(&self) -> usize {
+        self.workspaces.len() + usize::from(self.projection.is_some())
+    }
+
+    fn reserve_session_command(
+        &mut self,
+        session_id: &str,
+        intent: DesktopCommandIntent,
+    ) -> Result<u64, String> {
+        let command_id = self.next_command_id;
+        let next_command_id = command_id
+            .checked_add(1)
+            .ok_or_else(|| "Desktop command sequence is exhausted; restart the app.".to_owned())?;
+        let ledger = if self.active_workspace.session_id() == session_id {
+            &mut self.active_workspace.command_ledger
+        } else {
+            &mut self
+                .workspaces
+                .get_mut(session_id)
+                .ok_or_else(|| "Cannot close an unavailable session.".to_owned())?
+                .command_ledger
+        };
+        ledger
+            .reserve_with_id(command_id, intent)
+            .map_err(|error| error.to_string())?;
+        self.next_command_id = next_command_id;
+        Ok(command_id)
+    }
+
+    fn close_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let intent = DesktopCommandIntent::CloseSession {
+            session_id: session_id.to_owned(),
+        };
+        let command_id = match self.reserve_session_command(session_id, intent.clone()) {
+            Ok(command_id) => command_id,
+            Err(error) => {
+                self.preference_notice = Some(error);
+                self.notify_sessions_pane(cx);
+                return;
+            }
+        };
+        let admission = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| "desktop runtime is unavailable".to_owned())
+            .and_then(|runtime| {
+                runtime
+                    .try_close_session(command_id, session_id)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = admission {
+            let _ = self.complete_workspace_command(session_id, command_id, &intent);
+            self.preference_notice = Some(error);
+        }
+        self.notify_sessions_pane(cx);
+    }
+
+    fn remove_closed_workspace(&mut self, session_id: &str) {
+        if self.active_workspace.session_id() != session_id {
+            self.workspaces.remove(session_id);
+            return;
+        }
+        if let Some(next_session_id) = self.workspaces.keys().min().cloned() {
+            let _ = self.swap_active_workspace(&next_session_id);
+            self.workspaces.remove(session_id);
+        } else {
+            let project = self.project.clone();
+            let command_ledger = std::mem::take(&mut self.active_workspace.command_ledger);
+            self.active_workspace = SessionWorkspace::new(
+                project,
+                None,
+                Some("Closed the last open session.".into()),
+                command_ledger,
+            );
+        }
+    }
+
+    pub(super) fn install_native_visual_session_fixture(&mut self) {
+        let Some(projection) = self.projection.as_ref() else {
+            return;
+        };
+        let session_id = projection.snapshot().session.session_id.clone();
+        self.session_controller.replace_catalog(
+            vec![desktop::runtime::DesktopSessionCatalogEntry {
+                session_id,
+                name: Some("Current desktop task".into()),
+                cwd: Some(self.project.cwd.display().to_string()),
+                // A future timestamp is clamped to zero elapsed time by the
+                // presentation helper, keeping the replay's `now` label
+                // deterministic across calendar dates.
+                created_at: "9999-12-31T23:59:59Z".into(),
+                updated_at: "9999-12-31T23:59:59Z".into(),
+                active_leaf_id: None,
+            }],
+            0,
+        );
+        self.narrow_sessions_open = true;
     }
 
     fn visibility(&self) -> PanelVisibility {
@@ -1436,6 +1559,7 @@ impl NativeShell {
                         command @ (desktop::runtime::DesktopRuntimeCommandKind::Resync
                         | desktop::runtime::DesktopRuntimeCommandKind::CreateSession
                         | desktop::runtime::DesktopRuntimeCommandKind::OpenSession
+                        | desktop::runtime::DesktopRuntimeCommandKind::CloseSession
                         | desktop::runtime::DesktopRuntimeCommandKind::ListSessions),
                     code,
                     ..
@@ -3619,6 +3743,17 @@ impl NativeShell {
     fn sessions_pane_view_model(&self) -> SessionsPaneViewModel {
         let snapshot = self.projection.as_ref().map(DesktopProjection::snapshot);
         let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
+        let mut runtime_states = self
+            .workspaces
+            .values()
+            .chain(std::iter::once(&self.active_workspace))
+            .filter(|workspace| workspace.projection.is_some())
+            .map(|workspace| SessionRuntimeState {
+                session_id: Arc::from(workspace.session_id()),
+                status: workspace_semantic_status(workspace),
+            })
+            .collect::<Vec<_>>();
+        runtime_states.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         SessionsPaneViewModel {
             panel_width: self.preferences.sessions_panel_width,
             catalog: Arc::from(self.session_controller.catalog().to_vec()),
@@ -3628,6 +3763,8 @@ impl NativeShell {
                     .map(|snapshot| snapshot.session.session_id.as_str())
                     .unwrap_or_default(),
             ),
+            runtime_states: Arc::from(runtime_states),
+            workspace_limit_reached: self.open_workspace_count() >= MAX_SESSION_WORKSPACES,
             composer_running,
             awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
             session_pending: self.command_ledger.contains_where(|intent| {
@@ -4040,26 +4177,7 @@ impl NativeShell {
     }
 
     fn semantic_status(&self) -> SemanticStatus {
-        let Some(projection) = self.projection.as_ref() else {
-            return SemanticStatus::Idle;
-        };
-        match projection.lifecycle() {
-            DesktopProjectionLifecycle::Failed | DesktopProjectionLifecycle::NeedsResync => {
-                SemanticStatus::Error
-            }
-            DesktopProjectionLifecycle::Stopped => SemanticStatus::Warning,
-            DesktopProjectionLifecycle::Running
-                if !projection.snapshot().pending_authorizations.is_empty() =>
-            {
-                SemanticStatus::Authorization
-            }
-            DesktopProjectionLifecycle::Running
-                if projection.snapshot().active_operation.is_some() =>
-            {
-                SemanticStatus::Running
-            }
-            DesktopProjectionLifecycle::Running => SemanticStatus::Idle,
-        }
+        workspace_semantic_status(&self.active_workspace)
     }
 }
 
@@ -4731,7 +4849,8 @@ mod tests {
         runtime_harness.drain_command_kinds();
 
         shell.update(cx, |shell, cx| {
-            let session_b_snapshot = visual_test_snapshot_for("session-b");
+            let mut session_b_snapshot = visual_test_snapshot_for("session-b");
+            session_b_snapshot.session.active_operation = Some("operation-session-b".into());
             let session_b_projection = DesktopProjection::new(session_b_snapshot.clone())
                 .expect("session B fixture is a valid product projection");
             let mut session_b = SessionWorkspace::new(
@@ -4769,6 +4888,15 @@ mod tests {
             shell.composer.edit("draft a");
             shell.inspector_section = InspectorSection::Runtime;
             shell.workspaces.insert("session-b".into(), session_b);
+            let sessions = shell.sessions_pane_view_model();
+            assert_eq!(
+                sessions
+                    .runtime_states
+                    .iter()
+                    .find(|state| state.session_id.as_ref() == "session-b")
+                    .map(|state| state.status),
+                Some(SemanticStatus::Running)
+            );
             shell.refresh_conversation_rows_at_width(800, cx);
             shell.runtime_ui_notification_count = 0;
 
@@ -4842,7 +4970,74 @@ mod tests {
             let session_e = visual_test_snapshot_for("session-e");
             assert!(!shell.install_hydrated_workspace(&session_e));
             assert!(!shell.workspaces.contains_key("session-e"));
+            let workspace_ids_before = shell.workspaces.keys().cloned().collect::<HashSet<_>>();
+            shell.open_session("session-e".into(), cx);
+            assert_eq!(
+                shell.workspaces.keys().cloned().collect::<HashSet<_>>(),
+                workspace_ids_before
+            );
+            assert!(
+                shell
+                    .preference_notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("close one first"))
+            );
         });
+        assert!(
+            !runtime_harness
+                .drain_command_kinds()
+                .contains(&desktop::runtime::DesktopRuntimeCommandKind::OpenSession)
+        );
+    }
+
+    #[gpui::test]
+    fn closing_a_background_workspace_removes_only_its_owner(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let snapshot_a = visual_test_snapshot_for("close-session-a");
+        let projection_a = DesktopProjection::new(snapshot_a)
+            .expect("close-session A fixture is a valid projection");
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, projection_a);
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        shell.update(cx, |shell, cx| {
+            let snapshot_b = visual_test_snapshot_for("close-session-b");
+            let projection_b = DesktopProjection::new(snapshot_b.clone())
+                .expect("close-session B fixture is a valid projection");
+            shell.workspaces.insert(
+                "close-session-b".into(),
+                SessionWorkspace::new(
+                    snapshot_b.project,
+                    Some(projection_b),
+                    None,
+                    DesktopCommandLedger::default(),
+                ),
+            );
+            let intent = DesktopCommandIntent::CloseSession {
+                session_id: "close-session-b".into(),
+            };
+            shell.close_session("close-session-b", cx);
+            let command_id = shell
+                .workspaces
+                .get("close-session-b")
+                .and_then(|workspace| workspace.command_ledger.command_id_for(&intent))
+                .expect("close command is owned by the target workspace");
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::SessionClosed {
+                    command_id,
+                    session_id: "close-session-b".into(),
+                },
+            );
+            assert!(shell.poll_runtime(cx));
+            assert_eq!(shell.active_workspace.session_id(), "close-session-a");
+            assert!(!shell.workspaces.contains_key("close-session-b"));
+        });
+        assert!(
+            runtime_harness
+                .drain_command_kinds()
+                .contains(&desktop::runtime::DesktopRuntimeCommandKind::CloseSession)
+        );
     }
 
     fn desktop_region_bounds(
@@ -7746,7 +7941,7 @@ use inspector_pane::{
 };
 use overlay_host::{OverlayAuthorizationView, OverlayHost, OverlayHostEvent, OverlayViewModel};
 use session_controller::SessionController;
-use sessions_pane::{SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
+use sessions_pane::{SessionRuntimeState, SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
 use status_bar::{StatusBar, StatusBarViewModel};
 use update::ProjectionDirtyRouting;
 #[cfg(test)]

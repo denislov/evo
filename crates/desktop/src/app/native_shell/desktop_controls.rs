@@ -477,7 +477,7 @@ impl DesktopActionRow {
                     .when_some(self.leading, |row, leading| row.child(leading))
                     .child(
                         div()
-                            .flex_none()
+                            .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
