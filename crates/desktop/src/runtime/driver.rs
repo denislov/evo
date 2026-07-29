@@ -16,9 +16,7 @@ use coding_agent::api::event::{
     CodingAgentProductEvent, CodingAgentProductEventDeliveryClass, CodingAgentProductEventFamily,
     CodingAgentRecoveryResolution,
 };
-use coding_agent::api::operation::{
-    CodingAgentOperation, CodingAgentOperationOutcome, PromptInvocation,
-};
+use coding_agent::api::operation::{CodingAgentOperation, CodingAgentOperationOutcome};
 use coding_agent::api::review::{
     CodingAgentExternalEditorTarget, CodingAgentFileReview, CodingAgentFileReviewRequest,
 };
@@ -293,6 +291,7 @@ impl RuntimeState {
         session_id: &str,
         command_id: u64,
         prompt: String,
+        attachments: Vec<std::path::PathBuf>,
         thinking_level: Option<CodingAgentThinkingLevel>,
     ) -> Result<ActivePrompt, DesktopBridgeError> {
         #[cfg(test)]
@@ -301,6 +300,13 @@ impl RuntimeState {
                 message: "injected desktop prompt start failure".into(),
             });
         }
+        let prepared = self
+            .context
+            .prepare_prompt_with_attachments(&prompt, &attachments)?;
+        let display_text = prepared.display_text().to_owned();
+        let operation = self
+            .context
+            .prepared_prompt_operation(prepared, thinking_level);
         let mut session =
             self.sessions
                 .remove(session_id)
@@ -314,13 +320,10 @@ impl RuntimeState {
                 return Err(error.into());
             }
         };
-        let operation = self
-            .context
-            .prompt_operation(PromptInvocation::Text(prompt.clone()), thinking_level);
         let draft_id = CodingAgentDraftId(format!("desktop-prompt-{command_id}"));
         let submission = match connection.prepare_client_submission(
             &mut session,
-            Some(CodingAgentSubmissionDraft::new(draft_id, prompt)),
+            Some(CodingAgentSubmissionDraft::new(draft_id, display_text)),
             operation,
         ) {
             Ok(submission) => submission,

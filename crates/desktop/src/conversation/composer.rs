@@ -96,10 +96,19 @@ impl ComposerState {
         command_id: u64,
         kind: ComposerSubmissionKind,
     ) -> Result<&str, ComposerSubmitError> {
+        self.begin_submit_with_attachments(command_id, kind, false)
+    }
+
+    pub fn begin_submit_with_attachments(
+        &mut self,
+        command_id: u64,
+        kind: ComposerSubmissionKind,
+        has_attachments: bool,
+    ) -> Result<&str, ComposerSubmitError> {
         if matches!(self.admission, ComposerAdmission::Pending { .. }) {
             return Err(ComposerSubmitError::AdmissionPending);
         }
-        if self.draft.trim().is_empty() {
+        if self.draft.trim().is_empty() && !has_attachments {
             return Err(ComposerSubmitError::Empty);
         }
         if self.draft.len() > MAX_COMPOSER_BYTES {
@@ -338,5 +347,25 @@ mod tests {
             Err(ComposerSubmitError::StaleCompletion)
         );
         assert_eq!(composer.draft(), "valid");
+    }
+
+    #[test]
+    fn attachment_only_prompt_can_enter_admission_without_losing_empty_draft() {
+        let mut composer = ComposerState::default();
+        assert_eq!(
+            composer.begin_submit(1, ComposerSubmissionKind::Prompt),
+            Err(ComposerSubmitError::Empty)
+        );
+        assert_eq!(
+            composer
+                .begin_submit_with_attachments(2, ComposerSubmissionKind::Prompt, true)
+                .unwrap(),
+            ""
+        );
+        composer
+            .rejected(2, "attachment was rejected")
+            .expect("matching rejection restores idle admission");
+        assert_eq!(composer.draft(), "");
+        assert_eq!(composer.rejection(), Some("attachment was rejected"));
     }
 }

@@ -25,6 +25,8 @@ use super::{
 pub(super) enum ComposerPaneEvent {
     InputChanged(String),
     Focused,
+    AddAttachments,
+    RemoveAttachment(usize),
     SubmitPrimary,
     Submit,
     SubmitRunning,
@@ -38,8 +40,17 @@ pub(super) struct ComposerPaneViewModel {
     pub(super) awaiting_prompt_start: bool,
     pub(super) authorization_pending: bool,
     pub(super) running_mode: ComposerRunningMode,
+    pub(super) attachments: Arc<[ComposerAttachmentViewModel]>,
+    pub(super) attachments_enabled: bool,
+    pub(super) attachment_disabled_reason: Option<Arc<str>>,
     pub(super) rejection: Option<Arc<str>>,
     pub(super) keyboard_focus_visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ComposerAttachmentViewModel {
+    pub(super) label: Arc<str>,
+    pub(super) path: Arc<str>,
 }
 
 #[derive(Debug, Default)]
@@ -177,6 +188,9 @@ impl Render for ComposerPane {
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
         let authorization_pending = view_model.authorization_pending;
         let running_mode = view_model.running_mode;
+        let attachments = view_model.attachments;
+        let attachments_enabled = view_model.attachments_enabled;
+        let attachment_disabled_reason = view_model.attachment_disabled_reason;
         let rejection = view_model.rejection;
         let keyboard_focus_visible = view_model.keyboard_focus_visible;
         let composer_disabled = composer_pending || awaiting_prompt_start;
@@ -197,6 +211,10 @@ impl Render for ComposerPane {
         };
         let event_target_for_steer = cx.entity().downgrade();
         let event_target_for_queue = cx.entity().downgrade();
+        let attachment_button_label = attachment_disabled_reason.as_deref().map_or_else(
+            || "Add files or images".to_owned(),
+            |reason| format!("Attachments unavailable: {reason}"),
+        );
         let composer_notice = rejection
             .as_deref()
             .map(|notice| (notice, theme.danger))
@@ -263,14 +281,10 @@ impl Render for ComposerPane {
                             .debug_selector(|| "desktop-composer-content".into())
                             .min_h(px(48.))
                             .w_full()
-                            .flex()
-                            .items_end()
-                            .gap_token(DesignSpace::Sm)
                             .child(
                                 div()
                                     .debug_selector(|| "desktop-composer-input-region".into())
-                                    .flex_1()
-                                    .min_w_0()
+                                    .w_full()
                                     .child(
                                         Input::new(&input)
                                             .appearance(false)
@@ -278,6 +292,95 @@ impl Render for ComposerPane {
                                             .focus_bordered(false)
                                             .disabled(composer_disabled),
                                     ),
+                            ),
+                    )
+                    .when(!attachments.is_empty(), |surface| {
+                        surface.child(
+                            div()
+                                .debug_selector(|| "desktop-composer-attachments".into())
+                                .w_full()
+                                .flex()
+                                .flex_wrap()
+                                .gap_token(DesignSpace::Xs)
+                                .children(attachments.iter().enumerate().map(|(index, attachment)| {
+                                    let path = attachment.path.clone();
+                                    div()
+                                        .id(format!("composer-attachment-{index}"))
+                                        .role(Role::ListItem)
+                                        .aria_label(format!("Attached file: {path}"))
+                                        .max_w(px(280.))
+                                        .flex()
+                                        .items_center()
+                                        .gap_token(DesignSpace::Xs)
+                                        .px_token(DesignSpace::Sm)
+                                        .py_token(DesignSpace::Xs)
+                                        .rounded_token(DesignRadius::Md)
+                                        .border_1()
+                                        .border_color(rgb(theme.divider.value()))
+                                        .bg(rgb(theme.surface.value()))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_token(DesignText::Metadata)
+                                                .text_color(rgb(theme.text.value()))
+                                                .truncate()
+                                                .child(attachment.label.to_string()),
+                                        )
+                                        .child(
+                                            DesktopIconButton::new(
+                                                format!("remove-composer-attachment-{index}"),
+                                                DesktopIcon::Close,
+                                                format!("Remove {}", attachment.label),
+                                            )
+                                            .disabled(composer_disabled)
+                                            .build()
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                cx.emit(ComposerPaneEvent::RemoveAttachment(index));
+                                            })),
+                                        )
+                                })),
+                        )
+                    })
+                    .child(
+                        div()
+                            .debug_selector(|| "desktop-composer-bottom-row".into())
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_token(DesignSpace::Sm)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .min_w_0()
+                                    .gap_token(DesignSpace::Xs)
+                                    .child(
+                                        DesktopIconButton::new(
+                                            "add-composer-attachments",
+                                            DesktopIcon::Plus,
+                                            attachment_button_label,
+                                        )
+                                        .size(DesktopControlSize::Standard)
+                                        .disabled(!attachments_enabled || composer_disabled)
+                                        .build()
+                                        .debug_selector(|| {
+                                            "desktop-hit-add-composer-attachments".into()
+                                        })
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(ComposerPaneEvent::AddAttachments);
+                                        })),
+                                    )
+                                    .when_some(attachment_disabled_reason, |left, reason| {
+                                        left.child(
+                                            div()
+                                                .min_w_0()
+                                                .text_token(DesignText::Metadata)
+                                                .text_color(rgb(theme.muted_text.value()))
+                                                .truncate()
+                                                .child(reason.to_string()),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()

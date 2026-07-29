@@ -394,7 +394,9 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             }
             shell
         });
+        let root = cx.new(|cx| Root::new(shell.clone(), window, cx));
         if let Some(replay) = replay {
+            shell.update(cx, |shell, cx| shell.focus_composer_input(window, cx));
             schedule_frame(window, replay);
         }
         if keyboard_focus_replay {
@@ -407,7 +409,7 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
                 window.refresh();
             });
         }
-        cx.new(|cx| Root::new(shell, window, cx))
+        root
     })
     .map(|_| ())
     .map_err(|error| error.to_string())

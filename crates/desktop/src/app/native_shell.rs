@@ -18,7 +18,8 @@ use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel, PreferenceW
 use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
 use desktop::runtime::{
     DesktopRecoveryAction, DesktopRecoveryIdentity, DesktopRuntimeBridge,
-    DesktopRuntimeCommandHandle, DesktopRuntimeSelectionKind,
+    DesktopRuntimeCommandHandle, DesktopRuntimeSelectionKind, MAX_PROMPT_ATTACHMENTS,
+    validate_prompt_attachments,
 };
 use desktop::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH, FocusState, FocusTarget,
@@ -28,11 +29,12 @@ use desktop::shell::{
 };
 use gpui::{
     ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, Role, ScrollStrategy, Styled as _,
-    Subscription, Window, WindowBounds, div, prelude::*, px, rgb,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, PathPromptOptions, Render, Role,
+    ScrollStrategy, Styled as _, Subscription, Window, WindowBounds, div, prelude::*, px, rgb,
 };
 use std::collections::{HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -260,6 +262,7 @@ pub(super) struct SessionWorkspace {
     composer: ComposerState,
     composer_needs_sync: bool,
     composer_running_mode: ComposerRunningMode,
+    composer_attachments: Vec<PathBuf>,
     command_ledger: DesktopCommandLedger,
     thinking_selection: DesktopThinkingLevel,
     file_review: Arc<DesktopFileReviewState>,
@@ -299,6 +302,7 @@ impl SessionWorkspace {
             composer: ComposerState::default(),
             composer_needs_sync: false,
             composer_running_mode: ComposerRunningMode::default(),
+            composer_attachments: Vec::new(),
             command_ledger,
             thinking_selection,
             file_review: Arc::new(DesktopFileReviewState::default()),
@@ -624,6 +628,10 @@ impl NativeShell {
                     }
                     ComposerPaneEvent::Focused => {
                         this.record_focus(FocusTarget::Composer, window, cx);
+                    }
+                    ComposerPaneEvent::AddAttachments => this.choose_composer_attachments(cx),
+                    ComposerPaneEvent::RemoveAttachment(index) => {
+                        this.remove_composer_attachment(*index, cx);
                     }
                     ComposerPaneEvent::SubmitPrimary => {
                         if !this.root_action_blocked_by_overlay(window, cx) {
@@ -1376,6 +1384,7 @@ impl NativeShell {
                         .complete(*command_id, &DesktopCommandIntent::Prompt)
                         && self.composer.accepted(*command_id).is_ok()
                     {
+                        self.composer_attachments.clear();
                         self.composer_needs_sync = true;
                         self.conversation_controller.mark_live_dirty();
                         sessions_pane_dirty = true;
@@ -2226,16 +2235,34 @@ impl NativeShell {
     }
 
     fn submit_composer(&mut self, cx: &mut Context<Self>) {
+        if !self.composer_attachments.is_empty()
+            && !self
+                .project
+                .models
+                .iter()
+                .find(|model| model.id == self.project.selected_model_id)
+                .is_some_and(|model| model.supports_images)
+        {
+            self.set_preference_notice(
+                "Selected model does not support image attachments; the draft was retained.".into(),
+            );
+            self.notify_composer_pane(cx);
+            self.notify_toast_host(cx);
+            cx.notify();
+            return;
+        }
         let intent = DesktopCommandIntent::Prompt;
         let Some(command_id) = self.reserve_command(intent.clone()) else {
             self.notify_toast_host(cx);
             cx.notify();
             return;
         };
-        let payload = match self
-            .composer
-            .begin_submit(command_id, ComposerSubmissionKind::Prompt)
-        {
+        let has_attachments = !self.composer_attachments.is_empty();
+        let payload = match self.composer.begin_submit_with_attachments(
+            command_id,
+            ComposerSubmissionKind::Prompt,
+            has_attachments,
+        ) {
             Ok(payload) => payload.to_owned(),
             Err(error) => {
                 self.command_ledger.complete(command_id, &intent);
@@ -2257,12 +2284,20 @@ impl NativeShell {
                 session_id
                     .as_deref()
                     .map_or_else(
-                        || runtime.try_submit_prompt(command_id, &payload, thinking_level),
+                        || {
+                            runtime.try_submit_prompt_with_attachments(
+                                command_id,
+                                &payload,
+                                &self.composer_attachments,
+                                thinking_level,
+                            )
+                        },
                         |session_id| {
-                            runtime.try_submit_prompt_for_session(
+                            runtime.try_submit_prompt_with_attachments_for_session(
                                 command_id,
                                 session_id,
                                 &payload,
+                                &self.composer_attachments,
                                 thinking_level,
                             )
                         },
@@ -2292,6 +2327,85 @@ impl NativeShell {
         }
     }
 
+    fn choose_composer_attachments(&mut self, cx: &mut Context<Self>) {
+        if let Some(reason) = self.composer_attachment_disabled_reason() {
+            self.set_preference_notice(reason.to_string());
+            self.notify_toast_host(cx);
+            cx.notify();
+            return;
+        }
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach files or images".into()),
+        });
+        cx.spawn(async move |this, cx| match selection.await {
+            Ok(Ok(Some(paths))) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.add_composer_attachments(paths, cx);
+                });
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(_)) | Err(_) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.set_preference_notice("The file picker could not be opened.".into());
+                    this.notify_toast_host(cx);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn add_composer_attachments(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let mut candidate = self.composer_attachments.clone();
+        for path in paths {
+            if !candidate.contains(&path) {
+                candidate.push(path);
+            }
+        }
+        if let Err(error) = validate_prompt_attachments(&candidate) {
+            self.set_preference_notice(error.to_string());
+            self.notify_toast_host(cx);
+            cx.notify();
+            return;
+        }
+        self.composer_attachments = candidate;
+        self.notify_composer_pane(cx);
+        cx.notify();
+    }
+
+    fn remove_composer_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.composer_attachments.len() {
+            self.composer_attachments.remove(index);
+            self.notify_composer_pane(cx);
+            cx.notify();
+        }
+    }
+
+    fn composer_attachment_disabled_reason(&self) -> Option<&'static str> {
+        let supports_images = self
+            .project
+            .models
+            .iter()
+            .find(|model| model.id == self.project.selected_model_id)
+            .is_some_and(|model| model.supports_images);
+        if !supports_images {
+            return Some("Selected model does not support image attachments.");
+        }
+        let snapshot = self.projection.as_ref().map(DesktopProjection::snapshot);
+        if snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some()) {
+            return Some("Attachments are unavailable while an operation is running.");
+        }
+        if matches!(self.composer.admission(), ComposerAdmission::Pending { .. })
+            || self.composer.submitted().is_some()
+        {
+            return Some("Attachments are unavailable while a prompt is starting.");
+        }
+        None
+    }
+
     fn reject_pending_composer(&mut self, message: String) {
         let command_id = match self.composer.admission() {
             ComposerAdmission::Pending { command_id, .. } => *command_id,
@@ -2303,6 +2417,16 @@ impl NativeShell {
     }
 
     fn submit_active_control(&mut self, kind: ComposerSubmissionKind, cx: &mut Context<Self>) {
+        if !self.composer_attachments.is_empty() {
+            self.set_preference_notice(
+                "Attachments cannot be added to a running operation; the draft was retained."
+                    .into(),
+            );
+            self.notify_composer_pane(cx);
+            self.notify_toast_host(cx);
+            cx.notify();
+            return;
+        }
         if kind == ComposerSubmissionKind::Prompt {
             self.set_preference_notice(
                 "Prompt submissions must use the idle composer action.".into(),
@@ -3755,7 +3879,7 @@ impl NativeShell {
         .detach();
     }
 
-    fn focus_composer_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_composer_input(&self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = self.composer_pane.read(cx).focus_handle().clone();
         focus.focus(window, cx);
     }
@@ -3828,6 +3952,7 @@ impl NativeShell {
     fn composer_pane_view_model(&self) -> ComposerPaneViewModel {
         let snapshot = self.projection.as_ref().map(DesktopProjection::snapshot);
         let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
+        let attachment_disabled_reason = self.composer_attachment_disabled_reason();
         ComposerPaneViewModel {
             composer_pending: matches!(
                 self.composer.admission(),
@@ -3838,6 +3963,22 @@ impl NativeShell {
             authorization_pending: snapshot
                 .is_some_and(|snapshot| !snapshot.pending_authorizations.is_empty()),
             running_mode: self.active_composer_running_mode(),
+            attachments: self
+                .composer_attachments
+                .iter()
+                .map(|path| composer_pane::ComposerAttachmentViewModel {
+                    label: Arc::from(
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("attachment"),
+                    ),
+                    path: Arc::from(path.display().to_string()),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            attachments_enabled: attachment_disabled_reason.is_none()
+                && self.composer_attachments.len() < MAX_PROMPT_ATTACHMENTS,
+            attachment_disabled_reason: attachment_disabled_reason.map(Arc::from),
             rejection: self.composer.rejection().map(Arc::from),
             keyboard_focus_visible: self.keyboard_focus_visible(),
         }
@@ -6453,8 +6594,9 @@ mod tests {
         let actions = cx
             .debug_bounds("desktop-composer-actions")
             .expect("Composer action region is laid out");
-        assert!(input.right() <= actions.left());
-        assert!(input.left() >= panel.left() && actions.right() <= panel.right());
+        assert!(input.bottom() <= actions.top());
+        assert!(input.left() >= panel.left() && input.right() <= panel.right());
+        assert!(actions.left() >= panel.left() && actions.right() <= panel.right());
         match cx.debug_bounds("desktop-composer-state-notice") {
             Some(notice) if notice_expected => {
                 assert!(notice.bottom() <= input.top());
@@ -7145,6 +7287,96 @@ mod tests {
                 Some(CodingAgentThinkingLevel::High),
             )]
         );
+    }
+
+    #[gpui::test]
+    fn composer_picker_attaches_bounded_paths_and_forwards_them_with_the_prompt(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, visual_test_projection());
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        let add = cx
+            .debug_bounds("desktop-hit-add-composer-attachments")
+            .expect("composer bottom row exposes the attachment picker");
+        cx.simulate_click(add.center(), gpui::Modifiers::default());
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            assert!(!options.directories);
+            assert!(options.multiple);
+            Some(vec![
+                PathBuf::from("/desktop-visual-test/screenshot.png"),
+                PathBuf::from("/desktop-visual-test/notes.txt"),
+            ])
+        });
+        cx.run_until_parked();
+
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.composer_attachments.len(), 2);
+            shell.composer.edit("inspect the selected files");
+            shell.submit_composer(cx);
+        });
+        assert_eq!(
+            runtime_harness.drain_prompt_attachments(),
+            [(
+                Some("desktop-visual-test".into()),
+                "inspect the selected files".into(),
+                vec![
+                    PathBuf::from("/desktop-visual-test/screenshot.png"),
+                    PathBuf::from("/desktop-visual-test/notes.txt"),
+                ],
+            )]
+        );
+    }
+
+    #[gpui::test]
+    fn composer_rejects_attachment_overflow_without_changing_the_draft(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, cx| {
+            shell.composer.edit("retain this exact draft");
+            shell.add_composer_attachments(
+                (0..=MAX_PROMPT_ATTACHMENTS)
+                    .map(|index| PathBuf::from(format!("/tmp/attachment-{index}.png")))
+                    .collect(),
+                cx,
+            );
+            assert!(shell.composer_attachments.is_empty());
+            assert_eq!(shell.composer.draft(), "retain this exact draft");
+            assert!(
+                shell
+                    .preference_notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("more than 16 attachments"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn composer_disables_attachment_picker_for_a_model_without_image_support(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, cx| {
+            shell.project.selected_model_id = "adjacent-model".into();
+            shell.notify_composer_pane(cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.composer_attachment_disabled_reason()),
+            Some("Selected model does not support image attachments.")
+        );
+        let add = cx
+            .debug_bounds("desktop-hit-add-composer-attachments")
+            .expect("disabled attachment action remains visible with its reason");
+        cx.simulate_click(add.center(), gpui::Modifiers::default());
+        assert!(!cx.did_prompt_for_paths());
     }
 
     #[gpui::test]

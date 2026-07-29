@@ -143,6 +143,7 @@ async fn dispatch_command_inner(
         DesktopRuntimeCommand::SubmitPrompt {
             session_id,
             prompt,
+            attachments,
             thinking_level,
             ..
         } => {
@@ -163,7 +164,7 @@ async fn dispatch_command_inner(
                 .as_ref()
                 .map(|session_id| state.snapshot(session_id))
                 .transpose()?;
-            match state.start_prompt(&session_id, command_id, prompt, thinking_level) {
+            match state.start_prompt(&session_id, command_id, prompt, attachments, thinking_level) {
                 Ok(prompt) => {
                     active.insert(session_id, prompt);
                     Ok(match created_snapshot {

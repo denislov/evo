@@ -1369,6 +1369,37 @@ feat(desktop): promote thinking level to session-scoped state
 - click-to-photon 与 composer latency gate 无回归；
 - 三档 golden 更新并附 review note。
 
+**实施记录（2026-07-29）**
+
+- Composer 改为明确的上下结构：保留既有 1–8 行 auto-grow 和 min/max 高度，输入区下方新增操作栏，
+  左侧固定为 `+` 附件入口，右侧保留发送按钮；运行态的 Steer/Queue selector 仍只与发送按钮成组。
+  已选择文件在两者之间以 bounded chip 列表呈现，显示文件名、完整路径 accessible label 与逐项移除按钮。
+- 附件草稿归属 `SessionWorkspace`，因此随会话切换保存；只有 `PromptAccepted` 才同时清空正文与附件，
+  同步 admission 拒绝、runtime 拒绝、选择超限及产品准备失败都保留原始正文和原附件。支持 attachment-only
+  prompt；运行中的 Steer/FollowUp 不接收附件并给出保留草稿的明确提示。
+- `SubmitPrompt` 新增 `Vec<PathBuf>` 附件载荷。Desktop admission 限制最多 16 项、单路径 16 KiB、路径
+  总量 64 KiB，并拒绝空路径、NUL 与非 UTF-8；超限采用“整批拒绝、不自动截断、保留草稿”的结论。
+  文件选择器使用 GPUI 多文件 prompt，重复路径去重，候选列表只有在整体验证通过后才原子替换会话附件。
+- 当前模型从完整产品 model catalog 按 `selected_model_id` 解析；`supports_images=false` 时入口保持可见但
+  disabled，tooltip / accessible label 与可见 metadata 均解释原因。若用户在已选择附件后切到不支持图片的
+  模型，提交同样 fail closed 并保留草稿，不会把不兼容 payload 送入 runtime。
+- 产品侧独立提交 `dae428a`（`feat(coding-agent): prepare prompts from explicit attachments`）新增窄 API：
+  embedding adapter 只交付显式路径，产品继续通过既有 `append_file_reference`、图片数量/编码字节边界以及
+  `block_images` / `auto_resize_images` 设置准备 opaque prompt，再由产品 operation factory 消费；Desktop
+  不读取、不编码图片，也不复制产品图片策略。
+- 新增 reducer、runtime harness 与 GPUI 回归，覆盖 attachment-only admission、协议精确携带路径、文件选择器、
+  超过 16 项整批拒绝且正文不丢失，以及不支持图片的模型禁用入口。native replay 同时改为在 Root 安装后
+  显式恢复 Composer focus，避免新增 footer focus target 使性能输入夹具漂移；`InputRenderLatencyProbe` 的
+  Change → next render 采样路径和 Enter 语义未改。
+- 全部 10 个 fixture（standard / idle 三档及 authorization、reduced-motion、keyboard-focus、no-color）
+  已人工审图并附 review note；安装后首次复播 RMSE 均为 `0`，最终 native replay focus 修正后的复播仍全部
+  低于 `0.015` 预算（最大为 narrow `0.000696099`）。最终验证为 Desktop `222 passed / 5 ignored`、
+  dependency boundary `16/16`、严格 Clippy、fmt 与 `git diff --check`。native 性能门：GPU/present frame
+  p95 `7237µs`、input dispatch-to-post-render p95 `8353µs`、steady RSS growth `53248B`、production
+  Markdown p95 `109µs`；headless 门：10k hydration `2620µs`、frame p95 `4218µs`、input roundtrip
+  p95 `7436µs`、input-change-to-render p95 `629µs`，200 events/s streaming p95 `8µs`。
+  click-to-photon 外部传感器脚本按本次执行指示继续跳过，不计为通过或失败。
+
 **建议提交**
 
 ```text

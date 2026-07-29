@@ -9,6 +9,7 @@ use coding_agent::api::review::{
     CodingAgentExternalEditorTarget, CodingAgentFileReview, CodingAgentFileReviewRequest,
 };
 use coding_agent::api::view::CodingAgentTranscriptSnapshot;
+use std::path::{Path, PathBuf};
 
 use crate::file_review::{DesktopExternalEditorConfig, DesktopExternalEditorLaunchError};
 
@@ -17,6 +18,7 @@ pub const DESKTOP_UPDATE_QUEUE_CAPACITY: usize = 128;
 pub const DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY: usize = 64;
 pub const MAX_CONCURRENT_DESKTOP_SESSIONS: usize = 4;
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
+pub const MAX_PROMPT_ATTACHMENTS: usize = 16;
 pub const MAX_CONTROL_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_DESKTOP_SESSION_CATALOG: usize = 128;
 
@@ -26,6 +28,8 @@ pub(super) const MAX_SELECTION_ID_BYTES: usize = 256;
 pub(super) const MAX_RECOVERY_ID_BYTES: usize = 1024;
 const MAX_FILE_REVIEW_ID_BYTES: usize = 1024;
 pub(super) const MAX_FILE_REVIEW_PATH_BYTES: usize = 16 * 1024;
+pub(super) const MAX_PROMPT_ATTACHMENT_PATH_BYTES: usize = 16 * 1024;
+pub(super) const MAX_PROMPT_ATTACHMENT_PATH_TOTAL_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub(super) enum DesktopRuntimeCommand {
@@ -63,6 +67,7 @@ pub(super) enum DesktopRuntimeCommand {
         command_id: u64,
         session_id: Option<String>,
         prompt: String,
+        attachments: Vec<PathBuf>,
         thinking_level: Option<CodingAgentThinkingLevel>,
     },
     Abort {
@@ -591,15 +596,74 @@ pub(super) fn bounded_utf8_prefix(value: &str, max_bytes: usize) -> String {
     value[..end].to_owned()
 }
 
+#[allow(
+    dead_code,
+    reason = "compatibility entry point for text-only desktop clients"
+)]
 pub(super) fn validate_prompt(prompt: &str) -> Result<(), DesktopCommandAdmissionError> {
-    if prompt.trim().is_empty() {
+    validate_prompt_with_attachments(prompt, &[])
+}
+
+pub(super) fn validate_prompt_with_attachments(
+    prompt: &str,
+    attachments: &[PathBuf],
+) -> Result<(), DesktopCommandAdmissionError> {
+    if prompt.trim().is_empty() && attachments.is_empty() {
         return Err(DesktopCommandAdmissionError::InvalidPrompt {
-            message: "prompt must not be empty".into(),
+            message: "prompt or attachment must not be empty".into(),
         });
     }
     if prompt.len() > MAX_PROMPT_BYTES {
         return Err(DesktopCommandAdmissionError::InvalidPrompt {
             message: format!("prompt exceeds {MAX_PROMPT_BYTES} bytes"),
+        });
+    }
+    validate_prompt_attachments(attachments)?;
+    Ok(())
+}
+
+pub fn validate_prompt_attachments(
+    attachments: &[PathBuf],
+) -> Result<(), DesktopCommandAdmissionError> {
+    if attachments.len() > MAX_PROMPT_ATTACHMENTS {
+        return Err(DesktopCommandAdmissionError::InvalidPrompt {
+            message: format!("prompt has more than {MAX_PROMPT_ATTACHMENTS} attachments"),
+        });
+    }
+    let mut total_path_bytes = 0usize;
+    for attachment in attachments {
+        validate_prompt_attachment_path(attachment)?;
+        total_path_bytes = total_path_bytes.saturating_add(
+            attachment
+                .to_str()
+                .map(str::len)
+                .expect("attachment path was validated as UTF-8"),
+        );
+        if total_path_bytes > MAX_PROMPT_ATTACHMENT_PATH_TOTAL_BYTES {
+            return Err(DesktopCommandAdmissionError::InvalidPrompt {
+                message: format!(
+                    "attachment paths exceed {MAX_PROMPT_ATTACHMENT_PATH_TOTAL_BYTES} bytes"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_prompt_attachment_path(path: &Path) -> Result<(), DesktopCommandAdmissionError> {
+    let Some(path) = path.to_str() else {
+        return Err(DesktopCommandAdmissionError::InvalidPrompt {
+            message: "attachment path must be valid UTF-8".into(),
+        });
+    };
+    if path.is_empty() || path.contains('\0') {
+        return Err(DesktopCommandAdmissionError::InvalidPrompt {
+            message: "attachment path must not be empty or contain NUL".into(),
+        });
+    }
+    if path.len() > MAX_PROMPT_ATTACHMENT_PATH_BYTES {
+        return Err(DesktopCommandAdmissionError::InvalidPrompt {
+            message: format!("attachment path exceeds {MAX_PROMPT_ATTACHMENT_PATH_BYTES} bytes"),
         });
     }
     Ok(())

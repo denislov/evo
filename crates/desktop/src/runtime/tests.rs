@@ -1089,6 +1089,7 @@ async fn prompt_start_failure_reports_the_session_that_was_already_created() {
             command_id: 16,
             session_id: None,
             prompt: "prompt start failure".into(),
+            attachments: Vec::new(),
             thinking_level: None,
         },
     )
@@ -2629,6 +2630,10 @@ fn command_inputs_and_queue_capacities_are_bounded() {
     assert!(validate_prompt("").is_err());
     assert!(validate_prompt(&"x".repeat(MAX_PROMPT_BYTES + 1)).is_err());
     assert!(validate_prompt("prompt").is_ok());
+    let attachments = vec![std::path::PathBuf::from("fixture.png"); MAX_PROMPT_ATTACHMENTS];
+    assert!(validate_prompt_with_attachments("", &attachments).is_ok());
+    let over_limit = vec![std::path::PathBuf::from("fixture.png"); MAX_PROMPT_ATTACHMENTS + 1];
+    assert!(validate_prompt_with_attachments("draft remains", &over_limit).is_err());
     assert!(validate_control_text("").is_err());
     assert!(validate_control_text(&"x".repeat(MAX_CONTROL_TEXT_BYTES + 1)).is_err());
     assert!(validate_control_text("steer").is_ok());
@@ -2661,6 +2666,38 @@ fn command_inputs_and_queue_capacities_are_bounded() {
     assert!(validate_selection_id("model", "").is_err());
     assert!(validate_selection_id("profile", &"x".repeat(MAX_SELECTION_ID_BYTES + 1)).is_err());
     assert!(validate_selection_id("model", "claude-haiku-4-5").is_ok());
+}
+
+#[test]
+fn attachment_commands_preserve_bounded_paths_and_session_target() {
+    let (bridge, mut harness) = DesktopRuntimeBridge::instrumented_for_test();
+    let attachments = [
+        std::path::PathBuf::from("screenshots/one.png"),
+        std::path::PathBuf::from("notes/two.txt"),
+    ];
+    bridge
+        .try_submit_prompt_with_attachments_for_session(
+            900,
+            "session-attachment-test",
+            "inspect these",
+            &attachments,
+            None,
+        )
+        .unwrap();
+    bridge
+        .try_submit_prompt_with_attachments(901, "inspect once more", &attachments[..1], None)
+        .unwrap();
+    assert_eq!(
+        harness.drain_prompt_attachments(),
+        [
+            (
+                Some("session-attachment-test".into()),
+                "inspect these".into(),
+                attachments.to_vec(),
+            ),
+            (None, "inspect once more".into(), attachments[..1].to_vec(),),
+        ]
+    );
 }
 
 #[test]

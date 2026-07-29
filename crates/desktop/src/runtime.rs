@@ -17,7 +17,8 @@ pub use protocol::{
     DesktopRuntimeHydratedSnapshot, DesktopRuntimeMetadataSnapshot, DesktopRuntimeReadySnapshot,
     DesktopRuntimeRecoverySnapshot, DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind,
     DesktopRuntimeShutdownError, DesktopRuntimeStartError, DesktopRuntimeUpdate,
-    DesktopSessionCatalogEntry, MAX_DESKTOP_SESSION_CATALOG,
+    DesktopSessionCatalogEntry, MAX_DESKTOP_SESSION_CATALOG, MAX_PROMPT_ATTACHMENTS,
+    validate_prompt_attachments,
 };
 #[allow(unused_imports)]
 pub use protocol::{MAX_CONTROL_TEXT_BYTES, MAX_PROMPT_BYTES};
