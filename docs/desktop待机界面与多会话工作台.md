@@ -1,5 +1,9 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
+> 后续决策：本计划中“多项目切换器不在本轮”、Home 隐藏左右 panel、扁平 session 历史与
+> 自动 session catalog refresh 的约束，已由
+> [`desktop多项目工作区与启动界面重构计划.md`](./desktop多项目工作区与启动界面重构计划.md)
+> 明确替代。本文件保留为已执行批次与历史验收记录，不再作为上述四项的最新设计依据。
 > 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302、VUI-303、VUI-304、VUI-305、VUI-306、VUI-307 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
