@@ -189,6 +189,7 @@ mod resident_memory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopApplicationOptions {
     cwd: PathBuf,
+    projectless: bool,
     session_id: Option<String>,
 }
 
@@ -196,12 +197,27 @@ impl DesktopApplicationOptions {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self {
             cwd: cwd.into(),
+            projectless: false,
+            session_id: None,
+        }
+    }
+
+    /// Start on a user-global scratch workspace instead of treating the
+    /// process working directory as an explicitly selected project.
+    pub fn projectless() -> Self {
+        Self {
+            cwd: PathBuf::from("."),
+            projectless: true,
             session_id: None,
         }
     }
 
     pub fn cwd(&self) -> &Path {
         &self.cwd
+    }
+
+    pub fn is_projectless(&self) -> bool {
+        self.projectless
     }
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
@@ -258,6 +274,14 @@ mod tests {
         let options = super::DesktopApplicationOptions::new("project")
             .with_session_id("session-from-options");
         assert_eq!(options.cwd(), std::path::Path::new("project"));
+        assert!(!options.is_projectless());
         assert_eq!(options.session_id(), Some("session-from-options"));
+    }
+
+    #[test]
+    fn projectless_options_do_not_claim_the_process_directory_as_a_project() {
+        let options = super::DesktopApplicationOptions::projectless();
+        assert!(options.is_projectless());
+        assert_eq!(options.session_id(), None);
     }
 }

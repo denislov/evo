@@ -26,6 +26,8 @@ pub(super) enum HomePaneEvent {
 pub(super) struct HomePaneViewModel {
     pub(super) model: Arc<str>,
     pub(super) thinking: Arc<str>,
+    pub(super) workspace: Arc<str>,
+    pub(super) scratch_workspace: bool,
     pub(super) recent_sessions: Arc<[DesktopSessionCatalogEntry]>,
     pub(super) omitted_sessions: usize,
     pub(super) global_skills: Arc<[CodingAgentResourceCommand]>,
@@ -165,7 +167,12 @@ impl Render for HomePane {
                             .gap_token(DesignSpace::Md)
                             .text_token(DesignText::Metadata)
                             .child(format!("Model · {}", view_model.model))
-                            .child(format!("Thinking · {}", view_model.thinking)),
+                            .child(format!("Thinking · {}", view_model.thinking))
+                            .child(if view_model.scratch_workspace {
+                                format!("Scratch workspace · {}", view_model.workspace)
+                            } else {
+                                format!("Project · {}", view_model.workspace)
+                            }),
                     )
                     .child(
                         div()

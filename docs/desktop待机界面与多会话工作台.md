@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -902,6 +902,34 @@ feat(desktop): render an idle home surface without a session
 - 新增测试：无项目待机态创建的会话，其 cwd 位于 scratch 工作区下；
 - 新增测试：同一工作区重复进入复用同一目录；
 - 新增测试：scratch 工作区不解析项目级 `.evo/settings.toml`。
+
+**实施记录（2026-07-29）**
+
+- Desktop 默认入口改为显式 projectless 模式，不再把进程 cwd 当成用户选择的项目；已有
+  `DesktopApplicationOptions::new(cwd)` 仍保持显式项目启动语义。projectless 启动从产品解析的
+  全局配置根（`EVO_DIR`，否则 `~/.evo`）创建并复用
+  `scratch/<workspace-id>`，工作区 id 与 session id 解耦并持久化到
+  `desktop/preferences.json`；id 仅允许有界的 ASCII 字母数字、`-`、`_`，scratch 根或工作区
+  若是符号链接或非目录则拒绝启动，避免偏好内容把路径解析带出产品目录。
+- coding-agent 以独立兼容提交 `7d4dcb0` 增加
+  `CodingAgentEmbeddingOptions::with_global_config_only()` 与公开的全局配置根查询。scratch cwd
+  仍是 agent 执行文件操作和写入 session manifest 的真实 cwd，但配置解析显式排除该目录及祖先的
+  `.evo/settings.toml`、项目 skills、prompts、themes、profiles 与 `AGENTS.md`，只保留全局配置、
+  全局资源和全局上下文；显式项目启动继续使用原有完整项目解析。
+- Home 摘要行以文本标注 `Scratch workspace · <path>`，而非只靠颜色表达，避免将 agent 生成文件
+  误认为写入进程目录或已选择项目；三档待机态 visual golden 已附 review note 更新，七个既有
+  session / authorization / reduced-motion / keyboard-focus / no-color 夹具像素不变，独立复跑的
+  十个夹具全部 `RMSE=0`。
+- 清理策略采用保守保留：窗口关闭时绝不删除 scratch。即使目录当前为空，后续会话或 agent
+  仍可能写入文件，且多窗口按同一持久化 id 复用该目录；仅在用户显式重置 Desktop 偏好时才允许
+  回收该工作区，避免关闭竞态和隐式数据丢失。
+- 测试覆盖首次 prompt 原子建会话后 durable overview 记录精确 scratch cwd、恶意 scratch
+  `.evo/settings.toml` 不生效、工作区 id 首次创建与重复复用、非法 id 丢弃、旧版偏好兼容与
+  projectless/显式项目选项语义。验证通过：Desktop `205 passed / 5 ignored`、dependency
+  boundary `16/16`、coding-agent lib `759/759`、API boundary `14/14`、Desktop all-target
+  check、Desktop 与 coding-agent lib 严格 Clippy、CLI/TUI all-target check、fmt 与
+  `git diff --check`。coding-agent 全量 all-target 仍只受上文已记录的既有
+  `docs/product-event-contract.md` 缺失阻断。
 
 **建议提交**
 

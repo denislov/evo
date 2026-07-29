@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +20,10 @@ const PREFERENCES_SCHEMA_VERSION: u16 = 1;
 const MAX_PREFERENCES_BYTES: u64 = 64 * 1024;
 const DESKTOP_DIRECTORY: &str = "desktop";
 const PREFERENCES_FILE: &str = "preferences.json";
+const SCRATCH_DIRECTORY: &str = "scratch";
+const MAX_WORKSPACE_ID_BYTES: usize = 64;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static WORKSPACE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +71,8 @@ pub struct DesktopPreferences {
     pub ui_scale: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) external_editor: Option<DesktopExternalEditorConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) scratch_workspace_id: Option<String>,
 }
 
 impl Default for DesktopPreferences {
@@ -81,6 +87,7 @@ impl Default for DesktopPreferences {
             reduced_motion: false,
             ui_scale: 1.0,
             external_editor: None,
+            scratch_workspace_id: None,
         }
     }
 }
@@ -106,8 +113,131 @@ impl DesktopPreferences {
         {
             self.external_editor = None;
         }
+        if self
+            .scratch_workspace_id
+            .as_deref()
+            .is_some_and(|id| !valid_workspace_id(id))
+        {
+            self.scratch_workspace_id = None;
+        }
         self
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScratchWorkspaceError {
+    #[error("scratch workspace path is a symbolic link: {path}")]
+    SymbolicLink { path: PathBuf },
+    #[error("scratch workspace path is not a directory: {path}")]
+    NotDirectory { path: PathBuf },
+    #[error("scratch workspace I/O failed at {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// Resolve the stable projectless workspace below the product-owned global root.
+///
+/// Empty workspaces are deliberately retained: the id is persistent adapter
+/// state and the directory may later receive agent-created files. Reclamation
+/// is therefore tied to an explicit preference reset, never to window close.
+pub fn resolve_scratch_workspace(
+    global_config_dir: &Path,
+    preferences: &mut DesktopPreferences,
+) -> Result<PathBuf, ScratchWorkspaceError> {
+    let root = global_config_dir.join(SCRATCH_DIRECTORY);
+    ensure_scratch_directory(&root)?;
+
+    if let Some(id) = preferences.scratch_workspace_id.as_deref() {
+        let workspace = root.join(id);
+        ensure_scratch_directory(&workspace)?;
+        return Ok(workspace);
+    }
+
+    loop {
+        let id = generate_workspace_id();
+        let workspace = root.join(&id);
+        match fs::create_dir(&workspace) {
+            Ok(()) => {
+                preferences.scratch_workspace_id = Some(id);
+                return Ok(workspace);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(ScratchWorkspaceError::Io {
+                    path: workspace,
+                    source,
+                });
+            }
+        }
+    }
+}
+
+fn ensure_scratch_directory(path: &Path) -> Result<(), ScratchWorkspaceError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(ScratchWorkspaceError::SymbolicLink {
+                    path: path.to_path_buf(),
+                });
+            }
+            if !metadata.is_dir() {
+                return Err(ScratchWorkspaceError::NotDirectory {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|source| ScratchWorkspaceError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let metadata =
+                fs::symlink_metadata(path).map_err(|source| ScratchWorkspaceError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            if metadata.file_type().is_symlink() {
+                return Err(ScratchWorkspaceError::SymbolicLink {
+                    path: path.to_path_buf(),
+                });
+            }
+            if !metadata.is_dir() {
+                return Err(ScratchWorkspaceError::NotDirectory {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+        Err(source) => {
+            return Err(ScratchWorkspaceError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn valid_workspace_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_WORKSPACE_ID_BYTES
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn generate_workspace_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let sequence = WORKSPACE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "workspace-{timestamp:x}-{:x}-{sequence:x}",
+        std::process::id()
+    )
 }
 
 const fn default_sessions_panel_width() -> u32 {
@@ -490,6 +620,36 @@ mod tests {
     }
 
     #[test]
+    fn scratch_workspace_id_is_created_once_and_reused_from_preferences() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut preferences = DesktopPreferences::default();
+
+        let first = resolve_scratch_workspace(temp.path(), &mut preferences).unwrap();
+        let id = preferences
+            .scratch_workspace_id
+            .clone()
+            .expect("workspace resolution persists its id");
+        let second = resolve_scratch_workspace(temp.path(), &mut preferences).unwrap();
+
+        assert_eq!(first, temp.path().join("scratch").join(&id));
+        assert_eq!(second, first);
+        assert!(first.is_dir());
+        assert!(valid_workspace_id(&id));
+    }
+
+    #[test]
+    fn untrusted_scratch_workspace_ids_are_discarded_before_path_resolution() {
+        for invalid in ["", "../escape", "nested/path", "x\\y", &"x".repeat(65)] {
+            let preferences = DesktopPreferences {
+                scratch_workspace_id: Some(invalid.to_owned()),
+                ..DesktopPreferences::default()
+            }
+            .normalized();
+            assert!(preferences.scratch_workspace_id.is_none());
+        }
+    }
+
+    #[test]
     fn preferences_round_trip_and_normalize_untrusted_geometry() {
         let temp = tempfile::tempdir().unwrap();
         let store = PreferenceStore::new(temp.path());
@@ -509,6 +669,7 @@ mod tests {
             reduced_motion: true,
             ui_scale: 99.0,
             external_editor: None,
+            scratch_workspace_id: Some("workspace-stable".into()),
         };
 
         let saved = store.save(&preferences).unwrap();
@@ -520,6 +681,10 @@ mod tests {
         assert_eq!(saved.sessions_panel_width, SESSION_PANEL_MIN_WIDTH);
         assert_eq!(saved.context_panel_width, CONTEXT_PANEL_MAX_WIDTH);
         assert_eq!(saved.ui_scale, 2.0);
+        assert_eq!(
+            saved.scratch_workspace_id.as_deref(),
+            Some("workspace-stable")
+        );
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.preferences, saved);
@@ -541,6 +706,7 @@ mod tests {
         let preferences: DesktopPreferences = serde_json::from_value(legacy).unwrap();
         assert_eq!(preferences.sessions_panel_width, SESSION_PANEL_WIDTH);
         assert_eq!(preferences.context_panel_width, CONTEXT_PANEL_WIDTH);
+        assert!(preferences.scratch_workspace_id.is_none());
     }
 
     #[test]

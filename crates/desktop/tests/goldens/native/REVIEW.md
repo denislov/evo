@@ -1,19 +1,19 @@
 # Native visual golden review
 
-## DSK-503 idle home surface
+## DSK-504 scratch workspace identity
 
-- Target surface: the native Desktop window while no coding-agent session is open.
-- Control semantics: the full-width Home pane now presents the selected model and thinking level,
-  a bounded recent-session directory, and user-global skills. The existing Composer is reused as
-  the primary input and submission control; submitting remains the point at which a session is
-  created.
-- Wide / medium / narrow review: all three idle fixtures keep the Home content and Composer inside
-  the viewport, hide both session-only side panels, retain readable two-column discovery content,
-  and avoid clipping or overlap with the status bar.
-- Accessibility: Home is exposed as a named main region, recent sessions remain typed action rows,
-  and the idle focus ring contains only Composer and Status. The established-session focus order is
-  unchanged.
-
+- Target surface: the idle Home summary row for projectless Desktop startup.
+- Control semantics: the row now names the active location as `Scratch workspace`
+  and shows its bounded path, so users do not mistake agent-created files for
+  writes to the process directory or to a selected project. Model and thinking
+  facts retain their existing order and meaning.
+- Wide / medium / narrow review: the additional metadata remains on the same
+  bounded summary row at all three viewports. It does not overlap the Home
+  heading, recent sessions, global skills, Composer, or status bar. The
+  established-session fixtures are pixel-identical.
+- Accessibility: the label is textual rather than color-only, stays inside the
+  existing named Home main region, introduces no focus target, and does not
+  change the established-session or idle focus order.
 
 # Native visual before/after review
 
@@ -24,9 +24,9 @@ Generated from deterministic native GPUI replays. Review the paired images and d
 | `wide` | `2600x1656` | `0` | `wide-before.png` | `wide-after.png` | `wide-diff.png` |
 | `medium` | `1800x1600` | `0` | `medium-before.png` | `medium-after.png` | `medium-diff.png` |
 | `narrow` | `1400x1600` | `0` | `narrow-before.png` | `narrow-after.png` | `narrow-diff.png` |
-| `wide-idle` | `2600x1656` | `0.127544` | `wide-idle-before.png` | `wide-idle-after.png` | `wide-idle-diff.png` |
-| `medium-idle` | `1800x1600` | `0.143314` | `medium-idle-before.png` | `medium-idle-after.png` | `medium-idle-diff.png` |
-| `narrow-idle` | `1400x1600` | `0.159407` | `narrow-idle-before.png` | `narrow-idle-after.png` | `narrow-idle-diff.png` |
+| `wide-idle` | `2600x1656` | `0.0148227` | `wide-idle-before.png` | `wide-idle-after.png` | `wide-idle-diff.png` |
+| `medium-idle` | `1800x1600` | `0.0181238` | `medium-idle-before.png` | `medium-idle-after.png` | `medium-idle-diff.png` |
+| `narrow-idle` | `1400x1600` | `0.0205504` | `narrow-idle-before.png` | `narrow-idle-after.png` | `narrow-idle-diff.png` |
 | `wide-authorization` | `2600x1656` | `0` | `wide-authorization-before.png` | `wide-authorization-after.png` | `wide-authorization-diff.png` |
 | `wide-reduced-motion` | `2600x1656` | `0` | `wide-reduced-motion-before.png` | `wide-reduced-motion-after.png` | `wide-reduced-motion-diff.png` |
 | `wide-keyboard-focus` | `2600x1656` | `0` | `wide-keyboard-focus-before.png` | `wide-keyboard-focus-after.png` | `wide-keyboard-focus-diff.png` |

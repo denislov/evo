@@ -3448,9 +3448,17 @@ impl NativeShell {
         let thinking = self
             .thinking_selection
             .label(self.project.settings.default_thinking_level.as_deref());
+        let scratch_root = self.project.global_config_dir.join("scratch");
+        let scratch_workspace = self
+            .project
+            .cwd
+            .parent()
+            .is_some_and(|parent| parent == scratch_root);
         HomePaneViewModel {
             model: Arc::from(truncate_label(&self.project.selected_model_id, 28)),
             thinking: Arc::from(truncate_label(&thinking, 18)),
+            workspace: Arc::from(truncate_label(&self.project.cwd.display().to_string(), 42)),
+            scratch_workspace,
             recent_sessions: Arc::from(self.session_controller.catalog().to_vec()),
             omitted_sessions: self.session_controller.omitted(),
             global_skills: Arc::clone(&self.global_skills),
@@ -4351,7 +4359,11 @@ mod tests {
     ) -> (gpui::Entity<NativeShell>, &mut gpui::VisualTestContext) {
         let shell_slot = Rc::new(RefCell::new(None));
         let shell_slot_for_window = Rc::clone(&shell_slot);
-        let project = visual_test_snapshot().project;
+        let mut project = visual_test_snapshot().project;
+        project.global_config_dir = std::path::PathBuf::from("/desktop-global");
+        project.cwd = project
+            .global_config_dir
+            .join("scratch/workspace-native-fixture");
         let (_, visual_cx) = cx.add_window_view(move |window, cx| {
             let shell = cx.new(|cx| {
                 NativeShell::new(
@@ -4411,6 +4423,8 @@ mod tests {
                 "default"
             );
             assert_eq!(shell.home_pane_view_model().global_skills.len(), 1);
+            assert!(shell.home_pane_view_model().scratch_workspace);
+            assert!(shell.home_pane_view_model().workspace.contains("scratch"));
         });
 
         for (width, height) in [(1_300., 900.), (900., 800.), (700., 800.)] {

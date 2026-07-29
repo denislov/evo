@@ -817,6 +817,60 @@ async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
 }
 
 #[tokio::test]
+async fn projectless_first_prompt_records_the_global_only_scratch_cwd() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let scratch = global.join("scratch/workspace-runtime-test");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(scratch.join(".evo")).unwrap();
+    std::fs::write(
+        scratch.join(".evo/settings.toml"),
+        "default_thinking_level = \"high\"\n",
+    )
+    .unwrap();
+    let _env = ProcessEnvGuard::isolated(&global);
+    let options = CodingAgentEmbeddingOptions::new(&scratch)
+        .with_global_config_only()
+        .with_session_dir(&sessions)
+        .with_model_id("claude-sonnet-4-5");
+    let (mut bridge, ready) = DesktopRuntimeBridge::spawn(options)
+        .unwrap()
+        .wait_blocking()
+        .unwrap();
+    assert_eq!(ready.project.cwd, scratch);
+    assert_ne!(
+        ready.project.settings.default_thinking_level.as_deref(),
+        Some("high"),
+        "scratch-local project settings must not enter a global-only context"
+    );
+
+    bridge
+        .try_submit_prompt(16, "scratch workspace prompt", None)
+        .unwrap();
+    let Some(DesktopRuntimeUpdate::PromptAcceptedWithSession { snapshot, .. }) =
+        bridge.next_update().await
+    else {
+        panic!("the first scratch prompt should atomically create its session");
+    };
+    let session_id = snapshot.session.session.session_id;
+    let catalog =
+        coding_agent::api::embedding::CodingAgentSessionQuery::from_session_root(&sessions)
+            .overviews()
+            .unwrap();
+    let overview = catalog
+        .overviews
+        .iter()
+        .find(|overview| overview.session_id == session_id)
+        .expect("the scratch session should be visible in the durable overview");
+    assert_eq!(
+        overview.cwd.as_deref(),
+        Some(scratch.to_string_lossy().as_ref())
+    );
+
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn session_creation_failure_rejects_the_first_prompt_without_an_active_owner() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, _) = isolated_options(&temp);

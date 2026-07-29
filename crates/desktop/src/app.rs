@@ -4,7 +4,7 @@ mod native_shell;
 use std::sync::Arc;
 use std::time::Duration;
 
-use coding_agent::api::embedding::CodingAgentEmbeddingOptions;
+use coding_agent::api::embedding::{CodingAgentEmbeddingOptions, global_config_directory};
 use gpui::{
     App, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _, Window,
     WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
@@ -15,6 +15,7 @@ use gpui_platform::application;
 use self::native_shell::{NativeShell, NativeShellInit};
 use crate::preferences::{
     DesktopPreferences, PreferenceLoad, PreferenceRecovery, PreferenceStore, PreferenceWriter,
+    resolve_scratch_workspace,
 };
 use crate::projection::DesktopProjection;
 use crate::runtime::{
@@ -55,7 +56,11 @@ impl Render for StartupFailure {
 }
 
 pub(crate) fn run(options: crate::DesktopApplicationOptions) {
-    let crate::DesktopApplicationOptions { cwd, session_id } = options;
+    let crate::DesktopApplicationOptions {
+        cwd,
+        projectless,
+        session_id,
+    } = options;
     let native_replay = native_perf::request();
     // Bundled Lucide icons back every icon-only control. Without an asset
     // source `Icon` renders nothing, so this registration is what makes the
@@ -82,8 +87,56 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                 return;
             }
 
-            let bootstrap = DesktopRuntimeBridge::spawn(CodingAgentEmbeddingOptions::new(cwd));
             cx.spawn(async move |cx| {
+                let global_config_dir = global_config_directory();
+                let store = PreferenceStore::new(&global_config_dir);
+                let (mut loaded, mut notice) = match store.load() {
+                    Ok(loaded) => {
+                        let notice = preference_notice(&loaded);
+                        (loaded, notice)
+                    }
+                    Err(error) => (
+                        PreferenceLoad {
+                            preferences: DesktopPreferences::default(),
+                            recovery: None,
+                        },
+                        Some(format!("Preferences could not be loaded: {error}")),
+                    ),
+                };
+                let scratch_id_was_missing = loaded.preferences.scratch_workspace_id.is_none();
+                let embedding_options = if projectless {
+                    let scratch = match resolve_scratch_workspace(
+                        &global_config_dir,
+                        &mut loaded.preferences,
+                    ) {
+                        Ok(scratch) => scratch,
+                        Err(error) => {
+                            let _ = open_failure(
+                                format!("scratch workspace initialization failed: {error}"),
+                                cx,
+                            );
+                            return;
+                        }
+                    };
+                    CodingAgentEmbeddingOptions::new(scratch).with_global_config_only()
+                } else {
+                    CodingAgentEmbeddingOptions::new(cwd)
+                };
+                let writer = match PreferenceWriter::spawn(store) {
+                    Ok(writer) => Some(writer),
+                    Err(error) => {
+                        notice = Some(format!("Preference writer unavailable: {error}"));
+                        None
+                    }
+                };
+                if projectless
+                    && scratch_id_was_missing
+                    && let Some(writer) = writer.as_ref()
+                {
+                    writer.schedule(loaded.preferences.clone());
+                }
+
+                let bootstrap = DesktopRuntimeBridge::spawn(embedding_options);
                 let mut bootstrap = match bootstrap {
                     Ok(bootstrap) => bootstrap,
                     Err(error) => {
@@ -106,27 +159,6 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                     }
                 };
 
-                let store = PreferenceStore::new(&snapshot.project.global_config_dir);
-                let (loaded, mut notice) = match store.load() {
-                    Ok(loaded) => {
-                        let notice = preference_notice(&loaded);
-                        (loaded, notice)
-                    }
-                    Err(error) => (
-                        PreferenceLoad {
-                            preferences: DesktopPreferences::default(),
-                            recovery: None,
-                        },
-                        Some(format!("Preferences could not be loaded: {error}")),
-                    ),
-                };
-                let writer = match PreferenceWriter::spawn(store) {
-                    Ok(writer) => Some(writer),
-                    Err(error) => {
-                        notice = Some(format!("Preference writer unavailable: {error}"));
-                        None
-                    }
-                };
                 let options = window_options(&loaded.preferences);
                 let requested = match session_id.as_deref() {
                     Some(session_id) => {
