@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410、VUI-411、VUI-412、VUI-420 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410、VUI-411、VUI-412、VUI-420、VUI-421 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -1226,6 +1226,32 @@ CenterDrawerHost
 完成标准：菜单中没有普通未配置项；provider group 顺序稳定；选择结果仍走 typed runtime selection。
 
 #### VUI-421：Capability-driven Thinking menu
+
+> 状态：已完成。Header 不再遍历 Desktop 固定七档枚举；`NativeShell` 直接从当前
+> `CodingAgentModelChoice.thinking_capability` 投影 `ConversationHeaderThinkingOption`：`supported=false`
+> 时不渲染 selector，`supported=true` 时固定以 Auto 开头，只在 `can_disable=true` 时加入 Off，并按产品
+> `explicit_levels` 的顺序加入显式等级。重复等级与 capability 中非法出现的 Off 不会生成第二条或绕过
+> `can_disable`；菜单、Command Palette cycle 和直接 event handler 共用同一合法选项集合。
+>
+> Model selection command 现在同时携带当前 typed `CodingAgentThinkingLevel`。runtime 在切换 context 前按目标
+> 模型 capability 再次执行 `sanitize_thinking_level`，并在同一 `SelectionChanged` 中返回合法等级与
+> `thinking_fallback`。Desktop 仅在该响应被 command ledger 接受且 projection 成功替换后，同时更新 Header、
+> session preference 与后续 prompt 状态；fallback 收敛到现有 `Default` 存储语义、显示为 Auto，并在 Header
+> 固定状态区域呈现局部辅助提示，不把 fallback 细节发送到全局 Toast。Home、idle Session、已有 Session
+> prompt、旧持久化偏好和 Reload 后 capability 漂移都会经过同一双层 admission，非法组合不会保留。
+>
+> 回归覆盖 `supported/can_disable/explicit_levels` 精确 fixture、重复/非法 DTO、菜单外非法选择、隐藏
+> non-reasoning selector 后 Profile 左移、模型切换携带显式 Thinking、runtime fallback、accepted response 后
+> 原子持久化，以及 Header-local status。CodeGraph 定位了 selection command → runtime context → projection
+> completion 的真实链路；`ast-grep-outline` 的变更后审计确认固定 `DesktopThinkingLevel::ALL` 已删除，新增状态
+> 仍由 `SessionWorkspace` 按会话隔离，Header child entity 未取得 runtime/product authority。
+>
+> Gate：Desktop 302 个 library tests 中 297 个通过、5 个既有 release 性能用例保持 ignored，20 个
+> dependency boundary tests 与严格 all-target Clippy 通过；格式、diff、native/headless performance gate 均
+> 通过。10 张 native golden 已逐张 review 并安装，随后 compare normalized RMSE 全部为 `0`（预算
+> `0.015`）；wide/medium/narrow 与 no-color 的差异仅限 `Default` 改为 `Auto` 后的 Header 文本和预期空间重排。
+> 9.5 完整 visual matrix 仍需把持久化的 non-reasoning/局部 fallback 状态与 VUI-420 已记录的打开 Provider
+> popup 一并纳入统一 fixture；本项交互与 hit-test 已覆盖，计划最终收敛前不得遗漏该执行债务。
 
 工作：
 
