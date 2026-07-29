@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410、VUI-411、VUI-412 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410、VUI-411、VUI-412、VUI-420 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -1193,6 +1193,28 @@ CenterDrawerHost
 ### Phase 7：Header selector 与 Inspector
 
 #### VUI-420：Provider-grouped model menu
+
+> 状态：已完成。`NativeShell` 现从产品层 `CodingAgentModelChoice` 只投影
+> `configured && supports_text` 项，并在 Header ViewModel 中预先生成
+> `ConversationHeaderModelGroup`；Provider 与组内 model 分别按稳定的字典序和 `name + id` 排序，不再受当前
+> selected model 在原始 catalog 中的位置影响。普通未配置模型与 image-only 模型不会进入任何 group。
+>
+> `ConversationHeader` 使用原生 non-interactive `PopupMenuItem::label` 呈现 Provider，组间使用 separator；模型
+> 行以 name 为主文本、bounded model id 为 metadata，保留完整 name/id accessible label，当前 id 继续显示
+> check。超过 8 个模型时菜单在 320 px 高度内滚动。当前模型失去认证、变为非文本模型或离开 catalog 时只
+> 出现一段独立 `Current model unavailable` warning，不会恢复整个未配置 catalog；零可用模型显示
+> `No configured text models`，并明确提示在 `auth.toml`/环境变量补充 key 后执行 Reload local resources。
+>
+> GPUI 回归覆盖 Provider/catalog 反序后的稳定排序、普通项过滤、长名称、current auth lost、zero configured，
+> 以及真实 popup 键盘选择；`exact-target-model` 仍经 `ConversationHeaderEvent::SelectModel(Arc<str>)` 和
+> `DesktopRuntimeSelectionKind::Model` 原样提交给 Home owner。CodeGraph 与 `ast-grep-outline` 审计确认新增
+> DTO/helper 没有接触 credential、runtime command 或新的状态 owner。
+>
+> Gate：Desktop 294 个 library tests 通过、5 个既有 release 性能用例保持 ignored，20 个 dependency
+> boundary tests 与严格 all-target Clippy 通过；格式、diff、native/headless performance gate 均通过。现有
+> 10 张 native golden 的 review/compare normalized RMSE 全部为 `0`（预算 `0.015`），review note 已更新且
+> 未重写图片。专门持久化“打开的 Provider popup”仍作为 9.5 完整 visual matrix 的执行债务保留；本项已由
+> 真实 GPUI PopupMenu interaction 覆盖，计划最终收敛前需补入统一 visual fixture 集。
 
 工作：
 
