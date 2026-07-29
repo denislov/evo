@@ -385,9 +385,11 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
         "conversation_header.rs",
         "conversation_pane.rs",
         "center_drawer_host.rs",
+        "home_pane.rs",
         "inspector_pane.rs",
         "root_modal_host.rs",
         "sessions_pane.rs",
+        "skills_pane.rs",
         "toast_host.rs",
     ]
     .into_iter()
@@ -543,6 +545,12 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
         .expect("conversation controller should be readable");
     let sessions = fs::read_to_string(controller_root.join("sessions_pane.rs"))
         .expect("sessions pane should be readable");
+    let home = fs::read_to_string(controller_root.join("home_pane.rs"))
+        .expect("home pane should be readable");
+    let skills = fs::read_to_string(controller_root.join("skills_pane.rs"))
+        .expect("skills pane should be readable");
+    let center_navigation = fs::read_to_string(controller_root.join("center_navigation.rs"))
+        .expect("center navigation contract should be readable");
     let project_catalog = fs::read_to_string(controller_root.join("project_catalog_controller.rs"))
         .expect("project catalog controller should be readable");
     let composer = fs::read_to_string(controller_root.join("composer_pane.rs"))
@@ -579,6 +587,50 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(sessions.contains("search_input: gpui::Entity<InputState>"));
     assert!(!sessions.contains("WeakEntity<NativeShell>"));
     assert!(!sessions.contains("owner.read(cx)"));
+    assert!(!sessions.contains("CodingAgentResourceCommand"));
+    assert!(!sessions.contains("global_skills"));
+    assert!(sessions.contains("SessionsPaneEvent::Navigate"));
+    assert!(sessions.contains("CenterNavigationTarget::NewConversation"));
+    assert!(sessions.contains("CenterNavigationTarget::Skills"));
+    assert!(sessions.contains("CenterNavigationTarget::Session"));
+    assert!(center_navigation.contains("enum CenterNavigationTarget"));
+    assert!(center_navigation.contains("enum CenterSurface"));
+    assert!(shell.contains("fn navigate_center("));
+    assert!(shell.contains("SessionsPaneEvent::Navigate(target)"));
+
+    for forbidden in [
+        "CodingAgentResourceCommand",
+        "DesktopSessionCatalogEntry",
+        "recent_sessions",
+        "global_skills",
+        "catalog_pending",
+        "project_catalog",
+        "command_ledger",
+        "DesktopProjection",
+        "NativeShell",
+        "EventEmitter",
+    ] {
+        assert!(
+            !home.contains(forbidden),
+            "HomePane must remain presentation-only and must not depend on {forbidden}"
+        );
+    }
+    assert!(home.contains("pub(super) struct HomePane;"));
+    assert!(home.contains("Software evolves. Your agent should too."));
+    assert!(skills.contains("struct SkillsPaneViewModel"));
+    assert!(skills.contains("skills: Arc<[CodingAgentResourceCommand]>"));
+    for forbidden in [
+        "WeakEntity<NativeShell>",
+        "owner.read(cx)",
+        "DesktopProjection",
+        "project_catalog",
+        "command_ledger",
+    ] {
+        assert!(
+            !skills.contains(forbidden),
+            "SkillsPane must consume only its bounded DTO and must not depend on {forbidden}"
+        );
+    }
     assert!(project_catalog.contains("struct ProjectCatalogController"));
     assert!(project_catalog.contains("enum ProjectCatalogState"));
     assert!(project_catalog.contains("struct ProjectCatalogGroup"));

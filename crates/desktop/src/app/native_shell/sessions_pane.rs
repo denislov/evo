@@ -1,4 +1,3 @@
-use coding_agent::api::embedding::CodingAgentResourceCommand;
 use desktop::shell::{SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
 use gpui::{
     EventEmitter, FocusHandle, Focusable as _, IntoElement, ParentElement as _, Render, Role,
@@ -13,23 +12,21 @@ use std::sync::Arc;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{
+    center_navigation::CenterNavigationTarget,
     desktop_controls::{
         DesktopActionRow, DesktopControlSize, DesktopIcon, DesktopIconButton, DesktopRowState,
     },
-    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+    desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
     project_catalog_controller::{
         ProjectCatalogGroup, ProjectCatalogState, session_matches_query, workspace_matches_query,
     },
     semantic_status_color,
 };
 
-const MAX_SESSIONS_PANE_SKILLS: usize = 8;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SessionsPaneEvent {
-    NewConversation,
+    Navigate(CenterNavigationTarget),
     Refresh,
-    Open(String),
     Rename(String, String),
     CloseSession(String),
     Dismiss,
@@ -47,8 +44,8 @@ pub(super) struct SessionsPaneViewModel {
     pub(super) project_groups: Arc<[ProjectCatalogGroup]>,
     pub(super) omitted_sessions: usize,
     pub(super) catalog_state: ProjectCatalogState,
-    pub(super) global_skills: Arc<[CodingAgentResourceCommand]>,
     pub(super) active_session_id: Arc<str>,
+    pub(super) skills_active: bool,
     pub(super) runtime_states: Arc<[SessionRuntimeState]>,
     pub(super) composer_running: bool,
     pub(super) awaiting_prompt_start: bool,
@@ -204,10 +201,6 @@ impl Render for SessionsPane {
         let renaming_session_id = self.renaming_session_id.clone();
         let search = search_input.read(cx).value().trim().to_lowercase();
         let omitted_sessions = view_model.omitted_sessions;
-        let omitted_skills = view_model
-            .global_skills
-            .len()
-            .saturating_sub(MAX_SESSIONS_PANE_SKILLS);
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let active_semantic_status = view_model.active_status;
         let runtime_states = Arc::clone(&view_model.runtime_states);
@@ -235,6 +228,7 @@ impl Render for SessionsPane {
             .map(|(index, (_, session))| {
                 let target = session.session_id.clone();
                 let active = target == active_session_id;
+                let selected = active && !view_model.skills_active;
                 let semantic_name = session
                     .name
                     .as_deref()
@@ -273,8 +267,8 @@ impl Render for SessionsPane {
                     accessible_label,
                 )
                 .state(DesktopRowState {
-                    selected: active,
-                    disabled: active
+                    selected,
+                    disabled: selected
                         || composer_running
                         || awaiting_prompt_start
                         || session_pending,
@@ -305,7 +299,9 @@ impl Render for SessionsPane {
                     .build(theme)
                     .debug_selector(move || format!("desktop-session-row-{index}"))
                     .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(SessionsPaneEvent::Open(target.clone()));
+                        cx.emit(SessionsPaneEvent::Navigate(
+                            CenterNavigationTarget::Session(target.clone()),
+                        ));
                     }));
                 let close_target = session.session_id.clone();
                 let rename_target = session.session_id.clone();
@@ -405,35 +401,6 @@ impl Render for SessionsPane {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let skill_rows = view_model
-            .global_skills
-            .iter()
-            .take(MAX_SESSIONS_PANE_SKILLS)
-            .enumerate()
-            .map(|(index, skill)| {
-                div()
-                    .id(("sessions-skill", index))
-                    .debug_selector(move || format!("desktop-sessions-skill-{index}"))
-                    .role(Role::ListItem)
-                    .px_token(DesignSpace::Md)
-                    .py_token(DesignSpace::Sm)
-                    .rounded_token(DesignRadius::Sm)
-                    .border_1()
-                    .border_color(rgb(theme.divider.value()))
-                    .child(
-                        div()
-                            .text_token(DesignText::Body)
-                            .child(format!("/{}", truncate_label(&skill.name, 24))),
-                    )
-                    .child(
-                        div()
-                            .mt_token(DesignSpace::Xs)
-                            .text_token(DesignText::Metadata)
-                            .text_color(rgb(theme.muted_text.value()))
-                            .child(truncate_label(&skill.description, 52)),
-                    )
-            })
-            .collect::<Vec<_>>();
         let empty_state = if visible_session_count > 0 {
             None
         } else if session_catalog_pending && view_model.project_groups.is_empty() {
@@ -477,7 +444,7 @@ impl Render for SessionsPane {
             "Open the new conversation home without creating a session",
         )
         .state(DesktopRowState {
-            selected: active_session_id.is_empty(),
+            selected: active_session_id.is_empty() && !view_model.skills_active,
             disabled: false,
             focus_visible: false,
         })
@@ -487,6 +454,19 @@ impl Render for SessionsPane {
             new_conversation_row.detail("Start from Home")
         } else {
             new_conversation_row
+        };
+        let skills_row = DesktopActionRow::new("skills", "Skills", "Open global skills")
+            .state(DesktopRowState {
+                selected: view_model.skills_active,
+                disabled: false,
+                focus_visible: false,
+            })
+            .size(DesktopControlSize::Critical)
+            .leading(div().child("◇"));
+        let skills_row = if presented_as_drawer {
+            skills_row.detail("Available to every project")
+        } else {
+            skills_row
         };
 
         div()
@@ -575,7 +555,7 @@ impl Render for SessionsPane {
             .child(
                 div()
                     .id("sessions-list")
-                    .aria_label("New conversation, global skills, and session history")
+                    .aria_label("New conversation, Skills, Projects, and session history")
                     .w_full()
                     .flex_1()
                     .min_h_0()
@@ -603,46 +583,21 @@ impl Render for SessionsPane {
                                     .build(theme)
                                     .debug_selector(|| "desktop-hit-new-conversation".into())
                                     .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(SessionsPaneEvent::NewConversation);
+                                        cx.emit(SessionsPaneEvent::Navigate(
+                                            CenterNavigationTarget::NewConversation,
+                                        ));
+                                    })),
+                            )
+                            .child(
+                                skills_row
+                                    .build(theme)
+                                    .debug_selector(|| "desktop-hit-skills".into())
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(SessionsPaneEvent::Navigate(
+                                            CenterNavigationTarget::Skills,
+                                        ));
                                     })),
                             ),
-                    )
-                    .child(
-                        div()
-                            .id("global-skills-section")
-                            .debug_selector(|| "desktop-global-skills-section".into())
-                            .role(Role::List)
-                            .aria_label("Global skills")
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .gap_token(DesignSpace::Sm)
-                            .border_t_1()
-                            .border_color(rgb(theme.divider.value()))
-                            .py_token(DesignSpace::Lg)
-                            .child(
-                                div()
-                                    .text_token(DesignText::Metadata)
-                                    .text_color(rgb(theme.muted_text.value()))
-                                    .child("GLOBAL SKILLS"),
-                            )
-                            .children(skill_rows)
-                            .when(view_model.global_skills.is_empty(), |section| {
-                                section.child(
-                                    div()
-                                        .p_token(DesignSpace::Sm)
-                                        .text_color(rgb(theme.muted_text.value()))
-                                        .child("No global skills installed."),
-                                )
-                            })
-                            .when(omitted_skills > 0, |section| {
-                                section.child(
-                                    div()
-                                        .text_token(DesignText::Metadata)
-                                        .text_color(rgb(theme.muted_text.value()))
-                                        .child(format!("+ {omitted_skills} more global skill(s)")),
-                                )
-                            }),
                     )
                     .child(
                         div()

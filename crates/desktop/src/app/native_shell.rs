@@ -437,6 +437,7 @@ pub(super) struct NativeShell {
     sessions_pane: gpui::Entity<SessionsPane>,
     composer_pane: gpui::Entity<ComposerPane>,
     home_pane: gpui::Entity<HomePane>,
+    skills_pane: gpui::Entity<SkillsPane>,
     inspector_pane: gpui::Entity<InspectorPane>,
     toast_host: gpui::Entity<ToastHost>,
     root_modal_host: gpui::Entity<RootModalHost>,
@@ -452,6 +453,7 @@ pub(super) struct NativeShell {
     command_palette: DesktopCommandPalette,
     active_modal: Option<DesktopModalKind>,
     active_drawer: Option<CenterDrawerKind>,
+    center_surface: CenterSurface,
     drawer_restore_focus: Option<FocusTarget>,
     conversation_full_message: Option<ConversationFullMessageView>,
     conversation_announcement: Option<(u64, String)>,
@@ -529,6 +531,7 @@ impl NativeShell {
         let sessions_pane = cx.new(|cx| SessionsPane::new(sidebar_focus.clone(), window, cx));
         let composer_pane = cx.new(|cx| ComposerPane::new(window, cx));
         let home_pane = cx.new(|_| HomePane::new());
+        let skills_pane = cx.new(|_| SkillsPane::new());
         let inspector_pane = cx.new(|cx| InspectorPane::new(inspector_focus.clone(), cx));
         let toast_host = cx.new(|cx| ToastHost::new(window, cx));
         let root_modal_host = cx.new(|_| {
@@ -635,13 +638,10 @@ impl NativeShell {
                 &sessions_pane,
                 window,
                 |this, _, event: &SessionsPaneEvent, window, cx| match event {
-                    SessionsPaneEvent::NewConversation => {
-                        this.show_home_workspace(window, cx);
+                    SessionsPaneEvent::Navigate(target) => {
+                        this.navigate_center(target.clone(), window, cx);
                     }
                     SessionsPaneEvent::Refresh => this.request_session_catalog(cx),
-                    SessionsPaneEvent::Open(session_id) => {
-                        this.open_session(session_id.clone(), cx);
-                    }
                     SessionsPaneEvent::Rename(session_id, name) => {
                         this.rename_session(session_id.clone(), name.clone(), cx);
                     }
@@ -682,15 +682,6 @@ impl NativeShell {
                     }
                     ComposerPaneEvent::SetRunningMode(mode) => {
                         this.set_active_composer_running_mode(*mode, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &home_pane,
-                window,
-                |this, _, event: &HomePaneEvent, _, cx| match event {
-                    HomePaneEvent::OpenSession(session_id) => {
-                        this.open_session(session_id.clone(), cx);
                     }
                 },
             ),
@@ -800,6 +791,7 @@ impl NativeShell {
             sessions_pane,
             composer_pane,
             home_pane,
+            skills_pane,
             inspector_pane,
             toast_host,
             root_modal_host,
@@ -815,6 +807,7 @@ impl NativeShell {
             command_palette: DesktopCommandPalette::default(),
             active_modal: None,
             active_drawer: None,
+            center_surface: CenterSurface::Primary,
             drawer_restore_focus: None,
             conversation_full_message: None,
             conversation_announcement: None,
@@ -841,9 +834,9 @@ impl NativeShell {
         shell.composer_pane.update(cx, |composer_pane, _| {
             composer_pane.set_view_model(composer_pane_view_model);
         });
-        let home_pane_view_model = shell.home_pane_view_model();
-        shell.home_pane.update(cx, |home_pane, _| {
-            home_pane.set_view_model(home_pane_view_model);
+        let skills_pane_view_model = shell.skills_pane_view_model();
+        shell.skills_pane.update(cx, |skills_pane, _| {
+            skills_pane.set_view_model(skills_pane_view_model);
         });
         let conversation_pane_view_model = shell.conversation_pane_view_model();
         shell.conversation_pane.update(cx, |conversation_pane, _| {
@@ -948,7 +941,39 @@ impl NativeShell {
         true
     }
 
+    fn navigate_center(
+        &mut self,
+        target: CenterNavigationTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            CenterNavigationTarget::NewConversation => self.show_home_workspace(window, cx),
+            CenterNavigationTarget::Skills => {
+                self.center_surface = CenterSurface::Skills;
+                self.dismiss_drawer(window, cx, false);
+                self.focus_target(FocusTarget::CenterBody, window, cx);
+                self.notify_sessions_pane(cx);
+                cx.notify();
+            }
+            CenterNavigationTarget::Session(session_id) => {
+                self.center_surface = CenterSurface::Primary;
+                self.dismiss_drawer(window, cx, false);
+                self.focus_target(FocusTarget::CenterBody, window, cx);
+                if self.projection.as_ref().is_some_and(|projection| {
+                    projection.snapshot().session.session_id == session_id
+                }) {
+                    self.notify_sessions_pane(cx);
+                    cx.notify();
+                } else {
+                    self.open_session(session_id, cx);
+                }
+            }
+        }
+    }
+
     fn show_home_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.center_surface = CenterSurface::Primary;
         if self.active_workspace.session_id() != HOME_COMPOSER_SESSION_KEY
             && !self.swap_active_workspace(HOME_COMPOSER_SESSION_KEY)
         {
@@ -967,7 +992,6 @@ impl NativeShell {
         self.dismiss_drawer(window, cx, true);
         self.record_focus(FocusTarget::Composer, window, cx);
         self.notify_sessions_pane(cx);
-        self.notify_home_pane(cx);
         self.notify_composer_pane(cx);
         self.notify_conversation_pane(cx);
         self.notify_conversation_header(cx);
@@ -2053,7 +2077,6 @@ impl NativeShell {
         }
         if sessions_pane_dirty {
             self.notify_sessions_pane(cx);
-            self.notify_home_pane(cx);
         }
         if composer_pane_dirty {
             self.notify_composer_pane(cx);
@@ -2068,7 +2091,6 @@ impl NativeShell {
         }
         if conversation_header_dirty {
             self.notify_conversation_header(cx);
-            self.notify_home_pane(cx);
         }
         if root_modal_host_dirty {
             self.notify_root_modal_host(cx);
@@ -2863,7 +2885,6 @@ impl NativeShell {
         ));
         self.notify_toast_host(cx);
         self.notify_conversation_header(cx);
-        self.notify_home_pane(cx);
         self.push_inspector_pane_view_model(cx);
         cx.notify();
     }
@@ -4065,12 +4086,12 @@ impl NativeShell {
             project_groups: Arc::from(self.project_catalog.project_groups()),
             omitted_sessions: self.project_catalog.omitted(),
             catalog_state: self.project_catalog.state().clone(),
-            global_skills: Arc::clone(&self.global_skills),
             active_session_id: Arc::from(
                 snapshot
                     .map(|snapshot| snapshot.session.session_id.as_str())
                     .unwrap_or_default(),
             ),
+            skills_active: self.center_surface == CenterSurface::Skills,
             runtime_states: Arc::from(runtime_states),
             composer_running,
             awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
@@ -4121,42 +4142,10 @@ impl NativeShell {
         }
     }
 
-    fn home_pane_view_model(&self) -> HomePaneViewModel {
-        let thinking = self
-            .thinking_selection
-            .label(self.project.settings.default_thinking_level.as_deref());
-        let scratch_root = self.project.global_config_dir.join("scratch");
-        let scratch_workspace = self
-            .project
-            .cwd
-            .parent()
-            .is_some_and(|parent| parent == scratch_root);
-        HomePaneViewModel {
-            model: Arc::from(truncate_label(&self.project.selected_model_id, 28)),
-            thinking: Arc::from(truncate_label(&thinking, 18)),
-            workspace: Arc::from(truncate_label(&self.project.cwd.display().to_string(), 42)),
-            scratch_workspace,
-            recent_sessions: Arc::from(self.project_catalog.catalog().to_vec()),
-            omitted_sessions: self.project_catalog.omitted(),
-            global_skills: Arc::clone(&self.global_skills),
-            session_pending: self.command_ledger.contains_where(|intent| {
-                matches!(
-                    intent,
-                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
-                )
-            }),
-            catalog_pending: self
-                .command_ledger
-                .contains(&DesktopCommandIntent::ListSessions),
+    fn skills_pane_view_model(&self) -> SkillsPaneViewModel {
+        SkillsPaneViewModel {
+            skills: Arc::clone(&self.global_skills),
         }
-    }
-
-    fn notify_home_pane(&self, cx: &mut Context<Self>) {
-        let view_model = self.home_pane_view_model();
-        self.home_pane.update(cx, |pane, cx| {
-            pane.set_view_model(view_model);
-            cx.notify();
-        });
     }
 
     fn inspector_pane_view_model(&self) -> InspectorPaneViewModel {
@@ -4635,7 +4624,34 @@ impl Render for NativeShell {
                 )
         });
 
-        let center = if self.projection.is_some() {
+        let center = if self.center_surface == CenterSurface::Skills {
+            div()
+                .id("skills-workspace")
+                .role(Role::Main)
+                .aria_label("Skills workspace")
+                .debug_selector(|| "desktop-skills-workspace".into())
+                .flex_none()
+                .w(px(layout.center.width as f32))
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .bg(rgb(theme.canvas.value()))
+                .child(self.conversation_header.clone())
+                .child(
+                    div()
+                        .id("center-body")
+                        .debug_selector(|| "desktop-center-body".into())
+                        .relative()
+                        .track_focus(&self.center_body_focus)
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(self.skills_pane.clone())
+                        .child(self.center_drawer_host.clone()),
+                )
+        } else if self.projection.is_some() {
             div()
                 .id("conversation-panel")
                 .role(Role::Main)
@@ -5468,9 +5484,8 @@ mod tests {
             let header = shell.conversation_header_view_model();
             assert_eq!(header.profile.as_ref(), "Default");
             assert_eq!(header.current_profile_id.as_ref(), "default");
-            assert_eq!(shell.home_pane_view_model().global_skills.len(), 1);
-            assert!(shell.home_pane_view_model().scratch_workspace);
-            assert!(shell.home_pane_view_model().workspace.contains("scratch"));
+            assert_eq!(shell.skills_pane_view_model().skills.len(), 1);
+            assert!(!shell.sessions_pane_view_model().skills_active);
         });
 
         for (width, height, expected_center_width, sidebar_visible) in [
@@ -5500,6 +5515,7 @@ mod tests {
             assert_eq!(f32::from(header.size.height), 48.);
             assert_eq!(f32::from(body.size.width), expected_center_width);
             assert_eq!(f32::from(body.origin.y - header.origin.y), 48.);
+            assert!(cx.debug_bounds("desktop-evo-wordmark").is_some());
             assert!(cx.debug_bounds("desktop-composer-panel").is_some());
         }
     }
@@ -5559,8 +5575,8 @@ mod tests {
             cx.debug_bounds("desktop-new-conversation-section")
                 .is_some()
         );
-        assert!(cx.debug_bounds("desktop-global-skills-section").is_some());
-        assert!(cx.debug_bounds("desktop-sessions-skill-0").is_some());
+        assert!(cx.debug_bounds("desktop-hit-skills").is_some());
+        assert!(cx.debug_bounds("desktop-skill-row-0").is_none());
         assert!(cx.debug_bounds("desktop-session-history-section").is_some());
         assert!(cx.debug_bounds("desktop-session-row-0").is_some());
         assert!(cx.debug_bounds("sessions-search").is_some());
@@ -5571,7 +5587,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn session_panel_renders_all_sections_and_new_conversation_returns_home(
+    fn typed_navigation_switches_skills_session_and_home_without_runtime_commands(
         cx: &mut TestAppContext,
     ) {
         initialize_visual_test(cx);
@@ -5598,10 +5614,42 @@ mod tests {
             cx.debug_bounds("desktop-new-conversation-section")
                 .is_some()
         );
-        assert!(cx.debug_bounds("desktop-global-skills-section").is_some());
-        assert!(cx.debug_bounds("desktop-sessions-skill-0").is_some());
+        assert!(cx.debug_bounds("desktop-hit-skills").is_some());
         assert!(cx.debug_bounds("desktop-session-history-section").is_some());
         assert!(cx.debug_bounds("desktop-session-row-0").is_some());
+
+        let skills = cx
+            .debug_bounds("desktop-hit-skills")
+            .expect("the panel exposes the Skills route");
+        cx.simulate_click(skills.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("desktop-skills-workspace").is_some());
+        assert!(cx.debug_bounds("desktop-skills-pane").is_some());
+        assert!(cx.debug_bounds("desktop-skill-row-0").is_some());
+        assert!(cx.debug_bounds("desktop-conversation-panel").is_none());
+        assert!(cx.debug_bounds("desktop-composer-panel").is_none());
+        assert!(shell.read_with(cx, |shell, _| {
+            shell.center_surface == CenterSurface::Skills
+                && shell.sessions_pane_view_model().skills_active
+        }));
+        assert_eq!(runtime_harness.drain_command_kinds(), []);
+
+        let active_session = cx
+            .debug_bounds("desktop-session-row-0")
+            .expect("the active session remains a typed navigation target");
+        cx.simulate_click(active_session.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("desktop-conversation-panel").is_some());
+        assert!(cx.debug_bounds("desktop-skills-workspace").is_none());
+        assert_eq!(runtime_harness.drain_command_kinds(), []);
+
+        let skills = cx
+            .debug_bounds("desktop-hit-skills")
+            .expect("the Skills route remains available");
+        cx.simulate_click(skills.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
 
         let new_conversation = cx
             .debug_bounds("desktop-hit-new-conversation")
@@ -9843,6 +9891,7 @@ mod tests {
     }
 }
 mod center_drawer_host;
+mod center_navigation;
 mod commands;
 mod composer_pane;
 mod conversation_controller;
@@ -9855,6 +9904,7 @@ mod inspector_pane;
 mod project_catalog_controller;
 mod root_modal_host;
 mod sessions_pane;
+mod skills_pane;
 mod streaming_text;
 mod toast_host;
 mod update;
@@ -9862,6 +9912,7 @@ mod update;
 use center_drawer_host::{
     CenterDrawerHost, CenterDrawerHostEvent, CenterDrawerKind, CenterDrawerViewModel,
 };
+use center_navigation::{CenterNavigationTarget, CenterSurface};
 use commands::{DirectCommandUpdate, ProjectionCommandCompletions};
 #[cfg(test)]
 use composer_pane::InputRenderLatencyProbe;
@@ -9886,7 +9937,7 @@ use conversation_header::{
 #[cfg(test)]
 use conversation_pane::CONVERSATION_RAIL_WIDTH;
 use conversation_pane::{ConversationPane, ConversationPaneEvent, ConversationPaneViewModel};
-use home_pane::{HomePane, HomePaneEvent, HomePaneViewModel};
+use home_pane::HomePane;
 use inspector_pane::{
     InspectorChangedFileView, InspectorDiagnosticView, InspectorPane, InspectorPaneEvent,
     InspectorPaneViewModel, InspectorRecoveryView,
@@ -9896,6 +9947,7 @@ use root_modal_host::{
     RootModalAuthorizationView, RootModalHost, RootModalHostEvent, RootModalViewModel,
 };
 use sessions_pane::{SessionRuntimeState, SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
+use skills_pane::{SkillsPane, SkillsPaneViewModel};
 use toast_host::{ToastHost, ToastNotice};
 use update::ProjectionDirtyRouting;
 #[cfg(test)]

@@ -62,6 +62,7 @@ impl Default for ProjectCatalogController {
 }
 
 impl ProjectCatalogController {
+    #[cfg(test)]
     pub(super) fn catalog(&self) -> &[DesktopSessionCatalogEntry] {
         &self.catalog
     }
