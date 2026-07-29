@@ -78,6 +78,7 @@ struct ConversationRowHeight {
     text_phase: StreamingTextPhase,
     details_expanded: bool,
     last_commit_at: Instant,
+    last_commit_source: ConversationRowHeightSource,
 }
 
 impl ConversationRowHeight {
@@ -100,6 +101,18 @@ impl ConversationRowHeight {
     fn clear_measurements(&mut self) {
         self.measured_collapsed = None;
         self.measured_expanded = None;
+    }
+
+    /// Whether a revision bump at `phase` can have replaced the row's content.
+    ///
+    /// A streaming revision only appends, so the previous measurement stays a
+    /// valid lower bound for the new text and is far closer to the truth than
+    /// `estimated_height`. Discarding it on every delta is what collapsed a row
+    /// to the estimate and let the next measurement snap it back, once per
+    /// throttle window. Terminal revisions can rewrite the text (sanitising,
+    /// truncating), so those do invalidate the measurement.
+    const fn revision_invalidates_measurements(phase: StreamingTextPhase) -> bool {
+        !phase.is_streaming()
     }
 }
 
@@ -146,16 +159,22 @@ impl ConversationRowLayoutState {
                 text_phase: input.text_phase,
                 details_expanded: input.details_expanded,
                 last_commit_at: now,
+                last_commit_source: ConversationRowHeightSource::Estimated,
             });
         let width_changed = row.width_bucket != width_bucket;
         let phase_changed = row.text_phase != input.text_phase;
         let details_changed = row.details_expanded != input.details_expanded;
         let revision_changed = row.source_revision != input.source_revision;
-        if width_changed || phase_changed || revision_changed {
+        if width_changed
+            || phase_changed
+            || (revision_changed
+                && ConversationRowHeight::revision_invalidates_measurements(input.text_phase))
+        {
             row.clear_measurements();
         }
         row.estimate = estimate;
-        let target_height = row.measured(input.details_expanded).unwrap_or(row.estimate);
+        let measured_target = row.measured(input.details_expanded);
+        let target_height = measured_target.unwrap_or(row.estimate);
         let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
         let mut next_refresh_after = None;
         if target_changed {
@@ -165,11 +184,16 @@ impl ConversationRowLayoutState {
             if width_changed
                 || phase_changed
                 || details_changed
-                || input.text_phase != StreamingTextPhase::StreamingPlainText
+                || !input.text_phase.is_streaming()
                 || elapsed >= STREAMING_ROW_HEIGHT_INTERVAL
             {
                 row.committed = target_height;
                 row.last_commit_at = now;
+                row.last_commit_source = if measured_target.is_some() {
+                    ConversationRowHeightSource::Measured
+                } else {
+                    ConversationRowHeightSource::Estimated
+                };
             } else {
                 next_refresh_after = Some(STREAMING_ROW_HEIGHT_INTERVAL.saturating_sub(elapsed));
             }
@@ -237,11 +261,19 @@ impl ConversationRowLayoutState {
             let elapsed = now
                 .checked_duration_since(row.last_commit_at)
                 .unwrap_or_default();
-            if row.text_phase != StreamingTextPhase::StreamingPlainText
+            // A measurement supersedes an estimate instead of queueing behind it.
+            // The estimate is a guess this row has just disproved, and sharing one
+            // throttle budget let an estimate commit starve the measurement for a
+            // full window — long enough for the card to overflow the fixed-height
+            // row it is painted into. Measurement-to-measurement changes stay
+            // throttled: that churn is the one visible as jitter.
+            if !row.text_phase.is_streaming()
+                || row.last_commit_source == ConversationRowHeightSource::Estimated
                 || elapsed >= STREAMING_ROW_HEIGHT_INTERVAL
             {
                 row.committed = measured;
                 row.last_commit_at = now;
+                row.last_commit_source = ConversationRowHeightSource::Measured;
                 height_changed = true;
                 tracing::trace!(target: "desktop", event = "row_height_commit", height = measured);
             } else {
@@ -298,17 +330,23 @@ impl ConversationRowLayoutState {
                 text_phase: input.text_phase,
                 details_expanded: input.details_expanded,
                 last_commit_at: now,
+                last_commit_source: ConversationRowHeightSource::Estimated,
             });
 
             let width_changed = row.width_bucket != width_bucket;
             let phase_changed = row.text_phase != input.text_phase;
             let details_changed = row.details_expanded != input.details_expanded;
             let revision_changed = row.source_revision != input.source_revision;
-            if width_changed || phase_changed || revision_changed {
+            if width_changed
+                || phase_changed
+                || (revision_changed
+                    && ConversationRowHeight::revision_invalidates_measurements(input.text_phase))
+            {
                 row.clear_measurements();
             }
             row.estimate = estimate;
-            let target_height = row.measured(input.details_expanded).unwrap_or(row.estimate);
+            let measured_target = row.measured(input.details_expanded);
+            let target_height = measured_target.unwrap_or(row.estimate);
             let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
             if target_changed {
                 let elapsed = now
@@ -317,11 +355,16 @@ impl ConversationRowLayoutState {
                 if width_changed
                     || phase_changed
                     || details_changed
-                    || input.text_phase != StreamingTextPhase::StreamingPlainText
+                    || !input.text_phase.is_streaming()
                     || elapsed >= STREAMING_ROW_HEIGHT_INTERVAL
                 {
                     row.committed = target_height;
                     row.last_commit_at = now;
+                    row.last_commit_source = if measured_target.is_some() {
+                        ConversationRowHeightSource::Measured
+                    } else {
+                        ConversationRowHeightSource::Estimated
+                    };
                 } else {
                     let remaining = STREAMING_ROW_HEIGHT_INTERVAL.saturating_sub(elapsed);
                     next_refresh_after = Some(
@@ -713,6 +756,141 @@ mod tests {
             None,
         );
         assert_eq!(collapsed_after_resize.heights, vec![108.]);
+    }
+
+    #[test]
+    fn streaming_measurement_preempts_the_estimate_it_disproves() {
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let item_key = row_layout("assistant:live", 100., true).item_key;
+        layout.resolve(
+            vec![row_layout("assistant:live", 100., true)],
+            900,
+            started,
+            None,
+        );
+
+        let measurement = |height: f32| ConversationRowMeasurement {
+            item_key: item_key.clone(),
+            source_revision: 1,
+            width_bucket: 900,
+            text_phase: StreamingTextPhase::StreamingPlainText,
+            details_expanded: false,
+            height,
+        };
+
+        // The estimate saturates well below a long streaming card. Making the
+        // measurement wait out the throttle window it did not consume leaves the
+        // card overflowing the fixed-height row it is painted into.
+        let first = layout
+            .submit_measurement(&measurement(2_000.), started + Duration::from_millis(1))
+            .expect("the row is current");
+        assert_eq!(first.height, 2_000.);
+        assert!(first.height_changed);
+        assert_eq!(first.source, ConversationRowHeightSource::Measured);
+
+        // Measurement-to-measurement churn is the visible jitter, so it stays
+        // throttled to the same 15Hz budget.
+        let throttled = layout
+            .submit_measurement(&measurement(2_400.), started + Duration::from_millis(20))
+            .expect("the row is current");
+        assert_eq!(throttled.height, 2_000.);
+        assert!(!throttled.height_changed);
+        assert_eq!(
+            throttled.next_refresh_after,
+            Some(STREAMING_ROW_HEIGHT_INTERVAL - Duration::from_millis(19))
+        );
+
+        let committed = layout
+            .submit_measurement(
+                &measurement(2_400.),
+                started + Duration::from_millis(1) + STREAMING_ROW_HEIGHT_INTERVAL,
+            )
+            .expect("the row is current");
+        assert_eq!(committed.height, 2_400.);
+        assert!(committed.height_changed);
+    }
+
+    #[test]
+    fn streaming_revisions_reuse_the_measured_height_instead_of_the_estimate() {
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let mut input = row_layout("assistant:live", 100., true);
+        let item_key = input.item_key.clone();
+        layout.resolve(vec![input.clone()], 900, started, None);
+        layout
+            .submit_measurement(
+                &ConversationRowMeasurement {
+                    item_key,
+                    source_revision: 1,
+                    width_bucket: 900,
+                    text_phase: StreamingTextPhase::StreamingPlainText,
+                    details_expanded: false,
+                    height: 2_000.,
+                },
+                started + Duration::from_millis(1),
+            )
+            .expect("the row is current");
+
+        // Every delta bumps the revision. A streaming revision only appends, so
+        // the measurement stays a valid lower bound; discarding it here made the
+        // row collapse to the estimate and snap back once per throttle window.
+        let mut now = started + Duration::from_millis(2);
+        for revision in 2..=8u64 {
+            input.source_revision = revision;
+            let resolved = layout.resolve_one(input.clone(), 900, now);
+            assert_eq!(
+                resolved.height, 2_000.,
+                "revision {revision} collapsed the row to its estimate"
+            );
+            assert_eq!(resolved.source, ConversationRowHeightSource::Measured);
+            assert_eq!(resolved.next_refresh_after, None);
+            now += Duration::from_millis(100);
+        }
+
+        // Settling into Markdown mid-stream is not a terminal phase, so it keeps
+        // the 15Hz throttle rather than committing every delta unthrottled.
+        input.source_revision = 9;
+        input.text_phase = StreamingTextPhase::SettlingMarkdown;
+        input.estimated_height = 2_600.;
+        let settling = layout.resolve_one(input.clone(), 900, now);
+        assert_eq!(settling.height, 2_600.);
+
+        input.source_revision = 10;
+        input.estimated_height = 3_000.;
+        let throttled = layout.resolve_one(input.clone(), 900, now + Duration::from_millis(1));
+        assert_eq!(throttled.height, 2_600.);
+        assert!(throttled.next_refresh_after.is_some());
+    }
+
+    #[test]
+    fn terminal_revisions_still_invalidate_the_measured_height() {
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let mut input = row_layout("assistant:final", 100., false);
+        let item_key = input.item_key.clone();
+        layout.resolve(vec![input.clone()], 900, started, None);
+        layout
+            .submit_measurement(
+                &ConversationRowMeasurement {
+                    item_key,
+                    source_revision: 1,
+                    width_bucket: 900,
+                    text_phase: StreamingTextPhase::FinalMarkdown,
+                    details_expanded: false,
+                    height: 900.,
+                },
+                started + Duration::from_millis(1),
+            )
+            .expect("the row is current");
+
+        // A completed row can be rewritten by sanitising and truncation, so its
+        // measurement genuinely is stale once the revision moves.
+        input.source_revision = 2;
+        input.estimated_height = 320.;
+        let rewritten = layout.resolve_one(input, 900, started + Duration::from_millis(2));
+        assert_eq!(rewritten.height, 320.);
+        assert_eq!(rewritten.source, ConversationRowHeightSource::Estimated);
     }
 
     #[test]

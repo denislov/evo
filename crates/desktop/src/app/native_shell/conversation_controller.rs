@@ -351,8 +351,7 @@ impl ConversationController {
 
     fn follow_latest_tail(&self, visible_blocks: usize) {
         if self.viewport.follow_latest() && visible_blocks > 0 {
-            self.scroll
-                .scroll_to_item(visible_blocks - 1, ScrollStrategy::Bottom);
+            self.align_scroll_to_bottom(visible_blocks);
         }
     }
 
@@ -367,6 +366,13 @@ impl ConversationController {
         self.align_scroll_to_bottom(visible_count);
     }
 
+    /// The single way this controller pins the viewport to the newest row.
+    ///
+    /// Everything that follows the tail routes through here so a projection
+    /// event and the frame's own `prepare_rows` cannot resolve the bottom two
+    /// different ways. The summed-height path is exact; `scroll_to_item` is the
+    /// fallback for when the height table has not caught up with the row count
+    /// yet, which is the case mid-way through applying a batch of events.
     pub(super) fn align_scroll_to_bottom(&self, block_count: usize) {
         if block_count == 0 {
             let mut offset = self.scroll.offset();

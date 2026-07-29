@@ -7988,6 +7988,77 @@ mod tests {
     }
 
     #[test]
+    fn streaming_deltas_do_not_collapse_a_measured_row_to_its_estimate() {
+        // End-to-end guard over the composed path: every delta bumps the row's
+        // content revision, and the rendered card is far taller than the row
+        // estimate. Discarding the measurement on each revision made the row
+        // oscillate between the two, once per throttle window.
+        const MEASURED_HEIGHT: f32 = 2_400.;
+        let streaming_projection = |text: &str| {
+            let mut snapshot = visual_test_snapshot();
+            snapshot.transcript.items = vec![CodingAgentSessionTranscriptItem::Assistant {
+                id: "streaming-answer".into(),
+                text: text.to_owned(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: false,
+                reasoning_duration_millis: None,
+            }];
+            DesktopProjection::new(snapshot)
+                .expect("streaming fixture is a valid product projection")
+        };
+
+        let mut controller = ConversationController::default();
+        let mut body = String::new();
+        let mut resolved_heights = Vec::new();
+        let mut row_keys = Vec::new();
+
+        for delta in 0..4 {
+            body.push_str("Another sentence of the streamed answer. ");
+            let projection = streaming_projection(&body);
+            let source = ConversationSource::new(&projection, None);
+            controller.apply_delta(true, 0);
+            controller.prepare_rows(&source, 900);
+
+            let row = controller.row_at(0).expect("the streaming row exists");
+            assert!(
+                !row.done,
+                "delta {delta} must still present the row as streaming"
+            );
+            resolved_heights.push(controller.render_heights_for_tests().borrow()[0]);
+            row_keys.push(row.item_key.clone());
+
+            controller.submit_row_measurement(
+                &source,
+                &ConversationRowMeasurement {
+                    item_key: row.item_key,
+                    source_revision: row.source_revision,
+                    width_bucket: row.width_bucket,
+                    text_phase: row.text_phase,
+                    details_expanded: false,
+                    height: MEASURED_HEIGHT,
+                },
+            );
+            // Outlast the height throttle so the next revision is free to commit,
+            // which is exactly when the collapse used to become visible.
+            std::thread::sleep(
+                crate::conversation::STREAMING_ROW_HEIGHT_INTERVAL + Duration::from_millis(5),
+            );
+        }
+
+        assert!(
+            row_keys.windows(2).all(|pair| pair[0] == pair[1]),
+            "a streaming row must keep one identity across deltas: {row_keys:?}"
+        );
+        assert!(
+            resolved_heights[1..]
+                .iter()
+                .all(|height| (*height - MEASURED_HEIGHT).abs() < 0.5),
+            "streaming deltas fell back to the row estimate: {resolved_heights:?}"
+        );
+    }
+
+    #[test]
     fn detail_toggle_holds_its_row_anchor_while_following_latest() {
         let mut snapshot = visual_test_snapshot();
         snapshot.transcript.items = vec![

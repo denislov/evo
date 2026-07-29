@@ -95,19 +95,22 @@ impl ConversationItemKey {
         Arc::clone(&self.stable_id)
     }
 
-    pub(super) fn markdown_state_key(
-        &self,
-        detail: bool,
-        revision: u64,
-        final_state: bool,
-    ) -> Arc<str> {
+    /// The GPUI element id backing this row's Markdown view.
+    ///
+    /// Deliberately free of the source revision. `TextView` keys its parsed
+    /// `TextViewState` off the element id, and its `set_text` already
+    /// short-circuits when the text is unchanged, so a per-revision id threw away
+    /// and rebuilt that state on every streaming delta — losing the text
+    /// selection with it. Only the phase splits the key, because settling and
+    /// final Markdown render the same row through different styling.
+    pub(super) fn markdown_state_key(&self, detail: bool, final_state: bool) -> Arc<str> {
         let namespace = if detail {
             "transcript-detail-markdown"
         } else {
             "transcript-markdown"
         };
         let phase = if final_state { "final" } else { "settling" };
-        Arc::from(format!("{namespace}:{}:{phase}:{revision}", self.stable_id))
+        Arc::from(format!("{namespace}:{}:{phase}", self.stable_id))
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
