@@ -8,7 +8,7 @@ pub(super) struct ProjectionDirtyRouting {
     pub(super) inspector_immediate: bool,
     pub(super) inspector_telemetry: bool,
     pub(super) conversation_header: bool,
-    pub(super) overlay: bool,
+    pub(super) root_modal: bool,
     pub(super) sessions: bool,
     pub(super) file_changes: bool,
 }
@@ -28,7 +28,7 @@ impl ProjectionDirtyRouting {
             inspector_telemetry,
             conversation_header: replaced
                 || delta.is_some_and(conversation_header_projection_dirty),
-            overlay: replaced || delta.is_some_and(overlay_host_projection_dirty),
+            root_modal: replaced || delta.is_some_and(root_modal_host_projection_dirty),
             sessions: replaced,
             file_changes: delta
                 .is_some_and(|delta| delta.context.contains(ContextDirtyFlags::CHANGES)),
@@ -65,6 +65,6 @@ pub(super) fn conversation_header_projection_dirty(delta: &DesktopProjectionDelt
     delta.context.contains(ContextDirtyFlags::OPERATIONS) || delta.lifecycle || delta.session
 }
 
-pub(super) fn overlay_host_projection_dirty(delta: &DesktopProjectionDelta) -> bool {
+pub(super) fn root_modal_host_projection_dirty(delta: &DesktopProjectionDelta) -> bool {
     conversation_header_projection_dirty(delta) || delta.authorizations
 }

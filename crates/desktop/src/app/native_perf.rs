@@ -396,7 +396,7 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
                 cx,
             );
             if matches!(request, NativeReplayRequest::Visual(_)) && !idle_replay {
-                shell.install_native_visual_session_fixture();
+                shell.install_native_visual_session_fixture(cx);
             }
             shell
         });

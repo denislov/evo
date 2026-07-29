@@ -230,11 +230,9 @@ enum DesktopFileReviewState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DesktopOverlayKind {
+enum DesktopModalKind {
     Authorization,
     CommandPalette,
-    NarrowSessions,
-    NarrowContext,
     FullMessage,
 }
 
@@ -441,7 +439,8 @@ pub(super) struct NativeShell {
     home_pane: gpui::Entity<HomePane>,
     inspector_pane: gpui::Entity<InspectorPane>,
     toast_host: gpui::Entity<ToastHost>,
-    overlay_host: gpui::Entity<OverlayHost>,
+    root_modal_host: gpui::Entity<RootModalHost>,
+    center_drawer_host: gpui::Entity<CenterDrawerHost>,
     focus: FocusState,
     center_header_focus: FocusHandle,
     sidebar_focus: FocusHandle,
@@ -449,15 +448,14 @@ pub(super) struct NativeShell {
     inspector_focus: FocusHandle,
     authorization_focus: FocusHandle,
     command_palette_focus: FocusHandle,
-    narrow_sessions_focus: FocusHandle,
     full_message_focus: FocusHandle,
     command_palette: DesktopCommandPalette,
-    active_overlay: Option<DesktopOverlayKind>,
+    active_modal: Option<DesktopModalKind>,
+    active_drawer: Option<CenterDrawerKind>,
+    drawer_restore_focus: Option<FocusTarget>,
     conversation_full_message: Option<ConversationFullMessageView>,
     conversation_announcement: Option<(u64, String)>,
     conversation_announcement_sequence: u64,
-    narrow_sessions_open: bool,
-    narrow_context_open: bool,
     project_catalog: ProjectCatalogController,
     panel_resize: Option<PanelResizeState>,
     focus_input_modality: FocusInputModality,
@@ -525,7 +523,6 @@ impl NativeShell {
         let inspector_focus = cx.focus_handle().tab_stop(true).tab_index(5);
         let authorization_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let command_palette_focus = cx.focus_handle().tab_stop(true).tab_index(6);
-        let narrow_sessions_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let full_message_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let conversation_pane = cx.new(|_| ConversationPane::new());
         let conversation_header = cx.new(|_| ConversationHeader::new(center_header_focus.clone()));
@@ -534,16 +531,15 @@ impl NativeShell {
         let home_pane = cx.new(|_| HomePane::new());
         let inspector_pane = cx.new(|cx| InspectorPane::new(inspector_focus.clone(), cx));
         let toast_host = cx.new(|cx| ToastHost::new(window, cx));
-        let overlay_host = cx.new(|_| {
-            OverlayHost::new(
-                inspector_pane.clone(),
-                sessions_pane.clone(),
+        let root_modal_host = cx.new(|_| {
+            RootModalHost::new(
                 authorization_focus.clone(),
                 command_palette_focus.clone(),
-                narrow_sessions_focus.clone(),
                 full_message_focus.clone(),
             )
         });
+        let center_drawer_host =
+            cx.new(|_| CenterDrawerHost::new(sessions_pane.clone(), inspector_pane.clone()));
 
         let subscriptions = vec![
             cx.on_focus(&center_header_focus, window, |this, window, cx| {
@@ -653,8 +649,7 @@ impl NativeShell {
                         this.close_session(session_id, cx);
                     }
                     SessionsPaneEvent::Dismiss => {
-                        this.narrow_sessions_open = false;
-                        this.dismiss_overlay(window, cx);
+                        this.dismiss_drawer(window, cx, true);
                     }
                 },
             ),
@@ -674,7 +669,7 @@ impl NativeShell {
                         this.remove_composer_attachment(*index, cx);
                     }
                     ComposerPaneEvent::SubmitPrimary => {
-                        if !this.root_action_blocked_by_overlay(window, cx) {
+                        if !this.root_action_blocked_by_modal(window, cx) {
                             this.submit_primary_composer(cx);
                         }
                     }
@@ -704,8 +699,7 @@ impl NativeShell {
                 window,
                 |this, _, event: &InspectorPaneEvent, window, cx| match event {
                     InspectorPaneEvent::Close => {
-                        this.narrow_context_open = false;
-                        this.dismiss_overlay(window, cx);
+                        this.dismiss_drawer(window, cx, true);
                     }
                     InspectorPaneEvent::RequestFileReview(request) => {
                         this.request_file_review(request.clone(), cx);
@@ -725,18 +719,18 @@ impl NativeShell {
                 },
             ),
             cx.subscribe_in(
-                &overlay_host,
+                &root_modal_host,
                 window,
-                |this, _, event: &OverlayHostEvent, window, cx| match event {
-                    OverlayHostEvent::ExecutePalette(command) => {
+                |this, _, event: &RootModalHostEvent, window, cx| match event {
+                    RootModalHostEvent::ExecutePalette(command) => {
                         this.command_palette.close();
-                        this.dismiss_overlay(window, cx);
+                        this.dismiss_modal(window, cx);
                         this.execute_palette_command(*command, window, cx);
                     }
-                    OverlayHostEvent::DecideAuthorization { identity, decision } => {
+                    RootModalHostEvent::DecideAuthorization { identity, decision } => {
                         this.decide_tool_authorization(identity.clone(), decision.clone(), cx);
                     }
-                    OverlayHostEvent::CopyFullMessage => {
+                    RootModalHostEvent::CopyFullMessage => {
                         if let Some(message) = &this.conversation_full_message {
                             cx.write_to_clipboard(ClipboardItem::new_string(
                                 message.text.to_string(),
@@ -744,9 +738,16 @@ impl NativeShell {
                             this.announce_conversation_copy("Full message copied.", cx);
                         }
                     }
-                    OverlayHostEvent::CloseFullMessage => {
+                    RootModalHostEvent::CloseFullMessage => {
                         this.close_full_conversation_message(window, cx);
                     }
+                },
+            ),
+            cx.subscribe_in(
+                &center_drawer_host,
+                window,
+                |this, _, event: &CenterDrawerHostEvent, window, cx| match event {
+                    CenterDrawerHostEvent::Dismiss => this.dismiss_drawer(window, cx, true),
                 },
             ),
             cx.observe_window_bounds(window, Self::window_bounds_changed),
@@ -801,7 +802,8 @@ impl NativeShell {
             home_pane,
             inspector_pane,
             toast_host,
-            overlay_host,
+            root_modal_host,
+            center_drawer_host,
             focus: FocusState::default(),
             center_header_focus,
             sidebar_focus,
@@ -809,15 +811,14 @@ impl NativeShell {
             inspector_focus,
             authorization_focus,
             command_palette_focus,
-            narrow_sessions_focus,
             full_message_focus,
             command_palette: DesktopCommandPalette::default(),
-            active_overlay: None,
+            active_modal: None,
+            active_drawer: None,
+            drawer_restore_focus: None,
             conversation_full_message: None,
             conversation_announcement: None,
             conversation_announcement_sequence: 0,
-            narrow_sessions_open: false,
-            narrow_context_open: false,
             project_catalog: ProjectCatalogController::default(),
             panel_resize: None,
             focus_input_modality: FocusInputModality::default(),
@@ -852,10 +853,16 @@ impl NativeShell {
         shell.inspector_pane.update(cx, |inspector_pane, _| {
             inspector_pane.set_view_model(inspector_pane_view_model);
         });
-        let overlay_view_model = shell.overlay_view_model();
-        shell.overlay_host.update(cx, |overlay_host, _| {
-            overlay_host.set_view_model(overlay_view_model);
+        let root_modal_view_model = shell.root_modal_view_model();
+        shell.root_modal_host.update(cx, |root_modal_host, _| {
+            root_modal_host.set_view_model(root_modal_view_model);
         });
+        let center_drawer_view_model = shell.center_drawer_view_model();
+        shell
+            .center_drawer_host
+            .update(cx, |center_drawer_host, _| {
+                center_drawer_host.set_view_model(center_drawer_view_model);
+            });
         shell
     }
 
@@ -957,10 +964,7 @@ impl NativeShell {
                 .insert(previous.session_id().to_owned(), previous);
         }
 
-        self.narrow_sessions_open = false;
-        if self.active_overlay == Some(DesktopOverlayKind::NarrowSessions) {
-            self.dismiss_overlay(window, cx);
-        }
+        self.dismiss_drawer(window, cx, true);
         self.record_focus(FocusTarget::Composer, window, cx);
         self.notify_sessions_pane(cx);
         self.notify_home_pane(cx);
@@ -968,7 +972,7 @@ impl NativeShell {
         self.notify_conversation_pane(cx);
         self.notify_conversation_header(cx);
         self.notify_inspector_pane(cx);
-        self.notify_overlay_host(cx);
+        self.notify_root_modal_host(cx);
         cx.notify();
     }
 
@@ -1105,7 +1109,7 @@ impl NativeShell {
         }
     }
 
-    pub(super) fn install_native_visual_session_fixture(&mut self) {
+    pub(super) fn install_native_visual_session_fixture(&mut self, cx: &mut Context<Self>) {
         let Some(projection) = self.projection.as_ref() else {
             return;
         };
@@ -1128,7 +1132,11 @@ impl NativeShell {
             };
         }
         self.project_catalog.replace_catalog(vec![entry], 0);
-        self.narrow_sessions_open = true;
+        self.active_drawer = Some(CenterDrawerKind::Sessions);
+        self.drawer_restore_focus = Some(self.focus.active());
+        self.notify_sessions_pane(cx);
+        self.notify_conversation_header(cx);
+        self.notify_center_drawer_host(cx);
     }
 
     fn visibility(&self) -> PanelVisibility {
@@ -1280,6 +1288,9 @@ impl NativeShell {
         let layout = self.layout(window);
         let previous = self.focus.active();
         if self.focus.request(target, layout) {
+            if self.active_drawer.is_some() {
+                self.drawer_restore_focus = Some(target);
+            }
             cx.notify();
         }
         if previous == FocusTarget::Sidebar || target == FocusTarget::Sidebar {
@@ -1311,21 +1322,19 @@ impl NativeShell {
             u32::from(viewport.height),
             PanelVisibility::default(),
         );
-        if self.narrow_sessions_open && forced_layout.sidebar.is_some() {
-            self.narrow_sessions_open = false;
-            self.preferences.sessions_panel_visible = true;
-            if self.active_overlay == Some(DesktopOverlayKind::NarrowSessions) {
-                self.active_overlay = None;
-                self.focus.close_overlay(self.layout(window));
+        let drawer_became_dockable = match self.active_drawer {
+            Some(CenterDrawerKind::Sessions) if forced_layout.sidebar.is_some() => {
+                self.preferences.sessions_panel_visible = true;
+                true
             }
-        }
-        if self.narrow_context_open && forced_layout.inspector.is_some() {
-            self.narrow_context_open = false;
-            self.preferences.context_panel_visible = true;
-            if self.active_overlay == Some(DesktopOverlayKind::NarrowContext) {
-                self.active_overlay = None;
-                self.focus.close_overlay(self.layout(window));
+            Some(CenterDrawerKind::Inspector) if forced_layout.inspector.is_some() => {
+                self.preferences.context_panel_visible = true;
+                true
             }
+            _ => false,
+        };
+        if drawer_became_dockable {
+            self.dismiss_drawer(window, cx, true);
         }
         let layout = self.layout(window);
         let previous_focus = self.focus.active();
@@ -1336,7 +1345,7 @@ impl NativeShell {
         self.schedule_preferences();
         self.notify_inspector_pane(cx);
         self.notify_conversation_header(cx);
-        self.notify_overlay_host(cx);
+        self.notify_center_drawer_host(cx);
         cx.notify();
     }
 
@@ -1351,7 +1360,7 @@ impl NativeShell {
         let mut inspector_telemetry_dirty = false;
         let mut toast_host_dirty = false;
         let mut conversation_header_dirty = false;
-        let mut overlay_host_dirty = false;
+        let mut root_modal_host_dirty = false;
         let mut root_dirty = false;
         while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
             let Some(update) = self.runtime_updates.pop_front() else {
@@ -1365,7 +1374,7 @@ impl NativeShell {
                 inspector_telemetry_dirty,
                 toast_host_dirty,
                 conversation_header_dirty,
-                overlay_host_dirty,
+                root_modal_host_dirty,
                 root_dirty,
             );
             let is_session_change = matches!(
@@ -1412,7 +1421,7 @@ impl NativeShell {
             ) {
                 toast_host_dirty = true;
                 conversation_header_dirty = true;
-                overlay_host_dirty = true;
+                root_modal_host_dirty = true;
                 root_dirty = true;
             }
             let update = match commands::reconcile_direct_update(self, update, cx) {
@@ -1432,7 +1441,7 @@ impl NativeShell {
                             inspector_telemetry_dirty,
                             toast_host_dirty,
                             conversation_header_dirty,
-                            overlay_host_dirty,
+                            root_modal_host_dirty,
                             root_dirty,
                         ) = dirty_before;
                     }
@@ -1885,7 +1894,7 @@ impl NativeShell {
                         inspector_telemetry_dirty,
                         toast_host_dirty,
                         conversation_header_dirty,
-                        overlay_host_dirty,
+                        root_modal_host_dirty,
                         root_dirty,
                     ) = dirty_before;
                 }
@@ -1926,8 +1935,8 @@ impl NativeShell {
             if dirty.conversation_header {
                 conversation_header_dirty = true;
             }
-            if dirty.overlay {
-                overlay_host_dirty = true;
+            if dirty.root_modal {
+                root_modal_host_dirty = true;
             }
             if dirty.sessions {
                 sessions_pane_dirty = true;
@@ -2000,7 +2009,7 @@ impl NativeShell {
                 inspector_pane_dirty = true;
                 toast_host_dirty = true;
                 conversation_header_dirty = true;
-                overlay_host_dirty = true;
+                root_modal_host_dirty = true;
             }
             if background_update {
                 let _ = self.swap_active_workspace(&foreground_session_id);
@@ -2011,7 +2020,7 @@ impl NativeShell {
                     inspector_telemetry_dirty,
                     toast_host_dirty,
                     conversation_header_dirty,
-                    overlay_host_dirty,
+                    root_modal_host_dirty,
                     root_dirty,
                 ) = dirty_before;
             }
@@ -2035,7 +2044,7 @@ impl NativeShell {
             || inspector_telemetry_dirty
             || toast_host_dirty
             || conversation_header_dirty
-            || overlay_host_dirty
+            || root_modal_host_dirty
         {
             self.runtime_ui_notification_count += 1;
         }
@@ -2061,8 +2070,8 @@ impl NativeShell {
             self.notify_conversation_header(cx);
             self.notify_home_pane(cx);
         }
-        if overlay_host_dirty {
-            self.notify_overlay_host(cx);
+        if root_modal_host_dirty {
+            self.notify_root_modal_host(cx);
         }
         !self
             .projection
@@ -2077,7 +2086,7 @@ impl NativeShell {
             cx.notify();
         });
         self.notify_toast_host(cx);
-        self.notify_overlay_host(cx);
+        self.notify_root_modal_host(cx);
     }
 
     fn composer_pane_state(&self) -> (bool, bool, bool, bool) {
@@ -2178,9 +2187,17 @@ impl NativeShell {
             });
     }
 
-    fn notify_overlay_host(&self, cx: &mut Context<Self>) {
-        let view_model = self.overlay_view_model();
-        self.overlay_host.update(cx, |host, cx| {
+    fn notify_root_modal_host(&self, cx: &mut Context<Self>) {
+        let view_model = self.root_modal_view_model();
+        self.root_modal_host.update(cx, |host, cx| {
+            host.set_view_model(view_model);
+            cx.notify();
+        });
+    }
+
+    fn notify_center_drawer_host(&self, cx: &mut Context<Self>) {
+        let view_model = self.center_drawer_view_model();
+        self.center_drawer_host.update(cx, |host, cx| {
             host.set_view_model(view_model);
             cx.notify();
         });
@@ -2243,15 +2260,11 @@ impl NativeShell {
             .sidebar
             .is_some();
         if !dockable {
-            self.command_palette.close();
-            self.narrow_sessions_open = !self.narrow_sessions_open;
-            if self.narrow_sessions_open {
-                self.activate_overlay(DesktopOverlayKind::NarrowSessions, window, cx);
+            if self.active_drawer == Some(CenterDrawerKind::Sessions) {
+                self.dismiss_drawer(window, cx, true);
             } else {
-                self.dismiss_overlay(window, cx);
+                self.activate_drawer(CenterDrawerKind::Sessions, window, cx);
             }
-            self.notify_sessions_pane(cx);
-            self.notify_inspector_pane(cx);
             return;
         }
         self.preferences.sessions_panel_visible = !self.preferences.sessions_panel_visible;
@@ -2289,13 +2302,10 @@ impl NativeShell {
             .inspector
             .is_some();
         if !dockable {
-            self.command_palette.close();
-            self.narrow_sessions_open = false;
-            self.narrow_context_open = !self.narrow_context_open;
-            if self.narrow_context_open {
-                self.activate_overlay(DesktopOverlayKind::NarrowContext, window, cx);
+            if self.active_drawer == Some(CenterDrawerKind::Inspector) {
+                self.dismiss_drawer(window, cx, true);
             } else {
-                self.dismiss_overlay(window, cx);
+                self.activate_drawer(CenterDrawerKind::Inspector, window, cx);
             }
             return;
         }
@@ -2901,7 +2911,7 @@ impl NativeShell {
             }
         }
         self.notify_toast_host(cx);
-        self.notify_overlay_host(cx);
+        self.notify_root_modal_host(cx);
         cx.notify();
     }
 
@@ -3103,7 +3113,7 @@ impl NativeShell {
             text,
             source_truncated,
         });
-        self.activate_overlay(DesktopOverlayKind::FullMessage, window, cx);
+        self.activate_modal(DesktopModalKind::FullMessage, window, cx);
     }
 
     fn open_full_conversation_message(
@@ -3124,12 +3134,12 @@ impl NativeShell {
             bytes = message.text.len(),
         );
         self.conversation_full_message = Some(message);
-        self.activate_overlay(DesktopOverlayKind::FullMessage, window, cx);
+        self.activate_modal(DesktopModalKind::FullMessage, window, cx);
     }
 
     fn close_full_conversation_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conversation_full_message = None;
-        self.dismiss_overlay(window, cx);
+        self.dismiss_modal(window, cx);
     }
 
     fn toggle_conversation_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
@@ -3368,49 +3378,85 @@ impl NativeShell {
         cx.notify();
     }
 
-    fn activate_overlay(
+    fn activate_modal(
         &mut self,
-        overlay: DesktopOverlayKind,
+        modal: DesktopModalKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let inspector_overlay_changed = self.active_overlay
-            == Some(DesktopOverlayKind::NarrowContext)
-            || overlay == DesktopOverlayKind::NarrowContext;
-        if self.active_overlay.is_none() {
-            self.focus.open_overlay();
+        self.dismiss_drawer(window, cx, false);
+        if self.active_modal.is_none() {
+            self.focus.open_modal();
         }
-        self.active_overlay = Some(overlay);
-        match overlay {
-            DesktopOverlayKind::Authorization => self.authorization_focus.focus(window, cx),
-            DesktopOverlayKind::CommandPalette => self.command_palette_focus.focus(window, cx),
-            DesktopOverlayKind::NarrowSessions => self.narrow_sessions_focus.focus(window, cx),
-            DesktopOverlayKind::NarrowContext => self.inspector_focus.focus(window, cx),
-            DesktopOverlayKind::FullMessage => self.full_message_focus.focus(window, cx),
-        }
-        if inspector_overlay_changed {
-            self.notify_inspector_pane(cx);
+        self.active_modal = Some(modal);
+        match modal {
+            DesktopModalKind::Authorization => self.authorization_focus.focus(window, cx),
+            DesktopModalKind::CommandPalette => self.command_palette_focus.focus(window, cx),
+            DesktopModalKind::FullMessage => self.full_message_focus.focus(window, cx),
         }
         self.notify_conversation_header(cx);
-        self.notify_overlay_host(cx);
+        self.notify_root_modal_host(cx);
         cx.notify();
     }
 
-    fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let inspector_overlay_changed =
-            self.active_overlay == Some(DesktopOverlayKind::NarrowContext);
-        self.active_overlay = None;
-        self.focus.close_overlay(self.layout(window));
+    fn dismiss_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_modal = None;
+        self.focus.close_modal(self.layout(window));
         self.focus_active_target(window, cx);
-        if inspector_overlay_changed {
-            self.notify_inspector_pane(cx);
-        }
         self.notify_conversation_header(cx);
-        self.notify_overlay_host(cx);
+        self.notify_root_modal_host(cx);
         cx.notify();
     }
 
-    fn reconcile_authorization_overlay(
+    fn activate_drawer(
+        &mut self,
+        drawer: CenterDrawerKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_modal.is_some() {
+            self.focus_active_target(window, cx);
+            return;
+        }
+        if self.active_drawer.is_none() {
+            self.drawer_restore_focus = Some(self.focus.active());
+        }
+        self.active_drawer = Some(drawer);
+        match drawer {
+            CenterDrawerKind::Sessions => self.sidebar_focus.focus(window, cx),
+            CenterDrawerKind::Inspector => self.inspector_focus.focus(window, cx),
+        }
+        self.notify_sessions_pane(cx);
+        self.notify_inspector_pane(cx);
+        self.notify_conversation_header(cx);
+        self.notify_center_drawer_host(cx);
+        cx.notify();
+    }
+
+    fn dismiss_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>, restore_focus: bool) {
+        if self.active_drawer.take().is_none() {
+            if !restore_focus {
+                self.drawer_restore_focus = None;
+            }
+            return;
+        }
+        let restore_target = self.drawer_restore_focus.take();
+        if restore_focus {
+            let layout = self.layout(window);
+            let restored = restore_target.is_some_and(|target| self.focus.request(target, layout));
+            if !restored {
+                let _ = self.focus.request(FocusTarget::Composer, layout);
+            }
+            self.focus_active_target(window, cx);
+        }
+        self.notify_sessions_pane(cx);
+        self.notify_inspector_pane(cx);
+        self.notify_conversation_header(cx);
+        self.notify_center_drawer_host(cx);
+        cx.notify();
+    }
+
+    fn reconcile_authorization_modal(
         &mut self,
         authorization_present: bool,
         window: &mut Window,
@@ -3418,31 +3464,26 @@ impl NativeShell {
     ) {
         if authorization_present {
             self.command_palette.close();
-            self.narrow_sessions_open = false;
-            self.narrow_context_open = false;
             self.conversation_full_message = None;
-            if self.active_overlay != Some(DesktopOverlayKind::Authorization) {
-                self.activate_overlay(DesktopOverlayKind::Authorization, window, cx);
+            if self.active_modal != Some(DesktopModalKind::Authorization) {
+                self.activate_modal(DesktopModalKind::Authorization, window, cx);
             }
-        } else if self.active_overlay == Some(DesktopOverlayKind::Authorization) {
-            self.dismiss_overlay(window, cx);
+        } else if self.active_modal == Some(DesktopModalKind::Authorization) {
+            self.dismiss_modal(window, cx);
         }
     }
 
     fn focus_target(&mut self, target: FocusTarget, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_overlay.is_some() {
+        if self.active_modal.is_some() {
             return;
         }
         let layout = self.layout(window);
         if target == FocusTarget::Sidebar && !layout.is_visible(target) {
-            self.narrow_sessions_open = true;
-            self.activate_overlay(DesktopOverlayKind::NarrowSessions, window, cx);
-            self.notify_sessions_pane(cx);
+            self.activate_drawer(CenterDrawerKind::Sessions, window, cx);
             return;
         }
         if target == FocusTarget::Inspector && !layout.is_visible(target) {
-            self.narrow_context_open = true;
-            self.activate_overlay(DesktopOverlayKind::NarrowContext, window, cx);
+            self.activate_drawer(CenterDrawerKind::Inspector, window, cx);
             return;
         }
         if !self.focus.request(target, layout) {
@@ -3458,7 +3499,7 @@ impl NativeShell {
     }
 
     fn cycle_focus(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_overlay.is_some() {
+        if self.active_modal.is_some() {
             self.focus_active_target(window, cx);
             return;
         }
@@ -3467,29 +3508,23 @@ impl NativeShell {
         cx.notify();
     }
 
-    fn root_action_blocked_by_overlay(
+    fn root_action_blocked_by_modal(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(overlay) = self.active_overlay else {
+        let Some(modal) = self.active_modal else {
             return false;
         };
         self.set_preference_notice(
-            match overlay {
-                DesktopOverlayKind::Authorization => {
+            match modal {
+                DesktopModalKind::Authorization => {
                     "Resolve the authorization dialog before using workspace shortcuts."
                 }
-                DesktopOverlayKind::CommandPalette => {
+                DesktopModalKind::CommandPalette => {
                     "Choose a typed command or close the command palette first."
                 }
-                DesktopOverlayKind::NarrowSessions => {
-                    "Choose a session or close the sessions dialog first."
-                }
-                DesktopOverlayKind::NarrowContext => {
-                    "Use the Inspector surface or close it before workspace shortcuts."
-                }
-                DesktopOverlayKind::FullMessage => {
+                DesktopModalKind::FullMessage => {
                     "Close the full message viewer before using workspace shortcuts."
                 }
             }
@@ -3653,10 +3688,8 @@ impl NativeShell {
             cx.notify();
             return;
         }
-        self.narrow_sessions_open = false;
-        self.narrow_context_open = false;
         self.command_palette.open();
-        self.activate_overlay(DesktopOverlayKind::CommandPalette, window, cx);
+        self.activate_modal(DesktopModalKind::CommandPalette, window, cx);
     }
 
     fn on_open_file_surface(
@@ -3665,7 +3698,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.root_action_blocked_by_overlay(window, cx) {
+        if self.root_action_blocked_by_modal(window, cx) {
             return;
         }
         self.review_next_file(cx);
@@ -3673,9 +3706,7 @@ impl NativeShell {
     }
 
     fn on_new_session(&mut self, _: &NewSession, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_overlay != Some(DesktopOverlayKind::NarrowSessions)
-            && self.root_action_blocked_by_overlay(window, cx)
-        {
+        if self.root_action_blocked_by_modal(window, cx) {
             return;
         }
         self.create_session(cx);
@@ -3687,7 +3718,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.root_action_blocked_by_overlay(window, cx) {
+        if self.root_action_blocked_by_modal(window, cx) {
             return;
         }
         self.focus_target(FocusTarget::Composer, window, cx);
@@ -3699,7 +3730,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.root_action_blocked_by_overlay(window, cx) {
+        if self.root_action_blocked_by_modal(window, cx) {
             return;
         }
         self.submit_primary_composer(cx);
@@ -3711,7 +3742,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.root_action_blocked_by_overlay(window, cx) {
+        if self.root_action_blocked_by_modal(window, cx) {
             return;
         }
         self.abort_active_operation(cx);
@@ -3723,35 +3754,33 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.active_overlay {
-            Some(DesktopOverlayKind::Authorization) => {
-                self.set_preference_notice(
-                    "Authorization requires Deny, Allow once, or Allow for operation.".into(),
-                );
-                self.authorization_focus.focus(window, cx);
-                cx.notify();
+        if let Some(modal) = self.active_modal {
+            match modal {
+                DesktopModalKind::Authorization => {
+                    self.set_preference_notice(
+                        "Authorization requires Deny, Allow once, or Allow for operation.".into(),
+                    );
+                    self.authorization_focus.focus(window, cx);
+                    cx.notify();
+                }
+                DesktopModalKind::CommandPalette => {
+                    self.command_palette.close();
+                    self.dismiss_modal(window, cx);
+                }
+                DesktopModalKind::FullMessage => {
+                    self.close_full_conversation_message(window, cx);
+                }
             }
-            Some(DesktopOverlayKind::CommandPalette) => {
-                self.command_palette.close();
-                self.dismiss_overlay(window, cx);
-            }
-            Some(DesktopOverlayKind::NarrowSessions) => {
-                self.narrow_sessions_open = false;
-                self.dismiss_overlay(window, cx);
-            }
-            Some(DesktopOverlayKind::NarrowContext) => {
-                self.narrow_context_open = false;
-                self.dismiss_overlay(window, cx);
-            }
-            Some(DesktopOverlayKind::FullMessage) => {
-                self.close_full_conversation_message(window, cx);
-            }
-            None if !matches!(self.file_review.as_ref(), DesktopFileReviewState::Empty) => {
-                self.file_review = Arc::new(DesktopFileReviewState::Empty);
-                self.set_preference_notice("Closed the changed-file review.".into());
-                cx.notify();
-            }
-            None => self.focus_target(FocusTarget::Composer, window, cx),
+            return;
+        }
+        if self.active_drawer.is_some() {
+            self.dismiss_drawer(window, cx, true);
+        } else if !matches!(self.file_review.as_ref(), DesktopFileReviewState::Empty) {
+            self.file_review = Arc::new(DesktopFileReviewState::Empty);
+            self.set_preference_notice("Closed the changed-file review.".into());
+            cx.notify();
+        } else {
+            self.focus_target(FocusTarget::Composer, window, cx);
         }
     }
 
@@ -3761,7 +3790,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.root_action_blocked_by_overlay(window, cx) {
+        if self.root_action_blocked_by_modal(window, cx) {
             return;
         }
         self.follow_latest(cx);
@@ -3773,7 +3802,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.root_action_blocked_by_overlay(window, cx) {
+        if self.root_action_blocked_by_modal(window, cx) {
             return;
         }
         self.toggle_context(window, cx);
@@ -3785,7 +3814,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.root_action_blocked_by_overlay(window, cx) {
+        if self.root_action_blocked_by_modal(window, cx) {
             return;
         }
         self.cycle_focus(false, window, cx);
@@ -3797,7 +3826,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.root_action_blocked_by_overlay(window, cx) {
+        if self.root_action_blocked_by_modal(window, cx) {
             return;
         }
         self.cycle_focus(true, window, cx);
@@ -3809,7 +3838,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.root_action_blocked_by_overlay(window, cx) {
+        if !self.root_action_blocked_by_modal(window, cx) {
             self.select_adjacent_conversation(true, cx);
         }
     }
@@ -3820,7 +3849,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.root_action_blocked_by_overlay(window, cx) {
+        if !self.root_action_blocked_by_modal(window, cx) {
             self.select_adjacent_conversation(false, cx);
         }
     }
@@ -3831,7 +3860,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.root_action_blocked_by_overlay(window, cx) {
+        if !self.root_action_blocked_by_modal(window, cx) {
             self.copy_keyboard_selected_conversation(cx);
         }
     }
@@ -3842,20 +3871,20 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.root_action_blocked_by_overlay(window, cx) {
+        if !self.root_action_blocked_by_modal(window, cx) {
             self.toggle_keyboard_selected_conversation_details(cx);
         }
     }
 
     fn on_palette_previous(&mut self, _: &PalettePrevious, _: &mut Window, cx: &mut Context<Self>) {
         self.command_palette.move_selection(true);
-        self.notify_overlay_host(cx);
+        self.notify_root_modal_host(cx);
         cx.notify();
     }
 
     fn on_palette_next(&mut self, _: &PaletteNext, _: &mut Window, cx: &mut Context<Self>) {
         self.command_palette.move_selection(false);
-        self.notify_overlay_host(cx);
+        self.notify_root_modal_host(cx);
         cx.notify();
     }
 
@@ -3869,7 +3898,7 @@ impl NativeShell {
             return;
         };
         self.command_palette.close();
-        self.dismiss_overlay(window, cx);
+        self.dismiss_modal(window, cx);
         self.execute_palette_command(command, window, cx);
     }
 
@@ -4006,18 +4035,12 @@ impl NativeShell {
             FocusTarget::CenterBody => self.center_body_focus.focus(window, cx),
             FocusTarget::Composer => self.focus_composer_input(window, cx),
             FocusTarget::Inspector => self.inspector_focus.focus(window, cx),
-            FocusTarget::Overlay => match self.active_overlay {
-                Some(DesktopOverlayKind::Authorization) => {
-                    self.authorization_focus.focus(window, cx)
-                }
-                Some(DesktopOverlayKind::CommandPalette) => {
+            FocusTarget::Modal => match self.active_modal {
+                Some(DesktopModalKind::Authorization) => self.authorization_focus.focus(window, cx),
+                Some(DesktopModalKind::CommandPalette) => {
                     self.command_palette_focus.focus(window, cx);
                 }
-                Some(DesktopOverlayKind::NarrowSessions) => {
-                    self.narrow_sessions_focus.focus(window, cx);
-                }
-                Some(DesktopOverlayKind::NarrowContext) => self.inspector_focus.focus(window, cx),
-                Some(DesktopOverlayKind::FullMessage) => self.full_message_focus.focus(window, cx),
+                Some(DesktopModalKind::FullMessage) => self.full_message_focus.focus(window, cx),
                 None => self.focus_composer_input(window, cx),
             },
         }
@@ -4059,7 +4082,7 @@ impl NativeShell {
             }),
             active_status: self.semantic_status(),
             keyboard_focus_visible: self.keyboard_focus_visible(),
-            context_is_overlay: self.narrow_sessions_open,
+            presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Sessions),
         }
     }
 
@@ -4140,7 +4163,7 @@ impl NativeShell {
         let Some(projection) = self.projection.as_ref() else {
             return InspectorPaneViewModel {
                 panel_width: self.preferences.context_panel_width,
-                context_is_overlay: self.narrow_context_open,
+                presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Inspector),
                 keyboard_focus_visible: self.keyboard_focus_visible(),
                 selected_section: self.inspector_section,
                 composer_running: false,
@@ -4260,7 +4283,7 @@ impl NativeShell {
         let usage = &snapshot.context.usage;
         InspectorPaneViewModel {
             panel_width: self.preferences.context_panel_width,
-            context_is_overlay: self.narrow_context_open,
+            presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Inspector),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             selected_section: self.inspector_section,
             composer_running,
@@ -4319,7 +4342,7 @@ impl NativeShell {
         }
     }
 
-    fn overlay_view_model(&self) -> OverlayViewModel {
+    fn root_modal_view_model(&self) -> RootModalViewModel {
         let authorization = self
             .projection
             .as_ref()
@@ -4332,18 +4355,24 @@ impl NativeShell {
                             && operation_id == request.operation_id
                     },
                 );
-                OverlayAuthorizationView {
+                RootModalAuthorizationView {
                     request,
                     decision_pending,
                 }
             });
-        OverlayViewModel {
+        RootModalViewModel {
             palette_open: self.command_palette.is_open(),
             palette_selected: self.command_palette.selected(),
-            narrow_context_open: self.narrow_context_open,
-            narrow_sessions_open: self.narrow_sessions_open,
             authorization,
             full_message: self.conversation_full_message.clone(),
+        }
+    }
+
+    fn center_drawer_view_model(&self) -> CenterDrawerViewModel {
+        CenterDrawerViewModel {
+            active: self.active_drawer,
+            sessions_width: self.preferences.sessions_panel_width,
+            inspector_width: self.preferences.context_panel_width,
         }
     }
 
@@ -4503,8 +4532,8 @@ impl NativeShell {
             project_name: Arc::from(project_name),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             panel_visibility: self.visibility(),
-            narrow_sessions_open: self.narrow_sessions_open,
-            narrow_context_open: self.narrow_context_open,
+            sessions_drawer_open: self.active_drawer == Some(CenterDrawerKind::Sessions),
+            inspector_drawer_open: self.active_drawer == Some(CenterDrawerKind::Inspector),
             sessions_panel_width: self.preferences.sessions_panel_width,
             context_panel_width: self.preferences.context_panel_width,
         }
@@ -4555,7 +4584,7 @@ impl Render for NativeShell {
             .projection
             .as_ref()
             .is_some_and(|projection| !projection.snapshot().pending_authorizations.is_empty());
-        self.reconcile_authorization_overlay(authorization_present, window, cx);
+        self.reconcile_authorization_modal(authorization_present, window, cx);
         let sidebar_panel = layout.sidebar.map(|bounds| {
             div()
                 .relative()
@@ -4627,6 +4656,7 @@ impl Render for NativeShell {
                     div()
                         .id("center-body")
                         .debug_selector(|| "desktop-center-body".into())
+                        .relative()
                         .key_context(actions::CONVERSATION_KEY_CONTEXT)
                         .track_focus(&self.center_body_focus)
                         .flex_1()
@@ -4634,7 +4664,8 @@ impl Render for NativeShell {
                         .flex()
                         .flex_col()
                         .child(self.conversation_pane.clone())
-                        .child(self.composer_pane.clone()),
+                        .child(self.composer_pane.clone())
+                        .child(self.center_drawer_host.clone()),
                 )
         } else {
             div()
@@ -4654,6 +4685,7 @@ impl Render for NativeShell {
                     div()
                         .id("center-body")
                         .debug_selector(|| "desktop-center-body".into())
+                        .relative()
                         .track_focus(&self.center_body_focus)
                         .flex_1()
                         .min_h_0()
@@ -4668,11 +4700,12 @@ impl Render for NativeShell {
                                 .px_6()
                                 .pb_8()
                                 .child(self.composer_pane.clone()),
-                        ),
+                        )
+                        .child(self.center_drawer_host.clone()),
                 )
         };
 
-        let overlay_host = self.overlay_host.clone();
+        let root_modal_host = self.root_modal_host.clone();
         let toast_host = self.toast_host.clone();
         let conversation_announcement = self
             .conversation_announcement
@@ -4727,7 +4760,7 @@ impl Render for NativeShell {
                     .child(center)
                     .children(inspector_panel),
             )
-            .child(overlay_host)
+            .child(root_modal_host)
             .child(toast_host)
             .when_some(conversation_announcement, |app, message| {
                 app.child(
@@ -4759,7 +4792,7 @@ fn focus_target_label(target: FocusTarget) -> &'static str {
         FocusTarget::CenterBody => "Center workspace",
         FocusTarget::Composer => "Composer",
         FocusTarget::Inspector => "Inspector",
-        FocusTarget::Overlay => "Overlay",
+        FocusTarget::Modal => "Modal",
     }
 }
 
@@ -5257,7 +5290,7 @@ mod tests {
         cx.run_until_parked();
         let toggle = cx
             .debug_bounds("desktop-hit-toggle-sessions")
-            .expect("idle Header exposes the Sessions overlay toggle");
+            .expect("idle Header exposes the Sessions drawer toggle");
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
@@ -5429,7 +5462,7 @@ mod tests {
             let inspector = shell.inspector_pane_view_model();
             assert_eq!(inspector.active_operation, "—");
             assert_eq!(inspector.stream_id, "—");
-            assert!(shell.overlay_view_model().authorization.is_none());
+            assert!(shell.root_modal_view_model().authorization.is_none());
             assert!(shell.toast_host.read(cx).messages().len() <= 3);
             assert_eq!(shell.conversation_pane_view_model().visible_count, 0);
             let header = shell.conversation_header_view_model();
@@ -5498,7 +5531,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn idle_sessions_overlay_renders_new_conversation_skills_and_history(cx: &mut TestAppContext) {
+    fn idle_sessions_drawer_renders_new_conversation_skills_and_history(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
@@ -5518,7 +5551,7 @@ mod tests {
 
         let toggle = cx
             .debug_bounds("desktop-hit-toggle-sessions")
-            .expect("idle Header exposes the Sessions overlay toggle");
+            .expect("idle Header exposes the Sessions drawer toggle");
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
         cx.run_until_parked();
 
@@ -5532,8 +5565,8 @@ mod tests {
         assert!(cx.debug_bounds("desktop-session-row-0").is_some());
         assert!(cx.debug_bounds("sessions-search").is_some());
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_overlay),
-            Some(DesktopOverlayKind::NarrowSessions)
+            shell.read_with(cx, |shell, _| shell.active_drawer),
+            Some(CenterDrawerKind::Sessions)
         );
     }
 
@@ -6275,7 +6308,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn inspector_tabs_stay_on_one_line_in_docked_and_overlay_layouts(cx: &mut TestAppContext) {
+    fn inspector_tabs_stay_on_one_line_in_docked_and_drawer_layouts(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let (shell, cx) = add_visual_shell_with_preferences(
             cx,
@@ -6284,10 +6317,10 @@ mod tests {
             visual_preferences_with_inspector(),
         );
 
-        for (width, open_overlay) in [(1_300., false), (700., true)] {
+        for (width, open_modal) in [(1_300., false), (700., true)] {
             cx.simulate_resize(size(px(width), px(900.)));
             cx.run_until_parked();
-            if open_overlay {
+            if open_modal {
                 cx.update(|window, app| {
                     shell.update(app, |shell, app| shell.toggle_context(window, app));
                 });
@@ -6384,11 +6417,25 @@ mod tests {
         cx.dispatch_action(ToggleInspectorPanel);
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_overlay),
-            Some(DesktopOverlayKind::NarrowContext)
+            shell.read_with(cx, |shell, _| shell.active_drawer),
+            Some(CenterDrawerKind::Inspector)
         );
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
         assert!(cx.debug_bounds("desktop-inspector-panel").is_some());
         assert_minimum_hit_target(cx, "desktop-hit-close-inspector");
+        let center_header = cx
+            .debug_bounds("desktop-conversation-header")
+            .expect("center header remains mounted above the drawer host");
+        let center_body = cx
+            .debug_bounds("desktop-center-body")
+            .expect("center body owns the drawer host");
+        let inspector_drawer = cx
+            .debug_bounds("desktop-inspector-drawer")
+            .expect("Inspector is rendered by the center-body drawer host");
+        assert_eq!(inspector_drawer.top(), center_body.top());
+        assert_eq!(inspector_drawer.bottom(), center_body.bottom());
+        assert_eq!(inspector_drawer.right(), center_body.right());
+        assert!(center_header.bottom() <= inspector_drawer.top());
         assert_eq!(
             cx.debug_bounds("desktop-conversation-panel"),
             Some(medium_conversation)
@@ -6399,9 +6446,25 @@ mod tests {
             medium_scroll
         );
 
-        cx.dispatch_action(EscapeHierarchy);
+        let model_selector = cx
+            .debug_bounds("desktop-header-model-selector")
+            .expect("the model selector stays exposed while Inspector is open");
+        cx.simulate_click(model_selector.center(), gpui::Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_overlay), None);
+        let down = gpui::Keystroke::parse("down").expect("down is a valid popup keystroke");
+        assert!(cx.update(|window, app| window.dispatch_keystroke(down, app)));
+        let escape = gpui::Keystroke::parse("escape").expect("escape is a valid popup keystroke");
+        assert!(cx.update(|window, app| window.dispatch_keystroke(escape, app)));
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_drawer),
+            Some(CenterDrawerKind::Inspector),
+            "selector interaction must not implicitly close the non-modal drawer"
+        );
+
+        cx.simulate_click(center_body.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_drawer), None);
         assert_eq!(
             shell.read_with(cx, |shell, _| shell.focus.active()),
             FocusTarget::Composer
@@ -6424,14 +6487,16 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_overlay),
-            Some(DesktopOverlayKind::NarrowSessions)
+            shell.read_with(cx, |shell, _| shell.active_drawer),
+            Some(CenterDrawerKind::Sessions)
         );
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
+        assert!(cx.debug_bounds("desktop-sessions-drawer").is_some());
         assert_minimum_hit_target(cx, "desktop-hit-sessions-overflow");
         assert_minimum_hit_target(cx, "desktop-hit-close-narrow-sessions");
         assert!(
             cx.debug_bounds("sessions-search").is_some(),
-            "narrow overlay reuses the searchable SessionsPane"
+            "narrow drawer reuses the searchable SessionsPane"
         );
         assert_eq!(
             cx.debug_bounds("desktop-conversation-panel"),
@@ -6445,7 +6510,7 @@ mod tests {
 
         cx.dispatch_action(EscapeHierarchy);
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_overlay), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_drawer), None);
         assert_eq!(
             shell.read_with(cx, |shell, _| shell.focus.active()),
             FocusTarget::Composer
@@ -6700,8 +6765,8 @@ mod tests {
         cx.simulate_click(open_output.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_overlay),
-            Some(DesktopOverlayKind::FullMessage)
+            shell.read_with(cx, |shell, _| shell.active_modal),
+            Some(DesktopModalKind::FullMessage)
         );
         assert!(shell.read_with(cx, |shell, _| {
             shell
@@ -6944,8 +7009,8 @@ mod tests {
         cx.simulate_click(open.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_overlay),
-            Some(DesktopOverlayKind::FullMessage)
+            shell.read_with(cx, |shell, _| shell.active_modal),
+            Some(DesktopModalKind::FullMessage)
         );
         let dialog = cx
             .debug_bounds("desktop-full-message-dialog")
@@ -6980,7 +7045,7 @@ mod tests {
             .expect("full viewer exposes a close action");
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_overlay), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
         assert!(shell.read_with(cx, |shell, _| shell.conversation_full_message.is_none()));
     }
 
@@ -7678,7 +7743,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn native_shell_command_palette_smoke_uses_overlay_focus_and_restores_it(
+    fn native_shell_command_palette_smoke_uses_modal_focus_and_restores_it(
         cx: &mut TestAppContext,
     ) {
         initialize_visual_test(cx);
@@ -7690,20 +7755,104 @@ mod tests {
         cx.dispatch_action(OpenCommandPalette);
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_overlay),
-            Some(DesktopOverlayKind::CommandPalette)
+            shell.read_with(cx, |shell, _| shell.active_modal),
+            Some(DesktopModalKind::CommandPalette)
         );
         assert_eq!(
             shell.read_with(cx, |shell, _| shell.focus.active()),
-            FocusTarget::Overlay
+            FocusTarget::Modal
         );
-
         cx.dispatch_action(EscapeHierarchy);
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_overlay), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
+        assert!(cx.debug_bounds("desktop-authorization-actions").is_none());
         assert_ne!(
             shell.read_with(cx, |shell, _| shell.focus.active()),
-            FocusTarget::Overlay
+            FocusTarget::Modal
+        );
+    }
+
+    #[gpui::test]
+    fn authorization_modal_preempts_the_drawer_and_restores_its_root_focus_owner(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+        cx.simulate_resize(size(px(1_000.), px(900.)));
+        cx.run_until_parked();
+
+        cx.dispatch_action(ToggleInspectorPanel);
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_drawer),
+            Some(CenterDrawerKind::Inspector)
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Composer,
+            "drawer focus remains independent from the logical root focus owner"
+        );
+
+        let mut authorization_snapshot = visual_test_snapshot();
+        authorization_snapshot
+            .session
+            .pending_authorizations
+            .push(ToolAuthorizationRequest {
+                authorization_id: "authorization-drawer-preemption".into(),
+                operation_id: "operation-drawer-preemption".into(),
+                turn_id: "turn-drawer-preemption".into(),
+                tool_call_id: "tool-drawer-preemption".into(),
+                tool_name: "bash".into(),
+                risk: ToolAuthorizationRisk::ShellExecution,
+                scope: ToolAuthorizationScope::Shell {
+                    cwd: "/desktop-visual-test".into(),
+                    command_fingerprint: "drawer-preemption-fingerprint".into(),
+                },
+                preview: ToolAuthorizationPreview {
+                    summary: "Authorize after opening the Inspector drawer".into(),
+                    path: None,
+                    command: Some("true".into()),
+                    cwd: Some("/desktop-visual-test".into()),
+                    content_preview: None,
+                },
+                capability_generation: 0,
+                requested_at: "2026-07-30T00:00:00Z".into(),
+            });
+        let authorization_projection = DesktopProjection::new(authorization_snapshot)
+            .expect("authorization drawer fixture is a valid product projection");
+        shell.update(cx, |shell, cx| {
+            shell.projection = Some(authorization_projection);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_drawer), None);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_modal),
+            Some(DesktopModalKind::Authorization)
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Modal
+        );
+        assert!(
+            cx.debug_bounds("desktop-authorization-actions").is_some(),
+            "the authorization projection mounts the real root modal after closing the drawer"
+        );
+
+        shell.update(cx, |shell, cx| {
+            shell.projection = Some(visual_test_projection());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
+        assert!(cx.debug_bounds("desktop-authorization-actions").is_none());
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Composer
         );
     }
 
@@ -7745,12 +7894,12 @@ mod tests {
         runtime_harness.drain_command_kinds();
 
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_overlay),
-            Some(DesktopOverlayKind::Authorization)
+            shell.read_with(cx, |shell, _| shell.active_modal),
+            Some(DesktopModalKind::Authorization)
         );
         assert_eq!(
             shell.read_with(cx, |shell, _| shell.focus.active()),
-            FocusTarget::Overlay
+            FocusTarget::Modal
         );
         let term_left = f32::from(
             cx.debug_bounds("desktop-authorization-term-operation")
@@ -8823,7 +8972,7 @@ mod tests {
         let composer = include_str!("native_shell/composer_pane.rs");
         let inspector = include_str!("native_shell/inspector_pane.rs");
         let toast_host = include_str!("native_shell/toast_host.rs");
-        let overlays = include_str!("native_shell/overlay_host.rs");
+        let overlays = include_str!("native_shell/root_modal_host.rs");
 
         assert!(shell.contains(".role(Role::Application)"));
         assert!(shell.contains(".role(Role::Main)"));
@@ -8991,7 +9140,7 @@ mod tests {
         let conversation = include_str!("native_shell/conversation_pane.rs");
         let sessions = include_str!("native_shell/sessions_pane.rs");
         let inspector = include_str!("native_shell/inspector_pane.rs");
-        let overlays = include_str!("native_shell/overlay_host.rs");
+        let overlays = include_str!("native_shell/root_modal_host.rs");
 
         assert!(shell.contains(".font_family(UI_FONT_FAMILY)"));
         for local_data_surface in [conversation, inspector, overlays] {
@@ -9013,7 +9162,7 @@ mod tests {
             include_str!("native_shell/sessions_pane.rs"),
             include_str!("native_shell/inspector_pane.rs"),
             include_str!("native_shell/toast_host.rs"),
-            include_str!("native_shell/overlay_host.rs"),
+            include_str!("native_shell/root_modal_host.rs"),
         ];
         let legacy_utility_tokens = [
             ".p_1()",
@@ -9048,7 +9197,7 @@ mod tests {
                 );
             }
         }
-        assert!(!include_str!("native_shell/overlay_host.rs").contains("rgba(0x"));
+        assert!(!include_str!("native_shell/root_modal_host.rs").contains("rgba(0x"));
     }
 
     #[test]
@@ -9394,7 +9543,7 @@ mod tests {
         assert!(pane.contains("No recent sessions yet."));
         assert!(pane.contains("No sessions match"));
         assert!(pane.contains("Loading sessions"));
-        assert!(pane.contains("context_is_overlay"));
+        assert!(pane.contains("presented_as_drawer"));
         assert!(!pane.contains(".label(\"Open\")"));
         assert!(!pane.contains("refresh-session-catalog"));
         assert!(!pane.contains(&active_duplicate));
@@ -9431,7 +9580,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_resize_handles_overlay_layout_and_persist_on_release() {
+    fn sidebar_resize_handles_drawer_layout_and_persist_on_release() {
         let shell = include_str!("native_shell.rs");
         let preferences = include_str!("../preferences.rs");
         let sessions_handle = ["sessions-resize-", "handle"].concat();
@@ -9586,64 +9735,80 @@ mod tests {
     }
 
     #[test]
-    fn overlay_rendering_is_owned_by_a_typed_child_entity() {
+    fn modal_and_drawer_rendering_have_separate_typed_hosts() {
         let shell = include_str!("native_shell.rs");
-        let host = include_str!("native_shell/overlay_host.rs");
+        let modal_host = include_str!("native_shell/root_modal_host.rs");
+        let drawer_host = include_str!("native_shell/center_drawer_host.rs");
         let authorization_id = ["\"authorization-", "overlay\""].concat();
         let palette_id = ["\"command-palette-", "overlay\""].concat();
-        let narrow_sessions_id = ["\"narrow-sessions-", "overlay\""].concat();
 
         assert!(!shell.contains(&authorization_id));
         assert!(!shell.contains(&palette_id));
-        assert!(!shell.contains(&narrow_sessions_id));
-        assert!(host.contains(&authorization_id));
-        assert!(host.contains(&palette_id));
-        assert!(host.contains(&narrow_sessions_id));
-        assert!(shell.contains("overlay_host: gpui::Entity<OverlayHost>"));
-        assert!(shell.contains(".child(overlay_host)"));
-        assert!(host.contains("impl EventEmitter<OverlayHostEvent>"));
-        assert!(host.contains("struct OverlayViewModel"));
-        assert!(host.contains("view_model: Option<OverlayViewModel>"));
-        assert!(host.contains("DecideAuthorization"));
-        assert!(host.contains("fn authorization_detail("));
-        assert!(host.contains("DesktopCriticalTone::Neutral"));
-        assert!(host.contains("DesktopCriticalTone::Affirmative"));
-        assert!(host.contains("DesktopCriticalTone::Dangerous"));
-        assert!(host.contains("font_family(MONOSPACE_FONT_FAMILY)"));
-        assert!(!host.contains("\"1 · Deny\""));
-        assert!(!host.contains("\"2 · Allow once\""));
-        assert!(!host.contains("\"3 · Allow for operation\""));
+        assert!(modal_host.contains(&authorization_id));
+        assert!(modal_host.contains(&palette_id));
+        assert!(shell.contains("root_modal_host: gpui::Entity<RootModalHost>"));
+        assert!(shell.contains("center_drawer_host: gpui::Entity<CenterDrawerHost>"));
+        assert!(shell.contains(".child(root_modal_host)"));
+        assert!(
+            shell
+                .matches(".child(self.center_drawer_host.clone())")
+                .count()
+                >= 2
+        );
+        assert!(modal_host.contains("impl EventEmitter<RootModalHostEvent>"));
+        assert!(modal_host.contains("struct RootModalViewModel"));
+        assert!(modal_host.contains("view_model: Option<RootModalViewModel>"));
+        assert!(modal_host.contains("DecideAuthorization"));
+        assert!(modal_host.contains("fn authorization_detail("));
+        assert!(modal_host.contains("DesktopCriticalTone::Neutral"));
+        assert!(modal_host.contains("DesktopCriticalTone::Affirmative"));
+        assert!(modal_host.contains("DesktopCriticalTone::Dangerous"));
+        assert!(modal_host.contains("font_family(MONOSPACE_FONT_FAMILY)"));
+        assert!(!modal_host.contains("\"1 · Deny\""));
+        assert!(!modal_host.contains("\"2 · Allow once\""));
+        assert!(!modal_host.contains("\"3 · Allow for operation\""));
         assert!(shell.contains("this.decide_tool_authorization("));
         assert!(shell.contains("Self::on_trap_overlay_focus"));
-        assert!(host.contains("self.inspector_pane.clone()"));
-        assert!(host.contains("self.sessions_pane.clone()"));
-        assert!(!host.contains("OverlaySessionView"));
-        assert!(!host.contains("session_catalog_pending"));
-        assert!(!host.contains("OpenSession"));
-        assert!(!host.contains("WeakEntity<NativeShell>"));
-        assert!(!host.contains("owner.read(cx)"));
-        assert!(!host.contains("DesktopProjection"));
-        assert!(!host.contains("command_ledger"));
-        assert!(!host.contains("project_catalog"));
-        assert!(shell.contains("fn overlay_view_model(&self) -> OverlayViewModel"));
+        assert!(!modal_host.contains("InspectorPane"));
+        assert!(!modal_host.contains("SessionsPane"));
+        assert!(drawer_host.contains("self.inspector_pane.clone()"));
+        assert!(drawer_host.contains("self.sessions_pane.clone()"));
+        assert!(drawer_host.contains("impl EventEmitter<CenterDrawerHostEvent>"));
+        assert!(drawer_host.contains("active: Option<CenterDrawerKind>"));
+        assert!(!drawer_host.contains("DESKTOP_OVERLAY_SCRIM_RGBA"));
+        assert!(!drawer_host.contains("Authorization"));
+        assert!(!drawer_host.contains("CommandPalette"));
+        assert!(!drawer_host.contains("FullMessage"));
+        assert!(!modal_host.contains("OverlaySessionView"));
+        assert!(!modal_host.contains("session_catalog_pending"));
+        assert!(!modal_host.contains("OpenSession"));
+        assert!(!modal_host.contains("WeakEntity<NativeShell>"));
+        assert!(!modal_host.contains("owner.read(cx)"));
+        assert!(!modal_host.contains("DesktopProjection"));
+        assert!(!modal_host.contains("command_ledger"));
+        assert!(!modal_host.contains("project_catalog"));
+        assert!(shell.contains("fn root_modal_view_model(&self) -> RootModalViewModel"));
+        assert!(shell.contains("fn center_drawer_view_model(&self) -> CenterDrawerViewModel"));
         assert!(shell.contains("authorization_focus: FocusHandle"));
-        assert!(shell.contains("active_overlay: Option<DesktopOverlayKind>"));
-        assert!(!host.contains("try_decide_tool_authorization"));
-        assert!(!host.contains("command_ledger.reserve"));
+        assert!(shell.contains("active_modal: Option<DesktopModalKind>"));
+        assert!(shell.contains("active_drawer: Option<CenterDrawerKind>"));
+        assert!(shell.contains("drawer_restore_focus: Option<FocusTarget>"));
+        assert!(!modal_host.contains("try_decide_tool_authorization"));
+        assert!(!modal_host.contains("command_ledger.reserve"));
     }
 
     #[test]
-    fn streaming_only_projection_delta_does_not_dirty_overlay_host() {
+    fn streaming_only_projection_delta_does_not_dirty_root_modal_host() {
         let mut streaming = desktop::projection::DesktopProjectionDelta {
             cursor: true,
             conversation: true,
             tools: true,
             ..Default::default()
         };
-        assert!(!overlay_host_projection_dirty(&streaming));
+        assert!(!root_modal_host_projection_dirty(&streaming));
 
         streaming.authorizations = true;
-        assert!(overlay_host_projection_dirty(&streaming));
+        assert!(root_modal_host_projection_dirty(&streaming));
     }
 
     #[test]
@@ -9677,6 +9842,7 @@ mod tests {
         assert!(!notice.contains(SECRET));
     }
 }
+mod center_drawer_host;
 mod commands;
 mod composer_pane;
 mod conversation_controller;
@@ -9686,13 +9852,16 @@ mod desktop_controls;
 mod desktop_style;
 mod home_pane;
 mod inspector_pane;
-mod overlay_host;
 mod project_catalog_controller;
+mod root_modal_host;
 mod sessions_pane;
 mod streaming_text;
 mod toast_host;
 mod update;
 
+use center_drawer_host::{
+    CenterDrawerHost, CenterDrawerHostEvent, CenterDrawerKind, CenterDrawerViewModel,
+};
 use commands::{DirectCommandUpdate, ProjectionCommandCompletions};
 #[cfg(test)]
 use composer_pane::InputRenderLatencyProbe;
@@ -9722,13 +9891,15 @@ use inspector_pane::{
     InspectorChangedFileView, InspectorDiagnosticView, InspectorPane, InspectorPaneEvent,
     InspectorPaneViewModel, InspectorRecoveryView,
 };
-use overlay_host::{OverlayAuthorizationView, OverlayHost, OverlayHostEvent, OverlayViewModel};
 use project_catalog_controller::ProjectCatalogController;
+use root_modal_host::{
+    RootModalAuthorizationView, RootModalHost, RootModalHostEvent, RootModalViewModel,
+};
 use sessions_pane::{SessionRuntimeState, SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
 use toast_host::{ToastHost, ToastNotice};
 use update::ProjectionDirtyRouting;
 #[cfg(test)]
 use update::{
     conversation_header_projection_dirty, inspector_projection_dirty,
-    inspector_projection_immediate_dirty, overlay_host_projection_dirty, root_projection_dirty,
+    inspector_projection_immediate_dirty, root_modal_host_projection_dirty, root_projection_dirty,
 };

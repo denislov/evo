@@ -4,20 +4,20 @@ use coding_agent::api::authorization::{
 };
 use desktop::shell::{DESKTOP_OVERLAY_SCRIM_RGBA, MONOSPACE_FONT_FAMILY, SemanticTheme};
 use gpui::{
-    Entity, EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, SharedString,
+    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, SharedString,
     Styled as _, Window, div, prelude::*, px, rgb, rgba,
 };
 use gpui_component::{Selectable as _, button::Button};
 use std::sync::Arc;
 
 use super::{
-    ConversationFullMessageView, DesktopPaletteCommand, InspectorPane, PALETTE_ENTRIES, actions,
+    ConversationFullMessageView, DesktopPaletteCommand, PALETTE_ENTRIES, actions,
     desktop_controls::{DesktopCriticalButton, DesktopCriticalTone},
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum OverlayHostEvent {
+pub(super) enum RootModalHostEvent {
     ExecutePalette(DesktopPaletteCommand),
     CopyFullMessage,
     CloseFullMessage,
@@ -28,59 +28,48 @@ pub(super) enum OverlayHostEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct OverlayAuthorizationView {
+pub(super) struct RootModalAuthorizationView {
     pub(super) request: ToolAuthorizationRequest,
     pub(super) decision_pending: bool,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct OverlayViewModel {
+pub(super) struct RootModalViewModel {
     pub(super) palette_open: bool,
     pub(super) palette_selected: usize,
-    pub(super) narrow_context_open: bool,
-    pub(super) narrow_sessions_open: bool,
-    pub(super) authorization: Option<OverlayAuthorizationView>,
+    pub(super) authorization: Option<RootModalAuthorizationView>,
     pub(super) full_message: Option<ConversationFullMessageView>,
 }
 
-pub(super) struct OverlayHost {
-    inspector_pane: Entity<InspectorPane>,
-    sessions_pane: Entity<super::SessionsPane>,
+pub(super) struct RootModalHost {
     authorization_focus: FocusHandle,
     command_palette_focus: FocusHandle,
-    narrow_sessions_focus: FocusHandle,
     full_message_focus: FocusHandle,
-    view_model: Option<OverlayViewModel>,
+    view_model: Option<RootModalViewModel>,
 }
 
-impl OverlayHost {
+impl RootModalHost {
     pub(super) fn new(
-        inspector_pane: Entity<InspectorPane>,
-        sessions_pane: Entity<super::SessionsPane>,
         authorization_focus: FocusHandle,
         command_palette_focus: FocusHandle,
-        narrow_sessions_focus: FocusHandle,
         full_message_focus: FocusHandle,
     ) -> Self {
         Self {
-            inspector_pane,
-            sessions_pane,
             authorization_focus,
             command_palette_focus,
-            narrow_sessions_focus,
             full_message_focus,
             view_model: None,
         }
     }
 
-    pub(super) fn set_view_model(&mut self, view_model: OverlayViewModel) {
+    pub(super) fn set_view_model(&mut self, view_model: RootModalViewModel) {
         self.view_model = Some(view_model);
     }
 }
 
-impl EventEmitter<OverlayHostEvent> for OverlayHost {}
+impl EventEmitter<RootModalHostEvent> for RootModalHost {}
 
-impl Render for OverlayHost {
+impl Render for RootModalHost {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let Some(view_model) = self.view_model.clone() else {
             return div().into_any_element();
@@ -118,7 +107,7 @@ impl Render for OverlayHost {
                             .label(label)
                             .tooltip(entry.semantic_label)
                             .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(OverlayHostEvent::ExecutePalette(command));
+                                cx.emit(RootModalHostEvent::ExecutePalette(command));
                             })),
                     )
             })
@@ -165,33 +154,6 @@ impl Render for OverlayHost {
                                 .aria_label("Available commands")
                                 .children(palette_rows),
                         ),
-                )
-        });
-        let narrow_context_overlay = view_model
-            .narrow_context_open
-            .then(|| self.inspector_pane.clone());
-        let narrow_sessions_overlay = view_model.narrow_sessions_open.then(|| {
-            overlay_surface("narrow-sessions-overlay", &self.narrow_sessions_focus)
-                .role(Role::Dialog)
-                .aria_label("Sessions")
-                .aria_description(
-                    "Create, refresh, or open a coding session. Escape closes this dialog.",
-                )
-                .key_context(actions::NARROW_SESSIONS_KEY_CONTEXT)
-                .child(
-                    div()
-                        .id("narrow-sessions-dialog")
-                        .w_full()
-                        .max_w(px(520.))
-                        .max_h(max_height)
-                        .overflow_hidden()
-                        .rounded_token(DesignRadius::Md)
-                        .border_1()
-                        .border_color(rgb(theme.focus_ring.value()))
-                        .bg(rgb(theme.elevated.value()))
-                        .flex()
-                        .flex_col()
-                        .child(self.sessions_pane.clone()),
                 )
         });
         let authorization_overlay =
@@ -386,7 +348,7 @@ impl Render for OverlayHost {
                                         .label("Copy full message")
                                         .tooltip("Copy the complete bounded message source")
                                         .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.emit(OverlayHostEvent::CopyFullMessage);
+                                            cx.emit(RootModalHostEvent::CopyFullMessage);
                                         })),
                                 )
                                 .child(
@@ -395,7 +357,7 @@ impl Render for OverlayHost {
                                         .label("Close")
                                         .tooltip("Close full message · Escape")
                                         .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.emit(OverlayHostEvent::CloseFullMessage);
+                                            cx.emit(RootModalHostEvent::CloseFullMessage);
                                         })),
                                 ),
                         ),
@@ -403,11 +365,9 @@ impl Render for OverlayHost {
         });
 
         div()
-            .id("overlay-host")
+            .id("root-modal-host")
             .absolute()
             .size_full()
-            .children(narrow_context_overlay)
-            .children(narrow_sessions_overlay)
             .children(command_palette_overlay)
             .children(full_message_overlay)
             .children(authorization_overlay)
@@ -433,7 +393,7 @@ fn authorization_button(
     identity: ToolAuthorizationIdentity,
     decision: ToolAuthorizationDecision,
     disabled: bool,
-    cx: &gpui::Context<OverlayHost>,
+    cx: &gpui::Context<RootModalHost>,
 ) -> Button {
     let presentation = authorization_decision_presentation(&decision);
     DesktopCriticalButton::new(
@@ -455,7 +415,7 @@ fn authorization_button(
             .child(presentation.shortcut),
     )
     .on_click(cx.listener(move |_, _, _, cx| {
-        cx.emit(OverlayHostEvent::DecideAuthorization {
+        cx.emit(RootModalHostEvent::DecideAuthorization {
             identity: identity.clone(),
             decision: decision.clone(),
         });

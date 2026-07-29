@@ -187,7 +187,7 @@ impl ShellLayout {
             FocusTarget::CenterHeader | FocusTarget::CenterBody | FocusTarget::Composer => true,
             FocusTarget::Sidebar => self.sidebar.is_some(),
             FocusTarget::Inspector => self.inspector.is_some(),
-            FocusTarget::Overlay => false,
+            FocusTarget::Modal => false,
         }
     }
 
@@ -213,20 +213,20 @@ pub enum FocusTarget {
     CenterBody,
     Composer,
     Inspector,
-    Overlay,
+    Modal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusState {
     active: FocusTarget,
-    restore_after_overlay: Option<FocusTarget>,
+    restore_after_modal: Option<FocusTarget>,
 }
 
 impl Default for FocusState {
     fn default() -> Self {
         Self {
             active: FocusTarget::Composer,
-            restore_after_overlay: None,
+            restore_after_modal: None,
         }
     }
 }
@@ -237,7 +237,7 @@ impl FocusState {
     }
 
     pub fn request(&mut self, target: FocusTarget, layout: ShellLayout) -> bool {
-        if self.restore_after_overlay.is_some() || !layout.is_visible(target) {
+        if self.restore_after_modal.is_some() || !layout.is_visible(target) {
             return false;
         }
         self.active = target;
@@ -245,7 +245,7 @@ impl FocusState {
     }
 
     pub fn cycle(&mut self, layout: ShellLayout, reverse: bool) {
-        if self.restore_after_overlay.is_some() {
+        if self.restore_after_modal.is_some() {
             return;
         }
         let order = layout.focus_order();
@@ -261,15 +261,15 @@ impl FocusState {
         self.active = order[next];
     }
 
-    pub fn open_overlay(&mut self) {
-        if self.restore_after_overlay.is_none() {
-            self.restore_after_overlay = Some(self.active);
-            self.active = FocusTarget::Overlay;
+    pub fn open_modal(&mut self) {
+        if self.restore_after_modal.is_none() {
+            self.restore_after_modal = Some(self.active);
+            self.active = FocusTarget::Modal;
         }
     }
 
-    pub fn close_overlay(&mut self, layout: ShellLayout) {
-        let Some(previous) = self.restore_after_overlay.take() else {
+    pub fn close_modal(&mut self, layout: ShellLayout) {
+        let Some(previous) = self.restore_after_modal.take() else {
             return;
         };
         self.active = if layout.is_visible(previous) {
@@ -280,7 +280,7 @@ impl FocusState {
     }
 
     pub fn reconcile_layout(&mut self, layout: ShellLayout) {
-        if self.restore_after_overlay.is_none() && !layout.is_visible(self.active) {
+        if self.restore_after_modal.is_none() && !layout.is_visible(self.active) {
             self.active = FocusTarget::Composer;
         }
     }
@@ -564,18 +564,18 @@ mod tests {
     }
 
     #[test]
-    fn overlay_traps_focus_and_restores_visible_owner() {
+    fn modal_traps_focus_and_restores_visible_owner() {
         let wide = ShellLayout::resolve(1_300, 900, PanelVisibility::default());
         let narrow = ShellLayout::resolve(700, 900, PanelVisibility::default());
         let mut focus = FocusState::default();
 
         assert!(focus.request(FocusTarget::Inspector, wide));
-        focus.open_overlay();
-        assert_eq!(focus.active(), FocusTarget::Overlay);
+        focus.open_modal();
+        assert_eq!(focus.active(), FocusTarget::Modal);
         focus.cycle(wide, false);
-        assert_eq!(focus.active(), FocusTarget::Overlay);
+        assert_eq!(focus.active(), FocusTarget::Modal);
 
-        focus.close_overlay(narrow);
+        focus.close_modal(narrow);
         assert_eq!(focus.active(), FocusTarget::Composer);
     }
 

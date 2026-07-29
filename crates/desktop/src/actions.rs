@@ -10,8 +10,8 @@ pub(crate) const ROOT_KEY_CONTEXT: &str = "PiDesktop";
 pub(crate) const CONVERSATION_KEY_CONTEXT: &str = "PiDesktopConversation";
 pub(crate) const PALETTE_KEY_CONTEXT: &str = "PiDesktopPalette";
 pub(crate) const AUTHORIZATION_KEY_CONTEXT: &str = "PiDesktopAuthorization";
-pub(crate) const NARROW_SESSIONS_KEY_CONTEXT: &str = "PiDesktopNarrowSessions";
-pub(crate) const NARROW_INSPECTOR_KEY_CONTEXT: &str = "PiDesktopNarrowInspector";
+pub(crate) const SESSIONS_DRAWER_KEY_CONTEXT: &str = "PiDesktopSessionsDrawer";
+pub(crate) const INSPECTOR_DRAWER_KEY_CONTEXT: &str = "PiDesktopInspectorDrawer";
 
 actions!(
     desktop,
@@ -393,23 +393,11 @@ pub(crate) fn bind_keys(cx: &mut App) {
             Some(AUTHORIZATION_KEY_CONTEXT),
         ),
         KeyBinding::new("escape", EscapeHierarchy, Some(AUTHORIZATION_KEY_CONTEXT)),
-        KeyBinding::new("tab", TrapOverlayFocus, Some(NARROW_SESSIONS_KEY_CONTEXT)),
-        KeyBinding::new(
-            "shift-tab",
-            TrapOverlayFocus,
-            Some(NARROW_SESSIONS_KEY_CONTEXT),
-        ),
-        KeyBinding::new("escape", EscapeHierarchy, Some(NARROW_SESSIONS_KEY_CONTEXT)),
-        KeyBinding::new("tab", TrapOverlayFocus, Some(NARROW_INSPECTOR_KEY_CONTEXT)),
-        KeyBinding::new(
-            "shift-tab",
-            TrapOverlayFocus,
-            Some(NARROW_INSPECTOR_KEY_CONTEXT),
-        ),
+        KeyBinding::new("escape", EscapeHierarchy, Some(SESSIONS_DRAWER_KEY_CONTEXT)),
         KeyBinding::new(
             "escape",
             EscapeHierarchy,
-            Some(NARROW_INSPECTOR_KEY_CONTEXT),
+            Some(INSPECTOR_DRAWER_KEY_CONTEXT),
         ),
     ]);
 }

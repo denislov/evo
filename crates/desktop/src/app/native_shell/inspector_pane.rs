@@ -63,7 +63,7 @@ pub(super) struct InspectorDiagnosticView {
 #[derive(Clone)]
 pub(super) struct InspectorPaneViewModel {
     pub(super) panel_width: u32,
-    pub(super) context_is_overlay: bool,
+    pub(super) presented_as_drawer: bool,
     pub(super) keyboard_focus_visible: bool,
     pub(super) selected_section: InspectorSection,
     pub(super) composer_running: bool,
@@ -374,7 +374,7 @@ impl Render for InspectorPane {
         let latest_issue = view_model.latest_issue;
         let runtime_attention_count = view_model.runtime_attention_count;
         let active_operation = view_model.active_operation;
-        let context_is_overlay = view_model.context_is_overlay;
+        let presented_as_drawer = view_model.presented_as_drawer;
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let selected_section = view_model.selected_section;
         let selected_section_index = inspector_section_index(selected_section);
@@ -392,12 +392,12 @@ impl Render for InspectorPane {
             .role(Role::Complementary)
             .aria_label("Task Inspector")
             .debug_selector(|| "desktop-inspector-panel".into())
-            .when(context_is_overlay, |panel| {
+            .when(presented_as_drawer, |panel| {
                 panel
                     .role(Role::Dialog)
                     .aria_label("Task Inspector dialog")
                     .aria_description("Review task details. Escape closes this dialog.")
-                    .key_context(actions::NARROW_INSPECTOR_KEY_CONTEXT)
+                    .key_context(actions::INSPECTOR_DRAWER_KEY_CONTEXT)
                     .absolute()
                     .top_0()
                     .right_0()
@@ -426,7 +426,7 @@ impl Render for InspectorPane {
                     .border_b_1()
                     .border_color(rgb(theme.divider.value()))
                     .child("INSPECTOR")
-                    .when(context_is_overlay, |header| {
+                    .when(presented_as_drawer, |header| {
                         header.child(
                             DesktopIconButton::new(
                                 "close-inspector",

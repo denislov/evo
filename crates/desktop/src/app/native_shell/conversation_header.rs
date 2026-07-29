@@ -79,8 +79,8 @@ pub(super) struct ConversationHeaderViewModel {
     pub(super) project_name: Arc<str>,
     pub(super) keyboard_focus_visible: bool,
     pub(super) panel_visibility: PanelVisibility,
-    pub(super) narrow_sessions_open: bool,
-    pub(super) narrow_context_open: bool,
+    pub(super) sessions_drawer_open: bool,
+    pub(super) inspector_drawer_open: bool,
     pub(super) sessions_panel_width: u32,
     pub(super) context_panel_width: u32,
 }
@@ -130,12 +130,12 @@ impl Render for ConversationHeader {
         let sessions_open = if forced_layout.sidebar.is_some() {
             view_model.panel_visibility.sessions
         } else {
-            view_model.narrow_sessions_open
+            view_model.sessions_drawer_open
         };
         let inspector_open = if forced_layout.inspector.is_some() {
             view_model.panel_visibility.context
         } else {
-            view_model.narrow_context_open
+            view_model.inspector_drawer_open
         };
         let viewport_width = u32::from(viewport.width);
         let expanded_chrome =

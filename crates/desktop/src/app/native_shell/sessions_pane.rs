@@ -55,7 +55,7 @@ pub(super) struct SessionsPaneViewModel {
     pub(super) session_pending: bool,
     pub(super) active_status: desktop::shell::SemanticStatus,
     pub(super) keyboard_focus_visible: bool,
-    pub(super) context_is_overlay: bool,
+    pub(super) presented_as_drawer: bool,
 }
 
 pub(super) struct SessionsPane {
@@ -197,7 +197,7 @@ impl Render for SessionsPane {
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
         let session_pending = view_model.session_pending;
         let session_catalog_pending = view_model.catalog_state.is_loading();
-        let context_is_overlay = view_model.context_is_overlay;
+        let presented_as_drawer = view_model.presented_as_drawer;
         let search_input = self.search_input.clone();
         let clear_search_input = search_input.clone();
         let rename_input = self.rename_input.clone();
@@ -285,7 +285,7 @@ impl Render for SessionsPane {
                 // The docked panel is intentionally compact: preserve the
                 // primary session name and close action. The wide overlay has
                 // enough room to add cwd metadata and relative time.
-                let row = if context_is_overlay {
+                let row = if presented_as_drawer {
                     row.detail(format!("{} · {status}", truncate_label(&target, 28)))
                         .trailing(
                             div()
@@ -483,7 +483,7 @@ impl Render for SessionsPane {
         })
         .size(DesktopControlSize::Critical)
         .leading(Icon::new(DesktopIcon::Plus.name()).small());
-        let new_conversation_row = if context_is_overlay {
+        let new_conversation_row = if presented_as_drawer {
             new_conversation_row.detail("Start from Home")
         } else {
             new_conversation_row
@@ -495,12 +495,14 @@ impl Render for SessionsPane {
             .aria_label("Sessions")
             .debug_selector(|| "desktop-sessions-panel".into())
             .track_focus(&self.focus)
-            .when(context_is_overlay, |panel| panel.w_full())
-            .when(!context_is_overlay, |panel| panel.w(px(panel_width as f32)))
+            .when(presented_as_drawer, |panel| panel.w_full())
+            .when(!presented_as_drawer, |panel| {
+                panel.w(px(panel_width as f32))
+            })
             .h_full()
             .flex()
             .flex_col()
-            .when(!context_is_overlay, |panel| panel.border_r_1())
+            .when(!presented_as_drawer, |panel| panel.border_r_1())
             .border_color(rgb(if focused {
                 theme.focus_ring.value()
             } else {
@@ -552,7 +554,7 @@ impl Render for SessionsPane {
                                     },
                                 ),
                             )
-                            .when(context_is_overlay, |actions| {
+                            .when(presented_as_drawer, |actions| {
                                 actions.child(
                                     DesktopIconButton::new(
                                         "close-narrow-sessions",

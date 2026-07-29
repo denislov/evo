@@ -384,8 +384,9 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
         "composer_pane.rs",
         "conversation_header.rs",
         "conversation_pane.rs",
+        "center_drawer_host.rs",
         "inspector_pane.rs",
-        "overlay_host.rs",
+        "root_modal_host.rs",
         "sessions_pane.rs",
         "toast_host.rs",
     ]
@@ -411,8 +412,8 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
     assert!(actions.contains("ROOT_KEY_CONTEXT"));
     assert!(actions.contains("PALETTE_KEY_CONTEXT"));
     assert!(actions.contains("AUTHORIZATION_KEY_CONTEXT"));
-    assert!(actions.contains("NARROW_SESSIONS_KEY_CONTEXT"));
-    assert!(actions.contains("NARROW_INSPECTOR_KEY_CONTEXT"));
+    assert!(actions.contains("SESSIONS_DRAWER_KEY_CONTEXT"));
+    assert!(actions.contains("INSPECTOR_DRAWER_KEY_CONTEXT"));
     assert!(actions.contains("ToggleInspectorPanel"));
     assert!(actions.contains("Toggle Inspector"));
     assert!(!actions.contains("slash_command"));
@@ -420,8 +421,8 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
 
     assert!(shell.contains("fn execute_palette_command("));
     assert!(shell.contains("fn on_escape_hierarchy("));
-    assert!(shell.contains("fn root_action_blocked_by_overlay("));
-    assert!(shell.contains("fn reconcile_authorization_overlay("));
+    assert!(shell.contains("fn root_action_blocked_by_modal("));
+    assert!(shell.contains("fn reconcile_authorization_modal("));
     assert!(native_ui.contains("secondary: true"));
     assert!(shell.contains("fn submit_primary_composer("));
     assert!(shell.contains(".key_context(actions::ROOT_KEY_CONTEXT)"));
@@ -458,8 +459,8 @@ fn desktop_visual_hierarchy_stays_flat_tokenized_and_action_heights_stay_shared(
     let native_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/app/native_shell");
     let conversation = fs::read_to_string(native_root.join("conversation_pane.rs"))
         .expect("desktop conversation pane should be readable");
-    let overlay = fs::read_to_string(native_root.join("overlay_host.rs"))
-        .expect("desktop overlay host should be readable");
+    let root_modal = fs::read_to_string(native_root.join("root_modal_host.rs"))
+        .expect("desktop root modal host should be readable");
     let controls = fs::read_to_string(native_root.join("desktop_controls.rs"))
         .expect("desktop shared controls should be readable");
 
@@ -494,7 +495,7 @@ fn desktop_visual_hierarchy_stays_flat_tokenized_and_action_heights_stay_shared(
     assert!(!truncated.contains(".rounded_token("));
     assert!(!truncated.contains(".border_1()"));
 
-    let full_message = context_around(&overlay, ".id(\"full-message-scroll\")", 0, 30);
+    let full_message = context_around(&root_modal, ".id(\"full-message-scroll\")", 0, 30);
     assert!(full_message.contains(".border_t_1()"));
     assert!(full_message.contains(".border_b_1()"));
     assert!(!full_message.contains(".rounded_token("));
@@ -548,8 +549,10 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
         .expect("composer pane should be readable");
     let inspector = fs::read_to_string(controller_root.join("inspector_pane.rs"))
         .expect("inspector pane should be readable");
-    let overlay = fs::read_to_string(controller_root.join("overlay_host.rs"))
-        .expect("overlay host should be readable");
+    let root_modal = fs::read_to_string(controller_root.join("root_modal_host.rs"))
+        .expect("root modal host should be readable");
+    let center_drawer = fs::read_to_string(controller_root.join("center_drawer_host.rs"))
+        .expect("center drawer host should be readable");
 
     for module in [
         "commands",
@@ -612,7 +615,11 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(shell.contains("composer_running_mode: ComposerRunningMode"));
     assert!(shell.contains("workspaces: HashMap<String, SessionWorkspace>"));
 
-    for (name, source) in [("inspector", &inspector), ("overlay", &overlay)] {
+    for (name, source) in [
+        ("inspector", &inspector),
+        ("root modal", &root_modal),
+        ("center drawer", &center_drawer),
+    ] {
         assert!(
             !source.contains(&weak_root_owner),
             "{name} must not retain a NativeShell back-reference"
@@ -640,12 +647,21 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(shell.contains("inspector_telemetry_refresh_deadline: Option<Instant>"));
     assert!(!shell.contains("inspector_session_sections: HashMap<String, InspectorSection>"));
     assert!(shell.contains("inspector_section: InspectorSection"));
-    assert!(overlay.contains("struct OverlayViewModel"));
-    assert!(overlay.contains("view_model: Option<OverlayViewModel>"));
-    assert!(overlay.contains("request: ToolAuthorizationRequest"));
-    assert!(!overlay.contains("project_catalog"));
-    assert!(shell.contains("fn overlay_view_model(&self) -> OverlayViewModel"));
-    assert!(shell.contains("active_overlay: Option<DesktopOverlayKind>"));
+    assert!(root_modal.contains("struct RootModalViewModel"));
+    assert!(root_modal.contains("view_model: Option<RootModalViewModel>"));
+    assert!(root_modal.contains("request: ToolAuthorizationRequest"));
+    assert!(!root_modal.contains("project_catalog"));
+    assert!(!root_modal.contains("SessionsPane"));
+    assert!(!root_modal.contains("InspectorPane"));
+    assert!(center_drawer.contains("struct CenterDrawerViewModel"));
+    assert!(center_drawer.contains("view_model: Option<CenterDrawerViewModel>"));
+    assert!(center_drawer.contains("sessions_pane: Entity<SessionsPane>"));
+    assert!(center_drawer.contains("inspector_pane: Entity<InspectorPane>"));
+    assert!(!center_drawer.contains("ToolAuthorizationRequest"));
+    assert!(shell.contains("fn root_modal_view_model(&self) -> RootModalViewModel"));
+    assert!(shell.contains("fn center_drawer_view_model(&self) -> CenterDrawerViewModel"));
+    assert!(shell.contains("active_modal: Option<DesktopModalKind>"));
+    assert!(shell.contains("active_drawer: Option<CenterDrawerKind>"));
 
     // Ownership assertions target production code: the shell's own test module
     // still constructs conversation fixtures directly.
