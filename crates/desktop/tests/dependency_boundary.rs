@@ -438,6 +438,12 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
         "native actions must remain discoverable through direct tooltips or the shared icon-tool contract"
     );
     assert!(desktop_controls.contains(".tooltip(self.accessible_label.clone())"));
+    assert!(desktop_controls.contains("ProjectDirectory"));
+    assert!(desktop_controls.contains("Self::ProjectDirectory => IconName::Folder"));
+    assert!(desktop_controls.contains("struct DesktopProjectDirectoryControl"));
+    assert!(desktop_controls.contains("enum DesktopProjectDirectoryState"));
+    assert!(desktop_controls.contains("Self::Locked => format!(\"{} · Fixed\""));
+    assert!(desktop_controls.contains("format!(\"{} · Pending\""));
     assert!(native_ui.contains("motion reduced"));
     assert!(native_ui.contains("motion static"));
     assert!(
@@ -555,6 +561,8 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
         .expect("project catalog controller should be readable");
     let composer = fs::read_to_string(controller_root.join("composer_pane.rs"))
         .expect("composer pane should be readable");
+    let desktop_controls = fs::read_to_string(controller_root.join("desktop_controls.rs"))
+        .expect("desktop shared controls should be readable");
     let inspector = fs::read_to_string(controller_root.join("inspector_pane.rs"))
         .expect("inspector pane should be readable");
     let root_modal = fs::read_to_string(controller_root.join("root_modal_host.rs"))
@@ -654,6 +662,14 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(composer.contains("ComposerPaneEvent::InputChanged"));
     assert!(composer.contains("ComposerPaneEvent::Focused"));
     assert!(composer.contains("ComposerPaneEvent::SubmitPrimary"));
+    assert!(composer.contains("struct ComposerProjectDirectoryViewModel"));
+    assert!(composer.contains("DesktopProjectDirectoryControl::new("));
+    assert!(desktop_controls.contains("desktop-project-directory-control"));
+    assert!(desktop_controls.contains("desktop-hit-project-directory"));
+    assert!(composer.contains("项目目录在对话创建后固定"));
+    assert!(shell.contains("DesktopProjectDirectoryState::Editable"));
+    assert!(shell.contains("DesktopProjectDirectoryState::Locked"));
+    assert!(shell.contains("DesktopProjectDirectoryState::Pending"));
     assert!(!composer.contains(&weak_root_owner));
     assert!(!composer.contains("owner.read(cx)"));
     assert!(!composer.contains("DesktopProjection"));

@@ -4110,17 +4110,45 @@ impl NativeShell {
     fn composer_pane_view_model(&self) -> ComposerPaneViewModel {
         let snapshot = self.projection.as_ref().map(DesktopProjection::snapshot);
         let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
+        let composer_pending =
+            matches!(self.composer.admission(), ComposerAdmission::Pending { .. });
+        let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
         let attachment_disabled_reason = self.composer_attachment_disabled_reason();
+        let project_directory_state = if composer_pending || awaiting_prompt_start {
+            desktop_controls::DesktopProjectDirectoryState::Pending
+        } else if self.projection.is_some() {
+            desktop_controls::DesktopProjectDirectoryState::Locked
+        } else {
+            desktop_controls::DesktopProjectDirectoryState::Editable
+        };
+        let project_directory_path = match self
+            .project
+            .workspace
+            .as_ref()
+            .map(|workspace| &workspace.scope)
+        {
+            Some(CodingAgentWorkspaceScope::Project { cwd })
+            | Some(CodingAgentWorkspaceScope::Legacy { cwd: Some(cwd) }) => Some(cwd.as_path()),
+            Some(CodingAgentWorkspaceScope::Projectless { .. })
+            | Some(CodingAgentWorkspaceScope::Legacy { cwd: None }) => None,
+            None if self.projection.is_some() => Some(self.project.cwd.as_path()),
+            None => None,
+        };
         ComposerPaneViewModel {
-            composer_pending: matches!(
-                self.composer.admission(),
-                ComposerAdmission::Pending { .. }
-            ),
+            composer_pending,
             composer_running,
-            awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
+            awaiting_prompt_start,
             authorization_pending: snapshot
                 .is_some_and(|snapshot| !snapshot.pending_authorizations.is_empty()),
             running_mode: self.active_composer_running_mode(),
+            project_directory: composer_pane::ComposerProjectDirectoryViewModel {
+                value: Arc::from(
+                    project_directory_path
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "无项目".into()),
+                ),
+                state: project_directory_state,
+            },
             attachments: self
                 .composer_attachments
                 .iter()
@@ -7447,6 +7475,93 @@ mod tests {
         assert!(
             (saturated_height - maximum_height).abs() <= 1.,
             "content beyond the eight-row auto-grow maximum must not keep expanding the Composer: twenty={maximum_height}, forty={saturated_height}"
+        );
+    }
+
+    #[gpui::test]
+    fn project_directory_control_is_scoped_locked_pending_and_narrow_safe(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (idle_shell, cx) = add_idle_visual_shell(cx);
+
+        let idle_directory = idle_shell.read_with(cx, |shell, _| {
+            shell.composer_pane_view_model().project_directory
+        });
+        assert_eq!(idle_directory.value.as_ref(), "无项目");
+        assert_eq!(
+            idle_directory.state,
+            desktop_controls::DesktopProjectDirectoryState::Editable
+        );
+
+        for width in [1_300., 700.] {
+            cx.simulate_resize(size(px(width), px(800.)));
+            settle_visual_measurements(cx);
+            let attachment = cx
+                .debug_bounds("desktop-hit-add-composer-attachments")
+                .expect("attachment action remains in the Composer bottom-left");
+            let project = cx
+                .debug_bounds("desktop-project-directory-control")
+                .expect("project directory control remains in the Composer bottom-left");
+            let submit = cx
+                .debug_bounds("desktop-hit-submit-composer")
+                .expect("submit action remains in the Composer bottom-right");
+            assert!(attachment.right() <= project.left());
+            assert!(project.right() <= submit.left());
+            assert!(f32::from(project.size.width) <= 280.);
+            assert_eq!(f32::from(project.size.height), 36.);
+            assert_minimum_hit_target(cx, "desktop-hit-add-composer-attachments");
+            assert_minimum_hit_target(cx, "desktop-hit-project-directory");
+            assert_minimum_hit_target(cx, "desktop-hit-submit-composer");
+        }
+
+        let long_path =
+            PathBuf::from("/工作区/这是一个需要被压缩但必须保留完整辅助信息的项目目录/evo");
+        let mut session_snapshot = visual_test_snapshot();
+        session_snapshot.project.cwd = long_path.clone();
+        let session_projection = DesktopProjection::new(session_snapshot)
+            .expect("long-path session fixture is a valid product projection");
+        let (session_shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            session_projection,
+        );
+        let session_directory = session_shell.read_with(cx, |shell, _| {
+            shell.composer_pane_view_model().project_directory
+        });
+        assert_eq!(
+            session_directory.value.as_ref(),
+            long_path.display().to_string()
+        );
+        assert_eq!(
+            session_directory.state,
+            desktop_controls::DesktopProjectDirectoryState::Locked
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
+        assert!(
+            f32::from(
+                cx.debug_bounds("desktop-project-directory-control")
+                    .expect("locked long-path pill remains visible")
+                    .size
+                    .width
+            ) <= 280.
+        );
+
+        let (pending_shell, cx) = add_idle_visual_shell(cx);
+        pending_shell.update(cx, |shell, cx| {
+            shell
+                .composer
+                .edit("submit against the frozen project target");
+            shell
+                .composer
+                .begin_submit(401, ComposerSubmissionKind::Prompt)
+                .expect("Home draft enters pending admission");
+            shell.notify_composer_pane(cx);
+        });
+        assert_eq!(
+            pending_shell.read_with(cx, |shell, _| {
+                shell.composer_pane_view_model().project_directory.state
+            }),
+            desktop_controls::DesktopProjectDirectoryState::Pending
         );
     }
 

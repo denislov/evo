@@ -16,7 +16,8 @@ use std::{
 use super::{
     ComposerRunningMode,
     desktop_controls::{
-        DesktopControlSize, DesktopControlWeight, DesktopIcon, DesktopIconButton, DesktopSelector,
+        DesktopControlSize, DesktopControlWeight, DesktopIcon, DesktopIconButton,
+        DesktopProjectDirectoryControl, DesktopProjectDirectoryState, DesktopSelector,
     },
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
@@ -40,11 +41,38 @@ pub(super) struct ComposerPaneViewModel {
     pub(super) awaiting_prompt_start: bool,
     pub(super) authorization_pending: bool,
     pub(super) running_mode: ComposerRunningMode,
+    pub(super) project_directory: ComposerProjectDirectoryViewModel,
     pub(super) attachments: Arc<[ComposerAttachmentViewModel]>,
     pub(super) attachments_enabled: bool,
     pub(super) attachment_disabled_reason: Option<Arc<str>>,
     pub(super) rejection: Option<Arc<str>>,
     pub(super) keyboard_focus_visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ComposerProjectDirectoryViewModel {
+    pub(super) value: Arc<str>,
+    pub(super) state: DesktopProjectDirectoryState,
+}
+
+impl ComposerProjectDirectoryViewModel {
+    fn accessible_label(&self) -> String {
+        match self.state {
+            DesktopProjectDirectoryState::Editable if self.value.as_ref() == "无项目" => {
+                "项目目录：无项目。按 Enter 或 Space 选择目录。".into()
+            }
+            DesktopProjectDirectoryState::Editable => {
+                format!("项目目录：{}。按 Enter 或 Space 选择其他目录。", self.value)
+            }
+            DesktopProjectDirectoryState::Locked => format!(
+                "项目目录：{}。项目目录在对话创建后固定。请新建对话以选择其他项目。",
+                self.value
+            ),
+            DesktopProjectDirectoryState::Pending => {
+                format!("项目目录：{}。正在提交，暂时不能更改。", self.value)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +216,7 @@ impl Render for ComposerPane {
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
         let authorization_pending = view_model.authorization_pending;
         let running_mode = view_model.running_mode;
+        let project_directory = view_model.project_directory;
         let attachments = view_model.attachments;
         let attachments_enabled = view_model.attachments_enabled;
         let attachment_disabled_reason = view_model.attachment_disabled_reason;
@@ -219,6 +248,7 @@ impl Render for ComposerPane {
             .as_deref()
             .map(|notice| (notice, theme.danger))
             .or_else(|| state_notice.map(|notice| (notice, theme.muted_text)));
+        let project_directory_accessible_label = project_directory.accessible_label();
 
         div()
             .id("composer-panel")
@@ -353,7 +383,9 @@ impl Render for ComposerPane {
                                 div()
                                     .flex()
                                     .items_center()
+                                    .flex_1()
                                     .min_w_0()
+                                    .overflow_hidden()
                                     .gap_token(DesignSpace::Xs)
                                     .child(
                                         DesktopIconButton::new(
@@ -371,6 +403,13 @@ impl Render for ComposerPane {
                                             cx.emit(ComposerPaneEvent::AddAttachments);
                                         })),
                                     )
+                                    .child(DesktopProjectDirectoryControl::new(
+                                        "composer-project-directory",
+                                        project_directory.value,
+                                        project_directory_accessible_label,
+                                        project_directory.state,
+                                    )
+                                    .build())
                                     .when_some(attachment_disabled_reason, |left, reason| {
                                         left.child(
                                             div()
@@ -491,5 +530,43 @@ impl Render for ComposerPane {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_directory_accessibility_preserves_full_value_and_state() {
+        let full_path = Arc::<str>::from("/工作区/一个很长的项目目录/evo");
+        let editable = ComposerProjectDirectoryViewModel {
+            value: Arc::clone(&full_path),
+            state: DesktopProjectDirectoryState::Editable,
+        };
+        let locked = ComposerProjectDirectoryViewModel {
+            value: Arc::clone(&full_path),
+            state: DesktopProjectDirectoryState::Locked,
+        };
+        let pending = ComposerProjectDirectoryViewModel {
+            value: Arc::clone(&full_path),
+            state: DesktopProjectDirectoryState::Pending,
+        };
+
+        assert!(editable.accessible_label().contains(full_path.as_ref()));
+        assert!(editable.accessible_label().contains("Enter 或 Space"));
+        assert!(locked.accessible_label().contains(full_path.as_ref()));
+        assert!(locked.accessible_label().contains("对话创建后固定"));
+        assert!(pending.accessible_label().contains(full_path.as_ref()));
+        assert!(pending.accessible_label().contains("正在提交"));
+
+        let projectless = ComposerProjectDirectoryViewModel {
+            value: Arc::from("无项目"),
+            state: DesktopProjectDirectoryState::Editable,
+        };
+        assert_eq!(
+            projectless.accessible_label(),
+            "项目目录：无项目。按 Enter 或 Space 选择目录。"
+        );
     }
 }

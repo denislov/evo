@@ -75,6 +75,8 @@ pub(super) enum DesktopIcon {
     Clear,
     Close,
     Plus,
+    /// Workspace scope shown in the Composer project selector.
+    ProjectDirectory,
     /// Composer submission.
     Submit,
     /// In-flight indicator that occupies the same box as the icon it replaces.
@@ -100,10 +102,99 @@ impl DesktopIcon {
             Self::Clear => IconName::CircleX,
             Self::Close => IconName::Close,
             Self::Plus => IconName::Plus,
+            Self::ProjectDirectory => IconName::Folder,
             Self::Submit => IconName::ArrowUp,
             Self::Busy => IconName::LoaderCircle,
             Self::Warning => IconName::TriangleAlert,
         }
+    }
+}
+
+/// Visual state of the Composer project-directory control.
+///
+/// The state is textual as well as structural, so pending and locked remain
+/// distinguishable when colour is unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DesktopProjectDirectoryState {
+    Editable,
+    Locked,
+    Pending,
+}
+
+impl DesktopProjectDirectoryState {
+    const fn is_editable(self) -> bool {
+        matches!(self, Self::Editable)
+    }
+
+    fn visible_value(self, value: &str) -> String {
+        match self {
+            Self::Editable => desktop::shell::truncate_label(value, 30),
+            Self::Locked => format!("{} · Fixed", desktop::shell::truncate_label(value, 22)),
+            Self::Pending => {
+                format!("{} · Pending", desktop::shell::truncate_label(value, 20))
+            }
+        }
+    }
+}
+
+/// Compact project-directory selector/pill used in the Composer bottom row.
+///
+/// This control owns only display semantics. DSK-650 attaches the directory
+/// picker event without moving project state or picker authority into this
+/// primitive.
+pub(super) struct DesktopProjectDirectoryControl {
+    id: ElementId,
+    value: SharedString,
+    accessible_label: SharedString,
+    state: DesktopProjectDirectoryState,
+}
+
+impl DesktopProjectDirectoryControl {
+    pub(super) fn new(
+        id: impl Into<ElementId>,
+        value: impl Into<SharedString>,
+        accessible_label: impl Into<SharedString>,
+        state: DesktopProjectDirectoryState,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            value: value.into(),
+            accessible_label: accessible_label.into(),
+            state,
+        }
+    }
+
+    pub(super) fn build(self) -> gpui::AnyElement {
+        let button_id = (self.id.clone(), "button");
+        let accessible_label = self.accessible_label.clone();
+        let visible_value = self.state.visible_value(self.value.as_ref());
+        let button = Button::new(button_id)
+            .icon(DesktopIcon::ProjectDirectory.name())
+            .label(visible_value)
+            .tooltip(accessible_label.clone())
+            .compact()
+            .dropdown_caret(self.state.is_editable())
+            .disabled(!self.state.is_editable())
+            .loading(self.state == DesktopProjectDirectoryState::Pending)
+            .h(px(DesktopControlSize::Standard.pixels()))
+            .max_w(px(280.))
+            .overflow_hidden();
+        let button = if self.state.is_editable() {
+            button.ghost()
+        } else {
+            button.outline()
+        };
+
+        div()
+            .id(self.id)
+            .debug_selector(|| "desktop-project-directory-control".into())
+            .role(Role::Group)
+            .aria_label(accessible_label)
+            .min_w_0()
+            .max_w(px(280.))
+            .overflow_hidden()
+            .child(button.debug_selector(|| "desktop-hit-project-directory".into()))
+            .into_any_element()
     }
 }
 
@@ -542,6 +633,7 @@ mod tests {
             DesktopIcon::Clear,
             DesktopIcon::Close,
             DesktopIcon::Plus,
+            DesktopIcon::ProjectDirectory,
             DesktopIcon::Submit,
             DesktopIcon::Busy,
             DesktopIcon::Warning,
@@ -596,6 +688,21 @@ mod tests {
         // accepting clicks, so submission cannot be issued twice.
         assert!(busy.busy);
         assert!(!resting.busy);
+    }
+
+    #[test]
+    fn project_directory_control_keeps_state_textual_and_unicode_bounded() {
+        let long_path = "/工作区/非常长的项目目录/包含中文和-emoji-🙂/evo";
+        let editable = DesktopProjectDirectoryState::Editable.visible_value(long_path);
+        let locked = DesktopProjectDirectoryState::Locked.visible_value(long_path);
+        let pending = DesktopProjectDirectoryState::Pending.visible_value(long_path);
+
+        assert!(editable.ends_with('…'));
+        assert!(locked.ends_with(" · Fixed"));
+        assert!(pending.ends_with(" · Pending"));
+        assert!(DesktopProjectDirectoryState::Editable.is_editable());
+        assert!(!DesktopProjectDirectoryState::Locked.is_editable());
+        assert!(!DesktopProjectDirectoryState::Pending.is_editable());
     }
 
     #[test]
