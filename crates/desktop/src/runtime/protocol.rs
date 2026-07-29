@@ -9,7 +9,10 @@ use coding_agent::api::event::{CodingAgentProductEvent, CodingAgentRecoveryResol
 use coding_agent::api::review::{
     CodingAgentExternalEditorTarget, CodingAgentFileReview, CodingAgentFileReviewRequest,
 };
-use coding_agent::api::view::CodingAgentTranscriptSnapshot;
+use coding_agent::api::view::{
+    CodingAgentTranscriptSnapshot, CodingAgentWorkspaceKind, CodingAgentWorkspaceMigration,
+    CodingAgentWorkspaceMigrationOutcome, CodingAgentWorkspaceOverview,
+};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -364,14 +367,37 @@ pub struct DesktopRuntimeRecoverySnapshot {
     pub pending_recoveries: Vec<CodingAgentRecoveryPending>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopSessionCatalogEntry {
     pub session_id: String,
     pub name: Option<String>,
-    pub cwd: Option<String>,
+    pub workspace: CodingAgentWorkspaceOverview,
+    pub workspace_migration: CodingAgentWorkspaceMigration,
     pub created_at: String,
     pub updated_at: String,
     pub active_leaf_id: Option<String>,
+}
+
+impl Default for DesktopSessionCatalogEntry {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            name: None,
+            workspace: CodingAgentWorkspaceOverview {
+                group_id: "legacy:unscoped".into(),
+                kind: CodingAgentWorkspaceKind::Legacy,
+                display_name: "Legacy session".into(),
+                display_path: None,
+            },
+            workspace_migration: CodingAgentWorkspaceMigration {
+                outcome: CodingAgentWorkspaceMigrationOutcome::Unavailable,
+                diagnostic: None,
+            },
+            created_at: String::new(),
+            updated_at: String::new(),
+            active_leaf_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,5 +1,4 @@
 use coding_agent::api::embedding::CodingAgentResourceCommand;
-use desktop::runtime::DesktopSessionCatalogEntry;
 use desktop::shell::{SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
 use gpui::{
     EventEmitter, FocusHandle, Focusable as _, IntoElement, ParentElement as _, Render, Role,
@@ -18,6 +17,9 @@ use super::{
         DesktopActionRow, DesktopControlSize, DesktopIcon, DesktopIconButton, DesktopRowState,
     },
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+    project_catalog_controller::{
+        ProjectCatalogGroup, ProjectCatalogState, session_matches_query, workspace_matches_query,
+    },
     semantic_status_color,
 };
 
@@ -42,15 +44,15 @@ pub(super) struct SessionRuntimeState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SessionsPaneViewModel {
     pub(super) panel_width: u32,
-    pub(super) catalog: Arc<[DesktopSessionCatalogEntry]>,
+    pub(super) project_groups: Arc<[ProjectCatalogGroup]>,
     pub(super) omitted_sessions: usize,
+    pub(super) catalog_state: ProjectCatalogState,
     pub(super) global_skills: Arc<[CodingAgentResourceCommand]>,
     pub(super) active_session_id: Arc<str>,
     pub(super) runtime_states: Arc<[SessionRuntimeState]>,
     pub(super) composer_running: bool,
     pub(super) awaiting_prompt_start: bool,
     pub(super) session_pending: bool,
-    pub(super) session_catalog_pending: bool,
     pub(super) active_status: desktop::shell::SemanticStatus,
     pub(super) keyboard_focus_visible: bool,
     pub(super) context_is_overlay: bool,
@@ -194,7 +196,7 @@ impl Render for SessionsPane {
         let composer_running = view_model.composer_running;
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
         let session_pending = view_model.session_pending;
-        let session_catalog_pending = view_model.session_catalog_pending;
+        let session_catalog_pending = view_model.catalog_state.is_loading();
         let context_is_overlay = view_model.context_is_overlay;
         let search_input = self.search_input.clone();
         let clear_search_input = search_input.clone();
@@ -211,41 +213,26 @@ impl Render for SessionsPane {
         let runtime_states = Arc::clone(&view_model.runtime_states);
         let refresh_target = cx.entity().downgrade();
         let now = OffsetDateTime::now_utc();
-        let visible_session_count = view_model
-            .catalog
+        let catalog_rows = view_model
+            .project_groups
             .iter()
-            .filter(|session| {
-                search.is_empty()
-                    || session.session_id.to_lowercase().contains(&search)
-                    || session
-                        .name
-                        .as_deref()
-                        .is_some_and(|name| name.to_lowercase().contains(&search))
-                    || session
-                        .cwd
-                        .as_deref()
-                        .is_some_and(|cwd| cwd.to_lowercase().contains(&search))
-                    || session.updated_at.to_lowercase().contains(&search)
+            .flat_map(|group| {
+                group
+                    .sessions
+                    .iter()
+                    .map(move |session| (&group.workspace, session))
             })
-            .count();
-        let session_rows = view_model
-            .catalog
-            .iter()
-            .filter(|session| {
+            .filter(|(workspace, session)| {
                 search.is_empty()
-                    || session.session_id.to_lowercase().contains(&search)
-                    || session
-                        .name
-                        .as_deref()
-                        .is_some_and(|name| name.to_lowercase().contains(&search))
-                    || session
-                        .cwd
-                        .as_deref()
-                        .is_some_and(|cwd| cwd.to_lowercase().contains(&search))
-                    || session.updated_at.to_lowercase().contains(&search)
+                    || workspace_matches_query(workspace, &search)
+                    || session_matches_query(session, &search)
             })
+            .collect::<Vec<_>>();
+        let visible_session_count = catalog_rows.len();
+        let session_rows = catalog_rows
+            .into_iter()
             .enumerate()
-            .map(|(index, session)| {
+            .map(|(index, (_, session))| {
                 let target = session.session_id.clone();
                 let active = target == active_session_id;
                 let semantic_name = session
@@ -449,7 +436,7 @@ impl Render for SessionsPane {
             .collect::<Vec<_>>();
         let empty_state = if visible_session_count > 0 {
             None
-        } else if session_catalog_pending && view_model.catalog.is_empty() {
+        } else if session_catalog_pending && view_model.project_groups.is_empty() {
             Some("Loading sessions…".to_owned())
         } else if !search.is_empty() {
             Some(format!(
@@ -457,7 +444,32 @@ impl Render for SessionsPane {
                 truncate_label(&search, 24)
             ))
         } else {
-            Some("No recent sessions yet. Create one to begin.".to_owned())
+            Some(match &view_model.catalog_state {
+                ProjectCatalogState::NotLoaded => {
+                    "Refresh to load projects and session history.".to_owned()
+                }
+                ProjectCatalogState::Error { message } => format!(
+                    "Session history unavailable: {}. Use Refresh to retry.",
+                    truncate_label(
+                        view_model.catalog_state.error_message().unwrap_or(message),
+                        72
+                    )
+                ),
+                ProjectCatalogState::Stale {
+                    error: Some(message),
+                } => format!(
+                    "Session history is stale: {}. Use Refresh to retry.",
+                    truncate_label(
+                        view_model.catalog_state.error_message().unwrap_or(message),
+                        72
+                    )
+                ),
+                ProjectCatalogState::Loading
+                | ProjectCatalogState::Ready
+                | ProjectCatalogState::Stale { error: None } => {
+                    "No recent sessions yet. Create one to begin.".to_owned()
+                }
+            })
         };
         let new_conversation_row = DesktopActionRow::new(
             "new-conversation",

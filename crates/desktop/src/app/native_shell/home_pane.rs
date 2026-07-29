@@ -66,10 +66,11 @@ impl Render for HomePane {
                 let target = session.session_id.clone();
                 let title = session.name.as_deref().unwrap_or(&session.session_id);
                 let detail = session
-                    .cwd
-                    .as_deref()
-                    .map(|cwd| truncate_label(cwd, 46))
-                    .unwrap_or_else(|| truncate_label(&session.updated_at, 32));
+                    .workspace
+                    .display_path
+                    .as_ref()
+                    .map(|path| truncate_label(&path.display().to_string(), 46))
+                    .unwrap_or_else(|| truncate_label(&session.workspace.display_name, 32));
                 DesktopActionRow::new(
                     ("home-session", index),
                     truncate_label(title, 34),

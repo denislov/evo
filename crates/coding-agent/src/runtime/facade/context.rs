@@ -268,10 +268,6 @@ pub struct CodingAgentSessionOverview {
     pub name: Option<String>,
     pub workspace: CodingAgentWorkspaceOverview,
     pub workspace_migration: CodingAgentWorkspaceMigration,
-    /// Legacy compatibility field. New consumers should use `workspace`.
-    ///
-    /// This remains until DSK-630 moves all adapters to the typed overview.
-    pub cwd: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub active_leaf_id: Option<String>,

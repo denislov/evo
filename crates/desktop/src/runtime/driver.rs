@@ -192,7 +192,8 @@ impl RuntimeState {
             .map(|overview| DesktopSessionCatalogEntry {
                 session_id: bounded_utf8_prefix(&overview.session_id, MAX_SESSION_ID_BYTES),
                 name: overview.name.map(|name| bounded_utf8_prefix(&name, 256)),
-                cwd: overview.cwd.map(|cwd| bounded_utf8_prefix(&cwd, 1024)),
+                workspace: overview.workspace,
+                workspace_migration: overview.workspace_migration,
                 created_at: bounded_utf8_prefix(&overview.created_at, 128),
                 updated_at: bounded_utf8_prefix(&overview.updated_at, 128),
                 active_leaf_id: overview

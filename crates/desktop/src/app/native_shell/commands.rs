@@ -25,7 +25,7 @@ pub(super) fn reconcile_direct_update(
             let sessions_dirty = shell.complete_workspace_command(&session_id, command_id, &intent);
             if sessions_dirty {
                 shell.remove_closed_workspace(&session_id);
-                shell.session_controller.remove_session(&session_id);
+                shell.project_catalog.remove_session(&session_id);
                 shell.set_preference_notice("Session closed.".into());
             }
             DirectCommandUpdate::Consumed {
@@ -88,7 +88,7 @@ pub(super) fn reconcile_direct_update(
                     )
                 });
             if sessions_dirty {
-                shell.session_controller.replace_catalog(sessions, omitted);
+                shell.project_catalog.replace_catalog(sessions, omitted);
             }
             DirectCommandUpdate::Consumed {
                 sessions_dirty,
@@ -107,7 +107,7 @@ pub(super) fn reconcile_direct_update(
             let sessions_dirty = shell.command_ledger.complete(command_id, &intent);
             if sessions_dirty {
                 shell
-                    .session_controller
+                    .project_catalog
                     .rename_session(&session_id, name, updated_at);
                 shell.set_preference_notice("Session name updated.".into());
             }

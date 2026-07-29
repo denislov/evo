@@ -501,7 +501,6 @@ impl SessionService {
                     name: summary.name,
                     workspace: workspace.scope.overview(),
                     workspace_migration: workspace.migration,
-                    cwd: workspace.compatibility_cwd,
                     created_at: summary.created_at,
                     updated_at: summary.updated_at,
                     active_leaf_id: summary.active_leaf_id,
@@ -533,7 +532,6 @@ impl SessionService {
                     name: summary.name,
                     workspace: workspace.scope.overview(),
                     workspace_migration: workspace.migration,
-                    cwd: workspace.compatibility_cwd,
                     created_at: summary.created_at,
                     updated_at: summary.updated_at,
                     active_leaf_id: summary.active_leaf_id,
@@ -3647,7 +3645,6 @@ mod tests {
             CodingAgentWorkspaceKind::Projectless
         );
         assert_eq!(overviews[0].workspace.display_path, None);
-        assert_eq!(overviews[0].cwd, None);
         assert_eq!(
             overviews[0].workspace_migration.outcome,
             CodingAgentWorkspaceMigrationOutcome::NotRequired
@@ -3723,7 +3720,6 @@ mod tests {
             CodingAgentWorkspaceKind::Projectless
         );
         assert_eq!(overviews[0].workspace.display_path, None);
-        assert_eq!(overviews[0].cwd, None);
         assert_eq!(
             overviews[0].workspace_migration.outcome,
             CodingAgentWorkspaceMigrationOutcome::Migrated

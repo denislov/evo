@@ -457,7 +457,7 @@ pub(super) struct NativeShell {
     conversation_announcement_sequence: u64,
     narrow_sessions_open: bool,
     narrow_context_open: bool,
-    session_controller: SessionController,
+    project_catalog: ProjectCatalogController,
     panel_resize: Option<PanelResizeState>,
     focus_input_modality: FocusInputModality,
     #[cfg(test)]
@@ -812,7 +812,7 @@ impl NativeShell {
             conversation_announcement_sequence: 0,
             narrow_sessions_open: false,
             narrow_context_open: false,
-            session_controller: SessionController::default(),
+            project_catalog: ProjectCatalogController::default(),
             panel_resize: None,
             focus_input_modality: FocusInputModality::default(),
             #[cfg(test)]
@@ -1104,20 +1104,24 @@ impl NativeShell {
             return;
         };
         let session_id = projection.snapshot().session.session_id.clone();
-        self.session_controller.replace_catalog(
-            vec![desktop::runtime::DesktopSessionCatalogEntry {
-                session_id,
-                name: Some("Current desktop task".into()),
-                cwd: Some(self.project.cwd.display().to_string()),
-                // A future timestamp is clamped to zero elapsed time by the
-                // presentation helper, keeping the replay's `now` label
-                // deterministic across calendar dates.
-                created_at: "9999-12-31T23:59:59Z".into(),
-                updated_at: "9999-12-31T23:59:59Z".into(),
-                active_leaf_id: None,
-            }],
-            0,
-        );
+        let mut entry = desktop::runtime::DesktopSessionCatalogEntry {
+            session_id,
+            name: Some("Current desktop task".into()),
+            // A future timestamp is clamped to zero elapsed time by the
+            // presentation helper, keeping the replay's `now` label
+            // deterministic across calendar dates.
+            created_at: "9999-12-31T23:59:59Z".into(),
+            updated_at: "9999-12-31T23:59:59Z".into(),
+            ..Default::default()
+        };
+        if let Some(workspace) = self.project.workspace.as_ref() {
+            entry.workspace = workspace.overview.clone();
+            entry.workspace_migration = coding_agent::api::view::CodingAgentWorkspaceMigration {
+                outcome: coding_agent::api::view::CodingAgentWorkspaceMigrationOutcome::NotRequired,
+                diagnostic: None,
+            };
+        }
+        self.project_catalog.replace_catalog(vec![entry], 0);
         self.narrow_sessions_open = true;
     }
 
@@ -1687,8 +1691,7 @@ impl NativeShell {
                         command @ (desktop::runtime::DesktopRuntimeCommandKind::Resync
                         | desktop::runtime::DesktopRuntimeCommandKind::CreateSession
                         | desktop::runtime::DesktopRuntimeCommandKind::OpenSession
-                        | desktop::runtime::DesktopRuntimeCommandKind::CloseSession
-                        | desktop::runtime::DesktopRuntimeCommandKind::ListSessions),
+                        | desktop::runtime::DesktopRuntimeCommandKind::CloseSession),
                     code,
                     ..
                 } if self
@@ -1697,6 +1700,27 @@ impl NativeShell {
                     .is_some() =>
                 {
                     self.set_preference_notice(safe_runtime_rejection_notice(*command, code));
+                    sessions_pane_dirty = true;
+                }
+                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
+                    command_id,
+                    command: desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
+                    code,
+                    ..
+                } if self
+                    .command_ledger
+                    .complete_rejection(
+                        *command_id,
+                        desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
+                    )
+                    .is_some() =>
+                {
+                    let notice = safe_runtime_rejection_notice(
+                        desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
+                        code,
+                    );
+                    self.project_catalog.fail_refresh(notice.clone());
+                    self.set_preference_notice(notice);
                     sessions_pane_dirty = true;
                 }
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
@@ -1776,6 +1800,12 @@ impl NativeShell {
                 }
                 desktop::runtime::DesktopRuntimeUpdate::RuntimeFailed { error } => {
                     sessions_pane_dirty = true;
+                    if self.project_catalog.state().is_loading() {
+                        self.project_catalog.fail_refresh(format!(
+                            "desktop runtime failed ({})",
+                            truncate_label(&error.code, 28)
+                        ));
+                    }
                     self.command_ledger.clear();
                     self.reject_pending_composer(format!(
                         "desktop runtime failed ({})",
@@ -1784,6 +1814,9 @@ impl NativeShell {
                 }
                 desktop::runtime::DesktopRuntimeUpdate::Stopped => {
                     sessions_pane_dirty = true;
+                    if self.project_catalog.state().is_loading() {
+                        self.project_catalog.fail_refresh("desktop runtime stopped");
+                    }
                     self.command_ledger.clear();
                     self.reject_pending_composer("desktop runtime stopped".into());
                 }
@@ -4002,8 +4035,9 @@ impl NativeShell {
         runtime_states.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         SessionsPaneViewModel {
             panel_width: self.preferences.sessions_panel_width,
-            catalog: Arc::from(self.session_controller.catalog().to_vec()),
-            omitted_sessions: self.session_controller.omitted(),
+            project_groups: Arc::from(self.project_catalog.project_groups()),
+            omitted_sessions: self.project_catalog.omitted(),
+            catalog_state: self.project_catalog.state().clone(),
             global_skills: Arc::clone(&self.global_skills),
             active_session_id: Arc::from(
                 snapshot
@@ -4019,9 +4053,6 @@ impl NativeShell {
                     DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
                 )
             }),
-            session_catalog_pending: self
-                .command_ledger
-                .contains(&DesktopCommandIntent::ListSessions),
             active_status: self.semantic_status(),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             context_is_overlay: self.narrow_sessions_open,
@@ -4078,8 +4109,8 @@ impl NativeShell {
             thinking: Arc::from(truncate_label(&thinking, 18)),
             workspace: Arc::from(truncate_label(&self.project.cwd.display().to_string(), 42)),
             scratch_workspace,
-            recent_sessions: Arc::from(self.session_controller.catalog().to_vec()),
-            omitted_sessions: self.session_controller.omitted(),
+            recent_sessions: Arc::from(self.project_catalog.catalog().to_vec()),
+            omitted_sessions: self.project_catalog.omitted(),
             global_skills: Arc::clone(&self.global_skills),
             session_pending: self.command_ledger.contains_where(|intent| {
                 matches!(
@@ -5163,6 +5194,10 @@ mod tests {
 
         cx.run_until_parked();
         assert_eq!(
+            shell.read_with(cx, |shell, _| shell.project_catalog.state().clone()),
+            project_catalog_controller::ProjectCatalogState::NotLoaded
+        );
+        assert_eq!(
             runtime_harness.drain_command_kinds(),
             [],
             "startup must not load the session catalog"
@@ -5199,6 +5234,10 @@ mod tests {
             runtime_harness.drain_command_kinds(),
             [desktop::runtime::DesktopRuntimeCommandKind::ListSessions]
         );
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.project_catalog.state().clone()),
+            project_catalog_controller::ProjectCatalogState::Loading
+        );
         shell.update(cx, |shell, cx| shell.request_session_catalog(cx));
         assert_eq!(
             runtime_harness.drain_command_kinds(),
@@ -5222,8 +5261,12 @@ mod tests {
             );
             assert!(shell.poll_runtime(cx));
             assert_eq!(
-                shell.session_controller.catalog()[0].session_id,
+                shell.project_catalog.catalog()[0].session_id,
                 "explicit-refresh-session"
+            );
+            assert_eq!(
+                shell.project_catalog.state(),
+                &project_catalog_controller::ProjectCatalogState::Ready
             );
             assert!(shell.preference_notice.is_none());
         });
@@ -5249,6 +5292,12 @@ mod tests {
                 shell.preference_notice.as_deref(),
                 Some("desktop runtime command queue is closed")
             );
+            assert_eq!(
+                shell.project_catalog.state(),
+                &project_catalog_controller::ProjectCatalogState::Error {
+                    message: "desktop runtime command queue is closed".into()
+                }
+            );
             assert!(
                 !shell
                     .command_ledger
@@ -5263,11 +5312,58 @@ mod tests {
                 shell.preference_notice.as_deref(),
                 Some("desktop runtime command queue is closed")
             );
+            assert!(matches!(
+                shell.project_catalog.state(),
+                project_catalog_controller::ProjectCatalogState::Error { .. }
+            ));
             assert!(
                 !shell
                     .command_ledger
                     .contains(&DesktopCommandIntent::ListSessions),
                 "failed refresh must not schedule another attempt"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn rejected_session_catalog_refresh_keeps_typed_error_state(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+        cx.run_until_parked();
+
+        shell.update(cx, |shell, cx| shell.request_session_catalog(cx));
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [desktop::runtime::DesktopRuntimeCommandKind::ListSessions]
+        );
+        shell.update(cx, |shell, cx| {
+            let command_id = shell
+                .command_ledger
+                .command_id_for(&DesktopCommandIntent::ListSessions)
+                .expect("refresh is pending before rejection");
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
+                    command_id,
+                    command: desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
+                    code: "catalog_unavailable".into(),
+                    message: "private runtime detail must not become catalog state".into(),
+                },
+            );
+            assert!(shell.poll_runtime(cx));
+            assert_eq!(
+                shell.project_catalog.state(),
+                &project_catalog_controller::ProjectCatalogState::Error {
+                    message: "ListSessions rejected (catalog_unavailable)".into()
+                }
+            );
+            assert!(
+                !shell
+                    .project_catalog
+                    .state()
+                    .error_message()
+                    .unwrap()
+                    .contains("private runtime detail")
             );
         });
     }
@@ -5319,7 +5415,7 @@ mod tests {
         initialize_visual_test(cx);
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
-            shell.session_controller.replace_catalog(
+            shell.project_catalog.replace_catalog(
                 vec![desktop::runtime::DesktopSessionCatalogEntry {
                     session_id: "idle-recent-session".into(),
                     name: Some("Idle recent session".into()),
@@ -5364,7 +5460,7 @@ mod tests {
         cx.run_until_parked();
         runtime_harness.drain_command_kinds();
         shell.update(cx, |shell, cx| {
-            shell.session_controller.replace_catalog(
+            shell.project_catalog.replace_catalog(
                 vec![desktop::runtime::DesktopSessionCatalogEntry {
                     session_id: "desktop-visual-test".into(),
                     name: Some("Active visual session".into()),
@@ -5515,7 +5611,7 @@ mod tests {
             );
             assert!(shell.poll_runtime(cx));
             assert_eq!(
-                shell.session_controller.catalog()[0].session_id,
+                shell.project_catalog.catalog()[0].session_id,
                 "session-created-locally"
             );
 
@@ -5556,7 +5652,7 @@ mod tests {
                     DesktopCommandLedger::default(),
                 ),
             );
-            shell.session_controller.replace_catalog(
+            shell.project_catalog.replace_catalog(
                 vec![desktop::runtime::DesktopSessionCatalogEntry {
                     session_id: "close-session-b".into(),
                     ..Default::default()
@@ -5611,7 +5707,7 @@ mod tests {
                     .any(|issue| issue.code == "prompt_prepare")
             );
             assert_eq!(
-                shell.session_controller.catalog()[0].session_id,
+                shell.project_catalog.catalog()[0].session_id,
                 "session-created",
                 "the first prompt must add its newly-created session locally"
             );
@@ -5815,7 +5911,7 @@ mod tests {
             assert!(shell.poll_runtime(cx));
             assert_eq!(shell.active_workspace.session_id(), "close-session-a");
             assert!(!shell.workspaces.contains_key("close-session-b"));
-            assert!(shell.session_controller.catalog().is_empty());
+            assert!(shell.project_catalog.catalog().is_empty());
         });
         assert_eq!(
             runtime_harness.drain_command_kinds(),
@@ -6802,7 +6898,7 @@ mod tests {
                 .session
                 .session_id
                 .clone();
-            shell.session_controller.replace_catalog(
+            shell.project_catalog.replace_catalog(
                 vec![
                     desktop::runtime::DesktopSessionCatalogEntry {
                         session_id: active_session_id,
@@ -6849,7 +6945,7 @@ mod tests {
         cx.run_until_parked();
         runtime_harness.drain_command_kinds();
         shell.update(cx, |shell, cx| {
-            shell.session_controller.replace_catalog(
+            shell.project_catalog.replace_catalog(
                 vec![
                     desktop::runtime::DesktopSessionCatalogEntry {
                         session_id: "named-session-id".into(),
@@ -9159,7 +9255,7 @@ mod tests {
     fn sessions_navigation_is_searchable_recent_and_user_refreshed() {
         let shell = include_str!("native_shell.rs");
         let pane = include_str!("native_shell/sessions_pane.rs");
-        let controller = include_str!("native_shell/session_controller.rs");
+        let controller = include_str!("native_shell/project_catalog_controller.rs");
         let commands = include_str!("native_shell/commands.rs");
         let search_placeholder = ["placeholder(\"Search ", "sessions…\")"].concat();
         let active_duplicate = ["current_session_", "label"].concat();
@@ -9168,7 +9264,7 @@ mod tests {
         assert!(pane.contains(&search_placeholder));
         assert!(!controller.contains("schedule_session_catalog_refresh"));
         assert!(!controller.contains("SESSION_CATALOG_REFRESH_INTERVAL"));
-        assert!(controller.contains("struct SessionController"));
+        assert!(controller.contains("struct ProjectCatalogController"));
         assert!(!controller.contains("refresh_deadline: Option<Instant>"));
         assert!(controller.contains("fn request_session_catalog"));
         assert!(shell.contains("SessionsPaneEvent::Refresh => this.request_session_catalog(cx)"));
@@ -9178,7 +9274,8 @@ mod tests {
         assert!(pane.contains("Untitled"));
         assert!(pane.contains("Rename session"));
         assert!(pane.contains("SessionsPaneEvent::Rename"));
-        assert!(pane.contains("view_model.catalog"));
+        assert!(pane.contains("view_model.catalog_state"));
+        assert!(pane.contains("view_model.project_groups"));
         assert!(pane.contains("sessions-overflow"));
         assert!(pane.contains("PopupMenuItem::new(if session_catalog_pending"));
         assert!(pane.contains("DesktopActionRow::new("));
@@ -9354,7 +9451,7 @@ mod tests {
         let shell = include_str!("native_shell.rs");
         let host = include_str!("native_shell/toast_host.rs");
         let commands = include_str!("native_shell/commands.rs");
-        let sessions = include_str!("native_shell/session_controller.rs");
+        let sessions = include_str!("native_shell/project_catalog_controller.rs");
         let exact_assignment = ["self.preference_notice", " = Some(message);"].concat();
         let any_direct_assignment = [".preference_notice", " = Some("].concat();
 
@@ -9419,7 +9516,7 @@ mod tests {
         assert!(!host.contains("owner.read(cx)"));
         assert!(!host.contains("DesktopProjection"));
         assert!(!host.contains("command_ledger"));
-        assert!(!host.contains("session_controller"));
+        assert!(!host.contains("project_catalog"));
         assert!(shell.contains("fn overlay_view_model(&self) -> OverlayViewModel"));
         assert!(shell.contains("authorization_focus: FocusHandle"));
         assert!(shell.contains("active_overlay: Option<DesktopOverlayKind>"));
@@ -9482,7 +9579,7 @@ mod desktop_style;
 mod home_pane;
 mod inspector_pane;
 mod overlay_host;
-mod session_controller;
+mod project_catalog_controller;
 mod sessions_pane;
 mod streaming_text;
 mod toast_host;
@@ -9518,7 +9615,7 @@ use inspector_pane::{
     InspectorPaneViewModel, InspectorRecoveryView,
 };
 use overlay_host::{OverlayAuthorizationView, OverlayHost, OverlayHostEvent, OverlayViewModel};
-use session_controller::SessionController;
+use project_catalog_controller::ProjectCatalogController;
 use sessions_pane::{SessionRuntimeState, SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
 use toast_host::{ToastHost, ToastNotice};
 use update::ProjectionDirtyRouting;

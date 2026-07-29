@@ -542,8 +542,8 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
         .expect("conversation controller should be readable");
     let sessions = fs::read_to_string(controller_root.join("sessions_pane.rs"))
         .expect("sessions pane should be readable");
-    let session_controller = fs::read_to_string(controller_root.join("session_controller.rs"))
-        .expect("session controller should be readable");
+    let project_catalog = fs::read_to_string(controller_root.join("project_catalog_controller.rs"))
+        .expect("project catalog controller should be readable");
     let composer = fs::read_to_string(controller_root.join("composer_pane.rs"))
         .expect("composer pane should be readable");
     let inspector = fs::read_to_string(controller_root.join("inspector_pane.rs"))
@@ -554,7 +554,7 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     for module in [
         "commands",
         "conversation_controller",
-        "session_controller",
+        "project_catalog_controller",
         "update",
     ] {
         assert!(shell.contains(&format!("mod {module};")));
@@ -576,10 +576,17 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(sessions.contains("search_input: gpui::Entity<InputState>"));
     assert!(!sessions.contains("WeakEntity<NativeShell>"));
     assert!(!sessions.contains("owner.read(cx)"));
-    assert!(session_controller.contains("struct SessionController"));
-    assert!(!session_controller.contains("refresh_deadline: Option<Instant>"));
-    assert!(!session_controller.contains("fn schedule_session_catalog_refresh"));
-    assert!(session_controller.contains("fn request_session_catalog"));
+    assert!(project_catalog.contains("struct ProjectCatalogController"));
+    assert!(project_catalog.contains("enum ProjectCatalogState"));
+    assert!(project_catalog.contains("struct ProjectCatalogGroup"));
+    assert!(project_catalog.contains("collapsed_group_ids: HashSet<String>"));
+    assert!(project_catalog.contains("fn filtered_project_groups"));
+    assert!(sessions.contains("project_groups: Arc<[ProjectCatalogGroup]>"));
+    assert!(sessions.contains("catalog_state: ProjectCatalogState"));
+    assert!(!sessions.contains("pub(super) catalog: Arc<[DesktopSessionCatalogEntry]>"));
+    assert!(!project_catalog.contains("refresh_deadline: Option<Instant>"));
+    assert!(!project_catalog.contains("fn schedule_session_catalog_refresh"));
+    assert!(project_catalog.contains("fn request_session_catalog"));
     assert!(!shell.contains("session_catalog_refresh_deadline"));
 
     let root_input_field = ["composer_", "input:"].concat();
@@ -636,7 +643,7 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(overlay.contains("struct OverlayViewModel"));
     assert!(overlay.contains("view_model: Option<OverlayViewModel>"));
     assert!(overlay.contains("request: ToolAuthorizationRequest"));
-    assert!(!overlay.contains("session_controller"));
+    assert!(!overlay.contains("project_catalog"));
     assert!(shell.contains("fn overlay_view_model(&self) -> OverlayViewModel"));
     assert!(shell.contains("active_overlay: Option<DesktopOverlayKind>"));
 

@@ -328,9 +328,10 @@ pub struct CodingAgentSessionCatalog {
 
 /// Bounded lightweight directory for idle and session-picker surfaces.
 ///
-/// Each entry combines manifest facts with the cwd from only the first
-/// `SessionCreated` frame. Unlike [`CodingAgentSessionCatalog`], this query
-/// does not replay transcripts and therefore has no `entry_count`.
+/// Each entry combines manifest facts with a product-owned workspace overview.
+/// Legacy v1 identity reads only the first `SessionCreated` frame. Unlike
+/// [`CodingAgentSessionCatalog`], this query does not replay transcripts and
+/// therefore has no `entry_count`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingAgentSessionOverviewCatalog {
     pub overviews: Vec<CodingAgentSessionOverview>,
@@ -1457,7 +1458,6 @@ mod tests {
         let choice = &catalog.choices[0];
         assert_eq!(overview.session_id, choice.id);
         assert_eq!(overview.name, choice.name);
-        assert_eq!(overview.cwd.as_deref(), Some(choice.cwd.as_str()));
         assert_eq!(
             overview.workspace.kind,
             crate::workspace::CodingAgentWorkspaceKind::Project
@@ -1504,10 +1504,6 @@ mod tests {
 
         assert_eq!(overviews.overviews.len(), 1);
         assert_eq!(overviews.overviews[0].session_id, "sess_bad_later_frame");
-        assert_eq!(
-            overviews.overviews[0].cwd.as_deref(),
-            Some("/query-fixture")
-        );
         assert_eq!(
             overviews.overviews[0].workspace.kind,
             crate::workspace::CodingAgentWorkspaceKind::Project

@@ -1797,7 +1797,7 @@ async fn prompt_prepare_failure_retains_the_persisted_scoped_session() {
         .into_iter()
         .find(|overview| overview.session_id == session_id)
         .expect("the rejected prompt session remains durable");
-    assert_eq!(overview.cwd.as_deref(), snapshot.project.cwd.to_str());
+    assert_eq!(overview.workspace, resolved.overview);
     state.close_idle_session(&session_id).await.unwrap();
 }
 
@@ -1890,7 +1890,6 @@ async fn projectless_first_prompt_records_the_global_only_scratch_cwd() {
         coding_agent::api::view::CodingAgentWorkspaceKind::Projectless
     );
     assert_eq!(overview.workspace.display_path, None);
-    assert_eq!(overview.cwd, None);
 
     bridge.shutdown().await.unwrap();
 }
