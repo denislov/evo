@@ -5502,9 +5502,9 @@ mod tests {
             let actions = cx
                 .debug_bounds("desktop-header-actions")
                 .expect("header actions remain visible");
-            let runtime = cx
-                .debug_bounds("desktop-header-runtime-status")
-                .expect("running status remains visible");
+            let runtime_slot = cx
+                .debug_bounds("desktop-header-runtime-status-slot")
+                .expect("the attention-only status slot remains reserved");
             assert!(identity.right() <= actions.left());
             if let Some(title) = &title {
                 assert!(title.left() >= identity.left() && title.right() <= identity.right());
@@ -5515,8 +5515,21 @@ mod tests {
                     "narrow chrome reserves space for selectors"
                 );
             }
-            assert!(runtime.left() >= actions.left() && runtime.right() <= actions.right());
-            assert!(actions.right() <= header.right());
+            assert!(
+                runtime_slot.left() >= actions.left() && runtime_slot.right() <= actions.right()
+            );
+            assert_eq!(
+                f32::from(runtime_slot.size.width),
+                header_runtime_status_slot_width(width as u32)
+            );
+            assert!(
+                cx.debug_bounds("desktop-header-runtime-status").is_none(),
+                "idle does not render a status indicator"
+            );
+            assert!(
+                actions.right() <= header.right(),
+                "Header actions must stay bounded at {width}px: header={header:?}, actions={actions:?}"
+            );
 
             assert!(cx.debug_bounds("desktop-status-panel").is_none());
             assert!(cx.debug_bounds("desktop-status-primary").is_none());
@@ -5538,6 +5551,88 @@ mod tests {
                 "the session thinking selector remains available in the Header"
             );
             assert!(cx.debug_bounds("desktop-composer-thinking").is_none());
+        }
+    }
+
+    #[gpui::test]
+    fn idle_and_running_header_status_keep_every_other_control_stationary(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            visual_test_projection(),
+        );
+        let stable_selectors = [
+            "desktop-header-identity",
+            "desktop-header-actions",
+            "desktop-header-model-selector",
+            "desktop-header-thinking-selector",
+            "desktop-header-profile-selector",
+            "desktop-hit-toggle-inspector",
+            "desktop-header-overflow",
+        ];
+
+        for width in [1_300., 1_000., 700.] {
+            shell.update(cx, |shell, cx| {
+                let mut view_model = shell.conversation_header_view_model();
+                view_model.status = SemanticStatus::Idle;
+                shell.conversation_header.update(cx, |header, cx| {
+                    header.set_view_model(view_model);
+                    cx.notify();
+                });
+            });
+            cx.simulate_resize(size(px(width), px(900.)));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("desktop-header-runtime-status").is_none());
+            let idle_slot = cx
+                .debug_bounds("desktop-header-runtime-status-slot")
+                .expect("idle keeps the horizontal status reservation");
+            let idle_bounds = stable_selectors.map(|selector| {
+                cx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("idle header is missing {selector} at {width}px"))
+            });
+
+            for status in [
+                SemanticStatus::Running,
+                SemanticStatus::Authorization,
+                SemanticStatus::Warning,
+                SemanticStatus::Error,
+            ] {
+                shell.update(cx, |shell, cx| {
+                    let mut view_model = shell.conversation_header_view_model();
+                    view_model.status = status;
+                    // Isolate the status transition from the independently
+                    // conditional Abort action so this regression measures only
+                    // the attention indicator's geometry contract.
+                    view_model.composer_running = false;
+                    shell.conversation_header.update(cx, |header, cx| {
+                        header.set_view_model(view_model);
+                        cx.notify();
+                    });
+                });
+                cx.run_until_parked();
+                let indicator = cx
+                    .debug_bounds("desktop-header-runtime-status")
+                    .unwrap_or_else(|| panic!("{status:?} renders the attention indicator"));
+                let slot = cx
+                    .debug_bounds("desktop-header-runtime-status-slot")
+                    .expect("attention states keep the reserved status slot");
+                assert!(
+                    indicator.left() >= slot.left() && indicator.right() <= slot.right(),
+                    "{status:?} indicator must fit its slot: indicator={indicator:?}, slot={slot:?}"
+                );
+                assert_eq!(idle_slot.left(), slot.left());
+                assert_eq!(idle_slot.size.width, slot.size.width);
+                let attention_bounds = stable_selectors.map(|selector| {
+                    cx.debug_bounds(selector).unwrap_or_else(|| {
+                        panic!("{status:?} header is missing {selector} at {width}px")
+                    })
+                });
+                assert_eq!(
+                    idle_bounds, attention_bounds,
+                    "{status:?} appearance must not move any other Header control at {width}px"
+                );
+            }
         }
     }
 
@@ -8769,6 +8864,8 @@ use conversation_controller::{
     distance_to_bottom as conversation_distance_to_bottom,
     row_target_height as conversation_row_target_height, upsert_indexed_item,
 };
+#[cfg(test)]
+use conversation_header::header_runtime_status_slot_width;
 use conversation_header::{
     ConversationHeader, ConversationHeaderEvent, ConversationHeaderSelectorOption,
     ConversationHeaderViewModel,

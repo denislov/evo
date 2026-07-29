@@ -1596,6 +1596,24 @@ style(desktop): drop the conversation block card background
 - 新增测试：idle 与 running 两态下顶栏其余元素位置一致；
 - 三档 golden 更新并附 review note。
 
+**实现状态（2026-07-29）：完成**
+
+- 仅移除 Conversation Header 中常驻的 `○ Idle` 提示；Header 本体、会话标题、Model / Thinking / Profile
+  选择器、Sessions / Inspector 开关、Abort 与 overflow 均保留。idle 不挂载 glyph、label、背景或无意义的
+  accessibility status node，也不把 `Idle` 迁移到另一处重复显示；会话级状态继续由 Sessions 行状态点承担。
+- Header 保留 state-independent 的 attention slot：medium / wide 为 104 px，低于 900 px 的 narrow 为 80 px；
+  action gap 分别为 8 px / 4 px。Running、Authorization、Warning、Error 才在槽内挂载 `Role::Status`，因此状态
+  出现/消失不移动任何其他控件。Authorization 的视觉短标签为 `Approval`（narrow 为 `Auth`），accessible label
+  仍是完整的 `Authorization required`。
+- 新增三档 GPUI 回归：同一 Header 依次切换 Idle / Running / Authorization / Warning / Error，验证 attention
+  indicator 不越出槽位，并对 identity、actions、Model / Thinking / Profile、Inspector toggle 与 overflow 的 bounds
+  做精确等值比较；既有 Header 边界测试同时确认 1300 / 1000 / 700 px 均无裁切或溢出。
+- wide / medium / narrow、三档 idle、authorization、reduced-motion、keyboard-focus、no-color 共 10 个 fixture
+  已按原始分辨率人工审图并附 VUI-309 review note；安装后确定性复播 RMSE 全部为 `0`（预算 `0.015`）。
+  最终验证为 Desktop `228 passed / 5 ignored`、dependency boundary `16/16`、严格 Clippy、fmt 与
+  `git diff --check`。本任务不新增性能通道；click-to-photon `--drive 60` smoke 捕获 60 个唯一 app-side
+  post-render 样本，不含外部光电传感器数据，因而不计为真实 click-to-photon 测量或通过。
+
 **建议提交**
 
 ```text

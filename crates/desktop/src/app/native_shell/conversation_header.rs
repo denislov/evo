@@ -1,8 +1,8 @@
 use desktop::preferences::DesktopThinkingLevel;
 use desktop::shell::{PanelVisibility, SemanticStatus, SemanticTheme, ShellLayout};
 use gpui::{
-    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
-    prelude::*, px, rgb,
+    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, Styled as _, Window,
+    div, prelude::*, px, rgb,
 };
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use std::sync::Arc;
@@ -15,6 +15,30 @@ use super::{
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
     semantic_status_color,
 };
+
+/// Stable space for the attention-only runtime indicator. Idle leaves this
+/// slot empty so status changes never move the selectors or panel actions.
+pub(super) const HEADER_RUNTIME_STATUS_SLOT_WIDTH: f32 = 104.;
+const HEADER_RUNTIME_STATUS_COMPACT_SLOT_WIDTH: f32 = 80.;
+
+pub(super) const fn header_runtime_status_slot_width(viewport_width: u32) -> f32 {
+    if viewport_width < 900 {
+        HEADER_RUNTIME_STATUS_COMPACT_SLOT_WIDTH
+    } else {
+        HEADER_RUNTIME_STATUS_SLOT_WIDTH
+    }
+}
+
+const fn header_runtime_status_label(status: SemanticStatus, compact: bool) -> &'static str {
+    match status {
+        // The full accessible name remains `Authorization required`; the
+        // compact visual label keeps the attention slot bounded at the
+        // narrowest supported Conversation workspace.
+        SemanticStatus::Authorization if compact => "Auth",
+        SemanticStatus::Authorization => "Approval",
+        _ => status.label(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConversationHeaderEvent {
@@ -128,6 +152,8 @@ impl Render for ConversationHeader {
             )
         };
         let show_session_title = expanded_chrome || (view_model.idle && viewport_width >= 900);
+        let compact_actions = viewport_width < 900;
+        let status_slot_width = header_runtime_status_slot_width(viewport_width);
         let model_accessible_label =
             format!("Select model; current {}", view_model.current_model_id);
         let profile_accessible_label = format!(
@@ -225,22 +251,43 @@ impl Render for ConversationHeader {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap_token(DesignSpace::Sm)
+                    .gap_token(if compact_actions {
+                        DesignSpace::Xs
+                    } else {
+                        DesignSpace::Sm
+                    })
                     .child(
                         div()
-                            .debug_selector(|| "desktop-header-runtime-status".into())
+                            .debug_selector(|| "desktop-header-runtime-status-slot".into())
+                            .w(px(status_slot_width))
                             .flex_none()
                             .flex()
                             .items_center()
-                            .gap_token(DesignSpace::Xs)
-                            .rounded_token(DesignRadius::Md)
-                            .px_token(DesignSpace::Sm)
-                            .py_token(DesignSpace::Xs)
-                            .bg(rgb(theme.surface.value()))
-                            .text_token(DesignText::Metadata)
-                            .text_color(semantic_status_color(status))
-                            .child(status.glyph())
-                            .child(status.label()),
+                            .when(status != SemanticStatus::Idle, |slot| {
+                                slot.child(
+                                    div()
+                                        .id("header-runtime-status")
+                                        .debug_selector(|| {
+                                            "desktop-header-runtime-status".into()
+                                        })
+                                        .role(Role::Status)
+                                        .aria_label(status.label())
+                                        .flex()
+                                        .items_center()
+                                        .gap_token(DesignSpace::Xs)
+                                        .rounded_token(DesignRadius::Md)
+                                        .px_token(DesignSpace::Sm)
+                                        .py_token(DesignSpace::Xs)
+                                        .bg(rgb(theme.surface.value()))
+                                        .text_token(DesignText::Metadata)
+                                        .text_color(semantic_status_color(status))
+                                        .child(status.glyph())
+                                        .child(header_runtime_status_label(
+                                            status,
+                                            compact_actions,
+                                        )),
+                                )
+                            }),
                     )
                     .child(
                         DesktopSelector::new(
