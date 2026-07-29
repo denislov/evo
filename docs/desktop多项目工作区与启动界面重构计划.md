@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -1093,6 +1093,31 @@ CenterDrawerHost
 ### Phase 6：Sidebar Projects 与 Home 品牌
 
 #### VUI-410：Sidebar 导航与 Projects 树
+
+> 状态：已完成。`SessionsPane` 已从扁平 session history 改为真正的 Projects → Sessions 树：
+> SidebarHeader 使用 compact `evo workspace` mark，New conversation 与 Skills 固定为一级 action；Projects
+> header 直接承载 32 px refresh、typed catalog 状态和有数据后才出现的 search。项目 disclosure row 显示
+> workspace identity、完整路径 tooltip、session 数量和聚合 runtime 状态，nested session row 显示
+> `current` / `running` / `error` / `available` 文本与 glyph，不依赖颜色。Projectless 明确显示 `无项目`，
+> Legacy 明确标注 migration required；not-loaded、loading、error、stale、empty、search-empty 与 omitted
+> 都限制在 Projects 局部状态，不占用全局 toast。
+>
+> Disclosure state 仍由 root-owned `ProjectCatalogController` 按稳定 group id 持有，Pane 只发
+> `SetProjectCollapsed` typed event；搜索临时展开匹配后代但不修改用户折叠偏好。Session rename/close 已合并到
+> 单一 32 px actions menu，inline rename 仅在编辑期间占位。Project 与 session 都写入真实 List/ListItem
+> 层级，project action 暴露 `aria-expanded`，屏幕阅读顺序固定为 New conversation → Skills → Projects →
+> project → nested sessions；New conversation、Skills、project disclosure 与 session row 均显式支持
+> Tab 后 Enter/Space 激活。
+>
+> Gate：新增 GPUI/单元回归覆盖 200 px 最小 Sidebar、wide docked、700 px drawer、折叠往返、稳定 session
+> index、32 px hit target、阅读顺序、search/disclosure 独立性、Legacy/empty/omitted 局部状态，以及 4 个并存
+> runtime 的 `current` / `running` / `error` / `available` 展示。Desktop library 281 个 tests 通过、5 个既有
+> release 性能用例保持 ignored，19 个 dependency boundary tests 与严格 all-target/all-features Clippy
+> 通过；格式与 diff 检查通过。10 个 wide/medium/narrow、idle、authorization、keyboard-focus、
+> reduced-motion、no-color visual review fixture 已生成（normalized RMSE `0.0246304`–`0.160454`），并抽查
+> wide、narrow idle、no-color 与 wide diff；未安装 golden，最终品牌构图仍由 VUI-411/VUI-412 统一收敛。
+> CodeGraph 变更前 call-path 与 `ast-grep-outline` 变更后 owner 审计确认 Pane、controller、shared control 与
+> root shell 的职责没有重新混合。
 
 工作：
 
