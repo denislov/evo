@@ -2,7 +2,7 @@
 
 > 状态：代码与自动 gate 完成；`VUI-104` click-to-photon 人工验收待补
 > 基线：当前 `main` 分支
-> 更新日期：2026-07-28
+> 更新日期：2026-07-30
 > 原则：行为保持、视觉语义明确、并行工作流、每批可独立回退
 
 ## 执行状态
@@ -19,6 +19,7 @@
 | `DSK-105` | 完成 | ConversationController 已成为 transcript cache/layout/viewport/dirty-sequence 的唯一 owner；Root 只提供 bounded `ConversationSource` 并消费 ViewModel；全量、boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `DSK-301` | 完成 | 七个纯逻辑 owner 已拆分，`conversation/mod.rs` 仅保留稳定 re-export；生产依赖为无环 DAG；全量、15/15 boundary、七个 visual fixture 和两组 performance gate 通过 |
 | `DSK-401` | 评估后暂不执行 | 四项候选只改善源码导航，不提供架构或性能收益；当前 owner/boundary 清晰，避免为移动文件制造无收益 churn |
+| `DSK-690` | 完成 | Home/timer/root-overlay/fixed-thinking 旧路径删除审计通过；20 个 NativeShell Rust 源码自证测试已删除，dependency boundary 改为 9 个 typed manifest、AST module/public-surface 与 authority 测试；用户快捷键、accessibility、per-session workspace/shell 文档已同步 |
 | `VUI-000` | 完成 | 七个 fixture 已 review；文档第二节七条问题经确认全部纳入改造范围 |
 | `VUI-101` | 完成 | 已接入 `gpui-component-assets` 的 Lucide 图标源并建立控件权重阶梯；全量、boundary、七个 visual fixture（零像素变化）通过 |
 | `VUI-102` | 完成 | Header 已使用 panel/overflow icon 与唯一 model/profile selector；StatusBar 仅保留临时 thinking selector 和被动状态；全量、七个 reviewed golden 与两组 performance gate 通过 |

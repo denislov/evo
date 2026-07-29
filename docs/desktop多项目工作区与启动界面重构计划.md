@@ -1302,6 +1302,31 @@ CenterDrawerHost
 
 #### DSK-690：删除旧路径和源码文本断言债务
 
+> 状态：已完成。最终删除审计确认生产代码中不再存在 Home Recent/Global columns、15 秒
+> `session_catalog_refresh_deadline`/scheduler、root-level `NarrowContext`/`OverlaySessionView`、或固定遍历
+> `DesktopThinkingLevel::ALL` 的菜单路径；Home 仅保留 hero，Skills 是独立 center surface，catalog 只由显式
+> refresh 驱动，modal 与 center drawer 分属两个 typed host，Thinking 选项只从产品 capability 投影。对应的
+> 无 caller DTO/module 已在前序任务删除，本项没有为了“兼容”重新引入空壳或第二实现。
+>
+> 测试债务完成破坏性收敛：删除 NativeShell、`desktop_controls` 与 native visual tests 中 20 个读取 Rust
+> `.rs` 文件后用 `contains` 自证实现细节的测试，保留其已经存在的 GPUI hit-test、typed command、dirty routing、
+> focus/accessibility、layout/render-cache 与 visual/performance 行为覆盖。`dependency_boundary.rs` 从 20 个大量
+> 扫描源码字符串的测试收敛为 9 个契约测试：manifest/lock 使用 TOML 解析，Rust public surface、19 个 child
+> module graph、pane/host authority 与 runtime/presentation 方向使用 `syn` AST/identifier traversal；测试模块会被
+> traversal 排除，新增合法测试不会误触生产依赖策略。CodeGraph 用于确认旧 owner/caller 已消失，
+> `ast-grep-outline` 变更后审计确认 NativeShell 的生产 item/module surface 未改变，删减只发生在测试模块。
+>
+> `docs/architecture.md` 已同步真实的 `RuntimeState`/`RuntimeSessionWorkspace` per-session context、typed
+> New/Existing workspace scope、NativeShell/SessionWorkspace、统一三列 Shell 以及独立 modal/drawer host；同页新增
+> 用户可见 keyboard shortcut 和 AccessKit role/focus/非颜色语义契约。`docs/desktop架构.md` 状态表与 native
+> visual REVIEW 也已更新。Desktop 284 个 library tests 中 279 个通过、5 个 release 性能用例保持 ignored，
+> 9 个 dependency/module boundary tests 与严格 all-target/all-features Clippy 通过，格式与 diff 检查通过。
+> 10 张 deterministic native fixture 已逐张复核且 normalized RMSE 全部为 `0`，没有替换 golden。native gate
+> 的 GPU frame P95 为 `5.393 ms`、input dispatch-to-post-render P95 为 `8.381 ms`、steady RSS growth 为
+> `159744 B`；headless gate 的 10k-row CPU frame P95 为 `2.349 ms`、input roundtrip P95 为 `4.840 ms`、
+> change-to-render P95 为 `366 us`。此前记录的 9.5 扩展 visual matrix 债务仍由后续最终验收统一收敛，不属于
+> 本项 source-path 清理的完成替代品。
+
 工作：
 
 - 删除已无 caller 的 Home recent/skill DTO、session refresh timer、旧 overlay branches、固定 thinking menu builder。

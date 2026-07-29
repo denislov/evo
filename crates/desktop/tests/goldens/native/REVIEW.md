@@ -1,5 +1,20 @@
 # Native visual golden review
 
+DSK-690 removes legacy-path and Rust source-text assertion debt without changing
+the production Render tree. The ten deterministic captures were replayed and
+reviewed; every fixture remains at normalized RMSE `0`, so no golden image is
+replaced.
+
+- Wide, medium, narrow, three idle variants, authorization, reduced-motion,
+  keyboard-focus, and no-color retain their reviewed geometry and semantics.
+- The old Home sections, catalog refresh timer, root-level narrow Inspector
+  overlay, and fixed Thinking enumeration are now guarded by typed behavior,
+  module-graph/authority tests, and the final deletion audit—not by searching
+  implementation source strings.
+- Keyboard shortcuts and AccessKit role/focus contracts are documented in
+  `docs/architecture.md`; GPUI interaction tests remain the authority for hit
+  targets, popup/drawer focus restoration, and non-color selection semantics.
+
 VUI-422 closes the Inspector dock/drawer interaction contract without changing
 the reviewed shell pixels. All ten deterministic captures compare at normalized
 RMSE `0`, so this task does not replace any golden image.

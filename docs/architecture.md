@@ -393,45 +393,106 @@ crates/tui/src/
 
 ```
 crates/desktop/src/
-├── lib.rs              # DesktopApplicationOptions + run()
-├── main.rs             # 桌面应用二进制入口
-├── app.rs              # gpui 应用结构
-├── runtime.rs          # DesktopRuntime（4675 行）— 命令/更新通道
-├── projection.rs       # 运行时状态 → GUI 模型投映
-├── conversation.rs     # 对话 UI 模型
-├── actions.rs          # GUI 操作定义
-├── file_review.rs      # 外部编辑器启动器
-├── shell.rs            # 原生 Shell 集成
-├── preferences.rs      # 偏好设置
-└── command_ledger.rs   # 命令分类账
+├── lib.rs                         # 唯一公开面：DesktopApplicationOptions + run()
+├── main.rs                        # 桌面应用二进制入口
+├── app.rs                         # gpui bootstrap、窗口与 runtime 生命周期
+├── app/native_shell.rs            # 根布局、typed event 协调与 workspace 切换
+├── app/native_shell/              # Header/Pane/Modal/Drawer 等 bounded child entity
+├── runtime.rs                     # runtime facade 与稳定 re-export
+├── runtime/{protocol,bridge}.rs   # typed command/update 协议与有界 channel
+├── runtime/{driver,dispatch}.rs   # per-session owner、事件泵与 command dispatch
+├── projection.rs                  # 产品 snapshot/event → DesktopProjection
+├── conversation/                  # row model、Markdown、layout、cache、viewport
+├── actions.rs                     # typed action、key context 与 Command Palette
+├── shell.rs                       # 纯 ShellLayout/Focus 几何
+├── file_review.rs                 # bounded review 与外部编辑器启动器
+├── preferences.rs                 # Desktop-only 持久化偏好
+└── command_ledger.rs              # per-workspace command intent 分类账
 ```
 
 **核心架构模式**：
 
 ```
-                    Tokio 运行时（后台线程）
-┌─────────────────────────────────────────────────┐
-│  DesktopRuntime                                 │
-│  ├── 持有 CodingAgentSession                    │
-│  ├── 命令队列 (mpsc channel)                     │
-│  └── 更新队列 (mpsc channel)                     │
-│                                                  │
-│  命令：Reload | Resync | CreateSession |        │
-│        OpenSession | SubmitPrompt | Abort |     │
-│        Steer | ...                               │
-│                                                  │
-│  更新：DesktopRuntimeUpdate（~100 变体）          │
-└──────────┬──────────────────┬───────────────────┘
-           │ (命令通道)        │ (更新通道)
-           ▼                   ▼
-┌─────────────────────────────────────────────────┐
-│              gpui GUI 线程                       │
-│  DesktopApplication                             │
-│  ├── 对话窗口                                    │
-│  ├── 文件审查                                    │
-│  └── 偏好设置                                    │
-└─────────────────────────────────────────────────┘
+                     Tokio runtime（后台线程）
+┌──────────────────────────────────────────────────────────┐
+│ RuntimeState                                             │
+│ ├── home: HomeRuntimeContext                             │
+│ └── workspaces: HashMap<session_id, RuntimeSessionWorkspace>
+│      └── workspace scope + 独立 EmbeddingContext/Session │
+│                                                          │
+│ DesktopRuntimeCommand ── typed owner/prompt target ──────┤
+│ DesktopRuntimeUpdate  ── session identity + sequence ────┤
+└───────────────────────────┬──────────────────────────────┘
+                            │ bounded priority/data channels
+                            ▼
+                     gpui GUI 线程
+┌──────────────────────────────────────────────────────────┐
+│ NativeShell                                              │
+│ ├── active_workspace: SessionWorkspace                   │
+│ ├── workspaces: HashMap<session_id, SessionWorkspace>    │
+│ ├── command reconciliation + selective dirty routing     │
+│ └── bounded child entities                               │
+│      Sessions | Header | Conversation | Composer         │
+│      Inspector | Toast | RootModalHost | CenterDrawerHost│
+└──────────────────────────────────────────────────────────┘
 ```
+
+每个已打开 session 在 runtime 和 GUI 两侧都有独立 owner。`DesktopPromptTarget::New`
+携带 `CodingAgentWorkspaceSelection`、model 与 profile，用于原子创建新的 runtime
+workspace；`DesktopPromptTarget::Existing` 只携带 durable `session_id`，类型上无法注入
+新的 cwd。Project、Projectless 和 legacy migration 都由 `coding-agent` 解析为 typed
+workspace scope，Desktop 不通过 cwd 字符串猜测身份，也不共享一个可变
+`EmbeddingContext` 给多个 session。
+
+`ShellLayout` 对 Home、Skills 与已有 Session 使用同一三列几何：
+
+```text
+┌─ Sessions（docked） ─┬──────────── Center Header ────────────┬─ Inspector（docked） ┐
+│ 独立 panel           │ Model | Thinking | Profile | toggles │ 独立 header/resize    │
+│                      ├──────────── Center Body ──────────────┤                      │
+│                      │ Home / Skills / Conversation         │                      │
+│                      │ Composer + CenterDrawerHost           │                      │
+│                      │ drawer 只覆盖此区域，不覆盖 Header     │                      │
+└──────────────────────┴──────────────────────────────────────┴──────────────────────┘
+```
+
+Root modal 与 center drawer 是不同 host：授权、Command Palette 和全文查看使用带焦点
+trap 的 modal；Sessions/Inspector drawer 是非 modal 的 center-body 覆盖层。Escape、
+outside-click 和 drawer close 统一恢复打开前的可见焦点 owner。
+
+#### Desktop 键盘快捷键
+
+下列为用户可见的稳定绑定；`Ctrl/Cmd` 表示 Linux/Windows 使用 Ctrl、macOS 使用 Cmd。
+
+| 操作 | 快捷键 |
+| --- | --- |
+| 打开 Command Palette | `Ctrl/Cmd+K` |
+| 打开 changed-file review | `Ctrl/Cmd+P` |
+| 新建 session | `Ctrl/Cmd+N` |
+| 聚焦 Composer | `Ctrl/Cmd+L` |
+| 提交 Composer | `Ctrl/Cmd+Enter` |
+| 中止当前 operation | `Ctrl/Cmd+Esc` |
+| 显示/隐藏 Inspector | `Ctrl/Cmd+\` |
+| 在可见区域间前进/后退 | `Ctrl/Cmd+Tab` / `Ctrl/Cmd+Shift+Tab` |
+| 跳到最新输出 | `End` |
+| 层级关闭 popup、drawer 或 modal | `Escape` |
+| Conversation 选择上一条/下一条 | `↑` / `↓` |
+| 展开或折叠选中项详情 | `Space` |
+| 复制选中的 conversation block | `Ctrl/Cmd+C` |
+| 授权：拒绝/允许一次/本 operation 允许 | `1` / `2` / `3` |
+
+#### Desktop accessibility 契约
+
+- Application、Navigation、Main、Log、Form、Complementary、Status、Dialog 和
+  AlertDialog 使用真实 AccessKit role；可选择行同步 `selected`、`position-in-set` 与
+  `size-of-set`。
+- icon-only action 必须具有 tooltip 与完整 accessible label；短标签或 Unicode-safe
+  ellipsis 只影响可见文本，项目路径、模型/配置身份仍保留在 tooltip/label 中。
+- Pointer hover 不冒充 keyboard focus；键盘输入触发可见 focus ring，hover-only 工具仍
+  保持在 tab order 中。关键状态同时使用文字、形状或长度，不以颜色作为唯一信息载体。
+- Modal 抢占并封闭焦点；drawer 保留 Center Header selector 可点击，关闭时恢复原焦点。
+- `wide-keyboard-focus`、`wide-no-color`、authorization 与三档 responsive fixture 是
+  visual review 的固定组成，GPUI interaction tests 负责真实 hit-test 与 focus restore。
 
 ---
 
@@ -642,7 +703,7 @@ version = "0.7.2"
 | **快照测试** | 事件序列化合同 | `tests/event_snapshot/` |
 | **RPC 协议测试** | JSONL stdio 协议 | `cli/tests/rpc_stdio.rs` |
 | **组件测试** | UI 组件行为 | `tui/tests/components/` |
-| **依赖边界测试** | 验证 crate 间无意外耦合 | `desktop/tests/dependency_boundary.rs` |
+| **依赖/模块边界测试** | 解析 manifest 与 Rust AST，验证公开面、child module graph 和 authority 方向；不搜索实现字符串 | `desktop/tests/dependency_boundary.rs` |
 
 ### 8.2 Test-Support 机制
 
