@@ -2,8 +2,8 @@ use coding_agent::api::authorization::{ToolAuthorizationDecision, ToolAuthorizat
 #[cfg(test)]
 use coding_agent::api::embedding::CodingAgentResourceCommandKind;
 use coding_agent::api::embedding::{
-    CodingAgentEmbeddingSnapshot, CodingAgentResourceCommand, CodingAgentThinkingLevel,
-    CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
+    CodingAgentEmbeddingSnapshot, CodingAgentModelChoice, CodingAgentResourceCommand,
+    CodingAgentThinkingLevel, CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
 };
 use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
@@ -33,7 +33,7 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, ParentElement as _, PathPromptOptions, Render, Role,
     ScrollStrategy, Styled as _, Subscription, Window, WindowBounds, div, prelude::*, px, rgb,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -4649,29 +4649,8 @@ impl NativeShell {
             .find(|profile| profile.id.as_str() == current_profile_id)
             .map(|profile| profile.display_name.as_str())
             .unwrap_or(current_profile_id);
-        let model_options = project
-            .models
-            .iter()
-            .map(|model| {
-                let selectable =
-                    model.supports_text && (model.configured || model.id == current_model_id);
-                let availability = if !model.supports_text {
-                    " · no text input"
-                } else if !selectable {
-                    " · not configured"
-                } else {
-                    ""
-                };
-                ConversationHeaderSelectorOption {
-                    id: Arc::from(model.id.as_str()),
-                    label: Arc::from(format!(
-                        "{} · {} · {}{}",
-                        model.name, model.provider, model.id, availability
-                    )),
-                    selectable,
-                }
-            })
-            .collect::<Vec<_>>();
+        let (model_groups, unavailable_current_model) =
+            conversation_header_model_menu(&project.models, current_model_id);
         let profile_options = project
             .profiles
             .iter()
@@ -4720,7 +4699,8 @@ impl NativeShell {
             thinking_selection: self.thinking_selection,
             current_model_id: Arc::from(current_model_id),
             current_profile_id: Arc::from(current_profile_id),
-            model_options: model_options.into(),
+            model_groups: model_groups.into(),
+            unavailable_current_model,
             profile_options: profile_options.into(),
             project_name: Arc::from(project_name),
             keyboard_focus_visible: self.keyboard_focus_visible(),
@@ -4735,6 +4715,68 @@ impl NativeShell {
     fn semantic_status(&self) -> SemanticStatus {
         workspace_semantic_status(&self.active_workspace)
     }
+}
+
+fn conversation_header_model_menu(
+    models: &[CodingAgentModelChoice],
+    current_model_id: &str,
+) -> (
+    Vec<ConversationHeaderModelGroup>,
+    Option<ConversationHeaderModelWarning>,
+) {
+    let mut grouped = BTreeMap::<&str, Vec<ConversationHeaderModelOption>>::new();
+    for model in models
+        .iter()
+        .filter(|model| model.configured && model.supports_text)
+    {
+        grouped
+            .entry(model.provider.as_str())
+            .or_default()
+            .push(ConversationHeaderModelOption {
+                id: Arc::from(model.id.as_str()),
+                name: Arc::from(model.name.as_str()),
+                display_name: Arc::from(truncate_label(&model.name, 44)),
+            });
+    }
+
+    let groups = grouped
+        .into_iter()
+        .map(|(provider, mut options)| {
+            options.sort_by(|left, right| {
+                left.name
+                    .cmp(&right.name)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            ConversationHeaderModelGroup {
+                provider: Arc::from(provider),
+                options: options.into(),
+            }
+        })
+        .collect();
+    let unavailable_current_model = models
+        .iter()
+        .find(|model| model.id == current_model_id)
+        .filter(|model| !(model.configured && model.supports_text))
+        .map(|model| ConversationHeaderModelWarning {
+            id: Arc::from(model.id.as_str()),
+            name: Arc::from(model.name.as_str()),
+            reason: Arc::from(if !model.supports_text {
+                "No text input"
+            } else {
+                "Authentication required"
+            }),
+        })
+        .or_else(|| {
+            (!models.iter().any(|model| model.id == current_model_id)).then(|| {
+                ConversationHeaderModelWarning {
+                    id: Arc::from(current_model_id),
+                    name: Arc::from(current_model_id),
+                    reason: Arc::from("Not in model catalog"),
+                }
+            })
+        });
+
+    (groups, unavailable_current_model)
 }
 
 impl Render for NativeShell {
@@ -5111,6 +5153,28 @@ mod tests {
 
     fn visual_test_snapshot() -> desktop::runtime::DesktopRuntimeHydratedSnapshot {
         visual_test_snapshot_for("desktop-visual-test")
+    }
+
+    fn model_menu_fixture(
+        id: &str,
+        name: &str,
+        provider: &str,
+        configured: bool,
+        supports_text: bool,
+    ) -> CodingAgentModelChoice {
+        CodingAgentModelChoice {
+            id: id.into(),
+            name: name.into(),
+            provider: provider.into(),
+            reasoning: false,
+            thinking_capability: CodingAgentThinkingCapability::default(),
+            supports_text,
+            supports_images: !supports_text,
+            context_window: 32_000,
+            max_output_tokens: 4_000,
+            configured,
+            selected: false,
+        }
     }
 
     fn visual_test_snapshot_for(
@@ -7690,7 +7754,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn idle_model_selector_lists_the_complete_catalog_and_submits_the_exact_id(
+    fn idle_model_selector_groups_configured_text_models_and_submits_the_exact_id(
         cx: &mut TestAppContext,
     ) {
         initialize_visual_test(cx);
@@ -7704,21 +7768,22 @@ mod tests {
         assert!(shell.read_with(cx, |shell, _| shell.projection.is_none()));
         assert_eq!(
             view_model
-                .model_options
+                .model_groups
                 .iter()
+                .map(|group| group.provider.as_ref())
+                .collect::<Vec<_>>(),
+            ["fixture"]
+        );
+        assert_eq!(
+            view_model
+                .model_groups
+                .iter()
+                .flat_map(|group| group.options.iter())
                 .map(|option| option.id.as_ref())
                 .collect::<Vec<_>>(),
-            [
-                "test-model",
-                "adjacent-model",
-                "exact-target-model",
-                "image-only-model"
-            ]
+            ["adjacent-model", "exact-target-model", "test-model"]
         );
-        assert!(view_model.model_options[0].selectable);
-        assert!(view_model.model_options[1].selectable);
-        assert!(view_model.model_options[2].selectable);
-        assert!(!view_model.model_options[3].selectable);
+        assert!(view_model.unavailable_current_model.is_none());
 
         let selector = cx
             .debug_bounds("desktop-header-model-selector")
@@ -7735,6 +7800,103 @@ mod tests {
                 "exact-target-model".into(),
             )]
         );
+    }
+
+    #[test]
+    fn model_menu_filters_and_stably_orders_provider_groups_and_rows() {
+        let models = vec![
+            model_menu_fixture("z-current", "Zulu Current", "z-provider", true, true),
+            model_menu_fixture("a-second", "Second Alpha", "a-provider", true, true),
+            model_menu_fixture(
+                "unconfigured",
+                "Unavailable Alpha",
+                "a-provider",
+                false,
+                true,
+            ),
+            model_menu_fixture("image-only", "Image Alpha", "a-provider", true, false),
+            model_menu_fixture("a-first", "First Alpha", "a-provider", true, true),
+        ];
+
+        let (groups, warning) = conversation_header_model_menu(&models, "z-current");
+        assert!(warning.is_none());
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.provider.as_ref())
+                .collect::<Vec<_>>(),
+            ["a-provider", "z-provider"]
+        );
+        assert_eq!(
+            groups[0]
+                .options
+                .iter()
+                .map(|option| option.id.as_ref())
+                .collect::<Vec<_>>(),
+            ["a-first", "a-second"]
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .flat_map(|group| group.options.iter())
+                .map(|option| option.id.as_ref())
+                .collect::<Vec<_>>(),
+            ["a-first", "a-second", "z-current"]
+        );
+
+        let mut reordered = models;
+        reordered.reverse();
+        let (reordered_groups, _) = conversation_header_model_menu(&reordered, "z-current");
+        assert_eq!(groups, reordered_groups);
+    }
+
+    #[test]
+    fn model_menu_bounds_long_names_and_isolates_unavailable_current_model() {
+        let long_name =
+            "A deliberately very long model name used to prove bounded popup rows ".repeat(3);
+        let models = vec![
+            model_menu_fixture(
+                "lost-auth-model",
+                "Lost Authentication",
+                "z-provider",
+                false,
+                true,
+            ),
+            model_menu_fixture(
+                "configured-model-with-a-very-long-identifier-that-remains-typed",
+                &long_name,
+                "a-provider",
+                true,
+                true,
+            ),
+        ];
+
+        let (groups, warning) = conversation_header_model_menu(&models, "lost-auth-model");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].options.len(), 1);
+        assert_eq!(groups[0].options[0].name.as_ref(), long_name);
+        assert_ne!(groups[0].options[0].display_name.as_ref(), long_name);
+        assert!(groups[0].options[0].display_name.ends_with('…'));
+        assert_eq!(
+            warning,
+            Some(ConversationHeaderModelWarning {
+                id: Arc::from("lost-auth-model"),
+                name: Arc::from("Lost Authentication"),
+                reason: Arc::from("Authentication required"),
+            })
+        );
+
+        let unavailable = models
+            .into_iter()
+            .map(|mut model| {
+                model.configured = false;
+                model
+            })
+            .collect::<Vec<_>>();
+        let (empty_groups, warning) =
+            conversation_header_model_menu(&unavailable, "lost-auth-model");
+        assert!(empty_groups.is_empty());
+        assert!(warning.is_some());
     }
 
     #[gpui::test]
@@ -10568,8 +10730,14 @@ mod tests {
         assert!(header.contains("desktop-header-thinking-selector"));
         assert!(header.contains(".checked(option.id == current_model_id)"));
         assert!(header.contains(".checked(option.id == current_profile_id)"));
-        assert!(header.contains(".scrollable(model_options.len() > 8)"));
+        assert!(header.contains(".scrollable(model_option_count > 8)"));
         assert!(header.contains(".scrollable(profile_options.len() > 8)"));
+        assert!(header.contains("PopupMenuItem::label(group.provider.to_string())"));
+        assert!(header.contains("menu = menu.separator()"));
+        assert!(header.contains("No configured text models"));
+        assert!(header.contains("Current model unavailable"));
+        assert!(!header.contains("not configured"));
+        assert!(!header.contains("no text input"));
         assert!(header.contains("DesktopThinkingLevel::ALL.iter().fold("));
         assert!(header.contains(".checked(level == view_model.thinking_selection)"));
         for owner in [shell, header, actions] {
@@ -10797,8 +10965,9 @@ use conversation_controller::{
 #[cfg(test)]
 use conversation_header::header_runtime_status_slot_width;
 use conversation_header::{
-    ConversationHeader, ConversationHeaderEvent, ConversationHeaderSelectorOption,
-    ConversationHeaderViewModel,
+    ConversationHeader, ConversationHeaderEvent, ConversationHeaderModelGroup,
+    ConversationHeaderModelOption, ConversationHeaderModelWarning,
+    ConversationHeaderSelectorOption, ConversationHeaderViewModel,
 };
 #[cfg(test)]
 use conversation_pane::CONVERSATION_RAIL_WIDTH;

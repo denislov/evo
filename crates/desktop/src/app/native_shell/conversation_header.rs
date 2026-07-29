@@ -61,6 +61,26 @@ pub(super) struct ConversationHeaderSelectorOption {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConversationHeaderModelOption {
+    pub(super) id: Arc<str>,
+    pub(super) name: Arc<str>,
+    pub(super) display_name: Arc<str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConversationHeaderModelGroup {
+    pub(super) provider: Arc<str>,
+    pub(super) options: Arc<[ConversationHeaderModelOption]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConversationHeaderModelWarning {
+    pub(super) id: Arc<str>,
+    pub(super) name: Arc<str>,
+    pub(super) reason: Arc<str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConversationHeaderViewModel {
     pub(super) idle: bool,
     pub(super) status: SemanticStatus,
@@ -74,7 +94,8 @@ pub(super) struct ConversationHeaderViewModel {
     pub(super) thinking_selection: DesktopThinkingLevel,
     pub(super) current_model_id: Arc<str>,
     pub(super) current_profile_id: Arc<str>,
-    pub(super) model_options: Arc<[ConversationHeaderSelectorOption]>,
+    pub(super) model_groups: Arc<[ConversationHeaderModelGroup]>,
+    pub(super) unavailable_current_model: Option<ConversationHeaderModelWarning>,
     pub(super) profile_options: Arc<[ConversationHeaderSelectorOption]>,
     pub(super) project_name: Arc<str>,
     pub(super) keyboard_focus_visible: bool,
@@ -173,7 +194,12 @@ impl Render for ConversationHeader {
         let profile_target = cx.entity().downgrade();
         let thinking_target = cx.entity().downgrade();
         let reload_target = cx.entity().downgrade();
-        let model_options = Arc::clone(&view_model.model_options);
+        let model_groups = Arc::clone(&view_model.model_groups);
+        let unavailable_current_model = view_model.unavailable_current_model.clone();
+        let model_option_count = model_groups
+            .iter()
+            .map(|group| group.options.len())
+            .sum::<usize>();
         let profile_options = Arc::clone(&view_model.profile_options);
         let current_model_id = Arc::clone(&view_model.current_model_id);
         let current_profile_id = Arc::clone(&view_model.current_profile_id);
@@ -302,18 +328,75 @@ impl Render for ConversationHeader {
                         .build()
                         .debug_selector(|| "desktop-header-model-selector".into())
                         .dropdown_menu(move |menu, _, _| {
-                            model_options.iter().fold(
-                                menu.min_w(px(280.))
-                                    .max_w(px(480.))
-                                    .max_h(px(320.))
-                                    .scrollable(model_options.len() > 8),
-                                |menu, option| {
+                            let mut menu = menu
+                                .min_w(px(320.))
+                                .max_w(px(480.))
+                                .max_h(px(320.))
+                                .scrollable(model_option_count > 8);
+
+                            if let Some(warning) = unavailable_current_model.as_ref() {
+                                menu = menu
+                                    .item(PopupMenuItem::label("Current model unavailable"))
+                                    .item(PopupMenuItem::label(format!(
+                                        "{} · {} · {}",
+                                        desktop::shell::truncate_label(&warning.name, 32),
+                                        desktop::shell::truncate_label(&warning.id, 36),
+                                        warning.reason
+                                    )))
+                                    .separator();
+                            }
+
+                            if model_groups.is_empty() {
+                                return menu
+                                    .item(PopupMenuItem::label("No configured text models"))
+                                    .item(PopupMenuItem::label(
+                                        "Add keys to auth.toml or env, then Reload local resources.",
+                                    ));
+                            }
+
+                            for (group_index, group) in model_groups.iter().enumerate() {
+                                if group_index > 0 {
+                                    menu = menu.separator();
+                                }
+                                menu = menu.item(PopupMenuItem::label(group.provider.to_string()));
+
+                                for option in group.options.iter() {
                                     let target = model_target.clone();
                                     let id = Arc::clone(&option.id);
-                                    menu.item(
-                                        PopupMenuItem::new(option.label.to_string())
+                                    let accessible_name = Arc::clone(&option.name);
+                                    let display_name = Arc::clone(&option.display_name);
+                                    let metadata = Arc::<str>::from(format!(
+                                        "Model ID · {}",
+                                        desktop::shell::truncate_label(&option.id, 54)
+                                    ));
+                                    let row_id = Arc::clone(&option.id);
+                                    menu = menu.item(
+                                        PopupMenuItem::element(move |_, _| {
+                                            div()
+                                                .id(format!("header-model-menu-row-{row_id}"))
+                                                .w_full()
+                                                .min_w_0()
+                                                .flex()
+                                                .flex_col()
+                                                .aria_label(format!(
+                                                    "{}; model id {}",
+                                                    accessible_name, row_id
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .text_token(DesignText::Body)
+                                                        .child(display_name.to_string()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .text_token(DesignText::Metadata)
+                                                        .text_color(rgb(theme.subtle_text.value()))
+                                                        .child(metadata.to_string()),
+                                                )
+                                        })
                                             .checked(option.id == current_model_id)
-                                            .disabled(!option.selectable)
                                             .on_click(move |_, _, cx| {
                                                 if let Some(target) = target.upgrade() {
                                                     let id = Arc::clone(&id);
@@ -324,9 +407,10 @@ impl Render for ConversationHeader {
                                                     });
                                                 }
                                             }),
-                                    )
-                                },
-                            )
+                                    );
+                                }
+                            }
+                            menu
                         }),
                     )
                     .child(

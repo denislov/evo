@@ -1,7 +1,21 @@
 # Native visual golden review
 
-VUI-412 finalizes the reviewed Desktop visual baseline after the multi-project
-Sidebar and Evo Loop asset work.
+VUI-420 adds the Provider-grouped model popup while preserving the reviewed
+Desktop shell baseline. All ten deterministic captures compare at normalized
+RMSE `0`, so this task does not replace any golden image.
+
+- The closed Header selector retains its existing bounds in wide, medium,
+  narrow, idle, authorization, reduced-motion, keyboard-focus, and no-color
+  fixtures.
+- The opened popup is covered by the native GPUI interaction test: Provider
+  labels are non-interactive, the checked model remains keyboard-selectable,
+  and the exact typed model id reaches the Home runtime owner.
+- Dedicated ViewModel tests cover stable Provider and row ordering, filtered
+  unconfigured/image-only entries, bounded long names, current-auth-loss, and
+  zero-configured-model states.
+
+VUI-412 established the underlying Desktop visual baseline after the
+multi-project Sidebar and Evo Loop asset work.
 
 - `wide-idle`, `medium-idle`, and `narrow-idle` use the production path-only
   wordmark at 360, 320, and 280 logical pixels, retain the confirmed headline
