@@ -1321,6 +1321,15 @@ scripts/desktop-visual-golden.sh
 scripts/desktop-click-to-photon.sh
 ```
 
+`desktop-click-to-photon.sh` 默认是人工采集夹具：回放窗口只有黑白色块，必须由人
+按 Space 并由外部光电传感器记录出光时刻。X11 上可用 `--drive` 让脚本自己注入按键
+（`scripts/desktop-click-to-photon.sh --drive`），用来验证夹具本身和 app 侧
+`input_received → post_render` 这一半是否还通；它不产生 photon 数据，不能替代上面
+第十节的物理验收。注入期间脚本会独占 X 输入焦点：连着 XIM 输入法（fcitx5/ibus）
+时 GPUI 把按键转交给输入法服务，失焦窗口的按键会被直接丢弃而不是排队，所以
+`xdotool key --window` 打在后台窗口上永远采不到样本。同理 drive 模式结束回放用的是
+信号而不是注入 Escape——注入的 Escape 会被输入法回放到随后获得焦点的窗口上去。
+
 涉及 conversation cache、layout、streaming 或 runtime channel 时额外执行：
 
 ```bash
