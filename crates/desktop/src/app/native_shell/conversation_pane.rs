@@ -23,6 +23,14 @@ use desktop::shell::{
     SemanticTheme, USER_MESSAGE_MAX_WIDTH, USER_MESSAGE_WIDTH_PERCENT,
 };
 
+/// Width of the leading rail that carries conversation selection and hover now
+/// that blocks no longer paint a card background.
+pub(super) const CONVERSATION_RAIL_WIDTH: f32 = 2.;
+/// Fraction of the card height covered by the hover rail stub.
+pub(super) const CONVERSATION_HOVER_RAIL_HEIGHT: f32 = 0.34;
+/// Top offset that centres the hover rail stub within the card.
+pub(super) const CONVERSATION_HOVER_RAIL_INSET: f32 = (1. - CONVERSATION_HOVER_RAIL_HEIGHT) / 2.;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ConversationPaneEvent {
     Select {
@@ -171,13 +179,6 @@ impl Render for ConversationPane {
                         let detail_text = block.detail.clone();
                         let theme = SemanticTheme::GEEK_DARK;
                         let visual = conversation_block_visual(block.kind, block.is_error, theme);
-                        let card_border = if selected {
-                            theme.focus_ring
-                        } else if block.is_error || block.kind == ConversationBlockKind::Diagnostic {
-                            theme.danger
-                        } else {
-                            theme.border
-                        };
                         let is_assistant = block.kind == ConversationBlockKind::Assistant;
                         let reasoning_duration_label = block
                             .reasoning_duration_millis
@@ -209,6 +210,35 @@ impl Render for ConversationPane {
                             || block.title.to_string(),
                             |state| format!("{}, {state}", block.title),
                         );
+                        // Selection and hover replace the removed card
+                        // background. `focus_ring` and `accent` are the same
+                        // hue, and the grayscale review fixture collapses them
+                        // further, so the two states are separated by rail
+                        // length as well as tone: selection spans the full
+                        // card, hover spans a short centred stub. Both are
+                        // absolutely positioned and never affect row height.
+                        let selection_rail = if selected {
+                            div()
+                                .debug_selector(|| "conversation-selected-rail".to_owned())
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(CONVERSATION_RAIL_WIDTH))
+                                .bg(rgb(theme.focus_ring.value()))
+                        } else {
+                            div()
+                                .debug_selector(|| "conversation-hover-rail".to_owned())
+                                .absolute()
+                                .left_0()
+                                .top(relative(CONVERSATION_HOVER_RAIL_INSET))
+                                .h(relative(CONVERSATION_HOVER_RAIL_HEIGHT))
+                                .w(px(CONVERSATION_RAIL_WIDTH))
+                                .bg(gpui::transparent_black())
+                                .group_hover(hover_group.clone(), move |rail| {
+                                    rail.bg(rgb(theme.muted_text.value()))
+                                })
+                        };
                         Some(
                             div()
                                 .id((
@@ -278,23 +308,12 @@ impl Render for ConversationPane {
                                         .when(!visual.align_right, |card| {
                                             card.max_w(px(ASSISTANT_MESSAGE_MAX_WIDTH as f32))
                                         })
-                                        .rounded_token(DesignRadius::Lg)
-                                        .when(!is_assistant, |card| {
-                                            card.border_l_2()
-                                                .border_color(rgb(card_border.value()))
-                                        })
-                                        .bg(rgb(visual.surface.value()))
-                                        .hover(move |style| {
-                                            style.bg(rgb(theme.hover.value()))
-                                        })
-                                        .when(selected, |card| {
-                                            card.bg(rgb(theme.selection.value()))
-                                        })
                                         .px_token(DesignSpace::Lg)
                                         .py_token(DesignSpace::Md)
                                         .flex()
                                         .flex_col()
                                         .gap_token(DesignSpace::Sm)
+                                        .child(selection_rail)
                                         .child(
                                             div()
                                                 .id(("conversation-row-header", index))
@@ -353,34 +372,23 @@ impl Render for ConversationPane {
                                                                 }
                                                             },
                                                         ))
-                                                        .when(
-                                                            block.kind
-                                                                != ConversationBlockKind::User,
-                                                            |metadata| {
-                                                                metadata.child(
-                                                                    div()
-                                                                        .px_token(DesignSpace::Sm)
-                                                                        .py_token(DesignSpace::Xs)
-                                                                        .rounded_token(
-                                                                            DesignRadius::Sm,
-                                                                        )
-                                                                        .bg(rgb(
-                                                                            theme
-                                                                                .elevated
-                                                                                .value(),
-                                                                        ))
-                                                                        .text_token(
-                                                                            DesignText::Metadata,
-                                                                        )
-                                                                        .font_weight(
-                                                                            gpui::FontWeight::SEMIBOLD,
-                                                                        )
-                                                                        .text_color(rgb(
-                                                                            visual.accent.value(),
-                                                                        ))
-                                                                        .child(visual.glyph),
+                                                        .child(
+                                                            div()
+                                                                // Keep the former label padding so
+                                                                // removing its filled chip does not
+                                                                // perturb measured row height. Role
+                                                                // identity now comes from the leading
+                                                                // glyph and text tone alone.
+                                                                .px_token(DesignSpace::Sm)
+                                                                .py_token(DesignSpace::Xs)
+                                                                .text_token(DesignText::Metadata)
+                                                                .font_weight(
+                                                                    gpui::FontWeight::SEMIBOLD,
                                                                 )
-                                                            },
+                                                                .text_color(rgb(
+                                                                    visual.accent.value(),
+                                                                ))
+                                                                .child(visual.glyph),
                                                         )
                                                         .child(
                                                             div()

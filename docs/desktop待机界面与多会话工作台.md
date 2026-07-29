@@ -1546,6 +1546,26 @@ feat(desktop): make inspector tabs horizontally scrollable
 - conversation 性能 gate 无回归；
 - 三档 golden 更新并附 review note，明确说明选中/hover 的新表达方式。
 
+**实现状态（2026-07-29）：完成**
+
+- Conversation durable/live block 已移除 role surface、rounded card、hover background 与 selection background；
+  `YOU` / `AI` / `TOOL` / `AGENT` / `SUMMARY` / `ISSUE` 改为无填充的前导文字标记与语义文字色阶。
+  标记保留原透明 padding，因此不改变既有 header 与行高测量；reasoning、tool detail、code 等嵌套次要内容
+  继续使用 `theme.elevated`，层级语义未被扁平化。
+- selection 改为 2 px 全高前导 rail，hover 改为同一绝对定位槽中的短居中 rail。两者靠长度而非仅靠色相区分，
+  且均不参与 card bounds 或 virtual-list 行高。新增源码约束、角色 marker、灰度语义与 GPUI pointer 回归；
+  后者实际触发 hover/selection 并验证 card bounds 完全不变、selection rail 高度大于 hover rail 的两倍。
+- native visual replay 在 standard、reduced-motion 与 keyboard-focus fixture 中确定性选中稳定 row，使 keyboard-focus
+  与由 standard 生成的 no-color 灰度图都覆盖全高 selection rail。wide / medium / narrow、三档 idle、authorization、
+  reduced-motion、keyboard-focus、no-color 共 10 个 fixture 已按原始分辨率人工审图并附 VUI-308 review note；安装后
+  确定性复播 RMSE 全部为 `0`（预算 `0.015`）。三档 conversation 无裁切或意外重排，idle 三档像素不变。
+- 最终验证为 Desktop `227 passed / 5 ignored`、dependency boundary `16/16`、严格 Clippy、fmt 与
+  `git diff --check`。native gate 为 GPU/present frame P95 `5586µs`、input dispatch-to-post-render P95
+  `8373µs`、steady RSS growth `147456B`、production Markdown P95 `111µs`；headless 10k blocks 为 CPU frame
+  P95 `2847µs`、input roundtrip P95 `5768µs`，10 MiB hydration 与 content/streaming matrix 均通过。
+  click-to-photon `--drive 60` smoke 捕获 60 个唯一 app-side post-render 样本；它不含外部光电传感器数据，
+  因而不计为真实 click-to-photon 测量或通过。
+
 **建议提交**
 
 ```text

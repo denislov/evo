@@ -61,7 +61,6 @@ const HOME_COMPOSER_SESSION_KEY: &str = "home";
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
     glyph: &'static str,
-    surface: SemanticColor,
     accent: SemanticColor,
     align_right: bool,
 }
@@ -95,19 +94,16 @@ fn conversation_block_visual(
     match kind {
         ConversationBlockKind::User => ConversationBlockVisual {
             glyph: "YOU",
-            surface: theme.user_surface,
             accent: theme.accent,
             align_right: true,
         },
         ConversationBlockKind::Assistant => ConversationBlockVisual {
             glyph: "AI",
-            surface: theme.canvas,
             accent: theme.text,
             align_right: false,
         },
         ConversationBlockKind::Tool => ConversationBlockVisual {
             glyph: "TOOL",
-            surface: theme.tool_surface,
             accent: if is_error {
                 theme.danger
             } else {
@@ -117,21 +113,18 @@ fn conversation_block_visual(
         },
         ConversationBlockKind::Delegation => ConversationBlockVisual {
             glyph: "AGENT",
-            surface: theme.summary_surface,
             accent: theme.accent,
             align_right: false,
         },
         ConversationBlockKind::CompactionSummary | ConversationBlockKind::BranchSummary => {
             ConversationBlockVisual {
                 glyph: "SUMMARY",
-                surface: theme.summary_surface,
                 accent: theme.muted_text,
                 align_right: false,
             }
         }
         ConversationBlockKind::Diagnostic => ConversationBlockVisual {
             glyph: "ISSUE",
-            surface: theme.tool_surface,
             accent: theme.danger,
             align_right: false,
         },
@@ -3051,7 +3044,7 @@ impl NativeShell {
         }
     }
 
-    fn select_adjacent_conversation(&mut self, reverse: bool, cx: &mut Context<Self>) {
+    pub(super) fn select_adjacent_conversation(&mut self, reverse: bool, cx: &mut Context<Self>) {
         let workspace = &mut self.active_workspace;
         let Some(projection) = workspace.projection.as_ref() else {
             return;
@@ -7764,7 +7757,8 @@ mod tests {
             "TextView::markdown(self.id.clone(), self.text.clone())\n            .w_full()\n            .min_w_0()"
         ));
         assert!(!streaming.contains(".label(\"Copy code\")"));
-        assert!(pane.contains(
+        assert!(pane.contains(".child(visual.glyph)"));
+        assert!(!pane.contains(
             "block.kind\n                                                                != ConversationBlockKind::User"
         ));
         assert!(pane.contains("!is_assistant"));
@@ -7969,7 +7963,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_kinds_have_distinct_visual_surfaces() {
+    fn conversation_kinds_have_distinct_leading_markers() {
         let theme = SemanticTheme::GEEK_DARK;
         let user = conversation_block_visual(ConversationBlockKind::User, false, theme);
         let assistant = conversation_block_visual(ConversationBlockKind::Assistant, false, theme);
@@ -7980,17 +7974,90 @@ mod tests {
 
         assert!(user.align_right);
         assert!(!assistant.align_right);
-        assert_ne!(user.surface, assistant.surface);
-        assert_ne!(assistant.surface, tool.surface);
-        assert_eq!(tool.surface, failed_tool.surface);
-        assert_eq!(failed_tool.surface, diagnostic.surface);
         assert_ne!(tool.accent, failed_tool.accent);
         assert_eq!(tool.accent, theme.muted_text);
         assert_eq!(failed_tool.accent, theme.danger);
         assert_eq!(diagnostic.accent, theme.danger);
+        assert_ne!(user.glyph, assistant.glyph);
+        assert_ne!(assistant.glyph, tool.glyph);
         assert_ne!(tool.glyph, diagnostic.glyph);
         assert_eq!(delegation.accent, theme.accent);
-        assert_ne!(delegation.surface, theme.thinking_surface);
+    }
+
+    #[test]
+    fn conversation_blocks_use_geometry_neutral_selection_and_hover_rails() {
+        let conversation = include_str!("native_shell/conversation_pane.rs");
+        assert!(!conversation.contains("bg(rgb(visual.surface.value()))"));
+        assert!(!conversation.contains("style.bg(rgb(theme.hover.value()))"));
+        assert!(!conversation.contains("card.bg(rgb(theme.selection.value()))"));
+        assert!(!conversation.contains(".rounded_token(DesignRadius::Sm)\n                                                                .bg(rgb(theme.elevated.value()))"));
+        assert!(conversation.contains("conversation-selected-rail"));
+        assert!(conversation.contains("conversation-hover-rail"));
+        assert!(conversation.contains("gpui::transparent_black()"));
+        assert!(conversation.contains("group_hover(hover_group.clone()"));
+    }
+
+    #[test]
+    fn conversation_selection_outranks_hover_without_relying_on_hue() {
+        let theme = SemanticTheme::GEEK_DARK;
+        // The palette deliberately shares one hue between `focus_ring` and
+        // `accent`, and the review pipeline also renders a grayscale
+        // derivative of the wide fixture. Neither state may therefore depend
+        // on colour alone; rail length is the carrier that survives both.
+        assert_eq!(theme.focus_ring, theme.accent);
+        assert_ne!(theme.focus_ring, theme.muted_text);
+    }
+
+    #[gpui::test]
+    fn conversation_selection_and_hover_rails_preserve_card_geometry(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::User {
+                text: "Selection and hover rails must preserve this row.".into(),
+            }),
+        );
+        cx.simulate_resize(size(px(1_300.), px(900.)));
+        settle_visual_measurements(cx);
+        let card_before = cx
+            .debug_bounds("conversation-last-card")
+            .expect("the final conversation card is visible");
+        let hover_rail = cx
+            .debug_bounds("conversation-hover-rail")
+            .expect("unselected rows reserve the hover rail slot");
+        assert_eq!(f32::from(hover_rail.size.width), CONVERSATION_RAIL_WIDTH);
+        assert!(
+            (f32::from(hover_rail.center().y) - f32::from(card_before.center().y)).abs() <= 1.,
+            "the hover stub must stay vertically centred on its card"
+        );
+        cx.simulate_mouse_move(card_before.center(), None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("conversation-last-card"),
+            Some(card_before),
+            "the hover rail must not participate in card layout"
+        );
+
+        shell.update(cx, |shell, cx| shell.select_adjacent_conversation(true, cx));
+        settle_visual_measurements(cx);
+        let rail = cx
+            .debug_bounds("conversation-selected-rail")
+            .expect("keyboard selection paints a dedicated rail");
+        assert_eq!(f32::from(rail.size.width), CONVERSATION_RAIL_WIDTH);
+        assert!(f32::from(rail.size.height) > 0.);
+        assert!(
+            f32::from(rail.size.height) > f32::from(hover_rail.size.height) * 2.,
+            "selection must stay distinguishable from hover without colour: \
+             selected {} vs hover {}",
+            f32::from(rail.size.height),
+            f32::from(hover_rail.size.height)
+        );
+        assert_eq!(
+            cx.debug_bounds("conversation-last-card"),
+            Some(card_before),
+            "the selection rail must not participate in card layout"
+        );
     }
 
     #[test]
@@ -8706,6 +8773,8 @@ use conversation_header::{
     ConversationHeader, ConversationHeaderEvent, ConversationHeaderSelectorOption,
     ConversationHeaderViewModel,
 };
+#[cfg(test)]
+use conversation_pane::CONVERSATION_RAIL_WIDTH;
 use conversation_pane::{ConversationPane, ConversationPaneEvent, ConversationPaneViewModel};
 use home_pane::{HomePane, HomePaneEvent, HomePaneViewModel};
 use inspector_pane::{

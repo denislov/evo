@@ -353,6 +353,15 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             ..
         })
     );
+    let selection_replay = matches!(
+        request,
+        NativeReplayRequest::Visual(VisualReplaySpec {
+            state: VisualReplayState::Standard
+                | VisualReplayState::ReducedMotion
+                | VisualReplayState::KeyboardFocus,
+            ..
+        })
+    );
     let project = projection.project().clone();
     let projection = (!idle_replay).then_some(projection);
     let global_skills: Arc<[CodingAgentResourceCommand]> = Arc::from(if idle_replay {
@@ -395,6 +404,17 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             shell
         });
         let root = cx.new(|cx| Root::new(shell.clone(), window, cx));
+        if selection_replay {
+            let selection_shell = shell.clone();
+            window.on_next_frame(move |window, cx| {
+                // Row render data exists after Root's first frame. Select one
+                // stable row now so keyboard-focus and grayscale review
+                // fixtures exercise the geometry-neutral selection rail.
+                selection_shell
+                    .update(cx, |shell, cx| shell.select_adjacent_conversation(true, cx));
+                window.refresh();
+            });
+        }
         if let Some(replay) = replay {
             shell.update(cx, |shell, cx| shell.focus_composer_input(window, cx));
             schedule_frame(window, replay);
