@@ -1,9 +1,16 @@
 use gpui::{
-    ElementId, EventEmitter, IntoElement, ParentElement as _, Render, Role, SharedString,
+    ElementId, Entity, EventEmitter, IntoElement, ParentElement as _, Render, Role, SharedString,
     Styled as _, Window, div, prelude::*, px, relative, rgb,
 };
-use gpui_component::{ElementExt as _, VirtualListScrollHandle, button::Button, v_virtual_list};
-use std::{collections::HashSet, rc::Rc};
+use gpui_component::{
+    ElementExt as _, VirtualListScrollHandle, button::Button, text::TextViewState, v_virtual_list,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    sync::Arc,
+    time::Instant,
+};
 
 use super::{
     ConversationBlockKind, conversation_block_visual,
@@ -12,7 +19,7 @@ use super::{
         DesktopCriticalButton, DesktopCriticalTone, DesktopIcon, DesktopIconButton,
     },
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
-    streaming_text::StreamingText,
+    streaming_text::{StreamingText, markdown_completion_trace_enabled, trace_markdown_parse},
 };
 use desktop::conversation::{
     ConversationRowMeasurement, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, compact_duration,
@@ -82,17 +89,117 @@ pub(super) struct ConversationPaneViewModel {
     pub(super) diagnostic_recovery: Option<DesktopRecoveryIdentity>,
 }
 
+/// Markdown parse states outlive the frame that rendered them so a streaming row
+/// can extend its document instead of re-parsing it.
+///
+/// Only rows the virtual list actually renders get one, so the live set is
+/// bounded by the viewport; this cap is the backstop for scrolling churn.
+const MAX_MARKDOWN_PARSE_STATES: usize = 64;
+
+/// One row body's parsed Markdown, plus exactly what has been fed to it.
+struct MarkdownParseState {
+    state: Entity<TextViewState>,
+    /// The text `state` currently holds. Kept as the same `Arc` the render cache
+    /// hands out, so an unchanged row costs one pointer comparison.
+    fed: Arc<str>,
+    touched: u64,
+}
+
 pub(super) struct ConversationPane {
     view_model: Option<ConversationPaneViewModel>,
+    markdown_states: HashMap<Arc<str>, MarkdownParseState>,
+    markdown_generation: u64,
 }
 
 impl ConversationPane {
     pub(super) fn new() -> Self {
-        Self { view_model: None }
+        Self {
+            view_model: None,
+            markdown_states: HashMap::new(),
+            markdown_generation: 0,
+        }
     }
 
     pub(super) fn set_view_model(&mut self, view_model: ConversationPaneViewModel) {
         self.view_model = Some(view_model);
+    }
+
+    /// Resolve the parse state for a row body, feeding it the smallest update
+    /// that gets it to `text`.
+    ///
+    /// A streaming revision only appends, so the common case is a suffix push,
+    /// which `TextViewState` parses incrementally on a background task while the
+    /// previous document stays laid out. Anything that is not an extension —
+    /// completion replacing the text with its sanitised form, a rewind, a
+    /// branch — falls back to a full replace, which parses synchronously so the
+    /// very next layout already has correct geometry.
+    fn markdown_state(
+        &mut self,
+        key: &Arc<str>,
+        text: &Arc<str>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Entity<TextViewState> {
+        let generation = self.markdown_generation;
+        if let Some(existing) = self.markdown_states.get_mut(key) {
+            existing.touched = generation;
+            if !Arc::ptr_eq(&existing.fed, text) && existing.fed != *text {
+                let appended = (text.len() > existing.fed.len()
+                    && text.starts_with(existing.fed.as_ref()))
+                .then(|| &text[existing.fed.len()..]);
+                match appended {
+                    Some(suffix) => {
+                        let suffix = suffix.to_owned();
+                        existing
+                            .state
+                            .update(cx, |state, cx| state.push_str(&suffix, cx));
+                    }
+                    None => {
+                        let replacement = Arc::clone(text);
+                        let traced = markdown_completion_trace_enabled();
+                        let started_at = traced.then(Instant::now);
+                        existing
+                            .state
+                            .update(cx, |state, cx| state.set_text(&replacement, cx));
+                        if let Some(started_at) = started_at {
+                            trace_markdown_parse(key, replacement.len(), started_at);
+                        }
+                    }
+                }
+                existing.fed = Arc::clone(text);
+            }
+            return existing.state.clone();
+        }
+
+        let initial = Arc::clone(text);
+        let started_at = markdown_completion_trace_enabled().then(Instant::now);
+        let state = cx.new(|cx| TextViewState::markdown(&initial, cx));
+        if let Some(started_at) = started_at {
+            trace_markdown_parse(key, initial.len(), started_at);
+        }
+        self.markdown_states.insert(
+            Arc::clone(key),
+            MarkdownParseState {
+                state: state.clone(),
+                fed: initial,
+                touched: generation,
+            },
+        );
+        state
+    }
+
+    /// Drop parse states no recent frame rendered, newest generations first.
+    fn evict_markdown_states(&mut self) {
+        while self.markdown_states.len() > MAX_MARKDOWN_PARSE_STATES {
+            let Some(stale) = self
+                .markdown_states
+                .iter()
+                .min_by_key(|(_, entry)| entry.touched)
+                .map(|(key, _)| Arc::clone(key))
+            else {
+                break;
+            };
+            self.markdown_states.remove(&stale);
+        }
     }
 }
 
@@ -125,8 +232,9 @@ impl Render for ConversationPane {
             cx.entity(),
             "conversation-transcript",
             transcript_rows,
-            move |_, visible_range, window, cx| {
-                visible_range
+            move |pane, visible_range, _window, cx| {
+                pane.markdown_generation = pane.markdown_generation.wrapping_add(1);
+                let rows = visible_range
                     .filter_map(|index| {
                         let (block, row_height) = render.row(index)?;
                         let selected =
@@ -159,12 +267,8 @@ impl Render for ConversationPane {
                             block.item_key.stable_id()
                         ));
                         let durable = block.durable;
-                        let markdown_id = ElementId::Name(SharedString::new(
-                            block.markdown_state_key.clone(),
-                        ));
-                        let detail_markdown_id = ElementId::Name(SharedString::new(
-                            block.detail_markdown_state_key.clone(),
-                        ));
+                        let markdown_key = block.markdown_state_key.clone();
+                        let detail_markdown_key = block.detail_markdown_state_key.clone();
                         let text_phase = block.text_phase;
                         let measurement = ConversationRowMeasurement {
                             item_key: block.item_key.clone(),
@@ -638,12 +742,18 @@ impl Render for ConversationPane {
                                                     )
                                                     .child(
                                                         StreamingText::new(
-                                                            detail_markdown_id.clone(),
                                                             detail_text.clone(),
                                                             text_phase,
+                                                            text_phase.renders_markdown().then(|| {
+                                                                pane.markdown_state(
+                                                                    &detail_markdown_key,
+                                                                    &detail_text,
+                                                                    cx,
+                                                                )
+                                                            }),
                                                             cx.entity().downgrade(),
                                                         )
-                                                        .into_any_element(window, cx),
+                                                        .into_any_element(),
                                                     ),
                                             )
                                         },
@@ -739,12 +849,14 @@ impl Render for ConversationPane {
                                         })
                                         .when(!text.is_empty() && (!is_tool || detail_expanded), |card| {
                                             let content = StreamingText::new(
-                                                markdown_id,
-                                                text,
+                                                text.clone(),
                                                 text_phase,
+                                                text_phase.renders_markdown().then(|| {
+                                                    pane.markdown_state(&markdown_key, &text, cx)
+                                                }),
                                                 cx.entity().downgrade(),
                                             )
-                                            .into_any_element(window, cx);
+                                            .into_any_element();
                                             if is_tool {
                                                 card.child(
                                                     div()
@@ -805,12 +917,18 @@ impl Render for ConversationPane {
                                                     })
                                                     .child(
                                                         StreamingText::new(
-                                                            detail_markdown_id,
-                                                            detail_text,
+                                                            detail_text.clone(),
                                                             text_phase,
+                                                            text_phase.renders_markdown().then(|| {
+                                                                pane.markdown_state(
+                                                                    &detail_markdown_key,
+                                                                    &detail_text,
+                                                                    cx,
+                                                                )
+                                                            }),
                                                             cx.entity().downgrade(),
                                                         )
-                                                        .into_any_element(window, cx),
+                                                        .into_any_element(),
                                                     ),
                                             )
                                         },
@@ -1000,7 +1118,9 @@ impl Render for ConversationPane {
                                 ),
                         )
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                pane.evict_markdown_states();
+                rows
             },
         )
         .track_scroll(&scroll_handle);
@@ -1162,7 +1282,10 @@ fn tool_exit_code_label(title: &str, output: &str, done: bool, is_error: bool) -
 
 #[cfg(test)]
 mod tests {
-    use super::tool_exit_code_label;
+    use super::{ConversationPane, MAX_MARKDOWN_PARSE_STATES, tool_exit_code_label};
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use gpui_component::{Theme, ThemeMode, text::TextViewState};
+    use std::sync::Arc;
 
     #[test]
     fn tool_metadata_uses_only_structured_or_reported_values() {
@@ -1180,5 +1303,171 @@ mod tests {
             tool_exit_code_label("Tool · read", "ok", true, false),
             "not reported"
         );
+    }
+
+    fn measure(cx: &mut gpui::VisualTestContext, state: &Entity<TextViewState>) -> f32 {
+        use gpui::{ParentElement as _, Styled as _, px, size};
+        use gpui_component::{ElementExt as _, text::TextView};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let observed = Rc::new(RefCell::new(0.0f32));
+        let sink = Rc::clone(&observed);
+        let state = state.clone();
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            size(px(900.), px(4_000.)),
+            move |_, _| {
+                gpui::div().w(px(900.)).child(
+                    gpui::div()
+                        .w_full()
+                        .on_prepaint(move |bounds, _, _| {
+                            *sink.borrow_mut() = f32::from(bounds.size.height);
+                        })
+                        .child(TextView::new(&state)),
+                )
+            },
+        );
+        *observed.borrow()
+    }
+
+    struct PaneRoot;
+    impl gpui::Render for PaneRoot {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div()
+        }
+    }
+
+    /// Streaming a row in chunks must land on the same document as parsing it in
+    /// one shot.
+    ///
+    /// The pane feeds a reused `TextViewState` the smallest update that gets it
+    /// to the current text, so a delta becomes an incremental background append.
+    /// If the suffix arithmetic or the append path were wrong the row would
+    /// silently render a truncated or duplicated document, which the rendered
+    /// height catches.
+    #[gpui::test]
+    fn streamed_chunks_and_a_single_parse_reach_the_same_document(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+        let (_, visual_cx) = cx.add_window_view(|_, _| PaneRoot);
+        visual_cx.run_until_parked();
+
+        let pane = visual_cx.update(|_, cx| cx.new(|_| ConversationPane::new()));
+        let chunks = [
+            "# Heading\n\nfirst paragraph with **bold**\n\n",
+            "- alpha\n- beta\n\n",
+            "```rust\nfn main() {}\n```\n\n",
+            "closing paragraph\n",
+        ];
+        let full: String = chunks.concat();
+
+        let streamed_key: Arc<str> = Arc::from("transcript-markdown:row:settling");
+        let oneshot_key: Arc<str> = Arc::from("transcript-markdown:other:settling");
+
+        let mut accumulated = String::new();
+        let mut streamed = None;
+        for chunk in chunks {
+            accumulated.push_str(chunk);
+            let text: Arc<str> = Arc::from(accumulated.as_str());
+            streamed = Some(pane.update(visual_cx, |pane, cx| {
+                pane.markdown_state(&streamed_key, &text, cx)
+            }));
+            visual_cx.run_until_parked();
+        }
+        let streamed = streamed.expect("the streamed row resolved a parse state");
+
+        let oneshot_text: Arc<str> = Arc::from(full.as_str());
+        let oneshot = pane.update(visual_cx, |pane, cx| {
+            pane.markdown_state(&oneshot_key, &oneshot_text, cx)
+        });
+        visual_cx.run_until_parked();
+
+        let streamed_height = measure(visual_cx, &streamed);
+        let oneshot_height = measure(visual_cx, &oneshot);
+        assert!(oneshot_height > 100., "the fixture must be substantial");
+        assert_eq!(
+            streamed_height, oneshot_height,
+            "incrementally appended chunks must render the same document as one parse"
+        );
+
+        // One state per row body, reused across every delta rather than rebuilt.
+        let (state_count, reused) = pane.read_with(visual_cx, |pane, _| {
+            (
+                pane.markdown_states.len(),
+                pane.markdown_states
+                    .get(&streamed_key)
+                    .map(|entry| entry.state.entity_id()),
+            )
+        });
+        assert_eq!(state_count, 2);
+        assert_eq!(reused, Some(streamed.entity_id()));
+    }
+
+    /// A revision that is not an extension has to replace, not append.
+    #[gpui::test]
+    fn a_rewritten_row_replaces_its_document_in_place(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+        let (_, visual_cx) = cx.add_window_view(|_, _| PaneRoot);
+        visual_cx.run_until_parked();
+
+        let pane = visual_cx.update(|_, cx| cx.new(|_| ConversationPane::new()));
+        let key: Arc<str> = Arc::from("transcript-markdown:rewound:settling");
+
+        let long: Arc<str> = Arc::from("paragraph\n\n".repeat(12).as_str());
+        let long_state = pane.update(visual_cx, |pane, cx| pane.markdown_state(&key, &long, cx));
+        visual_cx.run_until_parked();
+        let long_height = measure(visual_cx, &long_state);
+
+        // Completion swaps in sanitised text, and a rewind or branch can shorten
+        // a row outright; neither is a suffix of what came before.
+        let short: Arc<str> = Arc::from("paragraph\n");
+        let short_state = pane.update(visual_cx, |pane, cx| pane.markdown_state(&key, &short, cx));
+        visual_cx.run_until_parked();
+        let short_height = measure(visual_cx, &short_state);
+
+        assert_eq!(
+            long_state.entity_id(),
+            short_state.entity_id(),
+            "the row keeps one parse state across a rewrite"
+        );
+        assert!(
+            short_height < long_height,
+            "a rewrite must replace the document, not append to it: \
+             {long_height} -> {short_height}"
+        );
+    }
+
+    #[gpui::test]
+    fn the_parse_state_pool_stays_bounded(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+        let (_, visual_cx) = cx.add_window_view(|_, _| PaneRoot);
+        visual_cx.run_until_parked();
+
+        let pane = visual_cx.update(|_, cx| cx.new(|_| ConversationPane::new()));
+        let text: Arc<str> = Arc::from("body");
+        pane.update(visual_cx, |pane, cx| {
+            for index in 0..(MAX_MARKDOWN_PARSE_STATES * 3) {
+                pane.markdown_generation = pane.markdown_generation.wrapping_add(1);
+                let key: Arc<str> = Arc::from(format!("transcript-markdown:row-{index}:settling"));
+                pane.markdown_state(&key, &text, cx);
+            }
+            pane.evict_markdown_states();
+        });
+
+        let remaining = pane.read_with(visual_cx, |pane, _| pane.markdown_states.len());
+        assert_eq!(remaining, MAX_MARKDOWN_PARSE_STATES);
     }
 }

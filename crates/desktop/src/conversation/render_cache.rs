@@ -16,25 +16,6 @@ pub const MAX_SETTLING_MARKDOWN_BYTES: usize = 64 * 1024;
 pub const MAX_ROW_RENDER_CACHE_ENTRIES: usize = MAX_TRANSCRIPT_BLOCKS + 256;
 pub const MAX_ROW_RENDER_CACHE_BYTES: usize = 40 * 1024 * 1024;
 
-/// Longest a settled Markdown row may hold back newly streamed text.
-pub const MAX_SETTLED_MARKDOWN_REFRESH: Duration = Duration::from_millis(750);
-
-/// How often a settled Markdown row adopts newly streamed text.
-///
-/// The interval grows with the document because the parse cost does. The release
-/// parser matrix measures inline-markup-heavy prose — exactly what an assistant
-/// answer looks like — at roughly 1 MB/s, so budgeting four times the expected
-/// parse keeps that synchronous work near a quarter of the wall clock even as a
-/// row approaches [`MAX_SETTLING_MARKDOWN_BYTES`].
-fn settled_markdown_refresh_interval(bytes: usize) -> Duration {
-    const PARSE_DUTY_CYCLE_DIVISOR: u64 = 4;
-    let parse_micros = bytes as u64;
-    Duration::from_micros(parse_micros.saturating_mul(PARSE_DUTY_CYCLE_DIVISOR)).clamp(
-        STREAMING_MARKDOWN_SETTLE_DELAY,
-        MAX_SETTLED_MARKDOWN_REFRESH,
-    )
-}
-
 /// Source lines measured exactly before the remainder is extrapolated.
 const ROW_ESTIMATE_SCAN_LINES: usize = 256;
 
@@ -189,9 +170,6 @@ struct ConversationRowRenderCacheEntry {
     retained_bytes: usize,
     touched_generation: u64,
     source_updated_at: Instant,
-    /// When this row last adopted newly streamed text, which is not every
-    /// revision once it renders Markdown. See [`settled_markdown_refresh_interval`].
-    text_refreshed_at: Instant,
 }
 
 #[derive(Debug)]
@@ -280,42 +258,14 @@ impl ConversationRowRenderCache {
             return entry.data.clone();
         }
 
-        // A settled row re-parses its whole document synchronously on the main
-        // thread — `TextViewState::set_text` is the full-replace path, and only
-        // `push_str` appends asynchronously — so adopting text on every delta
-        // would put an O(document) parse in every frame. Handing back the same
-        // `Arc` instead lets that `set_text` short-circuit on unchanged text, at
-        // the cost of the row advancing in steps rather than per token.
-        if !source.done
-            && let Some(entry) = self.entries.get_mut(&source.item_key)
-            && !entry.data.done
-            && entry.data.text_phase.renders_markdown()
-        {
-            let interval = settled_markdown_refresh_interval(
-                entry
-                    .data
-                    .text
-                    .len()
-                    .saturating_add(entry.data.detail.len()),
-            );
-            let elapsed = now.saturating_duration_since(entry.text_refreshed_at);
-            if elapsed < interval {
-                entry.touched_generation = self.generation;
-                // Track the revision so downstream identity checks still line the
-                // row up with its overlay; only the rendered text is held back.
-                entry.data.source_revision = source.source_revision;
-                entry.data.sanitized_revision = source.source_revision;
-                entry.data.next_text_phase_after = Some(interval.saturating_sub(elapsed));
-                return entry.data.clone();
-            }
-        }
-
         let within_settling_bounds =
             source.text.len().saturating_add(source.detail.len()) <= MAX_SETTLING_MARKDOWN_BYTES;
         // Settling is one-way for the life of a row. A new revision used to throw
         // an already-settled row back to raw text, and the two forms lay out
         // differently (heading sizes, code block padding, list indents), so every
-        // burst boundary in a bursty stream was a full reflow.
+        // burst boundary in a bursty stream was a full reflow. The byte bound
+        // covers the one synchronous parse that entering Markdown costs; every
+        // delta after it is an incremental append on a background task.
         let settled_markdown = within_settling_bounds
             && self
                 .entries
@@ -378,7 +328,6 @@ impl ConversationRowRenderCache {
             retained_bytes,
             touched_generation: self.generation,
             source_updated_at: now,
-            text_refreshed_at: now,
         };
         if let Some(previous) = self.entries.insert(source.item_key, entry) {
             self.retained_bytes = self.retained_bytes.saturating_sub(previous.retained_bytes);
@@ -447,9 +396,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ConversationRowRenderCache, ConversationRowRenderSource, MAX_SETTLED_MARKDOWN_REFRESH,
-        MAX_SETTLING_MARKDOWN_BYTES, STREAMING_MARKDOWN_SETTLE_DELAY, StreamingTextPhase,
-        conversation_block_height,
+        ConversationRowRenderCache, ConversationRowRenderSource, MAX_SETTLING_MARKDOWN_BYTES,
+        STREAMING_MARKDOWN_SETTLE_DELAY, StreamingTextPhase, conversation_block_height,
     };
     use crate::conversation::{ConversationBlockKind, ConversationItemKey, ConversationItemKind};
 
@@ -903,58 +851,6 @@ mod tests {
     }
 
     #[test]
-    fn settled_markdown_holds_back_text_between_refreshes() {
-        let mut cache = ConversationRowRenderCache::default();
-        let started = Instant::now();
-        cache.begin_frame();
-        cache.resolve_at(
-            render_source("assistant:paced", 1, "body", false),
-            900,
-            started,
-        );
-        let settled = cache.resolve_at(
-            render_source("assistant:paced", 1, "body", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY,
-        );
-        assert_eq!(settled.text_phase, StreamingTextPhase::SettlingMarkdown);
-
-        // The first delta after settling adopts immediately; pacing counts from
-        // the last text adoption, not from the settle.
-        let adopted = cache.resolve_at(
-            render_source("assistant:paced", 2, "body and more", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(10),
-        );
-        assert_eq!(adopted.text.as_ref(), "body and more");
-
-        // `TextViewState::set_text` re-parses the whole document synchronously,
-        // so the next delta keeps handing back the same `Arc` until the refresh
-        // interval elapses. That lets the parse short-circuit on unchanged text
-        // instead of landing in every frame.
-        let held = cache.resolve_at(
-            render_source("assistant:paced", 3, "body and more and more", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(20),
-        );
-        assert_eq!(held.text.as_ref(), "body and more");
-        assert_eq!(held.source_revision, 3, "identity still tracks the overlay");
-        assert_eq!(held.text_phase, StreamingTextPhase::SettlingMarkdown);
-        assert!(
-            held.next_text_phase_after.is_some(),
-            "a held-back row must schedule the refresh that releases its text"
-        );
-
-        let refreshed = cache.resolve_at(
-            render_source("assistant:paced", 4, "body and more and more", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY + MAX_SETTLED_MARKDOWN_REFRESH,
-        );
-        assert_eq!(refreshed.text.as_ref(), "body and more and more");
-        assert_eq!(refreshed.text_phase, StreamingTextPhase::SettlingMarkdown);
-    }
-
-    #[test]
     fn oversized_streaming_rows_stay_on_the_plain_text_path() {
         let mut cache = ConversationRowRenderCache::default();
         let started = Instant::now();
@@ -978,7 +874,7 @@ mod tests {
         let dropped = cache.resolve_at(
             render_source("assistant:huge", 2, &oversized, false),
             900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY + MAX_SETTLED_MARKDOWN_REFRESH,
+            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(1),
         );
         assert_eq!(dropped.text_phase, StreamingTextPhase::StreamingPlainText);
         assert_eq!(dropped.next_text_phase_after, None);

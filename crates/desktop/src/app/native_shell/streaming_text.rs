@@ -1,14 +1,12 @@
-use std::cell::Cell;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use desktop::conversation::StreamingTextPhase;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Element, ElementId, GlobalElementId,
-    InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ParentElement as _, Pixels,
-    SharedString, Styled as _, WeakEntity, Window, div,
+    AnyElement, ClipboardItem, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, Styled as _, WeakEntity,
 };
-use gpui_component::text::TextView;
+use gpui_component::text::{TextView, TextViewState};
 
 use super::{
     conversation_pane::{ConversationPane, ConversationPaneEvent},
@@ -18,209 +16,106 @@ use super::{
 const MARKDOWN_COMPLETION_TRACE_ENV: &str = "EVO_DESKTOP_MARKDOWN_TRACE";
 
 /// Lightweight conversation text renderer driven by the row's revision phase.
+///
+/// `StreamingPlainText` rows are raw text and own no parse state. Markdown rows
+/// render a [`TextViewState`] the pane owns and feeds, so the parsed document
+/// survives between frames and streaming deltas extend it incrementally on a
+/// background task rather than re-parsing it synchronously in every frame.
 pub(super) struct StreamingText {
-    id: ElementId,
     text: Arc<str>,
     phase: StreamingTextPhase,
+    markdown: Option<Entity<TextViewState>>,
     event_target: WeakEntity<ConversationPane>,
 }
 
 impl StreamingText {
     pub(super) fn new(
-        id: ElementId,
         text: Arc<str>,
         phase: StreamingTextPhase,
+        markdown: Option<Entity<TextViewState>>,
         event_target: WeakEntity<ConversationPane>,
     ) -> Self {
         Self {
-            id,
             text,
             phase,
+            markdown,
             event_target,
         }
     }
 
-    pub(super) fn into_any_element(self, _window: &mut Window, _cx: &mut gpui::App) -> AnyElement {
-        let text = SharedString::new(self.text);
-        match self.phase {
-            StreamingTextPhase::StreamingPlainText => div()
+    pub(super) fn into_any_element(self) -> AnyElement {
+        match (self.phase, self.markdown) {
+            (StreamingTextPhase::StreamingPlainText, _) | (_, None) => gpui::div()
                 .w_full()
                 .whitespace_normal()
-                .child(text)
+                .child(SharedString::new(self.text))
                 .into_any_element(),
-            StreamingTextPhase::SettlingMarkdown | StreamingTextPhase::FinalMarkdown => {
-                markdown_element(self.id, text, self.event_target)
-            }
+            (_, Some(state)) => markdown_element(&state, self.event_target),
         }
     }
 }
 
 fn markdown_element(
-    id: ElementId,
-    text: SharedString,
+    state: &Entity<TextViewState>,
     event_target: WeakEntity<ConversationPane>,
 ) -> AnyElement {
-    MarkdownCompletionTraceElement::new(id, text, event_target).into_any_element()
-}
-
-/// Transparent production wrapper around the real gpui-component Markdown view.
-///
-/// `TextView::markdown` performs a full-replace parse synchronously from its
-/// `request_layout` implementation. Timing the delegated request therefore
-/// produces a conservative parse-to-layout completion bound without forking the
-/// component or moving parsing out of its production path.
-struct MarkdownCompletionTraceElement {
-    id: ElementId,
-    state_key: SharedString,
-    text: SharedString,
-    event_target: WeakEntity<ConversationPane>,
-}
-
-struct MarkdownCompletionTraceLayoutState {
-    element: AnyElement,
-}
-
-impl MarkdownCompletionTraceElement {
-    fn new(id: ElementId, text: SharedString, event_target: WeakEntity<ConversationPane>) -> Self {
-        let state_key = match &id {
-            ElementId::Name(name) => name.clone(),
-            _ => SharedString::new(format!("{id:?}")),
-        };
-        Self {
-            id,
-            state_key,
-            text,
-            event_target,
-        }
-    }
-
-    fn markdown(&self) -> AnyElement {
-        let event_target = self.event_target.clone();
-        TextView::markdown(self.id.clone(), self.text.clone())
-            .w_full()
-            .min_w_0()
-            .selectable(true)
-            .code_block_actions(move |code_block, _, _| {
-                let code = code_block.code().to_string();
-                let event_target = event_target.clone();
-                DesktopIconButton::new(
-                    "copy-markdown-code",
-                    DesktopIcon::Copy,
-                    "Copy this code block",
-                )
-                .build()
-                .debug_selector(|| "desktop-copy-markdown-code".into())
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                    if let Some(target) = event_target.upgrade() {
-                        target.update(cx, |_, cx| {
-                            cx.emit(ConversationPaneEvent::CopyCodeCompleted);
-                        });
-                    }
-                })
+    TextView::new(state)
+        .w_full()
+        .min_w_0()
+        .selectable(true)
+        .code_block_actions(move |code_block, _, _| {
+            let code = code_block.code().to_string();
+            let event_target = event_target.clone();
+            DesktopIconButton::new(
+                "copy-markdown-code",
+                DesktopIcon::Copy,
+                "Copy this code block",
+            )
+            .build()
+            .debug_selector(|| "desktop-copy-markdown-code".into())
+            .on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                if let Some(target) = event_target.upgrade() {
+                    target.update(cx, |_, cx| {
+                        cx.emit(ConversationPaneEvent::CopyCodeCompleted);
+                    });
+                }
             })
-            .into_any_element()
-    }
+        })
+        .into_any_element()
 }
 
-impl IntoElement for MarkdownCompletionTraceElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
+/// Report the cost of the parse that just ran on the main thread.
+///
+/// Only full-replace parses are timed, because those are the ones
+/// `TextViewState::set_text` runs synchronously; appends hand their work to a
+/// background task and return immediately. The trace therefore still bounds the
+/// blocking parse cost a frame can absorb, which is what the native performance
+/// gate samples, and it now measures the parse itself rather than a layout
+/// request that happened to contain one.
+pub(super) fn trace_markdown_parse(state_key: &str, bytes: usize, started_at: Instant) {
+    if !markdown_completion_trace_enabled() {
+        return;
     }
+    let elapsed_micros = started_at.elapsed().as_micros();
+    let phase = if state_key.contains(":final:") {
+        "final"
+    } else {
+        "settling"
+    };
+    tracing::trace!(
+        state_key,
+        phase,
+        bytes,
+        parse_to_layout_us = elapsed_micros,
+        "desktop.markdown.parse_complete"
+    );
+    eprintln!(
+        "desktop_trace\tmarkdown_parse_complete\tstate_key={state_key}\tphase={phase}\tbytes={bytes}\tmarkdown_parse_to_layout_us={elapsed_micros}"
+    );
 }
 
-impl Element for MarkdownCompletionTraceElement {
-    type RequestLayoutState = MarkdownCompletionTraceLayoutState;
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut element = self.markdown();
-        if !markdown_completion_trace_enabled() {
-            let layout_id = element.request_layout(window, cx);
-            return (layout_id, MarkdownCompletionTraceLayoutState { element });
-        }
-
-        let trace_state_key = SharedString::new(format!(
-            "desktop-markdown-completion-trace:{}",
-            self.state_key
-        ));
-        let completed = window.use_keyed_state(trace_state_key, cx, |_, _| Cell::new(false));
-        let should_trace = !completed.read(cx).get();
-        let started_at = should_trace.then(Instant::now);
-        let layout_id = element.request_layout(window, cx);
-
-        if let Some(started_at) = started_at {
-            let elapsed_micros = started_at.elapsed().as_micros();
-            let phase = if self.state_key.contains(":final:") {
-                "final"
-            } else {
-                "settling"
-            };
-            // Interior mutation avoids scheduling another frame solely for
-            // instrumentation state after this one-shot completion.
-            completed.read(cx).set(true);
-            tracing::trace!(
-                state_key = self.state_key.as_ref(),
-                phase,
-                bytes = self.text.len(),
-                parse_to_layout_us = elapsed_micros,
-                "desktop.markdown.parse_complete"
-            );
-            eprintln!(
-                "desktop_trace\tmarkdown_parse_complete\tstate_key={}\tphase={}\tbytes={}\tmarkdown_parse_to_layout_us={}",
-                self.state_key,
-                phase,
-                self.text.len(),
-                elapsed_micros
-            );
-        }
-
-        (layout_id, MarkdownCompletionTraceLayoutState { element })
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        request_layout.element.prepaint(window, cx);
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        request_layout: &mut Self::RequestLayoutState,
-        _: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        request_layout.element.paint(window, cx);
-    }
-}
-
-fn markdown_completion_trace_enabled() -> bool {
+pub(super) fn markdown_completion_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var(MARKDOWN_COMPLETION_TRACE_ENV)

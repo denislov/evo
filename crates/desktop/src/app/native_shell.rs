@@ -7977,7 +7977,7 @@ mod tests {
         let streaming = include_str!("native_shell/streaming_text.rs");
         assert!(streaming.contains(".selectable(true)"));
         assert!(streaming.contains(
-            "TextView::markdown(self.id.clone(), self.text.clone())\n            .w_full()\n            .min_w_0()"
+            "TextView::new(state)\n        .w_full()\n        .min_w_0()\n        .selectable(true)"
         ));
         assert!(!streaming.contains(".label(\"Copy code\")"));
         assert!(pane.contains(".child(visual.glyph)"));
@@ -8548,7 +8548,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_streaming_text_uses_revision_phase_and_stable_markdown_identity() {
+    fn conversation_streaming_text_reuses_a_pane_owned_markdown_parse_state() {
         let source = include_str!("native_shell.rs");
         let pane = include_str!("native_shell/conversation_pane.rs");
         let streaming = include_str!("native_shell/streaming_text.rs");
@@ -8556,12 +8556,23 @@ mod tests {
         assert!(pane.contains("block.detail_markdown_state_key.clone()"));
         assert!(pane.contains("let text_phase = block.text_phase"));
         assert!(pane.contains("block.item_key.stable_id_arc()"));
+
+        // The parse state is owned per row body and reused across frames, which
+        // is what makes a streaming delta an incremental append instead of a
+        // synchronous re-parse of the whole document.
+        assert!(pane.contains("markdown_states: HashMap<Arc<str>, MarkdownParseState>"));
+        assert!(pane.contains("state.push_str(&suffix, cx)"));
+        assert!(pane.contains("state.set_text(&replacement, cx)"));
+        assert!(pane.contains("TextViewState::markdown(&initial, cx)"));
+        assert!(pane.contains("fn evict_markdown_states"));
+        assert!(streaming.contains("TextView::new(state)"));
+        assert!(
+            !streaming.contains("TextView::markdown"),
+            "rebuilding the view from raw text would discard the parsed state"
+        );
+
         assert!(streaming.contains("StreamingTextPhase::StreamingPlainText"));
-        assert!(streaming.contains("StreamingTextPhase::SettlingMarkdown"));
-        assert!(streaming.contains("StreamingTextPhase::FinalMarkdown"));
-        assert!(streaming.contains("TextView::markdown"));
         assert!(streaming.contains("EVO_DESKTOP_MARKDOWN_TRACE"));
-        assert!(streaming.contains("element.request_layout(window, cx)"));
         assert!(streaming.contains("desktop.markdown.parse_complete"));
         assert!(streaming.contains("markdown_parse_to_layout_us"));
         assert!(!pane.contains(".id((\"conversation-block\", index))"));
