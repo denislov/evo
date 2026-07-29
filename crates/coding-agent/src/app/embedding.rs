@@ -8,9 +8,11 @@ use ai::api::model::{Model, ModelInput};
 
 use crate::app::auth::{CodingAgentAuthController, load_global_auth_store};
 use crate::app::bootstrap::{DEFAULT_MODEL_ID, PromptInvocation, SessionMode, select_model};
+use crate::app::interactive::{CodingAgentPreparedPrompt, prepared_prompt_from_processed};
 use crate::app::invocation::CodingAgentInvocationOptions;
 use crate::app::operation_factory::CodingAgentOperationFactory;
 use crate::app::profile_catalog::CodingAgentProfileCatalog;
+use crate::app::prompt_input::{ImageProcessingOptions, process_explicit_file_attachments};
 use crate::app::session::{
     CodingAgentSessionBootstrap, CodingAgentSessionQuery, runtime_session_root,
 };
@@ -423,6 +425,33 @@ impl CodingAgentEmbeddingContext {
     ) -> CodingAgentOperation {
         self.operation_factory()
             .prompt_operation(invocation, thinking_level)
+    }
+
+    /// Validates explicit adapter-selected files through the product-owned
+    /// `@file` pipeline and returns an opaque prompt invocation.
+    pub fn prepare_prompt_with_attachments(
+        &self,
+        prompt: &str,
+        attachments: &[PathBuf],
+    ) -> Result<CodingAgentPreparedPrompt, CodingAgentPublicError> {
+        process_explicit_file_attachments(
+            prompt,
+            attachments,
+            &self.options.cwd,
+            ImageProcessingOptions::from_settings(&self.resolved.config.settings),
+        )
+        .map(prepared_prompt_from_processed)
+        .map_err(CodingAgentPublicError::from)
+    }
+
+    /// Consumes an opaque prepared prompt through the product operation
+    /// factory, without exposing provider content to the embedding adapter.
+    pub fn prepared_prompt_operation(
+        &self,
+        prompt: CodingAgentPreparedPrompt,
+        thinking_level: Option<CodingAgentThinkingLevel>,
+    ) -> CodingAgentOperation {
+        self.prompt_operation(prompt.into_invocation(), thinking_level)
     }
 
     /// Return an opaque product-owned operation factory for this resolved
@@ -863,6 +892,10 @@ fn skill_resource_command(skill: &Skill) -> CodingAgentResourceCommand {
     }
 }
 
+#[allow(
+    clippy::items_after_test_module,
+    reason = "embedding tests exercise private catalog helpers declared below"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,6 +903,47 @@ mod tests {
     use crate::app::settings::global_settings_snapshot;
     use crate::config::AuthStore;
     use crate::runtime::facade::CodingAgentErrorCategory;
+
+    #[test]
+    fn embedding_prepares_explicit_file_attachments_with_product_bounds() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let cwd = temp.path().join("project");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        env.set_evo_dir(&global);
+        let attachment = cwd.join("notes with spaces.txt");
+        std::fs::write(&attachment, "bounded attachment body").unwrap();
+        let context =
+            CodingAgentEmbeddingContext::load(CodingAgentEmbeddingOptions::new(&cwd)).unwrap();
+
+        let prepared = context
+            .prepare_prompt_with_attachments("review this", std::slice::from_ref(&attachment))
+            .unwrap();
+        assert!(
+            prepared
+                .display_text()
+                .starts_with("review this\n<file name=")
+        );
+        assert!(prepared.display_text().contains("bounded attachment body"));
+        assert!(!format!("{prepared:?}").contains("bounded attachment body"));
+        let operation = context.prepared_prompt_operation(prepared, None);
+        let CodingAgentOperation::Prompt(options) = operation else {
+            panic!("prepared prompt must construct a prompt operation");
+        };
+        assert!(matches!(
+            options.invocation(),
+            PromptInvocation::Text(text) if text.contains("bounded attachment body")
+        ));
+
+        let too_many = vec![attachment; crate::limits::MAX_AT_FILE_REFERENCES + 1];
+        let error = context
+            .prepare_prompt_with_attachments("review", &too_many)
+            .unwrap_err();
+        assert_eq!(error.category, CodingAgentErrorCategory::Input);
+        assert_eq!(error.code(), "invalid_input");
+    }
 
     #[test]
     fn global_only_embedding_ignores_project_configuration_and_resources() {

@@ -461,7 +461,9 @@ impl CodingAgentApplicationStartup {
     }
 }
 
-fn prepared_prompt_from_processed(processed: ProcessedPromptInput) -> CodingAgentPreparedPrompt {
+pub(crate) fn prepared_prompt_from_processed(
+    processed: ProcessedPromptInput,
+) -> CodingAgentPreparedPrompt {
     let attachment_count = processed.images.len();
     let retained_bytes = processed.text.len()
         + processed

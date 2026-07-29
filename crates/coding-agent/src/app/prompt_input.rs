@@ -190,6 +190,55 @@ pub fn process_at_file_references_with_processing_options(
     })
 }
 
+pub(crate) fn process_explicit_file_attachments(
+    prompt: &str,
+    attachments: &[PathBuf],
+    cwd: &Path,
+    options: ImageProcessingOptions,
+) -> Result<ProcessedPromptInput, ApplicationError> {
+    if prompt.len() > MAX_PROMPT_INPUT_BYTES {
+        return Err(ApplicationError::InvalidInput(format!(
+            "prompt exceeds the {MAX_PROMPT_INPUT_BYTES} byte safety limit"
+        )));
+    }
+    if attachments.len() > MAX_AT_FILE_REFERENCES {
+        return Err(ApplicationError::InvalidInput(format!(
+            "prompt contains more than {MAX_AT_FILE_REFERENCES} file attachments"
+        )));
+    }
+
+    let mut text = prompt.to_owned();
+    let mut images = Vec::new();
+    for attachment in attachments {
+        let path = attachment.to_str().ok_or_else(|| {
+            ApplicationError::InvalidInput("attachment path must be valid UTF-8".into())
+        })?;
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        append_file_reference(&mut text, &mut images, path, cwd, options)?;
+        if text.len() > MAX_PROMPT_INPUT_BYTES {
+            return Err(ApplicationError::InvalidInput(format!(
+                "expanded prompt exceeds the {MAX_PROMPT_INPUT_BYTES} byte safety limit"
+            )));
+        }
+    }
+
+    let mut content = vec![ContentBlock::Text {
+        text: text.clone(),
+        text_signature: None,
+    }];
+    content.extend(images.iter().map(|image| ContentBlock::Image {
+        data: image.data.clone(),
+        mime_type: image.mime_type.clone(),
+    }));
+    Ok(ProcessedPromptInput {
+        text,
+        images,
+        content,
+    })
+}
+
 fn append_file_reference(
     text: &mut String,
     images: &mut Vec<ImageAttachment>,
