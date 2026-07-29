@@ -12,7 +12,7 @@ pub(super) enum DirectCommandUpdate {
 pub(super) fn reconcile_direct_update(
     shell: &mut NativeShell,
     update: DesktopRuntimeUpdate,
-    cx: &mut Context<NativeShell>,
+    _cx: &mut Context<NativeShell>,
 ) -> DirectCommandUpdate {
     match update {
         DesktopRuntimeUpdate::SessionClosed {
@@ -25,8 +25,8 @@ pub(super) fn reconcile_direct_update(
             let sessions_dirty = shell.complete_workspace_command(&session_id, command_id, &intent);
             if sessions_dirty {
                 shell.remove_closed_workspace(&session_id);
+                shell.session_controller.remove_session(&session_id);
                 shell.set_preference_notice("Session closed.".into());
-                shell.request_session_catalog(cx);
             }
             DirectCommandUpdate::Consumed {
                 sessions_dirty,
@@ -89,17 +89,6 @@ pub(super) fn reconcile_direct_update(
                 });
             if sessions_dirty {
                 shell.session_controller.replace_catalog(sessions, omitted);
-                let session_count = shell.session_controller.catalog().len();
-                let notice = if omitted == 0 {
-                    format!("Loaded {} session(s).", session_count)
-                } else {
-                    format!(
-                        "Loaded {} session(s); {omitted} older session(s) omitted.",
-                        session_count
-                    )
-                };
-                shell.set_preference_notice(notice);
-                shell.schedule_session_catalog_refresh(cx);
             }
             DirectCommandUpdate::Consumed {
                 sessions_dirty,
@@ -233,7 +222,7 @@ impl ProjectionCommandCompletions {
         self,
         shell: &mut NativeShell,
         projection_replaced: bool,
-        cx: &mut Context<NativeShell>,
+        _cx: &mut Context<NativeShell>,
     ) -> bool {
         let mut sessions_dirty = false;
         if let Some(command_id) = self.resync
@@ -246,13 +235,11 @@ impl ProjectionCommandCompletions {
             } else {
                 "Resync response failed projection validation.".into()
             });
-            if projection_replaced {
-                shell.request_session_catalog(cx);
-            }
         }
         if let Some((owner_session_id, command_id, intent)) = self.session
             && shell.complete_workspace_command(&owner_session_id, command_id, &intent)
         {
+            let created = matches!(&intent, DesktopCommandIntent::CreateSession);
             sessions_dirty = true;
             shell.set_preference_notice(if projection_replaced {
                 match intent {
@@ -265,8 +252,8 @@ impl ProjectionCommandCompletions {
             } else {
                 "Session response failed projection validation; resync is required.".into()
             });
-            if projection_replaced {
-                shell.request_session_catalog(cx);
+            if projection_replaced && created {
+                sessions_dirty |= shell.insert_active_session_into_catalog();
             }
         }
         if let Some((command_id, skill_count, prompt_count, profile_count)) = self.reload

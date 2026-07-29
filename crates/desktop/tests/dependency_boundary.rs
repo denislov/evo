@@ -577,8 +577,9 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(!sessions.contains("WeakEntity<NativeShell>"));
     assert!(!sessions.contains("owner.read(cx)"));
     assert!(session_controller.contains("struct SessionController"));
-    assert!(session_controller.contains("refresh_deadline: Option<Instant>"));
-    assert!(session_controller.contains("fn schedule_session_catalog_refresh"));
+    assert!(!session_controller.contains("refresh_deadline: Option<Instant>"));
+    assert!(!session_controller.contains("fn schedule_session_catalog_refresh"));
+    assert!(session_controller.contains("fn request_session_catalog"));
     assert!(!shell.contains("session_catalog_refresh_deadline"));
 
     let root_input_field = ["composer_", "input:"].concat();

@@ -763,10 +763,6 @@ impl NativeShell {
             let _ = runtime_shutdown.shutdown(&mut runtime_events).await;
         })
         .detach();
-        cx.spawn(async move |this, cx| {
-            let _ = this.update(cx, |this, cx| this.request_session_catalog(cx));
-        })
-        .detach();
 
         let next_command_id = command_ledger.next_command_id();
         let thinking_selection = projection
@@ -1377,6 +1373,19 @@ impl NativeShell {
                     .matches(*command_id, &DesktopCommandIntent::CreateSession),
                 _ => false,
             };
+            let creates_session_from_prompt = match &update {
+                desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
+                    command_id,
+                    ..
+                }
+                | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
+                    command_id,
+                    ..
+                } => self
+                    .command_ledger
+                    .matches(*command_id, &DesktopCommandIntent::Prompt),
+                _ => false,
+            };
             let mut background_update = false;
             if !is_session_change
                 && let Some(target_session_id) = self.runtime_update_session_id(&update)
@@ -1826,6 +1835,9 @@ impl NativeShell {
                     self.project = metadata.project.clone();
                 }
             }
+            if creates_session_from_prompt && self.projection.is_some() {
+                sessions_pane_dirty |= self.insert_active_session_into_catalog();
+            }
             if self.projection.is_none() {
                 let _ = projection_completions.reconcile(self, true, cx);
                 if background_update {
@@ -2199,10 +2211,10 @@ impl NativeShell {
             self.narrow_sessions_open = !self.narrow_sessions_open;
             if self.narrow_sessions_open {
                 self.activate_overlay(DesktopOverlayKind::NarrowSessions, window, cx);
-                self.request_session_catalog(cx);
             } else {
                 self.dismiss_overlay(window, cx);
             }
+            self.notify_sessions_pane(cx);
             self.notify_inspector_pane(cx);
             return;
         }
@@ -3389,7 +3401,7 @@ impl NativeShell {
         if target == FocusTarget::Sessions && !layout.is_visible(target) {
             self.narrow_sessions_open = true;
             self.activate_overlay(DesktopOverlayKind::NarrowSessions, window, cx);
-            self.request_session_catalog(cx);
+            self.notify_sessions_pane(cx);
             return;
         }
         if target == FocusTarget::Context && !layout.is_visible(target) {
@@ -5144,17 +5156,120 @@ mod tests {
     }
 
     #[gpui::test]
-    fn baseline_idle_shell_automatically_requests_the_session_catalog(cx: &mut TestAppContext) {
+    fn idle_session_catalog_is_loaded_only_by_explicit_refresh(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
-        let (_shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+        let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
 
         cx.run_until_parked();
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [],
+            "startup must not load the session catalog"
+        );
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [],
+            "an idle shell must not arm a catalog refresh timer"
+        );
 
+        cx.simulate_resize(size(px(700.), px(800.)));
+        cx.run_until_parked();
+        let toggle = cx
+            .debug_bounds("desktop-hit-toggle-sessions")
+            .expect("idle Header exposes the Sessions overlay toggle");
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [],
+            "opening the Sessions surface must remain read-free"
+        );
+
+        let overflow = cx
+            .debug_bounds("desktop-hit-sessions-overflow")
+            .expect("Sessions exposes the explicit refresh menu");
+        cx.simulate_click(overflow.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        choose_popup_item(cx, 0);
+        cx.run_until_parked();
         assert_eq!(
             runtime_harness.drain_command_kinds(),
             [desktop::runtime::DesktopRuntimeCommandKind::ListSessions]
         );
+        shell.update(cx, |shell, cx| shell.request_session_catalog(cx));
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [],
+            "a pending explicit refresh must be deduplicated"
+        );
+        shell.update(cx, |shell, cx| {
+            let command_id = shell
+                .command_ledger
+                .command_id_for(&DesktopCommandIntent::ListSessions)
+                .expect("the explicit refresh remains pending");
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::SessionsListed {
+                    command_id,
+                    sessions: vec![desktop::runtime::DesktopSessionCatalogEntry {
+                        session_id: "explicit-refresh-session".into(),
+                        ..Default::default()
+                    }],
+                    omitted: 0,
+                },
+            );
+            assert!(shell.poll_runtime(cx));
+            assert_eq!(
+                shell.session_controller.catalog()[0].session_id,
+                "explicit-refresh-session"
+            );
+            assert!(shell.preference_notice.is_none());
+        });
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [],
+            "a successful explicit refresh must not schedule another load"
+        );
+    }
+
+    #[gpui::test]
+    fn explicit_session_catalog_refresh_failure_reports_error_without_retry(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+
+        shell.update(cx, |shell, cx| {
+            shell.request_session_catalog(cx);
+            assert_eq!(
+                shell.preference_notice.as_deref(),
+                Some("desktop runtime command queue is closed")
+            );
+            assert!(
+                !shell
+                    .command_ledger
+                    .contains(&DesktopCommandIntent::ListSessions),
+                "failed admission must release the pending refresh"
+            );
+        });
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        shell.update(cx, |shell, _cx| {
+            assert_eq!(
+                shell.preference_notice.as_deref(),
+                Some("desktop runtime command queue is closed")
+            );
+            assert!(
+                !shell
+                    .command_ledger
+                    .contains(&DesktopCommandIntent::ListSessions),
+                "failed refresh must not schedule another attempt"
+            );
+        });
     }
 
     #[gpui::test]
@@ -5347,7 +5462,10 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         initialize_visual_test(cx);
-        let (shell, cx) = add_idle_visual_shell(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+        cx.run_until_parked();
+        assert_eq!(runtime_harness.drain_command_kinds(), []);
         shell.update(cx, |shell, cx| {
             shell.composer.edit("home draft");
             let intent = DesktopCommandIntent::OpenSession {
@@ -5370,6 +5488,55 @@ mod tests {
             assert!(!shell.command_ledger.matches(command_id, &intent));
             assert!(shell.runtime_ui_notification_count > 0);
         });
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [],
+            "opening a session must not trigger a full catalog request"
+        );
+    }
+
+    #[gpui::test]
+    fn create_and_resync_update_local_state_without_loading_the_catalog(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+        cx.run_until_parked();
+        assert_eq!(runtime_harness.drain_command_kinds(), []);
+
+        shell.update(cx, |shell, cx| {
+            let create_id = shell
+                .reserve_command(DesktopCommandIntent::CreateSession)
+                .expect("create command fits the Home ledger");
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::SessionChanged {
+                    command_id: create_id,
+                    snapshot: visual_test_snapshot_for("session-created-locally"),
+                },
+            );
+            assert!(shell.poll_runtime(cx));
+            assert_eq!(
+                shell.session_controller.catalog()[0].session_id,
+                "session-created-locally"
+            );
+
+            let resync_id = shell
+                .reserve_command(DesktopCommandIntent::Resync)
+                .expect("resync command fits the session ledger");
+            shell
+                .runtime_updates
+                .push_back(desktop::runtime::DesktopRuntimeUpdate::Resynced {
+                    command_id: resync_id,
+                    replacement: desktop::runtime::DesktopRuntimeResyncSnapshot::Hydrated(
+                        visual_test_snapshot_for("session-created-locally"),
+                    ),
+                });
+            assert!(shell.poll_runtime(cx));
+        });
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [],
+            "create and resync completions must use local state only"
+        );
     }
 
     #[gpui::test]
@@ -5388,6 +5555,13 @@ mod tests {
                     None,
                     DesktopCommandLedger::default(),
                 ),
+            );
+            shell.session_controller.replace_catalog(
+                vec![desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id: "close-session-b".into(),
+                    ..Default::default()
+                }],
+                0,
             );
             shell.composer.edit("retain this exact Home draft");
             shell
@@ -5435,6 +5609,11 @@ mod tests {
                     .issues()
                     .iter()
                     .any(|issue| issue.code == "prompt_prepare")
+            );
+            assert_eq!(
+                shell.session_controller.catalog()[0].session_id,
+                "session-created",
+                "the first prompt must add its newly-created session locally"
             );
         });
     }
@@ -5636,11 +5815,12 @@ mod tests {
             assert!(shell.poll_runtime(cx));
             assert_eq!(shell.active_workspace.session_id(), "close-session-a");
             assert!(!shell.workspaces.contains_key("close-session-b"));
+            assert!(shell.session_controller.catalog().is_empty());
         });
-        assert!(
-            runtime_harness
-                .drain_command_kinds()
-                .contains(&desktop::runtime::DesktopRuntimeCommandKind::CloseSession)
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [desktop::runtime::DesktopRuntimeCommandKind::CloseSession],
+            "close must remove the local entry without loading the catalog"
         );
     }
 
@@ -8976,20 +9156,23 @@ mod tests {
     }
 
     #[test]
-    fn sessions_navigation_is_searchable_recent_and_automatically_refreshed() {
+    fn sessions_navigation_is_searchable_recent_and_user_refreshed() {
         let shell = include_str!("native_shell.rs");
         let pane = include_str!("native_shell/sessions_pane.rs");
         let controller = include_str!("native_shell/session_controller.rs");
+        let commands = include_str!("native_shell/commands.rs");
         let search_placeholder = ["placeholder(\"Search ", "sessions…\")"].concat();
-        let refresh_interval = ["Duration::from_secs(", "15)"].concat();
         let active_duplicate = ["current_session_", "label"].concat();
         let root_refresh_deadline = ["session_catalog_refresh_", "deadline"].concat();
 
         assert!(pane.contains(&search_placeholder));
-        assert!(controller.contains("schedule_session_catalog_refresh"));
-        assert!(controller.contains(&refresh_interval));
+        assert!(!controller.contains("schedule_session_catalog_refresh"));
+        assert!(!controller.contains("SESSION_CATALOG_REFRESH_INTERVAL"));
         assert!(controller.contains("struct SessionController"));
-        assert!(controller.contains("refresh_deadline: Option<Instant>"));
+        assert!(!controller.contains("refresh_deadline: Option<Instant>"));
+        assert!(controller.contains("fn request_session_catalog"));
+        assert!(shell.contains("SessionsPaneEvent::Refresh => this.request_session_catalog(cx)"));
+        assert!(!commands.contains("Loaded {} session(s)."));
         assert!(!shell.contains(&root_refresh_deadline));
         assert!(pane.contains("relative_session_time"));
         assert!(pane.contains("Untitled"));

@@ -1,16 +1,12 @@
-use std::time::{Duration, Instant};
-
-use desktop::runtime::DesktopSessionCatalogEntry;
+use desktop::runtime::{DesktopSessionCatalogEntry, MAX_DESKTOP_SESSION_CATALOG};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::*;
-
-pub(super) const SESSION_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 pub(super) struct SessionController {
     catalog: Vec<DesktopSessionCatalogEntry>,
     omitted: usize,
-    refresh_deadline: Option<Instant>,
 }
 
 impl SessionController {
@@ -49,24 +45,27 @@ impl SessionController {
         true
     }
 
-    pub(super) fn schedule_refresh(&mut self, now: Instant) -> Option<Instant> {
-        let deadline = now + SESSION_CATALOG_REFRESH_INTERVAL;
-        if self
-            .refresh_deadline
-            .is_some_and(|scheduled| scheduled <= deadline)
-        {
-            return None;
+    pub(super) fn insert_created_session(&mut self, entry: DesktopSessionCatalogEntry) {
+        let replaced = self
+            .catalog
+            .iter()
+            .position(|session| session.session_id == entry.session_id)
+            .map(|index| self.catalog.remove(index))
+            .is_some();
+        self.catalog.insert(0, entry);
+        if self.catalog.len() > MAX_DESKTOP_SESSION_CATALOG {
+            self.catalog.truncate(MAX_DESKTOP_SESSION_CATALOG);
+            if !replaced {
+                self.omitted = self.omitted.saturating_add(1);
+            }
         }
-        self.refresh_deadline = Some(deadline);
-        Some(deadline)
     }
 
-    pub(super) fn take_scheduled_refresh(&mut self, deadline: Instant) -> bool {
-        if self.refresh_deadline != Some(deadline) {
-            return false;
-        }
-        self.refresh_deadline = None;
-        true
+    pub(super) fn remove_session(&mut self, session_id: &str) -> bool {
+        let before = self.catalog.len();
+        self.catalog
+            .retain(|session| session.session_id != session_id);
+        self.catalog.len() != before
     }
 
     pub(super) fn next_session_id(&self, active_session_id: &str) -> Option<String> {
@@ -153,7 +152,7 @@ impl NativeShell {
         if let Err(message) = admission {
             self.command_ledger.complete(command_id, &intent);
             self.set_preference_notice(message);
-            self.schedule_session_catalog_refresh(cx);
+            self.notify_toast_host(cx);
         }
         self.notify_sessions_pane(cx);
         cx.notify();
@@ -189,28 +188,39 @@ impl NativeShell {
         cx.notify();
     }
 
-    pub(super) fn schedule_session_catalog_refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(deadline) = self.session_controller.schedule_refresh(Instant::now()) else {
-            return;
+    pub(super) fn insert_active_session_into_catalog(&mut self) -> bool {
+        let Some(projection) = self.projection.as_ref() else {
+            return false;
         };
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(SESSION_CATALOG_REFRESH_INTERVAL)
-                .await;
-            let _ =
-                this.update(cx, |this, cx| {
-                    if this.session_controller.take_scheduled_refresh(deadline) {
-                        if this.projection.as_ref().is_none_or(|projection| {
-                            projection.snapshot().active_operation.is_none()
-                        }) {
-                            this.request_session_catalog(cx);
-                        } else {
-                            this.schedule_session_catalog_refresh(cx);
-                        }
-                    }
-                });
-        })
-        .detach();
+        let session_id = projection.snapshot().session.session_id.clone();
+        let cwd = self
+            .project
+            .workspace
+            .as_ref()
+            .and_then(|workspace| match &workspace.scope {
+                CodingAgentWorkspaceScope::Project { cwd } => Some(cwd.display().to_string()),
+                CodingAgentWorkspaceScope::Projectless { .. }
+                | CodingAgentWorkspaceScope::Legacy { .. } => None,
+            });
+        let cwd = cwd.or_else(|| {
+            self.project
+                .workspace
+                .is_none()
+                .then(|| self.project.cwd.display().to_string())
+        });
+        let observed_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_default();
+        self.session_controller
+            .insert_created_session(DesktopSessionCatalogEntry {
+                session_id,
+                name: None,
+                cwd,
+                created_at: observed_at.clone(),
+                updated_at: observed_at,
+                active_leaf_id: None,
+            });
+        true
     }
 
     pub(super) fn open_session(&mut self, session_id: String, cx: &mut Context<Self>) {
@@ -288,8 +298,11 @@ impl NativeShell {
             .map(|projection| projection.snapshot().session.session_id.as_str())
             .unwrap_or(HOME_COMPOSER_SESSION_KEY);
         let Some(session_id) = self.session_controller.next_session_id(active) else {
-            self.set_preference_notice("Loading the session catalog…".into());
-            self.request_session_catalog(cx);
+            self.set_preference_notice(
+                "Refresh the session catalog before switching sessions.".into(),
+            );
+            self.notify_toast_host(cx);
+            cx.notify();
             return;
         };
         if session_id == active {
@@ -307,15 +320,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_refresh_has_one_deadline_and_keeps_recent_order() {
-        let now = Instant::now();
+    fn catalog_local_mutations_keep_recent_order_and_bounds() {
         let mut controller = SessionController::default();
-        let deadline = controller.schedule_refresh(now).unwrap();
-        assert_eq!(deadline, now + SESSION_CATALOG_REFRESH_INTERVAL);
-        assert_eq!(controller.schedule_refresh(now), None);
-        assert!(!controller.take_scheduled_refresh(deadline + Duration::from_secs(1)));
-        assert!(controller.take_scheduled_refresh(deadline));
-
         controller.replace_catalog(
             vec![
                 DesktopSessionCatalogEntry {
@@ -340,5 +346,33 @@ mod tests {
             controller.next_session_id("missing").as_deref(),
             Some("session-a")
         );
+        controller.insert_created_session(DesktopSessionCatalogEntry {
+            session_id: "session-c".into(),
+            updated_at: "2026-07-30T12:00:00Z".into(),
+            ..Default::default()
+        });
+        assert_eq!(controller.catalog()[0].session_id, "session-c");
+        assert!(controller.rename_session(
+            "session-c",
+            Some("Created locally".into()),
+            "2026-07-30T12:01:00Z".into(),
+        ));
+        assert_eq!(
+            controller.catalog()[0].name.as_deref(),
+            Some("Created locally")
+        );
+        assert!(controller.remove_session("session-c"));
+        assert!(!controller.remove_session("session-c"));
+
+        let mut bounded = SessionController::default();
+        for index in 0..=MAX_DESKTOP_SESSION_CATALOG {
+            bounded.insert_created_session(DesktopSessionCatalogEntry {
+                session_id: format!("session-{index}"),
+                ..Default::default()
+            });
+        }
+        assert_eq!(bounded.catalog().len(), MAX_DESKTOP_SESSION_CATALOG);
+        assert_eq!(bounded.catalog()[0].session_id, "session-128");
+        assert_eq!(bounded.omitted(), 1);
     }
 }
