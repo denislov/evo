@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -676,10 +676,9 @@ CenterDrawerHost
 > `CodingAgentEmbeddingOptions::for_workspace`，Home submission 可以从 snapshot 构造真实 typed
 > workspace target，而不是依赖 scratch cwd 猜 Projectless。
 >
-> 过渡债务：DSK-610 只完成 command/admission 事务边界。当前 `RuntimeState` 仍由单一 context
-> 创建新 session，`New` 中的 workspace/model/profile 只完成可信传输与校验，尚未用于构造 per-session
-> context；DSK-611 建立 `RuntimeSessionWorkspace` owner、DSK-612 实现 scope-aware 原子创建时必须消费
-> 这些字段并删除该债务。
+> 债务清偿：DSK-611 已建立 `RuntimeSessionWorkspace` owner，DSK-612 已让 `New` 中的
+> workspace/model/profile/thinking 实际参与 scope resolve、context load、capability sanitize、session
+> persistence 与 prompt start，并完成 post-create rejection 的强类型 snapshot/UI 迁移契约。
 >
 > Gate：Desktop 245 个 tests 通过、5 个既有用例保持 ignored，17 个 dependency boundary tests
 > 全部通过；严格 Clippy、格式和结构删除审计通过。`coding-agent` boundary 为 64/67，仍严格保持
@@ -716,10 +715,10 @@ CenterDrawerHost
 > create/start/recovery/rename/close 与 active command 均通过对应 workspace owner。最多 4 个 open
 > session、command id、priority/data queue、shutdown/join 与 recovery 语义保持不变。
 >
-> 过渡债务：DSK-612 继续收紧首次 prompt 的完整原子事务与逐阶段失败恢复；DSK-613 负责从 durable
-> manifest 先解析历史 session scope 再构造跨项目 context（当前尚未打开的 persisted session 仍从
-> Home options 建 context）；DSK-630/631 负责把当前 Home-scope session query 替换为用户驱动、按项目
-> 分组的 catalog。产品层 raw-cwd options 与可空 workspace snapshot 仍按 CAG-204 债务在计划收敛前删除。
+> 过渡债务：DSK-612 已清偿首次 prompt 的原子创建与失败恢复。DSK-613 仍负责从 durable manifest
+> 先解析历史 session scope 再构造跨项目 context（当前尚未打开的 persisted session 仍从 Home options
+> 建 context）；DSK-630/631 负责把当前 Home-scope session query 替换为用户驱动、按项目分组的
+> catalog。产品层 raw-cwd options 与可空 workspace snapshot 仍按 CAG-204 债务在计划收敛前删除。
 >
 > Gate：Desktop 246 个 tests 通过、5 个既有用例保持 ignored，17 个 dependency boundary tests
 > 全部通过；严格 Clippy、格式、CodeGraph 与 `ast-grep outline` owner/call-path 审计通过。
@@ -739,6 +738,37 @@ CenterDrawerHost
 完成标准：两个项目 session 同时运行，事件、cwd、资源、model/profile 不串；后台 session 不触发前台 notify。
 
 #### DSK-612：首次 prompt 的 scope-aware 原子创建
+
+> 状态：已完成。New prompt 现在固定按第 6.6 节执行：Bridge admission 校验 typed target；runtime
+> 重新 resolve workspace（覆盖 admission 后目录被删除的 TOCTOU）；按 resolved workspace load 独立
+> context；由该 context 验证 model/profile，并用 `sanitize_thinking_level` 把不支持的显式 thinking
+> 回落为 Auto；在持久化前验证 typed scope；创建 session 后直接从同一 owner 构造初始空 transcript、
+> 空 recovery 的完整 hydrated snapshot；再由同一 context prepare prompt/attachments 并启动 operation；
+> 只有 start 成功才发布 `PromptAcceptedWithSession`。
+>
+> Context load、workspace path 删除或 session create 在持久化前失败时只返回 `CommandRejected`，
+> runtime 中没有 owner，session manifest 也不存在。Session 已持久化后的 prompt prepare/start 失败
+> 必须返回 `PromptRejectedWithSession`；该 variant 已删除 `metadata + Option<snapshot>` 模糊形态，类型上
+> 强制携带完整 `DesktopRuntimeHydratedSnapshot`，并保留 idle workspace owner。Prompt-start failure
+> 注入点已移动到同 context prepare 成功之后，覆盖真实 post-persistence 阶段。
+>
+> Shell 收到 accepted/rejected snapshot 时，会把当前 Home `SessionWorkspace` 原地晋升为新 session
+> owner，即使已有其他后台 session 也不会新建空 workspace。Pending command ledger、精确 draft、附件与
+> thinking selection 因而一起迁移；rejection 会安装已创建 session、恢复 idle composer 并展示 typed
+> issue，不存在 draft 留在隐藏 Home、session 显示在另一 workspace 的中间态。
+>
+> 完成标准验证：Project target 的 canonical cwd 同时进入 embedding snapshot、typed persisted session
+> overview、同 context 的相对 attachment prepare、实际 builtin `bash pwd` 执行，以及 shell
+> authorization 的 `ToolAuthorizationScope::Shell` 和 preview；Projectless 首次 prompt 继续使用 managed
+> scratch execution cwd，并持久化 Projectless scope 而不对外暴露 scratch project path。
+>
+> Gate：`coding-agent` 785 个 library tests 与严格 Clippy 通过；Desktop 251 个 tests 通过、5 个既有
+> 用例保持 ignored，18 个 dependency boundary tests 全部通过，严格 Clippy、格式、CodeGraph 与
+> `ast-grep outline` transaction/owner 审计通过。`coding-agent` boundary 为 64/67，仍严格保持
+> DSK-600 登记的 3 个既有失败，没有新增回归。定向验收分别覆盖 context load、admission 后 path
+> 删除、session create、prompt prepare、prompt start 五类失败，以及有后台 session 时的 Home
+> draft/attachment rejection 迁移、snapshot/context/scope 一致性、thinking capability fallback、
+> Project/Projectless scope 和 tool/authorization cwd。
 
 工作：
 
