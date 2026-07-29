@@ -384,6 +384,10 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
                     runtime: DesktopRuntimeBridge::disconnected_for_replay(),
                     project,
                     projection,
+                    projectless_workspace_selection:
+                        coding_agent::api::embedding::CodingAgentWorkspaceSelection::projectless(
+                            "workspace-native-replay",
+                        ),
                     global_skills,
                     preferences,
                     preference_writer: None,

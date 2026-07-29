@@ -28,6 +28,8 @@ pub(super) enum ComposerPaneEvent {
     Focused,
     AddAttachments,
     RemoveAttachment(usize),
+    ChooseProjectDirectory,
+    ClearProjectDirectory,
     SubmitPrimary,
     Submit,
     SubmitRunning,
@@ -53,6 +55,7 @@ pub(super) struct ComposerPaneViewModel {
 pub(super) struct ComposerProjectDirectoryViewModel {
     pub(super) value: Arc<str>,
     pub(super) state: DesktopProjectDirectoryState,
+    pub(super) is_projectless: bool,
 }
 
 impl ComposerProjectDirectoryViewModel {
@@ -240,6 +243,8 @@ impl Render for ComposerPane {
         };
         let event_target_for_steer = cx.entity().downgrade();
         let event_target_for_queue = cx.entity().downgrade();
+        let event_target_for_project_choose = cx.entity().downgrade();
+        let event_target_for_project_clear = cx.entity().downgrade();
         let attachment_button_label = attachment_disabled_reason.as_deref().map_or_else(
             || "Add files or images".to_owned(),
             |reason| format!("Attachments unavailable: {reason}"),
@@ -403,13 +408,47 @@ impl Render for ComposerPane {
                                             cx.emit(ComposerPaneEvent::AddAttachments);
                                         })),
                                     )
-                                    .child(DesktopProjectDirectoryControl::new(
-                                        "composer-project-directory",
-                                        project_directory.value,
-                                        project_directory_accessible_label,
-                                        project_directory.state,
+                                    .child(
+                                        DesktopProjectDirectoryControl::new(
+                                            "composer-project-directory",
+                                            project_directory.value,
+                                            project_directory_accessible_label,
+                                            project_directory.state,
+                                        )
+                                        .build_with_menu(move |menu, _, _| {
+                                            let choose_target =
+                                                event_target_for_project_choose.clone();
+                                            let clear_target =
+                                                event_target_for_project_clear.clone();
+                                            menu.item(
+                                                PopupMenuItem::new("选择项目目录…").on_click(
+                                                    move |_, _, cx| {
+                                                        if let Some(target) = choose_target.upgrade()
+                                                        {
+                                                            target.update(cx, |_, cx| {
+                                                                cx.emit(
+                                                                    ComposerPaneEvent::ChooseProjectDirectory,
+                                                                );
+                                                            });
+                                                        }
+                                                    },
+                                                ),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new("无项目")
+                                                    .checked(project_directory.is_projectless)
+                                                    .on_click(move |_, _, cx| {
+                                                        if let Some(target) = clear_target.upgrade() {
+                                                            target.update(cx, |_, cx| {
+                                                                cx.emit(
+                                                                    ComposerPaneEvent::ClearProjectDirectory,
+                                                                );
+                                                            });
+                                                        }
+                                                    }),
+                                            )
+                                        }),
                                     )
-                                    .build())
                                     .when_some(attachment_disabled_reason, |left, reason| {
                                         left.child(
                                             div()
@@ -543,14 +582,17 @@ mod tests {
         let editable = ComposerProjectDirectoryViewModel {
             value: Arc::clone(&full_path),
             state: DesktopProjectDirectoryState::Editable,
+            is_projectless: false,
         };
         let locked = ComposerProjectDirectoryViewModel {
             value: Arc::clone(&full_path),
             state: DesktopProjectDirectoryState::Locked,
+            is_projectless: false,
         };
         let pending = ComposerProjectDirectoryViewModel {
             value: Arc::clone(&full_path),
             state: DesktopProjectDirectoryState::Pending,
+            is_projectless: false,
         };
 
         assert!(editable.accessible_label().contains(full_path.as_ref()));
@@ -563,6 +605,7 @@ mod tests {
         let projectless = ComposerProjectDirectoryViewModel {
             value: Arc::from("无项目"),
             state: DesktopProjectDirectoryState::Editable,
+            is_projectless: true,
         };
         assert_eq!(
             projectless.accessible_label(),

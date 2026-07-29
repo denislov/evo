@@ -527,6 +527,8 @@ fn desktop_bootstrap_and_native_shell_have_distinct_module_owners() {
     assert!(bootstrap.contains("application()"));
     assert!(bootstrap.contains(".run(move |cx: &mut App|"));
     assert!(bootstrap.contains("DesktopRuntimeBridge::spawn"));
+    assert!(bootstrap.contains("resolve_scratch_workspace"));
+    assert!(bootstrap.contains("projectless_workspace_selection"));
     // Icon assets are an application-startup concern: registering the source
     // anywhere else would leave icon-only controls rendering blank.
     assert!(bootstrap.contains(".with_assets(gpui_component_assets::Assets)"));
@@ -662,14 +664,27 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(composer.contains("ComposerPaneEvent::InputChanged"));
     assert!(composer.contains("ComposerPaneEvent::Focused"));
     assert!(composer.contains("ComposerPaneEvent::SubmitPrimary"));
+    assert!(composer.contains("ChooseProjectDirectory"));
+    assert!(composer.contains("ClearProjectDirectory"));
     assert!(composer.contains("struct ComposerProjectDirectoryViewModel"));
     assert!(composer.contains("DesktopProjectDirectoryControl::new("));
+    assert!(desktop_controls.contains("fn build_with_menu("));
     assert!(desktop_controls.contains("desktop-project-directory-control"));
     assert!(desktop_controls.contains("desktop-hit-project-directory"));
     assert!(composer.contains("项目目录在对话创建后固定"));
     assert!(shell.contains("DesktopProjectDirectoryState::Editable"));
     assert!(shell.contains("DesktopProjectDirectoryState::Locked"));
     assert!(shell.contains("DesktopProjectDirectoryState::Pending"));
+    assert!(shell.contains("draft_workspace_selection: CodingAgentWorkspaceSelection"));
+    assert!(shell.contains("self.draft_workspace_selection.clone()"));
+    assert!(shell.contains("fn choose_project_directory("));
+    assert!(shell.contains("files: false"));
+    assert!(shell.contains("directories: true"));
+    assert!(shell.contains("multiple: false"));
+    assert!(shell.contains("fn clear_project_directory("));
+    assert!(!composer.contains("prompt_for_paths"));
+    assert!(!composer.contains("DesktopPromptTarget"));
+    assert!(!composer.contains("CodingAgentWorkspaceSelection"));
     assert!(!composer.contains(&weak_root_owner));
     assert!(!composer.contains("owner.read(cx)"));
     assert!(!composer.contains("DesktopProjection"));

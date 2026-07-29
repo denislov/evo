@@ -106,23 +106,24 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                     ),
                 };
                 let scratch_id_was_missing = loaded.preferences.scratch_workspace_id.is_none();
+                if let Err(error) =
+                    resolve_scratch_workspace(&global_config_dir, &mut loaded.preferences)
+                {
+                    let _ = open_failure(
+                        format!("scratch workspace initialization failed: {error}"),
+                        cx,
+                    );
+                    return;
+                }
+                let projectless_workspace_selection = CodingAgentWorkspaceSelection::projectless(
+                    loaded
+                        .preferences
+                        .scratch_workspace_id
+                        .clone()
+                        .expect("scratch resolution must persist its workspace id"),
+                );
                 let workspace_selection = if projectless {
-                    if let Err(error) =
-                        resolve_scratch_workspace(&global_config_dir, &mut loaded.preferences)
-                    {
-                        let _ = open_failure(
-                            format!("scratch workspace initialization failed: {error}"),
-                            cx,
-                        );
-                        return;
-                    }
-                    CodingAgentWorkspaceSelection::projectless(
-                        loaded
-                            .preferences
-                            .scratch_workspace_id
-                            .clone()
-                            .expect("scratch resolution must persist its workspace id"),
-                    )
+                    projectless_workspace_selection.clone()
                 } else {
                     CodingAgentWorkspaceSelection::project(cwd)
                 };
@@ -144,10 +145,7 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                         None
                     }
                 };
-                if projectless
-                    && scratch_id_was_missing
-                    && let Some(writer) = writer.as_ref()
-                {
+                if scratch_id_was_missing && let Some(writer) = writer.as_ref() {
                     writer.schedule(loaded.preferences.clone());
                 }
 
@@ -207,6 +205,7 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                                 runtime,
                                 project: snapshot.project,
                                 projection: requested,
+                                projectless_workspace_selection,
                                 global_skills: Arc::from(
                                     coding_agent::api::embedding::global_skill_catalog(),
                                 ),

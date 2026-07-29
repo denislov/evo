@@ -35,7 +35,7 @@ use gpui::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -168,6 +168,13 @@ enum FocusInputModality {
     Pointer,
 }
 
+#[derive(Debug)]
+enum ProjectDirectoryPickerOutcome {
+    Selected(Vec<PathBuf>),
+    Cancelled,
+    Failed,
+}
+
 impl ComposerRunningMode {
     const fn submission_kind(self) -> ComposerSubmissionKind {
         match self {
@@ -247,6 +254,7 @@ struct ConversationFullMessageView {
 pub(super) struct SessionWorkspace {
     project: CodingAgentEmbeddingSnapshot,
     projection: Option<DesktopProjection>,
+    draft_workspace_selection: CodingAgentWorkspaceSelection,
     preference_notice: Option<String>,
     preference_notice_revision: u64,
     conversation_controller: ConversationController,
@@ -261,6 +269,7 @@ pub(super) struct SessionWorkspace {
 }
 
 impl SessionWorkspace {
+    #[cfg(test)]
     fn new(
         project: CodingAgentEmbeddingSnapshot,
         projection: Option<DesktopProjection>,
@@ -283,10 +292,30 @@ impl SessionWorkspace {
         command_ledger: DesktopCommandLedger,
         thinking_selection: DesktopThinkingLevel,
     ) -> Self {
+        let draft_workspace_selection = workspace_selection_from_embedding(&project);
+        Self::new_home_with_thinking(
+            project,
+            projection,
+            preference_notice,
+            command_ledger,
+            thinking_selection,
+            draft_workspace_selection,
+        )
+    }
+
+    fn new_home_with_thinking(
+        project: CodingAgentEmbeddingSnapshot,
+        projection: Option<DesktopProjection>,
+        preference_notice: Option<String>,
+        command_ledger: DesktopCommandLedger,
+        thinking_selection: DesktopThinkingLevel,
+        draft_workspace_selection: CodingAgentWorkspaceSelection,
+    ) -> Self {
         let preference_notice_revision = u64::from(preference_notice.is_some());
         Self {
             project,
             projection,
+            draft_workspace_selection,
             preference_notice,
             preference_notice_revision,
             conversation_controller: ConversationController::default(),
@@ -312,30 +341,38 @@ impl SessionWorkspace {
         if let Some(projection) = self.projection.as_ref() {
             return DesktopPromptTarget::existing(projection.snapshot().session.session_id.clone());
         }
-        let workspace = match self
+        DesktopPromptTarget::new(
+            self.draft_workspace_selection.clone(),
+            self.project.selected_model_id.clone(),
+            self.project.default_agent_profile_id.as_str(),
+        )
+    }
+
+    fn project_directory(&self) -> Option<&Path> {
+        if self.projection.is_none() {
+            return match &self.draft_workspace_selection {
+                CodingAgentWorkspaceSelection::Project { cwd } => Some(cwd.as_path()),
+                CodingAgentWorkspaceSelection::Projectless { .. } => None,
+            };
+        }
+        match self
             .project
             .workspace
             .as_ref()
             .map(|workspace| &workspace.scope)
         {
-            Some(CodingAgentWorkspaceScope::Project { cwd }) => {
-                CodingAgentWorkspaceSelection::project(cwd.clone())
-            }
-            Some(CodingAgentWorkspaceScope::Projectless { workspace_id }) => {
-                CodingAgentWorkspaceSelection::projectless(workspace_id.clone())
-            }
-            Some(CodingAgentWorkspaceScope::Legacy { cwd: Some(cwd) }) => {
-                CodingAgentWorkspaceSelection::project(cwd.clone())
-            }
-            Some(CodingAgentWorkspaceScope::Legacy { cwd: None }) | None => {
-                CodingAgentWorkspaceSelection::project(self.project.cwd.clone())
-            }
-        };
-        DesktopPromptTarget::new(
-            workspace,
-            self.project.selected_model_id.clone(),
-            self.project.default_agent_profile_id.as_str(),
-        )
+            Some(CodingAgentWorkspaceScope::Project { cwd })
+            | Some(CodingAgentWorkspaceScope::Legacy { cwd: Some(cwd) }) => Some(cwd.as_path()),
+            Some(CodingAgentWorkspaceScope::Projectless { .. })
+            | Some(CodingAgentWorkspaceScope::Legacy { cwd: None }) => None,
+            None => Some(self.project.cwd.as_path()),
+        }
+    }
+
+    fn project_directory_editable(&self) -> bool {
+        self.projection.is_none()
+            && matches!(self.composer.admission(), ComposerAdmission::Idle)
+            && self.composer.submitted().is_none()
     }
 
     fn runtime_owner_target(&self) -> DesktopRuntimeOwnerTarget {
@@ -349,6 +386,23 @@ impl SessionWorkspace {
     fn set_preference_notice(&mut self, message: String) {
         self.preference_notice = Some(message);
         self.preference_notice_revision = self.preference_notice_revision.wrapping_add(1).max(1);
+    }
+}
+
+fn workspace_selection_from_embedding(
+    project: &CodingAgentEmbeddingSnapshot,
+) -> CodingAgentWorkspaceSelection {
+    match project.workspace.as_ref().map(|workspace| &workspace.scope) {
+        Some(CodingAgentWorkspaceScope::Project { cwd })
+        | Some(CodingAgentWorkspaceScope::Legacy { cwd: Some(cwd) }) => {
+            CodingAgentWorkspaceSelection::project(cwd.clone())
+        }
+        Some(CodingAgentWorkspaceScope::Projectless { workspace_id }) => {
+            CodingAgentWorkspaceSelection::projectless(workspace_id.clone())
+        }
+        Some(CodingAgentWorkspaceScope::Legacy { cwd: None }) | None => {
+            CodingAgentWorkspaceSelection::project(project.cwd.clone())
+        }
     }
 }
 
@@ -425,6 +479,8 @@ pub(super) struct NativeShell {
     runtime: Option<DesktopRuntimeCommandHandle>,
     runtime_updates: VecDeque<desktop::runtime::DesktopRuntimeUpdate>,
     next_command_id: u64,
+    home_project: CodingAgentEmbeddingSnapshot,
+    projectless_workspace_selection: CodingAgentWorkspaceSelection,
     active_workspace: SessionWorkspace,
     workspaces: HashMap<String, SessionWorkspace>,
     global_skills: Arc<[CodingAgentResourceCommand]>,
@@ -484,6 +540,7 @@ pub(super) struct NativeShellInit {
     pub(super) runtime: DesktopRuntimeBridge,
     pub(super) project: CodingAgentEmbeddingSnapshot,
     pub(super) projection: Option<DesktopProjection>,
+    pub(super) projectless_workspace_selection: CodingAgentWorkspaceSelection,
     pub(super) global_skills: Arc<[CodingAgentResourceCommand]>,
     pub(super) preferences: DesktopPreferences,
     pub(super) preference_writer: Option<PreferenceWriter>,
@@ -497,12 +554,20 @@ impl NativeShell {
             runtime,
             project,
             projection,
+            projectless_workspace_selection,
             global_skills,
             preferences,
             preference_writer,
             mut preference_notice,
             initial_session_id,
         } = init;
+        assert!(
+            matches!(
+                &projectless_workspace_selection,
+                CodingAgentWorkspaceSelection::Projectless { .. }
+            ),
+            "the desktop Home clear target must be a managed Projectless workspace"
+        );
         let (runtime_commands, mut runtime_events, runtime_shutdown) = runtime.into_parts();
         let mut command_ledger = DesktopCommandLedger::default();
         if let Some(session_id) = initial_session_id {
@@ -668,6 +733,12 @@ impl NativeShell {
                     ComposerPaneEvent::RemoveAttachment(index) => {
                         this.remove_composer_attachment(*index, cx);
                     }
+                    ComposerPaneEvent::ChooseProjectDirectory => {
+                        this.choose_project_directory(cx);
+                    }
+                    ComposerPaneEvent::ClearProjectDirectory => {
+                        this.clear_project_directory(cx);
+                    }
                     ComposerPaneEvent::SubmitPrimary => {
                         if !this.root_action_blocked_by_modal(window, cx) {
                             this.submit_primary_composer(cx);
@@ -768,17 +839,31 @@ impl NativeShell {
                 preferences.thinking_level_for_session(&projection.snapshot().session.session_id)
             })
             .unwrap_or_default();
-        let active_workspace = SessionWorkspace::new_with_thinking(
-            project,
-            projection,
-            preference_notice,
-            command_ledger,
-            thinking_selection,
-        );
+        let home_project = project.clone();
+        let active_workspace = if projection.is_none() {
+            SessionWorkspace::new_home_with_thinking(
+                project,
+                projection,
+                preference_notice,
+                command_ledger,
+                thinking_selection,
+                projectless_workspace_selection.clone(),
+            )
+        } else {
+            SessionWorkspace::new_with_thinking(
+                project,
+                projection,
+                preference_notice,
+                command_ledger,
+                thinking_selection,
+            )
+        };
         let shell = Self {
             runtime: Some(runtime_commands),
             runtime_updates: VecDeque::new(),
             next_command_id,
+            home_project,
+            projectless_workspace_selection,
             active_workspace,
             workspaces: HashMap::with_capacity(MAX_SESSION_WORKSPACES.saturating_sub(1)),
             global_skills,
@@ -977,12 +1062,13 @@ impl NativeShell {
         if self.active_workspace.session_id() != HOME_COMPOSER_SESSION_KEY
             && !self.swap_active_workspace(HOME_COMPOSER_SESSION_KEY)
         {
-            let home = SessionWorkspace::new_with_thinking(
-                self.project.clone(),
+            let home = SessionWorkspace::new_home_with_thinking(
+                self.home_project.clone(),
                 None,
                 None,
                 DesktopCommandLedger::default(),
                 self.thinking_selection,
+                self.projectless_workspace_selection.clone(),
             );
             let previous = std::mem::replace(&mut self.active_workspace, home);
             self.workspaces
@@ -1122,13 +1208,14 @@ impl NativeShell {
             let _ = self.swap_active_workspace(&next_session_id);
             self.workspaces.remove(session_id);
         } else {
-            let project = self.project.clone();
             let command_ledger = std::mem::take(&mut self.active_workspace.command_ledger);
-            self.active_workspace = SessionWorkspace::new(
-                project,
+            self.active_workspace = SessionWorkspace::new_home_with_thinking(
+                self.home_project.clone(),
                 None,
                 Some("Closed the last open session.".into()),
                 command_ledger,
+                DesktopThinkingLevel::Default,
+                self.projectless_workspace_selection.clone(),
             );
         }
     }
@@ -1902,6 +1989,7 @@ impl NativeShell {
                     _ => None,
                 } {
                     self.project = metadata.project.clone();
+                    self.home_project = metadata.project.clone();
                 }
             }
             if creates_session_from_prompt && self.projection.is_some() {
@@ -2477,6 +2565,89 @@ impl NativeShell {
             }
         })
         .detach();
+    }
+
+    fn choose_project_directory(&mut self, cx: &mut Context<Self>) {
+        if !self.active_workspace.project_directory_editable() {
+            return;
+        }
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a project directory".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let outcome = match selection.await {
+                Ok(Ok(Some(paths))) => ProjectDirectoryPickerOutcome::Selected(paths),
+                Ok(Ok(None)) => ProjectDirectoryPickerOutcome::Cancelled,
+                Ok(Err(_)) | Err(_) => ProjectDirectoryPickerOutcome::Failed,
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.apply_project_directory_picker_outcome(outcome, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn apply_project_directory_picker_outcome(
+        &mut self,
+        outcome: ProjectDirectoryPickerOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_workspace.project_directory_editable() {
+            return;
+        }
+        match outcome {
+            ProjectDirectoryPickerOutcome::Selected(paths) => {
+                let mut paths = paths.into_iter();
+                let Some(path) = paths.next() else {
+                    self.set_preference_notice(
+                        "The directory picker returned no project directory.".into(),
+                    );
+                    self.notify_toast_host(cx);
+                    cx.notify();
+                    return;
+                };
+                if paths.next().is_some() {
+                    self.set_preference_notice(
+                        "The directory picker returned more than one project directory.".into(),
+                    );
+                    self.notify_toast_host(cx);
+                    cx.notify();
+                    return;
+                }
+                let _ = self.set_project_directory(path, cx);
+            }
+            ProjectDirectoryPickerOutcome::Cancelled => {}
+            ProjectDirectoryPickerOutcome::Failed => {
+                self.set_preference_notice("The directory picker could not be opened.".into());
+                self.notify_toast_host(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    fn set_project_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) -> bool {
+        if !self.active_workspace.project_directory_editable() {
+            return false;
+        }
+        self.active_workspace.draft_workspace_selection =
+            CodingAgentWorkspaceSelection::project(path);
+        self.notify_composer_pane(cx);
+        cx.notify();
+        true
+    }
+
+    fn clear_project_directory(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.active_workspace.project_directory_editable() {
+            return false;
+        }
+        self.active_workspace.draft_workspace_selection =
+            self.projectless_workspace_selection.clone();
+        self.notify_composer_pane(cx);
+        cx.notify();
+        true
     }
 
     fn add_composer_attachments(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -4114,26 +4285,17 @@ impl NativeShell {
             matches!(self.composer.admission(), ComposerAdmission::Pending { .. });
         let awaiting_prompt_start = self.composer.submitted().is_some() && !composer_running;
         let attachment_disabled_reason = self.composer_attachment_disabled_reason();
-        let project_directory_state = if composer_pending || awaiting_prompt_start {
-            desktop_controls::DesktopProjectDirectoryState::Pending
-        } else if self.projection.is_some() {
+        let project_directory_state = if self.projection.is_some() {
             desktop_controls::DesktopProjectDirectoryState::Locked
+        } else if !self.active_workspace.project_directory_editable()
+            || composer_pending
+            || awaiting_prompt_start
+        {
+            desktop_controls::DesktopProjectDirectoryState::Pending
         } else {
             desktop_controls::DesktopProjectDirectoryState::Editable
         };
-        let project_directory_path = match self
-            .project
-            .workspace
-            .as_ref()
-            .map(|workspace| &workspace.scope)
-        {
-            Some(CodingAgentWorkspaceScope::Project { cwd })
-            | Some(CodingAgentWorkspaceScope::Legacy { cwd: Some(cwd) }) => Some(cwd.as_path()),
-            Some(CodingAgentWorkspaceScope::Projectless { .. })
-            | Some(CodingAgentWorkspaceScope::Legacy { cwd: None }) => None,
-            None if self.projection.is_some() => Some(self.project.cwd.as_path()),
-            None => None,
-        };
+        let project_directory_path = self.active_workspace.project_directory();
         ComposerPaneViewModel {
             composer_pending,
             composer_running,
@@ -4148,6 +4310,7 @@ impl NativeShell {
                         .unwrap_or_else(|| "无项目".into()),
                 ),
                 state: project_directory_state,
+                is_projectless: project_directory_path.is_none(),
             },
             attachments: self
                 .composer_attachments
@@ -4901,9 +5064,7 @@ fn safe_runtime_rejection_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::borrow::Cow;
-    use std::cell::RefCell;
-    use std::collections::HashSet;
+    use std::{borrow::Cow, cell::RefCell, collections::HashSet, fs};
 
     use desktop::conversation::{
         ConversationItemKey, ConversationItemKind, ConversationRowRenderCache,
@@ -5234,6 +5395,9 @@ mod tests {
                         runtime,
                         project: projection.project().clone(),
                         projection: Some(projection),
+                        projectless_workspace_selection: CodingAgentWorkspaceSelection::projectless(
+                            "workspace-native-fixture",
+                        ),
                         global_skills: visual_global_skills(),
                         preferences,
                         preference_writer: None,
@@ -5286,6 +5450,9 @@ mod tests {
                         runtime,
                         project,
                         projection: None,
+                        projectless_workspace_selection: CodingAgentWorkspaceSelection::projectless(
+                            "workspace-native-fixture",
+                        ),
                         global_skills: visual_global_skills(),
                         preferences,
                         preference_writer: None,
@@ -8498,6 +8665,296 @@ mod tests {
                 ],
             )]
         );
+    }
+
+    #[gpui::test]
+    fn project_directory_menu_chooses_replaces_cancels_and_clears(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let first_root = tempfile::tempdir().expect("first picker fixture is created");
+        let first = first_root.path().join("第一个项目");
+        fs::create_dir(&first).expect("first project directory is created");
+        let second_root = tempfile::tempdir().expect("second picker fixture is created");
+        let second = second_root.path().join("替换后的项目");
+        fs::create_dir(&second).expect("second project directory is created");
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        for selected in [&first, &second] {
+            let selector = cx
+                .debug_bounds("desktop-hit-project-directory")
+                .expect("Home exposes the project directory selector");
+            cx.simulate_click(selector.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            choose_popup_item(cx, 0);
+            assert!(cx.did_prompt_for_paths());
+            let selected = selected.clone();
+            cx.simulate_path_prompt_response(|options| {
+                assert!(!options.files);
+                assert!(options.directories);
+                assert!(!options.multiple);
+                assert_eq!(
+                    options.prompt.as_deref(),
+                    Some("Choose a project directory")
+                );
+                Some(vec![selected])
+            });
+            cx.run_until_parked();
+        }
+
+        assert_eq!(
+            shell.read_with(cx, |shell, _| {
+                shell.active_workspace.draft_workspace_selection.clone()
+            }),
+            CodingAgentWorkspaceSelection::project(second.clone())
+        );
+
+        let selector = cx
+            .debug_bounds("desktop-hit-project-directory")
+            .expect("selected project remains replaceable");
+        cx.simulate_click(selector.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        choose_popup_item(cx, 0);
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| {
+                shell.active_workspace.draft_workspace_selection.clone()
+            }),
+            CodingAgentWorkspaceSelection::project(second)
+        );
+
+        let selector = cx
+            .debug_bounds("desktop-hit-project-directory")
+            .expect("selected project exposes the clear option");
+        cx.simulate_click(selector.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        choose_popup_item(cx, 1);
+        assert!(matches!(
+            shell.read_with(cx, |shell, _| {
+                shell.active_workspace.draft_workspace_selection.clone()
+            }),
+            CodingAgentWorkspaceSelection::Projectless { .. }
+        ));
+        assert_eq!(
+            shell.read_with(cx, |shell, _| {
+                shell.composer_pane_view_model().project_directory.value
+            }),
+            Arc::<str>::from("无项目")
+        );
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [],
+            "project selection remains client-local until prompt admission"
+        );
+    }
+
+    #[gpui::test]
+    fn project_directory_picker_failures_are_bounded_and_do_not_replace_selection(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, cx| {
+            let original = PathBuf::from("/kept/project");
+            assert!(shell.set_project_directory(original.clone(), cx));
+            shell.apply_project_directory_picker_outcome(
+                ProjectDirectoryPickerOutcome::Selected(vec![
+                    PathBuf::from("/unexpected/one"),
+                    PathBuf::from("/unexpected/two"),
+                ]),
+                cx,
+            );
+            assert_eq!(
+                shell.active_workspace.draft_workspace_selection,
+                CodingAgentWorkspaceSelection::project(original.clone())
+            );
+            assert!(
+                shell
+                    .preference_notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("more than one"))
+            );
+
+            shell.apply_project_directory_picker_outcome(ProjectDirectoryPickerOutcome::Failed, cx);
+            assert_eq!(
+                shell.active_workspace.draft_workspace_selection,
+                CodingAgentWorkspaceSelection::project(original)
+            );
+            assert_eq!(
+                shell.preference_notice.as_deref(),
+                Some("The directory picker could not be opened.")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn prompt_admission_clones_project_selection_and_blocks_late_mutation(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let selected = tempfile::tempdir().expect("selected project fixture is created");
+        let replacement = tempfile::tempdir().expect("replacement project fixture is created");
+        let selected_path = selected.path().to_path_buf();
+        let replacement_path = replacement.path().to_path_buf();
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        shell.update(cx, |shell, cx| {
+            assert!(shell.set_project_directory(selected_path.clone(), cx));
+            shell.composer.edit("freeze this project target");
+            shell.submit_composer(cx);
+            assert!(!shell.set_project_directory(replacement_path, cx));
+            assert!(!shell.clear_project_directory(cx));
+        });
+
+        assert_eq!(
+            runtime_harness.drain_prompts(),
+            [(
+                DesktopPromptTarget::new(
+                    CodingAgentWorkspaceSelection::project(selected_path.clone()),
+                    "test-model",
+                    "default",
+                ),
+                "freeze this project target".into(),
+                None,
+            )]
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, _| {
+                shell.active_workspace.draft_workspace_selection.clone()
+            }),
+            CodingAgentWorkspaceSelection::project(selected_path)
+        );
+    }
+
+    #[gpui::test]
+    fn deleted_selected_project_rejects_submit_but_retains_draft_and_selection(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let selected = tempfile::tempdir().expect("selected project fixture is created");
+        let selected_path = selected.path().to_path_buf();
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        shell.update(cx, |shell, cx| {
+            assert!(shell.set_project_directory(selected_path.clone(), cx));
+            shell.composer.edit("retain after project deletion");
+        });
+        drop(selected);
+        shell.update(cx, |shell, cx| shell.submit_composer(cx));
+
+        assert!(runtime_harness.drain_prompts().is_empty());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.composer.draft(), "retain after project deletion");
+            assert!(matches!(
+                shell.composer.admission(),
+                ComposerAdmission::Idle
+            ));
+            assert!(shell.composer.rejection().is_some());
+            assert_eq!(
+                shell.active_workspace.draft_workspace_selection,
+                CodingAgentWorkspaceSelection::project(selected_path)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn accepted_first_prompt_locks_scope_and_new_conversation_resets_projectless(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let selected = tempfile::tempdir().expect("selected project fixture is created");
+        let selected_path = selected.path().to_path_buf();
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, cx| {
+            assert!(shell.set_project_directory(selected_path.clone(), cx));
+            shell.composer.edit("create the selected project session");
+            let intent = DesktopCommandIntent::Prompt;
+            let command_id = shell
+                .reserve_command(intent)
+                .expect("the Home prompt fits the command ledger");
+            shell
+                .composer
+                .begin_submit(command_id, ComposerSubmissionKind::Prompt)
+                .expect("the Home draft enters admission");
+            let mut snapshot = visual_test_snapshot_for("selected-project-session");
+            snapshot.project.cwd = selected_path.clone();
+            snapshot.project.workspace = Some(
+                CodingAgentWorkspaceSelection::project(selected_path.clone())
+                    .resolve(&snapshot.project.global_config_dir)
+                    .expect("the selected project resolves for the session fixture"),
+            );
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
+                    command_id,
+                    snapshot,
+                },
+            );
+            assert!(shell.poll_runtime(cx));
+            let directory = shell.composer_pane_view_model().project_directory;
+            assert_eq!(
+                directory.value.as_ref(),
+                selected_path.display().to_string()
+            );
+            assert_eq!(
+                directory.state,
+                desktop_controls::DesktopProjectDirectoryState::Locked
+            );
+            assert!(!shell.clear_project_directory(cx));
+        });
+
+        let new_conversation = cx
+            .debug_bounds("desktop-hit-new-conversation")
+            .expect("the Sidebar exposes New conversation");
+        cx.simulate_click(new_conversation.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.projection.is_none());
+            assert!(matches!(
+                shell.active_workspace.draft_workspace_selection,
+                CodingAgentWorkspaceSelection::Projectless { .. }
+            ));
+            assert_eq!(
+                shell.composer_pane_view_model().project_directory.value,
+                Arc::<str>::from("无项目")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn temporarily_opening_a_session_preserves_the_home_project_draft(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        let selected = PathBuf::from("/home/draft/project");
+        shell.update(cx, |shell, cx| {
+            assert!(shell.set_project_directory(selected.clone(), cx));
+            shell.composer.edit("keep the scoped Home draft");
+            let snapshot = visual_test_snapshot_for("temporary-history-session");
+            let projection = DesktopProjection::new(snapshot.clone())
+                .expect("history session fixture is a valid projection");
+            let history = SessionWorkspace::new(
+                snapshot.project,
+                Some(projection),
+                None,
+                DesktopCommandLedger::default(),
+            );
+            let home = std::mem::replace(&mut shell.active_workspace, history);
+            shell
+                .workspaces
+                .insert(HOME_COMPOSER_SESSION_KEY.into(), home);
+
+            assert!(shell.swap_active_workspace(HOME_COMPOSER_SESSION_KEY));
+            assert_eq!(shell.composer.draft(), "keep the scoped Home draft");
+            assert_eq!(
+                shell.active_workspace.draft_workspace_selection,
+                CodingAgentWorkspaceSelection::project(selected)
+            );
+        });
     }
 
     #[gpui::test]

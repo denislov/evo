@@ -36,12 +36,13 @@
 #![allow(dead_code)]
 
 use gpui::{
-    ElementId, IntoElement, ParentElement as _, Role, SharedString, Styled as _, div, prelude::*,
-    px, rgb,
+    Context, ElementId, IntoElement, ParentElement as _, Role, SharedString, Styled as _, Window,
+    div, prelude::*, px, rgb,
 };
 use gpui_component::{
     Disableable as _, IconName, Selectable as _,
     button::{Button, ButtonVariants as _},
+    menu::{DropdownMenu as _, PopupMenu},
 };
 
 use desktop::shell::{SemanticColor, SemanticTheme};
@@ -164,14 +165,13 @@ impl DesktopProjectDirectoryControl {
         }
     }
 
-    pub(super) fn build(self) -> gpui::AnyElement {
+    fn button(&self) -> Button {
         let button_id = (self.id.clone(), "button");
-        let accessible_label = self.accessible_label.clone();
         let visible_value = self.state.visible_value(self.value.as_ref());
         let button = Button::new(button_id)
             .icon(DesktopIcon::ProjectDirectory.name())
             .label(visible_value)
-            .tooltip(accessible_label.clone())
+            .tooltip(self.accessible_label.clone())
             .compact()
             .dropdown_caret(self.state.is_editable())
             .disabled(!self.state.is_editable())
@@ -184,17 +184,37 @@ impl DesktopProjectDirectoryControl {
         } else {
             button.outline()
         };
+        button.debug_selector(|| "desktop-hit-project-directory".into())
+    }
 
+    fn wrap(self, trigger: gpui::AnyElement) -> gpui::AnyElement {
         div()
             .id(self.id)
             .debug_selector(|| "desktop-project-directory-control".into())
             .role(Role::Group)
-            .aria_label(accessible_label)
+            .aria_label(self.accessible_label)
             .min_w_0()
             .max_w(px(280.))
             .overflow_hidden()
-            .child(button.debug_selector(|| "desktop-hit-project-directory".into()))
+            .child(trigger)
             .into_any_element()
+    }
+
+    pub(super) fn build(self) -> gpui::AnyElement {
+        let button = self.button().into_any_element();
+        self.wrap(button)
+    }
+
+    pub(super) fn build_with_menu(
+        self,
+        menu: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> gpui::AnyElement {
+        let trigger = if self.state.is_editable() {
+            self.button().dropdown_menu(menu).into_any_element()
+        } else {
+            self.button().into_any_element()
+        };
+        self.wrap(trigger)
     }
 }
 
