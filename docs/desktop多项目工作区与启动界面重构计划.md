@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -623,6 +623,28 @@ CenterDrawerHost
 完成标准：Anthropic/OpenAI/非 reasoning/包含 null mapping/无 mapping 模型均有定向测试；Desktop 无需依赖 `ai`。
 
 #### CAG-204：按 scope 构建 EmbeddingContext
+
+> 状态：已完成。新增 `CodingAgentEmbeddingOptions::for_workspace` 产品入口，在 context load
+> 前解析 `CodingAgentWorkspaceSelection`，并把 canonical execution cwd、typed scope 和安全
+> overview 固定到 options/snapshot。Project context 读取各自的项目 settings、skills、agent
+> profiles 与 context files；Projectless context 强制 global-config-only，即使受管 scratch 下存在
+> `.evo/settings.toml`、project skill 或 `AGENTS.md` 也不会加载。
+>
+> Durable session root 在 workspace 解析时由全局 settings、`EVO_SESSION_DIR` 或默认全局
+> `sessions` 目录确定，项目 settings 不能按 cwd 重定向它。Direct session、bootstrap、headless
+> prompt 与 session query/hydration 均通过同一个 resolved-workspace 转换点，不再把已解析 scope
+> 退化为裸 `cwd`；model/profile override 继续由 typed options builder 叠加。
+>
+> 过渡债务：`CodingAgentEmbeddingOptions::new(cwd)` 与 snapshot 中可空的 `workspace` 暂时保留，
+> 供尚未迁移的 Desktop 单 context 调用点使用。DSK-611 切换为 `RuntimeSessionWorkspace` 后应删除
+> raw-cwd 构造路径并把 snapshot workspace 收紧为必填；完整计划收敛前必须清偿。
+>
+> Gate：`coding-agent` 785 个 library tests（单线程全量）、14 个 API contract 与严格 Clippy
+> 全部通过；Desktop 243 个 tests、17 个 dependency boundary tests 通过，5 个既有用例保持
+> ignored。`coding-agent` boundary 为 64/67，仍严格保持 DSK-600 登记的 3 个既有失败，没有新增
+> 回归。新增定向验收覆盖两个 Project context 同时加载时 settings/skills/context files 隔离、
+> model/profile override、共享 session root、workspace-filtered overview，以及 Projectless 对 scratch
+> `.evo` 的完全忽略。
 
 工作：
 
