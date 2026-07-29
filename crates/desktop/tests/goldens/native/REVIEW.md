@@ -1,41 +1,18 @@
 # Native visual golden review
 
-## VUI-303 explicit model and Profile dropdowns
+## VUI-304 review note
 
-- Target surface: the conversation header replaces the combined cyclic
-  `Next model` / `Next profile` menu with two independent DropdownMenu
-  controls. Each control names its current value, opens the complete
-  project-snapshot catalog, checks the selected item, and submits the exact
-  model or Profile id. Unsupported model entries remain visible but disabled;
-  Team Profiles are also visible but disabled because the product command sets
-  only the default agent Profile.
-- Wide review: both full labels (`Model` and `Profile`) fit between the stable
-  task identity/status region and the existing panel/action controls. Long
-  values truncate within their own selector; no header control overlaps or
-  changes the transcript, Inspector, or Composer geometry.
-- Medium review: the selectors use the existing compact `M` / `P` labels and
-  keep distinct click targets. Current-value text and chevrons remain visible,
-  while the existing side-panel reduction leaves the conversation width
-  unchanged.
-- Narrow review: the compact selectors, status slot, task identity, panel
-  toggle, and overflow action all remain on one line. The existing Sessions
-  dialog fixture remains modal and bounded; the header does not intersect it.
-- Idle review: wide, medium, and narrow Home fixtures now expose the same
-  selectors before a session exists. The header is labelled `New task`, uses
-  the cwd-free project model/Profile catalog, and stays separate from the Home
-  summary and bottom Composer. This intentional new header accounts for the
-  larger idle-fixture diffs.
-- Long-list behavior: both menus reuse the existing PopupMenu/DropdownMenu
-  primitive and become vertically scrollable above eight entries with a
-  bounded 320 px menu height. No second menu implementation or cyclic fallback
-  remains.
-- Accessibility: each selector has a full accessible label including the
-  current value, preserves the existing keyboard menu navigation, exposes the
-  checked item, and leaves unsupported models disabled instead of allowing an
-  invalid selection. Selection is textual and does not depend on color.
+Target surface: the conversation Header and Composer in active-session and idle/new-task workspaces.
 
-Approved after manual before/after inspection of all ten deterministic native
-fixtures on 2026-07-29 in the pinned X11 native replay environment.
+The thinking-level control moves from the Composer footer into a dedicated Header selector beside model and profile. The Header now communicates that thinking is stable session configuration, while the Composer is limited to prompt entry and submission. Active workspaces use compact `M`, `T`, and `P` labels when docked panels reduce chrome width. Idle wide and medium layouts retain the `New task` identity; narrow layouts hide that redundant identity text while keeping the panel toggle, runtime status, all three selectors, inspector toggle, and overflow action fully visible.
+
+- Wide: model, thinking, and profile remain ordered and bounded with both side panels docked; the Composer gains clean space where its thinking override previously lived.
+- Medium: all three selectors remain on one line with the Sessions panel docked, and the bottom Composer/toasts remain bounded.
+- Narrow: compact selectors remain available without clipping; the Sessions overlay, conversation content, Composer, and toast stack preserve their existing geometry.
+- Idle wide/medium/narrow: the same session-default selector is available before the first prompt, and the Composer no longer duplicates the setting.
+- Accessibility: the new selector has a stable debug/focus target and the accessible label `Select session thinking level; current …`; every fixed choice exposes checked state. The keyboard-focus fixture keeps a visible focus treatment, and the no-color fixture continues to distinguish state without relying on hue. Hiding the narrow identity text removes only duplicated visible chrome; the task heading remains in the Home surface and the panel toggle retains its accessible label.
+
+The authorization and reduced-motion overlays remain bounded and semantically unchanged. All ten after-captures were reviewed against their before images; the differences are limited to the intended Header/Composer ownership change and responsive chrome accommodation.
 
 # Native visual before/after review
 
@@ -43,13 +20,13 @@ Generated from deterministic native GPUI replays. Review the paired images and d
 
 | Fixture | Size | Normalized RMSE | Before | After | Diff |
 | --- | ---: | ---: | --- | --- | --- |
-| `wide` | `2600x1656` | `0.0245363` | `wide-before.png` | `wide-after.png` | `wide-diff.png` |
-| `medium` | `1800x1600` | `0.0251692` | `medium-before.png` | `medium-after.png` | `medium-diff.png` |
-| `narrow` | `1400x1600` | `0.00382332` | `narrow-before.png` | `narrow-after.png` | `narrow-diff.png` |
-| `wide-idle` | `2600x1656` | `0.0749222` | `wide-idle-before.png` | `wide-idle-after.png` | `wide-idle-diff.png` |
-| `medium-idle` | `1800x1600` | `0.0901283` | `medium-idle-before.png` | `medium-idle-after.png` | `medium-idle-diff.png` |
-| `narrow-idle` | `1400x1600` | `0.101382` | `narrow-idle-before.png` | `narrow-idle-after.png` | `narrow-idle-diff.png` |
-| `wide-authorization` | `2600x1656` | `0.00413911` | `wide-authorization-before.png` | `wide-authorization-after.png` | `wide-authorization-diff.png` |
-| `wide-reduced-motion` | `2600x1656` | `0.0245363` | `wide-reduced-motion-before.png` | `wide-reduced-motion-after.png` | `wide-reduced-motion-diff.png` |
-| `wide-keyboard-focus` | `2600x1656` | `0.0245363` | `wide-keyboard-focus-before.png` | `wide-keyboard-focus-after.png` | `wide-keyboard-focus-diff.png` |
-| `wide-no-color` | `2600x1656` | `0.0283238` | `wide-no-color-before.png` | `wide-no-color-after.png` | `wide-no-color-diff.png` |
+| `wide` | `2600x1656` | `0.0312867` | `wide-before.png` | `wide-after.png` | `wide-diff.png` |
+| `medium` | `1800x1600` | `0.0306262` | `medium-before.png` | `medium-after.png` | `medium-diff.png` |
+| `narrow` | `1400x1600` | `0.00467734` | `narrow-before.png` | `narrow-after.png` | `narrow-diff.png` |
+| `wide-idle` | `2600x1656` | `0.0273317` | `wide-idle-before.png` | `wide-idle-after.png` | `wide-idle-diff.png` |
+| `medium-idle` | `1800x1600` | `0.0288516` | `medium-idle-before.png` | `medium-idle-after.png` | `medium-idle-diff.png` |
+| `narrow-idle` | `1400x1600` | `0.0824138` | `narrow-idle-before.png` | `narrow-idle-after.png` | `narrow-idle-diff.png` |
+| `wide-authorization` | `2600x1656` | `0.00411609` | `wide-authorization-before.png` | `wide-authorization-after.png` | `wide-authorization-diff.png` |
+| `wide-reduced-motion` | `2600x1656` | `0.0312867` | `wide-reduced-motion-before.png` | `wide-reduced-motion-after.png` | `wide-reduced-motion-diff.png` |
+| `wide-keyboard-focus` | `2600x1656` | `0.0313403` | `wide-keyboard-focus-before.png` | `wide-keyboard-focus-after.png` | `wide-keyboard-focus-diff.png` |
+| `wide-no-color` | `2600x1656` | `0.0360673` | `wide-no-color-before.png` | `wide-no-color-after.png` | `wide-no-color-diff.png` |

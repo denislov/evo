@@ -1,5 +1,6 @@
 //! Bounded client-local preference persistence for the desktop adapter.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -22,8 +23,36 @@ const DESKTOP_DIRECTORY: &str = "desktop";
 const PREFERENCES_FILE: &str = "preferences.json";
 const SCRATCH_DIRECTORY: &str = "scratch";
 const MAX_WORKSPACE_ID_BYTES: usize = 64;
+const MAX_PERSISTED_SESSION_ID_BYTES: usize = 256;
+const MAX_PERSISTED_SESSION_THINKING_LEVELS: usize = 128;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static WORKSPACE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopThinkingLevel {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    #[default]
+    #[serde(other)]
+    Default,
+}
+
+impl DesktopThinkingLevel {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Default,
+        Self::Off,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+    ];
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +102,8 @@ pub struct DesktopPreferences {
     pub(crate) external_editor: Option<DesktopExternalEditorConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) scratch_workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) session_thinking_levels: BTreeMap<String, DesktopThinkingLevel>,
 }
 
 impl Default for DesktopPreferences {
@@ -88,6 +119,7 @@ impl Default for DesktopPreferences {
             ui_scale: 1.0,
             external_editor: None,
             scratch_workspace_id: None,
+            session_thinking_levels: BTreeMap::new(),
         }
     }
 }
@@ -120,8 +152,49 @@ impl DesktopPreferences {
         {
             self.scratch_workspace_id = None;
         }
+        self.session_thinking_levels.retain(|session_id, level| {
+            valid_persisted_session_id(session_id) && *level != DesktopThinkingLevel::Default
+        });
+        while self.session_thinking_levels.len() > MAX_PERSISTED_SESSION_THINKING_LEVELS {
+            self.session_thinking_levels.pop_last();
+        }
         self
     }
+
+    pub(crate) fn thinking_level_for_session(&self, session_id: &str) -> DesktopThinkingLevel {
+        self.session_thinking_levels
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_thinking_level_for_session(
+        &mut self,
+        session_id: &str,
+        level: DesktopThinkingLevel,
+    ) -> bool {
+        if !valid_persisted_session_id(session_id) {
+            return false;
+        }
+        if level == DesktopThinkingLevel::Default {
+            return self.session_thinking_levels.remove(session_id).is_some();
+        }
+        if self.session_thinking_levels.get(session_id) == Some(&level) {
+            return false;
+        }
+        if !self.session_thinking_levels.contains_key(session_id)
+            && self.session_thinking_levels.len() >= MAX_PERSISTED_SESSION_THINKING_LEVELS
+        {
+            self.session_thinking_levels.pop_first();
+        }
+        self.session_thinking_levels
+            .insert(session_id.to_owned(), level);
+        true
+    }
+}
+
+fn valid_persisted_session_id(session_id: &str) -> bool {
+    !session_id.is_empty() && session_id.len() <= MAX_PERSISTED_SESSION_ID_BYTES
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -670,6 +743,7 @@ mod tests {
             ui_scale: 99.0,
             external_editor: None,
             scratch_workspace_id: Some("workspace-stable".into()),
+            session_thinking_levels: BTreeMap::new(),
         };
 
         let saved = store.save(&preferences).unwrap();
@@ -707,6 +781,73 @@ mod tests {
         assert_eq!(preferences.sessions_panel_width, SESSION_PANEL_WIDTH);
         assert_eq!(preferences.context_panel_width, CONTEXT_PANEL_WIDTH);
         assert!(preferences.scratch_workspace_id.is_none());
+        assert!(preferences.session_thinking_levels.is_empty());
+    }
+
+    #[test]
+    fn session_thinking_preferences_are_sparse_bounded_and_forward_tolerant() {
+        let mut preferences = DesktopPreferences::default();
+        assert_eq!(
+            preferences.thinking_level_for_session("session-a"),
+            DesktopThinkingLevel::Default
+        );
+        assert!(
+            preferences.set_thinking_level_for_session("session-a", DesktopThinkingLevel::High)
+        );
+        assert!(
+            !preferences.set_thinking_level_for_session("session-a", DesktopThinkingLevel::High)
+        );
+        assert_eq!(
+            preferences.thinking_level_for_session("session-a"),
+            DesktopThinkingLevel::High
+        );
+        assert!(
+            preferences.set_thinking_level_for_session("session-a", DesktopThinkingLevel::Default)
+        );
+        assert!(
+            !preferences
+                .session_thinking_levels
+                .contains_key("session-a")
+        );
+
+        for index in 0..=MAX_PERSISTED_SESSION_THINKING_LEVELS {
+            assert!(preferences.set_thinking_level_for_session(
+                &format!("session-{index:03}"),
+                DesktopThinkingLevel::Low
+            ));
+        }
+        assert_eq!(
+            preferences.session_thinking_levels.len(),
+            MAX_PERSISTED_SESSION_THINKING_LEVELS
+        );
+        assert!(preferences.session_thinking_levels.contains_key(&format!(
+            "session-{MAX_PERSISTED_SESSION_THINKING_LEVELS:03}"
+        )));
+        assert!(!preferences.set_thinking_level_for_session("", DesktopThinkingLevel::XHigh));
+        assert!(!preferences.set_thinking_level_for_session(
+            &"x".repeat(MAX_PERSISTED_SESSION_ID_BYTES + 1),
+            DesktopThinkingLevel::XHigh
+        ));
+        let temp = tempfile::tempdir().unwrap();
+        let store = PreferenceStore::new(temp.path());
+        let saved = store.save(&preferences).unwrap();
+        assert_eq!(store.load().unwrap().preferences, saved);
+
+        let future = serde_json::json!({
+            "schema_version": PREFERENCES_SCHEMA_VERSION,
+            "window": {
+                "x": 0, "y": 0, "width": 1200, "height": 800, "maximized": false
+            },
+            "sessions_panel_visible": true,
+            "context_panel_visible": true,
+            "reduced_motion": false,
+            "ui_scale": 1.0,
+            "session_thinking_levels": {"future-session": "future-level"}
+        });
+        let normalized = serde_json::from_value::<DesktopPreferences>(future)
+            .unwrap()
+            .normalized();
+        assert!(normalized.session_thinking_levels.is_empty());
     }
 
     #[test]

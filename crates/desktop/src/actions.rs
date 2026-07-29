@@ -170,9 +170,9 @@ pub(crate) const PALETTE_ENTRIES: &[DesktopPaletteEntry] = &[
     ),
     entry(
         DesktopPaletteCommand::CycleThinking,
-        "Cycle thinking level",
+        "Cycle session thinking level",
         None,
-        "Cycle the composer thinking override",
+        "Cycle the active session thinking level",
     ),
     entry(
         DesktopPaletteCommand::ReviewNextFile,

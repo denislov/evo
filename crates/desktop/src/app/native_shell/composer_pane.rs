@@ -29,7 +29,6 @@ pub(super) enum ComposerPaneEvent {
     Submit,
     SubmitRunning,
     SetRunningMode(ComposerRunningMode),
-    CycleThinking,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +38,6 @@ pub(super) struct ComposerPaneViewModel {
     pub(super) awaiting_prompt_start: bool,
     pub(super) authorization_pending: bool,
     pub(super) running_mode: ComposerRunningMode,
-    pub(super) thinking: Arc<str>,
     pub(super) rejection: Option<Arc<str>>,
     pub(super) keyboard_focus_visible: bool,
 }
@@ -179,7 +177,6 @@ impl Render for ComposerPane {
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
         let authorization_pending = view_model.authorization_pending;
         let running_mode = view_model.running_mode;
-        let thinking = view_model.thinking;
         let rejection = view_model.rejection;
         let keyboard_focus_visible = view_model.keyboard_focus_visible;
         let composer_disabled = composer_pending || awaiting_prompt_start;
@@ -289,18 +286,6 @@ impl Render for ComposerPane {
                                     .flex()
                                     .items_center()
                                     .gap_token(DesignSpace::Xs)
-                                    .child(
-                                        DesktopSelector::new(
-                                            "cycle-thinking",
-                                            format!("T {thinking}"),
-                                            "Cycle the composer thinking override",
-                                        )
-                                        .build()
-                                        .debug_selector(|| "desktop-composer-thinking".into())
-                                        .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.emit(ComposerPaneEvent::CycleThinking);
-                                        })),
-                                    )
                                     .when(composer_running, |actions| {
                                         actions.child(
                                             DesktopSelector::new(

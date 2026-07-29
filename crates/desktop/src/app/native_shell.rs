@@ -14,7 +14,7 @@ use desktop::conversation::{
 #[cfg(test)]
 use desktop::conversation::{TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, conversation_block_height};
 use desktop::file_review::{DesktopFileReviewDocument, MAX_VISIBLE_FILE_CHANGES};
-use desktop::preferences::{DesktopPreferences, PreferenceWriter};
+use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel, PreferenceWriter};
 use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
 use desktop::runtime::{
     DesktopRecoveryAction, DesktopRecoveryIdentity, DesktopRuntimeBridge,
@@ -136,17 +136,6 @@ fn conversation_block_visual(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DesktopThinkingSelection {
-    Default,
-    Off,
-    Minimal,
-    Low,
-    Medium,
-    High,
-    XHigh,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum ComposerRunningMode {
     #[default]
@@ -192,7 +181,7 @@ impl ComposerRunningMode {
     }
 }
 
-impl DesktopThinkingSelection {
+impl DesktopThinkingLevel {
     const fn next(self) -> Self {
         match self {
             Self::Default => Self::Off,
@@ -272,7 +261,7 @@ pub(super) struct SessionWorkspace {
     composer_needs_sync: bool,
     composer_running_mode: ComposerRunningMode,
     command_ledger: DesktopCommandLedger,
-    thinking_selection: DesktopThinkingSelection,
+    thinking_selection: DesktopThinkingLevel,
     file_review: Arc<DesktopFileReviewState>,
 }
 
@@ -282,6 +271,22 @@ impl SessionWorkspace {
         projection: Option<DesktopProjection>,
         preference_notice: Option<String>,
         command_ledger: DesktopCommandLedger,
+    ) -> Self {
+        Self::new_with_thinking(
+            project,
+            projection,
+            preference_notice,
+            command_ledger,
+            DesktopThinkingLevel::Default,
+        )
+    }
+
+    fn new_with_thinking(
+        project: CodingAgentEmbeddingSnapshot,
+        projection: Option<DesktopProjection>,
+        preference_notice: Option<String>,
+        command_ledger: DesktopCommandLedger,
+        thinking_selection: DesktopThinkingLevel,
     ) -> Self {
         let preference_notice_revision = u64::from(preference_notice.is_some());
         Self {
@@ -295,7 +300,7 @@ impl SessionWorkspace {
             composer_needs_sync: false,
             composer_running_mode: ComposerRunningMode::default(),
             command_ledger,
-            thinking_selection: DesktopThinkingSelection::Default,
+            thinking_selection,
             file_review: Arc::new(DesktopFileReviewState::default()),
         }
     }
@@ -585,6 +590,9 @@ impl NativeShell {
                             profile_id.to_string(),
                             cx,
                         ),
+                    ConversationHeaderEvent::SelectThinking(level) => {
+                        this.select_thinking_level(*level, cx);
+                    }
                     ConversationHeaderEvent::Abort => this.abort_active_operation(cx),
                 },
             ),
@@ -632,7 +640,6 @@ impl NativeShell {
                     ComposerPaneEvent::SetRunningMode(mode) => {
                         this.set_active_composer_running_mode(*mode, cx);
                     }
-                    ComposerPaneEvent::CycleThinking => this.cycle_thinking_selection(cx),
                 },
             ),
             cx.subscribe_in(
@@ -719,8 +726,19 @@ impl NativeShell {
         .detach();
 
         let next_command_id = command_ledger.next_command_id();
-        let active_workspace =
-            SessionWorkspace::new(project, projection, preference_notice, command_ledger);
+        let thinking_selection = projection
+            .as_ref()
+            .map(|projection| {
+                preferences.thinking_level_for_session(&projection.snapshot().session.session_id)
+            })
+            .unwrap_or_default();
+        let active_workspace = SessionWorkspace::new_with_thinking(
+            project,
+            projection,
+            preference_notice,
+            command_ledger,
+            thinking_selection,
+        );
         let shell = Self {
             runtime: Some(runtime_commands),
             runtime_updates: VecDeque::new(),
@@ -881,6 +899,7 @@ impl NativeShell {
     fn install_hydrated_workspace(
         &mut self,
         snapshot: &desktop::runtime::DesktopRuntimeHydratedSnapshot,
+        inherit_home_thinking: bool,
     ) -> bool {
         let target_session_id = hydrated_session_id(snapshot);
         if self.active_workspace.session_id() == target_session_id {
@@ -905,18 +924,29 @@ impl NativeShell {
                 return false;
             }
         };
+        let thinking_selection = if inherit_home_thinking
+            && self.active_workspace.session_id() == HOME_COMPOSER_SESSION_KEY
+        {
+            self.thinking_selection
+        } else {
+            self.preferences
+                .thinking_level_for_session(target_session_id)
+        };
         if self.active_workspace.session_id() == HOME_COMPOSER_SESSION_KEY
             && self.workspaces.is_empty()
         {
             self.project = snapshot.project.clone();
             self.projection = Some(projection);
+            self.thinking_selection = thinking_selection;
+            self.remember_thinking_selection(target_session_id, thinking_selection);
             return true;
         }
-        let target = SessionWorkspace::new(
+        let target = SessionWorkspace::new_with_thinking(
             snapshot.project.clone(),
             Some(projection),
             None,
             DesktopCommandLedger::default(),
+            thinking_selection,
         );
         let previous = std::mem::replace(&mut self.active_workspace, target);
         self.workspaces
@@ -1267,6 +1297,17 @@ impl NativeShell {
                 &update,
                 desktop::runtime::DesktopRuntimeUpdate::SessionChanged { .. }
             );
+            let inherit_home_thinking = match &update {
+                desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession { .. }
+                | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
+                    snapshot: Some(_),
+                    ..
+                } => true,
+                desktop::runtime::DesktopRuntimeUpdate::SessionChanged { command_id, .. } => self
+                    .command_ledger
+                    .matches(*command_id, &DesktopCommandIntent::CreateSession),
+                _ => false,
+            };
             let mut background_update = false;
             if !is_session_change
                 && let Some(target_session_id) = self.runtime_update_session_id(&update)
@@ -1275,7 +1316,7 @@ impl NativeShell {
                 if self.swap_active_workspace(&target_session_id) {
                     background_update = true;
                 } else if let Some(snapshot) = runtime_update_hydrated_snapshot(&update)
-                    && self.install_hydrated_workspace(snapshot)
+                    && self.install_hydrated_workspace(snapshot, inherit_home_thinking)
                 {
                     background_update = foreground_session_id != HOME_COMPOSER_SESSION_KEY;
                 }
@@ -1318,7 +1359,7 @@ impl NativeShell {
             let projection_completions = ProjectionCommandCompletions::capture(self, &update);
             if let desktop::runtime::DesktopRuntimeUpdate::SessionChanged { snapshot, .. } = &update
                 && self.active_workspace.session_id() != hydrated_session_id(snapshot)
-                && !self.install_hydrated_workspace(snapshot)
+                && !self.install_hydrated_workspace(snapshot, inherit_home_thinking)
             {
                 let _ = projection_completions.reconcile(self, false, cx);
                 applied += 1;
@@ -2037,6 +2078,15 @@ impl NativeShell {
         }
     }
 
+    fn remember_thinking_selection(&mut self, session_id: &str, selection: DesktopThinkingLevel) {
+        if self
+            .preferences
+            .set_thinking_level_for_session(session_id, selection)
+        {
+            self.schedule_preferences();
+        }
+    }
+
     fn reconcile_file_review(&mut self) {
         let request = match self.file_review.as_ref() {
             DesktopFileReviewState::Empty => return,
@@ -2561,16 +2611,38 @@ impl NativeShell {
         cx.notify();
     }
 
-    fn cycle_thinking_selection(&mut self, cx: &mut Context<Self>) {
-        self.thinking_selection = self.thinking_selection.next();
+    fn select_thinking_level(&mut self, selection: DesktopThinkingLevel, cx: &mut Context<Self>) {
+        if self.thinking_selection == selection {
+            return;
+        }
+        self.thinking_selection = selection;
+        let session_id = self
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.clone());
+        if let Some(session_id) = session_id.as_deref() {
+            self.remember_thinking_selection(session_id, selection);
+        }
         let label = self
             .thinking_selection
             .label(self.project.settings.default_thinking_level.as_deref());
-        self.set_preference_notice(format!("Future prompts will use thinking {label}."));
-        self.notify_composer_pane(cx);
+        self.set_preference_notice(format!(
+            "{} will use thinking {label}.",
+            if session_id.is_some() {
+                "This session"
+            } else {
+                "The next session"
+            }
+        ));
         self.notify_toast_host(cx);
         self.notify_conversation_header(cx);
+        self.notify_home_pane(cx);
+        self.push_inspector_pane_view_model(cx);
         cx.notify();
+    }
+
+    fn cycle_thinking_selection(&mut self, cx: &mut Context<Self>) {
+        self.select_thinking_level(self.thinking_selection.next(), cx);
     }
 
     fn decide_tool_authorization(
@@ -3755,11 +3827,7 @@ impl NativeShell {
 
     fn composer_pane_view_model(&self) -> ComposerPaneViewModel {
         let snapshot = self.projection.as_ref().map(DesktopProjection::snapshot);
-        let project = &self.project;
         let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
-        let thinking = self
-            .thinking_selection
-            .label(project.settings.default_thinking_level.as_deref());
         ComposerPaneViewModel {
             composer_pending: matches!(
                 self.composer.admission(),
@@ -3770,7 +3838,6 @@ impl NativeShell {
             authorization_pending: snapshot
                 .is_some_and(|snapshot| !snapshot.pending_authorizations.is_empty()),
             running_mode: self.active_composer_running_mode(),
-            thinking: Arc::from(truncate_label(&thinking, 12)),
             rejection: self.composer.rejection().map(Arc::from),
             keyboard_focus_visible: self.keyboard_focus_visible(),
         }
@@ -4167,6 +4234,13 @@ impl NativeShell {
                 || selection_pending,
             model: Arc::from(truncate_label(model, 10)),
             profile: Arc::from(truncate_label(profile, 9)),
+            thinking: Arc::from(truncate_label(
+                &self
+                    .thinking_selection
+                    .label(project.settings.default_thinking_level.as_deref()),
+                12,
+            )),
+            thinking_selection: self.thinking_selection,
             current_model_id: Arc::from(current_model_id),
             current_profile_id: Arc::from(current_profile_id),
             model_options: model_options.into(),
@@ -4754,6 +4828,15 @@ mod tests {
         runtime: DesktopRuntimeBridge,
         projection: DesktopProjection,
     ) -> (gpui::Entity<NativeShell>, &mut gpui::VisualTestContext) {
+        add_visual_shell_with_preferences(cx, runtime, projection, DesktopPreferences::default())
+    }
+
+    fn add_visual_shell_with_preferences(
+        cx: &mut TestAppContext,
+        runtime: DesktopRuntimeBridge,
+        projection: DesktopProjection,
+        preferences: DesktopPreferences,
+    ) -> (gpui::Entity<NativeShell>, &mut gpui::VisualTestContext) {
         let shell_slot = Rc::new(RefCell::new(None));
         let shell_slot_for_window = Rc::clone(&shell_slot);
         let (_, visual_cx) = cx.add_window_view(move |window, cx| {
@@ -4764,7 +4847,7 @@ mod tests {
                         project: projection.project().clone(),
                         projection: Some(projection),
                         global_skills: Arc::from([]),
-                        preferences: DesktopPreferences::default(),
+                        preferences,
                         preference_writer: None,
                         preference_notice: None,
                         initial_session_id: None,
@@ -5090,7 +5173,7 @@ mod tests {
             }
             assert_eq!(shell.workspaces.len() + 1, MAX_SESSION_WORKSPACES);
             let session_e = visual_test_snapshot_for("session-e");
-            assert!(!shell.install_hydrated_workspace(&session_e));
+            assert!(!shell.install_hydrated_workspace(&session_e, false));
             assert!(!shell.workspaces.contains_key("session-e"));
             let workspace_ids_before = shell.workspaces.keys().cloned().collect::<HashSet<_>>();
             shell.open_session("session-e".into(), cx);
@@ -5276,9 +5359,7 @@ mod tests {
             let identity = cx
                 .debug_bounds("desktop-header-identity")
                 .expect("header identity region remains visible");
-            let title = cx
-                .debug_bounds("desktop-header-session-title")
-                .expect("semantic session title remains visible");
+            let title = cx.debug_bounds("desktop-header-session-title");
             let actions = cx
                 .debug_bounds("desktop-header-actions")
                 .expect("header actions remain visible");
@@ -5286,7 +5367,15 @@ mod tests {
                 .debug_bounds("desktop-header-runtime-status")
                 .expect("running status remains visible");
             assert!(identity.right() <= actions.left());
-            assert!(title.left() >= identity.left() && title.right() <= identity.right());
+            if let Some(title) = &title {
+                assert!(title.left() >= identity.left() && title.right() <= identity.right());
+            }
+            if width == 700. {
+                assert!(
+                    title.is_none(),
+                    "narrow chrome reserves space for selectors"
+                );
+            }
             assert!(runtime.left() >= actions.left() && runtime.right() <= actions.right());
             assert!(actions.right() <= header.right());
 
@@ -5305,9 +5394,11 @@ mod tests {
             assert!(toast_host.right() <= px(width));
             assert!(toast_host.bottom() <= px(900.));
             assert!(
-                cx.debug_bounds("desktop-composer-thinking").is_some(),
-                "the thinking selector remains available beside Composer actions"
+                cx.debug_bounds("desktop-header-thinking-selector")
+                    .is_some(),
+                "the session thinking selector remains available in the Header"
             );
+            assert!(cx.debug_bounds("desktop-composer-thinking").is_none());
         }
     }
 
@@ -6022,7 +6113,7 @@ mod tests {
                 "desktop-hit-submit-composer",
                 "desktop-header-model-selector",
                 "desktop-header-profile-selector",
-                "desktop-composer-thinking",
+                "desktop-header-thinking-selector",
             ] {
                 assert_minimum_hit_target(cx, selector);
             }
@@ -6988,7 +7079,7 @@ mod tests {
 
     #[test]
     fn thinking_selection_cycles_and_maps_only_explicit_overrides() {
-        let mut selection = DesktopThinkingSelection::Default;
+        let mut selection = DesktopThinkingLevel::Default;
         assert_eq!(selection.explicit(), None);
         assert_eq!(selection.label(Some("xhigh")), "default:xhigh");
 
@@ -7007,42 +7098,152 @@ mod tests {
         assert_eq!(selection.explicit(), Some(CodingAgentThinkingLevel::High));
         selection = selection.next();
         assert_eq!(selection.explicit(), Some(CodingAgentThinkingLevel::XHigh));
-        assert_eq!(selection.next(), DesktopThinkingSelection::Default);
+        assert_eq!(selection.next(), DesktopThinkingLevel::Default);
     }
 
     #[gpui::test]
-    fn composer_thinking_selector_owns_the_typed_cycle_path(cx: &mut TestAppContext) {
+    fn header_thinking_selector_submits_the_session_level_with_the_prompt(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
-        let (shell, cx) = add_visual_shell(
-            cx,
-            DesktopRuntimeBridge::disconnected_for_test(),
-            visual_test_projection(),
-        );
-        cx.simulate_resize(size(px(700.), px(800.)));
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, visual_test_projection());
         cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
 
         assert_eq!(
             shell.read_with(cx, |shell, _| shell.thinking_selection),
-            DesktopThinkingSelection::Default
+            DesktopThinkingLevel::Default
         );
         let selector = cx
-            .debug_bounds("desktop-composer-thinking")
-            .expect("Composer owns the thinking selector");
-        assert!(cx.debug_bounds("desktop-status-thinking").is_none());
+            .debug_bounds("desktop-header-thinking-selector")
+            .expect("the Header owns the session thinking selector");
+        assert!(cx.debug_bounds("desktop-composer-thinking").is_none());
 
         cx.simulate_click(selector.center(), gpui::Modifiers::default());
         cx.run_until_parked();
+        choose_popup_item(cx, 5);
 
         assert_eq!(
             shell.read_with(cx, |shell, _| shell.thinking_selection),
-            DesktopThinkingSelection::Off
+            DesktopThinkingLevel::High
         );
-        assert!(shell.read_with(cx, |shell, _| {
-            shell
-                .preference_notice
-                .as_deref()
-                .is_some_and(|notice| notice.contains("thinking off"))
-        }));
+        shell.update(cx, |shell, cx| {
+            assert_eq!(
+                shell
+                    .preferences
+                    .thinking_level_for_session("desktop-visual-test"),
+                DesktopThinkingLevel::High
+            );
+            shell.composer.edit("use the session thinking level");
+            shell.submit_composer(cx);
+        });
+
+        assert_eq!(
+            runtime_harness.drain_prompts(),
+            [(
+                Some("desktop-visual-test".into()),
+                "use the session thinking level".into(),
+                Some(CodingAgentThinkingLevel::High),
+            )]
+        );
+    }
+
+    #[gpui::test]
+    fn switching_workspaces_restores_each_persisted_thinking_level(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let snapshot_a = visual_test_snapshot_for("thinking-session-a");
+        let projection_a = DesktopProjection::new(snapshot_a)
+            .expect("thinking session A fixture is a valid projection");
+        let mut preferences = DesktopPreferences::default();
+        assert!(
+            preferences
+                .set_thinking_level_for_session("thinking-session-a", DesktopThinkingLevel::High)
+        );
+        assert!(
+            preferences
+                .set_thinking_level_for_session("thinking-session-b", DesktopThinkingLevel::Low)
+        );
+        let (shell, cx) = add_visual_shell_with_preferences(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_a,
+            preferences,
+        );
+        cx.run_until_parked();
+
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::High);
+            let snapshot_b = visual_test_snapshot_for("thinking-session-b");
+            let projection_b = DesktopProjection::new(snapshot_b.clone())
+                .expect("thinking session B fixture is a valid projection");
+            let thinking_b = shell
+                .preferences
+                .thinking_level_for_session("thinking-session-b");
+            shell.workspaces.insert(
+                "thinking-session-b".into(),
+                SessionWorkspace::new_with_thinking(
+                    snapshot_b.project,
+                    Some(projection_b),
+                    None,
+                    DesktopCommandLedger::default(),
+                    thinking_b,
+                ),
+            );
+
+            assert!(shell.swap_active_workspace("thinking-session-b"));
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::Low);
+            shell.select_thinking_level(DesktopThinkingLevel::XHigh, cx);
+            assert_eq!(
+                shell
+                    .preferences
+                    .thinking_level_for_session("thinking-session-b"),
+                DesktopThinkingLevel::XHigh
+            );
+
+            assert!(shell.swap_active_workspace("thinking-session-a"));
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::High);
+            assert!(shell.swap_active_workspace("thinking-session-b"));
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::XHigh);
+        });
+    }
+
+    #[gpui::test]
+    fn hydration_restores_existing_thinking_but_new_sessions_inherit_home(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+
+        shell.update(cx, |shell, _| {
+            assert!(shell.preferences.set_thinking_level_for_session(
+                "existing-thinking-session",
+                DesktopThinkingLevel::Low,
+            ));
+            shell.thinking_selection = DesktopThinkingLevel::XHigh;
+            let existing = visual_test_snapshot_for("existing-thinking-session");
+
+            assert!(shell.install_hydrated_workspace(&existing, false));
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::Low);
+            assert_eq!(
+                shell
+                    .preferences
+                    .thinking_level_for_session("existing-thinking-session"),
+                DesktopThinkingLevel::Low
+            );
+
+            let home_project = shell.project.clone();
+            shell.active_workspace =
+                SessionWorkspace::new(home_project, None, None, DesktopCommandLedger::default());
+            shell.workspaces.clear();
+            shell.thinking_selection = DesktopThinkingLevel::Medium;
+            let created = visual_test_snapshot_for("created-thinking-session");
+
+            assert!(shell.install_hydrated_workspace(&created, true));
+            assert_eq!(shell.thinking_selection, DesktopThinkingLevel::Medium);
+            assert_eq!(
+                shell
+                    .preferences
+                    .thinking_level_for_session("created-thinking-session"),
+                DesktopThinkingLevel::Medium
+            );
+        });
     }
 
     #[test]
@@ -7696,11 +7897,6 @@ mod tests {
         let root_input_field = ["composer_", "input:"].concat();
         let root_latency_field = ["composer_", "input_latency:"].concat();
         let weak_root_owner = ["WeakEntity", "<NativeShell>"].concat();
-        let cycle_thinking_handler = [
-            "ComposerPaneEvent::CycleThinking => this.",
-            "cycle_thinking_selection(cx)",
-        ]
-        .concat();
 
         assert!(!shell.contains(&composer_panel_id));
         assert!(pane.contains(&composer_panel_id));
@@ -7727,7 +7923,7 @@ mod tests {
         assert!(shell.contains("ComposerPaneEvent::SubmitRunning"));
         assert!(shell.contains("ComposerSubmissionKind::Steer"));
         assert!(shell.contains("ComposerPaneEvent::SetRunningMode"));
-        assert!(shell.contains(&cycle_thinking_handler));
+        assert!(!pane.contains("ComposerPaneEvent::CycleThinking"));
         assert!(shell.contains("ComposerSubmissionKind::FollowUp"));
         assert!(pane.contains("DesktopSelector::new("));
         assert!(pane.contains("\"composer-running-mode-selector\""));
@@ -7735,7 +7931,7 @@ mod tests {
         assert!(pane.contains("PopupMenuItem::new(\"Queue next\")"));
         assert!(pane.contains("DesktopIconButton::new("));
         assert!(pane.contains("DesktopIcon::Submit"));
-        assert!(pane.contains("desktop-composer-thinking"));
+        assert!(!pane.contains("desktop-composer-thinking"));
         assert!(pane.contains("desktop-composer-surface"));
         assert!(pane.contains(".min_h(px(48.))"));
         assert!(!pane.contains(".w(px(176.))"));
@@ -7938,14 +8134,19 @@ mod tests {
         assert!(shell.contains("ConversationHeaderEvent::Reload"));
         assert!(shell.contains("ConversationHeaderEvent::SelectModel(model_id)"));
         assert!(shell.contains("ConversationHeaderEvent::SelectSessionProfile(profile_id)"));
+        assert!(shell.contains("ConversationHeaderEvent::SelectThinking(level)"));
         assert!(header.contains("SelectModel(Arc<str>)"));
         assert!(header.contains("SelectSessionProfile(Arc<str>)"));
+        assert!(header.contains("SelectThinking(DesktopThinkingLevel)"));
         assert!(header.contains("desktop-header-model-selector"));
         assert!(header.contains("desktop-header-profile-selector"));
+        assert!(header.contains("desktop-header-thinking-selector"));
         assert!(header.contains(".checked(option.id == current_model_id)"));
         assert!(header.contains(".checked(option.id == current_profile_id)"));
         assert!(header.contains(".scrollable(model_options.len() > 8)"));
         assert!(header.contains(".scrollable(profile_options.len() > 8)"));
+        assert!(header.contains("DesktopThinkingLevel::ALL.iter().fold("));
+        assert!(header.contains(".checked(level == view_model.thinking_selection)"));
         for owner in [shell, header, actions] {
             assert!(!owner.contains(&old_model_cycle));
             assert!(!owner.contains(&old_profile_cycle));
@@ -7971,7 +8172,8 @@ mod tests {
         assert!(!header.contains(".label(\"Sessions\")"));
         assert!(!header.contains(".label(\"Inspector\")"));
         assert!(!header.contains(".label(\"...\")"));
-        assert!(!header.contains("thinking: Arc<str>"));
+        assert!(header.contains("thinking: Arc<str>"));
+        assert!(header.contains("thinking_selection: DesktopThinkingLevel"));
         assert!(!header.contains("conversation_controller.render_dirty_sequences"));
     }
 

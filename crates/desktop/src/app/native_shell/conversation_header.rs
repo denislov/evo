@@ -1,3 +1,4 @@
+use desktop::preferences::DesktopThinkingLevel;
 use desktop::shell::{PanelVisibility, SemanticStatus, SemanticTheme, ShellLayout};
 use gpui::{
     EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
@@ -21,6 +22,7 @@ pub(super) enum ConversationHeaderEvent {
     ToggleInspector,
     SelectModel(Arc<str>),
     SelectSessionProfile(Arc<str>),
+    SelectThinking(DesktopThinkingLevel),
     Reload,
     Abort,
 }
@@ -42,6 +44,8 @@ pub(super) struct ConversationHeaderViewModel {
     pub(super) selector_disabled: bool,
     pub(super) model: Arc<str>,
     pub(super) profile: Arc<str>,
+    pub(super) thinking: Arc<str>,
+    pub(super) thinking_selection: DesktopThinkingLevel,
     pub(super) current_model_id: Arc<str>,
     pub(super) current_profile_id: Arc<str>,
     pub(super) model_options: Arc<[ConversationHeaderSelectorOption]>,
@@ -107,28 +111,39 @@ impl Render for ConversationHeader {
         } else {
             view_model.narrow_context_open
         };
-        let (model_label, profile_label) = if layout.workspace.width >= 720 {
+        let viewport_width = u32::from(viewport.width);
+        let expanded_chrome =
+            layout.workspace.width >= 900 || (view_model.idle && viewport_width >= 1_100);
+        let (model_label, profile_label, thinking_label) = if expanded_chrome {
             (
                 format!("Model · {}", view_model.model),
                 format!("Profile · {}", view_model.profile),
+                format!("Thinking · {}", view_model.thinking),
             )
         } else {
             (
                 format!("M · {}", view_model.model),
                 format!("P · {}", view_model.profile),
+                format!("T · {}", view_model.thinking),
             )
         };
+        let show_session_title = expanded_chrome || (view_model.idle && viewport_width >= 900);
         let model_accessible_label =
             format!("Select model; current {}", view_model.current_model_id);
         let profile_accessible_label = format!(
             "Select session profile; current {}",
             view_model.current_profile_id
         );
+        let thinking_accessible_label = format!(
+            "Select session thinking level; current {}",
+            view_model.thinking
+        );
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let focus_accent = conversation_focus_accent(focused, theme);
 
         let model_target = cx.entity().downgrade();
         let profile_target = cx.entity().downgrade();
+        let thinking_target = cx.entity().downgrade();
         let reload_target = cx.entity().downgrade();
         let model_options = Arc::clone(&view_model.model_options);
         let profile_options = Arc::clone(&view_model.profile_options);
@@ -175,7 +190,7 @@ impl Render for ConversationHeader {
                             cx.emit(ConversationHeaderEvent::ToggleSessions);
                         })),
                     )
-                    .child(
+                    .when(show_session_title, |identity| identity.child(
                         div()
                             .debug_selector(|| "desktop-header-session-title".into())
                             .min_w_0()
@@ -202,7 +217,7 @@ impl Render for ConversationHeader {
                                     .text_color(rgb(theme.subtle_text.value()))
                                     .child(view_model.project_name.to_string()),
                             ),
-                    ),
+                    )),
             )
             .child(
                 div()
@@ -259,6 +274,47 @@ impl Render for ConversationHeader {
                                                     });
                                                 }
                                             }),
+                                    )
+                                },
+                            )
+                        }),
+                    )
+                    .child(
+                        DesktopSelector::new(
+                            "header-thinking-selector",
+                            thinking_label,
+                            thinking_accessible_label,
+                        )
+                        .build()
+                        .debug_selector(|| "desktop-header-thinking-selector".into())
+                        .dropdown_menu(move |menu, _, _| {
+                            DesktopThinkingLevel::ALL.iter().fold(
+                                menu.min_w(px(180.)).max_w(px(280.)),
+                                |menu, level| {
+                                    let target = thinking_target.clone();
+                                    let level = *level;
+                                    menu.item(
+                                        PopupMenuItem::new(match level {
+                                            DesktopThinkingLevel::Default => "Default",
+                                            DesktopThinkingLevel::Off => "Off",
+                                            DesktopThinkingLevel::Minimal => "Minimal",
+                                            DesktopThinkingLevel::Low => "Low",
+                                            DesktopThinkingLevel::Medium => "Medium",
+                                            DesktopThinkingLevel::High => "High",
+                                            DesktopThinkingLevel::XHigh => "XHigh",
+                                        })
+                                        .checked(level == view_model.thinking_selection)
+                                        .on_click(move |_, _, cx| {
+                                            if let Some(target) = target.upgrade() {
+                                                target.update(cx, |_, cx| {
+                                                    cx.emit(
+                                                        ConversationHeaderEvent::SelectThinking(
+                                                            level,
+                                                        ),
+                                                    );
+                                                });
+                                            }
+                                        }),
                                     )
                                 },
                             )

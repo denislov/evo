@@ -593,6 +593,24 @@ impl DesktopRuntimeTestHarness {
         }
         selections
     }
+
+    pub(crate) fn drain_prompts(
+        &mut self,
+    ) -> Vec<(Option<String>, String, Option<CodingAgentThinkingLevel>)> {
+        let mut prompts = Vec::new();
+        while let Ok(command) = self.commands.try_recv() {
+            if let DesktopRuntimeCommand::SubmitPrompt {
+                session_id,
+                prompt,
+                thinking_level,
+                ..
+            } = command
+            {
+                prompts.push((session_id, prompt, thinking_level));
+            }
+        }
+        prompts
+    }
 }
 
 impl DesktopRuntimeEventStream {

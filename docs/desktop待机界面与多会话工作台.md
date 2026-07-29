@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302、VUI-303 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302、VUI-303、VUI-304 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -1300,6 +1300,32 @@ thinking level 成为会话级持久状态，在顶栏选择，不再是每条�
 - 新增测试：切换会话后 thinking level 恢复为该会话的值；
 - 新增测试：提交的 prompt 携带会话当前 thinking level；
 - 三档 golden 更新并附 review note。
+
+**实施记录（2026-07-29）**
+
+- thinking level 继续由既有 `SessionWorkspace` 持有，显式类型统一为可序列化的
+  `DesktopThinkingLevel`。Desktop 偏好新增稀疏的 per-session 映射：`Default` 不落盘、无效或超过
+  256 bytes 的 session id 被拒绝、最多保留 128 项，未知未来枚举值安全降级为 `Default`；既有偏好文件
+  通过 serde default 向后兼容，无需改动产品 session manifest 或 CAG schema。
+- 首次从 Home 提交并建立会话时继承 Home 当前 thinking level，并立即记入目标 session 偏好；打开已有
+  session 时只恢复该 session 的持久值，不会误用 Home 或前台 workspace 的选择。已打开 workspace 的
+  切换继续恢复各自的内存状态，显式修改同时更新 workspace 与偏好后台写入器。
+- `ConversationHeader` 新增固定七项的独立下拉选择器（Default / Off / Minimal / Low / Medium / High /
+  XHigh），当前项以 checked 状态呈现；Composer 的 thinking view model、事件与控件全部删除。为容纳第三个
+  selector，docked 与窄视口使用 `M` / `T` / `P` 紧凑标签，并在空间不足时只收起重复的 session 身份文字；
+  待机 wide / medium 仍显示 `New task`，所有 viewport 都保留完整 accessible label 和至少 32 px 控件高度。
+  命令面板的循环快捷入口保留，但语义改为循环“当前会话”状态，不再属于 per-prompt Composer override。
+- `SubmitPrompt` 的产品协议与 dispatch 无需变化；shell 仍提交既有 `Option<CodingAgentThinkingLevel>`，但取值
+  改为 active workspace 的会话状态。测试运行时 harness 仅增加精确 prompt payload 解包，用 GPUI 回归验证
+  Header 选择 High 后提交得到 `thinking_level=Some(High)`，并验证 Composer 不再拥有该控件。
+- 新增测试覆盖偏好稀疏/上限/向前容错与存取 round-trip、Home 新会话继承和已有会话恢复、A/B workspace
+  切换恢复，以及 prompt 精确载荷。全部 10 个 fixture（standard / idle 三档及 authorization、
+  reduced-motion、keyboard-focus、no-color）已人工审图并附 review note；安装后复播 RMSE 均为 `0`。
+- 最终验证为 Desktop `217 passed / 5 ignored`、dependency boundary `16/16`、严格 Clippy、fmt 与
+  `git diff --check`。native 性能门：GPU/present frame p95 `6214µs`、input dispatch-to-post-render p95
+  `16672µs`、steady RSS growth `8192B`、production Markdown p95 `178µs`；headless 门：10k hydration
+  `3224µs`、frame p95 `3041µs`、input roundtrip p95 `6024µs`，200 events/s streaming p95 `5µs`。
+  click-to-photon 外部传感器脚本按本次执行指示跳过，不计为通过或失败。
 
 **建议提交**
 
