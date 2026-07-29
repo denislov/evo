@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -949,6 +949,30 @@ CenterDrawerHost
 完成标准：wide/medium/narrow 纯 geometry 测试覆盖 Home 与 session；Home sidebar 在 dockable 宽度可见。
 
 #### DSK-641：拆分 RootModalHost 与 CenterDrawerHost
+
+> 状态：已完成。原 application-root `OverlayHost` 已收敛并重命名为 `RootModalHost`，只持有
+> Command Palette、Authorization 与 Full Message 三类真正 modal；Sessions/Inspector Pane 由新的
+> typed `CenterDrawerHost` 持有。Home 与 Conversation 的 `center-body` 都建立 `relative` 挂载边界，
+> drawer 的 top/bottom/right/left 只相对 center body 计算，因此不会覆盖 center header。
+>
+> `NativeShell` 已删除 `DesktopOverlayKind`、`active_overlay` 与两组 narrow-open bool，改为独立的
+> `active_modal: Option<DesktopModalKind>`、`active_drawer: Option<CenterDrawerKind>` 和
+> `drawer_restore_focus`。Modal 继续通过 `FocusState::open_modal/close_modal` 严格 trap/restore；drawer
+> 保留逻辑 root focus owner，切换另一侧 drawer 不覆盖原恢复点，点击外部、Escape 或对应 toggle
+> 均关闭并恢复可见 owner。Drawer key context 只处理 Escape，不再把 Tab/Shift-Tab 路由到 modal
+> focus trap；`root_action_blocked_by_modal` 只读取 `active_modal`，drawer 打开时 header selectors 与
+> workspace actions 继续可操作。
+>
+> Authorization projection 出现时会先无恢复地关闭 active drawer，再进入 root modal；授权消失后
+> modal 恢复 drawer 打开前的 root owner。GPUI 回归覆盖 medium Inspector drawer 与 center body/header
+> 坐标、Model selector 在 drawer 打开时可点击、点击 drawer 外关闭、narrow Sessions drawer、
+> conversation geometry/scroll 不变，以及 Authorization 实际挂载、关闭 drawer、modal focus trap 和
+> 最终恢复 Composer。源码 ownership guard 与 dependency boundary 同时约束两个宿主不能重新混合
+> Pane、projection、command ledger 或 authorization 职责。
+>
+> Gate：Desktop library 265 个 tests 通过、5 个既有 release 性能用例保持 ignored，19 个 dependency
+> boundary tests 与严格 all-target Clippy 通过；格式、diff、旧 OverlayHost/active_overlay/narrow state
+> 符号扫描、CodeGraph call-path 与 `ast-grep-outline` 变更后结构审计通过。
 
 工作：
 
