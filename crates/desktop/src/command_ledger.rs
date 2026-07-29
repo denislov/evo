@@ -127,6 +127,28 @@ impl DesktopCommandLedger {
         Ok(command_id)
     }
 
+    pub(crate) fn reserve_with_id(
+        &mut self,
+        command_id: u64,
+        intent: DesktopCommandIntent,
+    ) -> Result<(), DesktopCommandLedgerError> {
+        if self.pending.len() >= self.capacity {
+            return Err(DesktopCommandLedgerError::Full);
+        }
+        self.next_command_id = self.next_command_id.max(
+            command_id
+                .checked_add(1)
+                .ok_or(DesktopCommandLedgerError::IdExhausted)?,
+        );
+        self.pending
+            .push_back(PendingDesktopCommand { command_id, intent });
+        Ok(())
+    }
+
+    pub(crate) const fn next_command_id(&self) -> u64 {
+        self.next_command_id
+    }
+
     pub(crate) fn contains(&self, intent: &DesktopCommandIntent) -> bool {
         self.pending.iter().any(|pending| &pending.intent == intent)
     }
@@ -260,6 +282,23 @@ mod tests {
             Err(DesktopCommandLedgerError::IdExhausted)
         );
         assert!(!ledger.contains(&DesktopCommandIntent::Reload));
+    }
+
+    #[test]
+    fn shell_assigned_ids_advance_the_local_floor_and_fail_closed_at_exhaustion() {
+        let mut ledger = DesktopCommandLedger::with_limits(1, 4);
+        assert_eq!(
+            ledger.reserve_with_id(41, DesktopCommandIntent::Reload),
+            Ok(())
+        );
+        assert!(ledger.matches(41, &DesktopCommandIntent::Reload));
+        assert_eq!(ledger.next_command_id(), 42);
+        assert_eq!(ledger.reserve(DesktopCommandIntent::Prompt), Ok(42));
+        assert_eq!(
+            ledger.reserve_with_id(u64::MAX, DesktopCommandIntent::Resync),
+            Err(DesktopCommandLedgerError::IdExhausted)
+        );
+        assert!(!ledger.contains(&DesktopCommandIntent::Resync));
     }
 
     #[test]

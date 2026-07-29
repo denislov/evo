@@ -31,6 +31,7 @@ use gpui::{
     Subscription, Window, WindowBounds, div, prelude::*, px, rgb,
 };
 use std::collections::{HashMap, VecDeque};
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,8 +49,7 @@ use crate::command_ledger::{DesktopCommandIntent, DesktopCommandLedger};
 
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
-const MAX_COMPOSER_SESSION_STATES: usize = 256;
-const MAX_INSPECTOR_SESSION_STATES: usize = 256;
+const MAX_SESSION_WORKSPACES: usize = 4;
 const CONVERSATION_ANNOUNCEMENT_DURATION: Duration = Duration::from_secs(2);
 /// Draft slot for the idle Home surface. It is a Composer state key only; the
 /// runtime never sees it, and no projection is ever constructed for it.
@@ -191,58 +191,6 @@ impl ComposerRunningMode {
     }
 }
 
-fn composer_running_mode_for(
-    modes: &HashMap<String, ComposerRunningMode>,
-    session_id: &str,
-) -> ComposerRunningMode {
-    modes.get(session_id).copied().unwrap_or_default()
-}
-
-fn reconcile_composer_session_state(
-    composer: &mut ComposerState,
-    drafts: &mut HashMap<String, String>,
-    previous_session_id: &str,
-    current_session_id: &str,
-) -> bool {
-    if current_session_id == previous_session_id {
-        return false;
-    }
-    if composer.draft().is_empty() {
-        drafts.remove(previous_session_id);
-    } else {
-        if drafts.len() >= MAX_COMPOSER_SESSION_STATES
-            && !drafts.contains_key(previous_session_id)
-            && let Some(stale) = drafts.keys().next().cloned()
-        {
-            drafts.remove(&stale);
-        }
-        drafts.insert(previous_session_id.to_owned(), composer.draft().to_owned());
-    }
-    let draft = drafts.remove(current_session_id).unwrap_or_default();
-    composer.edit(draft);
-    true
-}
-
-fn reconcile_inspector_session_section_state(
-    selected: &mut InspectorSection,
-    sections: &mut HashMap<String, InspectorSection>,
-    previous_session_id: &str,
-    current_session_id: &str,
-) -> bool {
-    if current_session_id == previous_session_id {
-        return false;
-    }
-    if sections.len() >= MAX_INSPECTOR_SESSION_STATES
-        && !sections.contains_key(previous_session_id)
-        && let Some(stale) = sections.keys().next().cloned()
-    {
-        sections.remove(&stale);
-    }
-    sections.insert(previous_session_id.to_owned(), *selected);
-    *selected = sections.remove(current_session_id).unwrap_or_default();
-    true
-}
-
 impl DesktopThinkingSelection {
     const fn next(self) -> Self {
         match self {
@@ -312,16 +260,109 @@ struct ConversationFullMessageView {
     source_truncated: bool,
 }
 
+pub(super) struct SessionWorkspace {
+    project: CodingAgentEmbeddingSnapshot,
+    projection: Option<DesktopProjection>,
+    preference_notice: Option<String>,
+    conversation_controller: ConversationController,
+    inspector_section: InspectorSection,
+    composer: ComposerState,
+    composer_needs_sync: bool,
+    composer_running_mode: ComposerRunningMode,
+    command_ledger: DesktopCommandLedger,
+    thinking_selection: DesktopThinkingSelection,
+    file_review: Arc<DesktopFileReviewState>,
+}
+
+impl SessionWorkspace {
+    fn new(
+        project: CodingAgentEmbeddingSnapshot,
+        projection: Option<DesktopProjection>,
+        preference_notice: Option<String>,
+        command_ledger: DesktopCommandLedger,
+    ) -> Self {
+        Self {
+            project,
+            projection,
+            preference_notice,
+            conversation_controller: ConversationController::default(),
+            inspector_section: InspectorSection::default(),
+            composer: ComposerState::default(),
+            composer_needs_sync: false,
+            composer_running_mode: ComposerRunningMode::default(),
+            command_ledger,
+            thinking_selection: DesktopThinkingSelection::Default,
+            file_review: Arc::new(DesktopFileReviewState::default()),
+        }
+    }
+
+    fn session_id(&self) -> &str {
+        self.projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.as_str())
+            .unwrap_or(HOME_COMPOSER_SESSION_KEY)
+    }
+}
+
+fn hydrated_session_id(snapshot: &desktop::runtime::DesktopRuntimeHydratedSnapshot) -> &str {
+    &snapshot.session.session.session_id
+}
+
+fn runtime_update_hydrated_snapshot(
+    update: &desktop::runtime::DesktopRuntimeUpdate,
+) -> Option<&desktop::runtime::DesktopRuntimeHydratedSnapshot> {
+    match update {
+        desktop::runtime::DesktopRuntimeUpdate::SessionChanged { snapshot, .. }
+        | desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession { snapshot, .. }
+        | desktop::runtime::DesktopRuntimeUpdate::PromptFinished { snapshot, .. } => Some(snapshot),
+        desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
+            snapshot: Some(snapshot),
+            ..
+        } => Some(snapshot),
+        desktop::runtime::DesktopRuntimeUpdate::Resynced {
+            replacement: desktop::runtime::DesktopRuntimeResyncSnapshot::Hydrated(snapshot),
+            ..
+        } => Some(snapshot),
+        _ => None,
+    }
+}
+
+fn runtime_update_command_id(update: &desktop::runtime::DesktopRuntimeUpdate) -> Option<u64> {
+    use desktop::runtime::DesktopRuntimeUpdate;
+    match update {
+        DesktopRuntimeUpdate::Reloaded { command_id, .. }
+        | DesktopRuntimeUpdate::Resynced { command_id, .. }
+        | DesktopRuntimeUpdate::SessionChanged { command_id, .. }
+        | DesktopRuntimeUpdate::SessionClosed { command_id, .. }
+        | DesktopRuntimeUpdate::SessionsListed { command_id, .. }
+        | DesktopRuntimeUpdate::SelectionChanged { command_id, .. }
+        | DesktopRuntimeUpdate::PromptAccepted { command_id }
+        | DesktopRuntimeUpdate::PromptAcceptedWithSession { command_id, .. }
+        | DesktopRuntimeUpdate::PromptRejectedWithSession { command_id, .. }
+        | DesktopRuntimeUpdate::PromptStarted { command_id, .. }
+        | DesktopRuntimeUpdate::ControlAccepted { command_id, .. }
+        | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { command_id, .. }
+        | DesktopRuntimeUpdate::RecoveryChanged { command_id, .. }
+        | DesktopRuntimeUpdate::FileReviewed { command_id, .. }
+        | DesktopRuntimeUpdate::ExternalEditorOpened { command_id, .. }
+        | DesktopRuntimeUpdate::PromptFinished { command_id, .. }
+        | DesktopRuntimeUpdate::CommandRejected { command_id, .. } => Some(*command_id),
+        DesktopRuntimeUpdate::ProductEvent { .. }
+        | DesktopRuntimeUpdate::ResyncRequired { .. }
+        | DesktopRuntimeUpdate::RuntimeFailed { .. }
+        | DesktopRuntimeUpdate::Stopped => None,
+    }
+}
+
 pub(super) struct NativeShell {
     runtime: Option<DesktopRuntimeCommandHandle>,
     runtime_updates: VecDeque<desktop::runtime::DesktopRuntimeUpdate>,
-    project: CodingAgentEmbeddingSnapshot,
-    projection: Option<DesktopProjection>,
+    next_command_id: u64,
+    active_workspace: SessionWorkspace,
+    workspaces: HashMap<String, SessionWorkspace>,
     global_skills: Arc<[CodingAgentResourceCommand]>,
     preferences: DesktopPreferences,
     preference_writer: Option<PreferenceWriter>,
-    preference_notice: Option<String>,
-    conversation_controller: ConversationController,
     inspector_telemetry_last_refresh: Option<Instant>,
     inspector_telemetry_refresh_deadline: Option<Instant>,
     conversation_pane: gpui::Entity<ConversationPane>,
@@ -330,15 +371,8 @@ pub(super) struct NativeShell {
     composer_pane: gpui::Entity<ComposerPane>,
     home_pane: gpui::Entity<HomePane>,
     inspector_pane: gpui::Entity<InspectorPane>,
-    inspector_section: InspectorSection,
-    inspector_session_sections: HashMap<String, InspectorSection>,
     status_bar: gpui::Entity<StatusBar>,
     overlay_host: gpui::Entity<OverlayHost>,
-    composer: ComposerState,
-    composer_needs_sync: bool,
-    composer_session_drafts: HashMap<String, String>,
-    composer_running_modes: HashMap<String, ComposerRunningMode>,
-    command_ledger: DesktopCommandLedger,
     focus: FocusState,
     sessions_focus: FocusHandle,
     conversation_focus: FocusHandle,
@@ -348,8 +382,6 @@ pub(super) struct NativeShell {
     command_palette_focus: FocusHandle,
     narrow_sessions_focus: FocusHandle,
     full_message_focus: FocusHandle,
-    thinking_selection: DesktopThinkingSelection,
-    file_review: Arc<DesktopFileReviewState>,
     command_palette: DesktopCommandPalette,
     active_overlay: Option<DesktopOverlayKind>,
     conversation_full_message: Option<ConversationFullMessageView>,
@@ -360,7 +392,23 @@ pub(super) struct NativeShell {
     session_controller: SessionController,
     panel_resize: Option<PanelResizeState>,
     focus_input_modality: FocusInputModality,
+    #[cfg(test)]
+    runtime_ui_notification_count: usize,
     _subscriptions: Vec<Subscription>,
+}
+
+impl Deref for NativeShell {
+    type Target = SessionWorkspace;
+
+    fn deref(&self) -> &Self::Target {
+        &self.active_workspace
+    }
+}
+
+impl DerefMut for NativeShell {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.active_workspace
+    }
 }
 
 pub(super) struct NativeShellInit {
@@ -447,10 +495,11 @@ impl NativeShell {
                 |this, _, event: &ConversationPaneEvent, window, cx| match event {
                     ConversationPaneEvent::Select { block_id, durable } => {
                         this.record_focus(FocusTarget::Conversation, window, cx);
-                        let Some(projection) = this.projection.as_ref() else {
+                        let workspace = &mut this.active_workspace;
+                        let Some(projection) = workspace.projection.as_ref() else {
                             return;
                         };
-                        this.conversation_controller.select_row(
+                        workspace.conversation_controller.select_row(
                             block_id.clone(),
                             *durable,
                             projection.conversation(),
@@ -634,16 +683,18 @@ impl NativeShell {
         })
         .detach();
 
+        let next_command_id = command_ledger.next_command_id();
+        let active_workspace =
+            SessionWorkspace::new(project, projection, preference_notice, command_ledger);
         let shell = Self {
             runtime: Some(runtime_commands),
             runtime_updates: VecDeque::new(),
-            project,
-            projection,
+            next_command_id,
+            active_workspace,
+            workspaces: HashMap::with_capacity(MAX_SESSION_WORKSPACES.saturating_sub(1)),
             global_skills,
             preferences,
             preference_writer,
-            preference_notice,
-            conversation_controller: ConversationController::default(),
             inspector_telemetry_last_refresh: None,
             inspector_telemetry_refresh_deadline: None,
             conversation_pane,
@@ -652,15 +703,8 @@ impl NativeShell {
             composer_pane,
             home_pane,
             inspector_pane,
-            inspector_section: InspectorSection::default(),
-            inspector_session_sections: HashMap::new(),
             status_bar,
             overlay_host,
-            composer: ComposerState::default(),
-            composer_needs_sync: false,
-            composer_session_drafts: HashMap::new(),
-            composer_running_modes: HashMap::new(),
-            command_ledger,
             focus: FocusState::default(),
             sessions_focus,
             conversation_focus,
@@ -670,8 +714,6 @@ impl NativeShell {
             command_palette_focus,
             narrow_sessions_focus,
             full_message_focus,
-            thinking_selection: DesktopThinkingSelection::Default,
-            file_review: Arc::new(DesktopFileReviewState::default()),
             command_palette: DesktopCommandPalette::default(),
             active_overlay: None,
             conversation_full_message: None,
@@ -682,6 +724,8 @@ impl NativeShell {
             session_controller: SessionController::default(),
             panel_resize: None,
             focus_input_modality: FocusInputModality::default(),
+            #[cfg(test)]
+            runtime_ui_notification_count: 0,
             _subscriptions: subscriptions,
         };
         let status_bar_view_model = shell.status_bar_view_model();
@@ -719,6 +763,134 @@ impl NativeShell {
             overlay_host.set_view_model(overlay_view_model);
         });
         shell
+    }
+
+    fn command_owner_session_id(&self, command_id: u64) -> Option<String> {
+        if self.command_ledger.intent(command_id).is_some() {
+            return Some(self.active_workspace.session_id().to_owned());
+        }
+        self.workspaces.iter().find_map(|(session_id, workspace)| {
+            workspace
+                .command_ledger
+                .intent(command_id)
+                .is_some()
+                .then(|| session_id.clone())
+        })
+    }
+
+    fn complete_workspace_command(
+        &mut self,
+        session_id: &str,
+        command_id: u64,
+        intent: &DesktopCommandIntent,
+    ) -> bool {
+        if self.active_workspace.session_id() == session_id
+            || (session_id == HOME_COMPOSER_SESSION_KEY
+                && !self.workspaces.contains_key(HOME_COMPOSER_SESSION_KEY)
+                && self.command_ledger.matches(command_id, intent))
+        {
+            return self.command_ledger.complete(command_id, intent);
+        }
+        self.workspaces
+            .get_mut(session_id)
+            .is_some_and(|workspace| workspace.command_ledger.complete(command_id, intent))
+    }
+
+    fn runtime_update_session_id(
+        &self,
+        update: &desktop::runtime::DesktopRuntimeUpdate,
+    ) -> Option<String> {
+        use desktop::runtime::{DesktopRuntimeResyncSnapshot, DesktopRuntimeUpdate};
+        match update {
+            DesktopRuntimeUpdate::ProductEvent { session_id, .. }
+            | DesktopRuntimeUpdate::SessionClosed { session_id, .. } => Some(session_id.clone()),
+            update if runtime_update_hydrated_snapshot(update).is_some() => {
+                runtime_update_hydrated_snapshot(update)
+                    .map(|snapshot| hydrated_session_id(snapshot).to_owned())
+            }
+            DesktopRuntimeUpdate::Reloaded { metadata, .. }
+            | DesktopRuntimeUpdate::SelectionChanged { metadata, .. }
+            | DesktopRuntimeUpdate::PromptStarted { metadata, .. }
+            | DesktopRuntimeUpdate::PromptRejectedWithSession { metadata, .. } => metadata
+                .session
+                .as_ref()
+                .map(|snapshot| snapshot.session.session_id.clone()),
+            DesktopRuntimeUpdate::Resynced {
+                replacement: DesktopRuntimeResyncSnapshot::Metadata(metadata),
+                ..
+            } => metadata
+                .session
+                .as_ref()
+                .map(|snapshot| snapshot.session.session_id.clone()),
+            DesktopRuntimeUpdate::RecoveryChanged { recovery, .. } => {
+                Some(recovery.session.session.session_id.clone())
+            }
+            DesktopRuntimeUpdate::ResyncRequired { snapshot, .. } => {
+                Some(snapshot.session.session_id.clone())
+            }
+            DesktopRuntimeUpdate::SessionsListed { .. } => None,
+            _ => runtime_update_command_id(update)
+                .and_then(|command_id| self.command_owner_session_id(command_id)),
+        }
+    }
+
+    fn swap_active_workspace(&mut self, target_session_id: &str) -> bool {
+        if self.active_workspace.session_id() == target_session_id {
+            return true;
+        }
+        let Some(target) = self.workspaces.remove(target_session_id) else {
+            return false;
+        };
+        let previous = std::mem::replace(&mut self.active_workspace, target);
+        self.workspaces
+            .insert(previous.session_id().to_owned(), previous);
+        true
+    }
+
+    fn install_hydrated_workspace(
+        &mut self,
+        snapshot: &desktop::runtime::DesktopRuntimeHydratedSnapshot,
+    ) -> bool {
+        let target_session_id = hydrated_session_id(snapshot);
+        if self.active_workspace.session_id() == target_session_id {
+            return true;
+        }
+        if self.workspaces.contains_key(target_session_id) {
+            return self.swap_active_workspace(target_session_id);
+        }
+        if self.workspaces.len() + 1 >= MAX_SESSION_WORKSPACES {
+            self.preference_notice = Some(format!(
+                "Cannot open more than {MAX_SESSION_WORKSPACES} session workspaces."
+            ));
+            return false;
+        }
+        let projection = match DesktopProjection::new(snapshot.clone()) {
+            Ok(projection) => projection,
+            Err(issue) => {
+                self.preference_notice = Some(format!(
+                    "Session response failed projection validation ({}).",
+                    truncate_label(&issue.code, 28)
+                ));
+                return false;
+            }
+        };
+        if self.active_workspace.session_id() == HOME_COMPOSER_SESSION_KEY
+            && self.workspaces.is_empty()
+        {
+            self.project = snapshot.project.clone();
+            self.projection = Some(projection);
+            return true;
+        }
+        let target = SessionWorkspace::new(
+            snapshot.project.clone(),
+            Some(projection),
+            None,
+            DesktopCommandLedger::default(),
+        );
+        let previous = std::mem::replace(&mut self.active_workspace, target);
+        self.workspaces
+            .insert(previous.session_id().to_owned(), previous);
+        true
     }
 
     fn visibility(&self) -> PanelVisibility {
@@ -953,6 +1125,34 @@ impl NativeShell {
             let Some(update) = self.runtime_updates.pop_front() else {
                 break;
             };
+            let foreground_session_id = self.active_workspace.session_id().to_owned();
+            let dirty_before = (
+                sessions_pane_dirty,
+                composer_pane_dirty,
+                inspector_pane_dirty,
+                inspector_telemetry_dirty,
+                status_bar_dirty,
+                conversation_header_dirty,
+                overlay_host_dirty,
+                root_dirty,
+            );
+            let is_session_change = matches!(
+                &update,
+                desktop::runtime::DesktopRuntimeUpdate::SessionChanged { .. }
+            );
+            let mut background_update = false;
+            if !is_session_change
+                && let Some(target_session_id) = self.runtime_update_session_id(&update)
+                && target_session_id != foreground_session_id
+            {
+                if self.swap_active_workspace(&target_session_id) {
+                    background_update = true;
+                } else if let Some(snapshot) = runtime_update_hydrated_snapshot(&update)
+                    && self.install_hydrated_workspace(snapshot)
+                {
+                    background_update = foreground_session_id != HOME_COMPOSER_SESSION_KEY;
+                }
+            }
             if !matches!(
                 &update,
                 desktop::runtime::DesktopRuntimeUpdate::ProductEvent { .. }
@@ -970,12 +1170,33 @@ impl NativeShell {
                 } => {
                     sessions_pane_dirty |= sessions_dirty;
                     inspector_pane_dirty |= inspector_dirty;
+                    if background_update {
+                        let _ = self.swap_active_workspace(&foreground_session_id);
+                        (
+                            sessions_pane_dirty,
+                            composer_pane_dirty,
+                            inspector_pane_dirty,
+                            inspector_telemetry_dirty,
+                            status_bar_dirty,
+                            conversation_header_dirty,
+                            overlay_host_dirty,
+                            root_dirty,
+                        ) = dirty_before;
+                    }
                     applied += 1;
                     continue;
                 }
             };
             let composer_pane_state_before = self.composer_pane_state();
             let projection_completions = ProjectionCommandCompletions::capture(self, &update);
+            if let desktop::runtime::DesktopRuntimeUpdate::SessionChanged { snapshot, .. } = &update
+                && self.active_workspace.session_id() != hydrated_session_id(snapshot)
+                && !self.install_hydrated_workspace(snapshot)
+            {
+                let _ = projection_completions.reconcile(self, false, cx);
+                applied += 1;
+                continue;
+            }
             match &update {
                 desktop::runtime::DesktopRuntimeUpdate::PromptAccepted { command_id }
                 | desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
@@ -1368,6 +1589,19 @@ impl NativeShell {
             }
             if self.projection.is_none() {
                 let _ = projection_completions.reconcile(self, true, cx);
+                if background_update {
+                    let _ = self.swap_active_workspace(&foreground_session_id);
+                    (
+                        sessions_pane_dirty,
+                        composer_pane_dirty,
+                        inspector_pane_dirty,
+                        inspector_telemetry_dirty,
+                        status_bar_dirty,
+                        conversation_header_dirty,
+                        overlay_host_dirty,
+                        root_dirty,
+                    ) = dirty_before;
+                }
                 applied += 1;
                 continue;
             }
@@ -1380,22 +1614,11 @@ impl NativeShell {
                 continue;
             };
             let had_active_operation = projection.snapshot().active_operation.is_some();
-            let previous_session_id = if projection_was_none {
-                HOME_COMPOSER_SESSION_KEY.to_owned()
-            } else {
-                projection.snapshot().session.session_id.clone()
-            };
             let outcome = projection.apply(update);
             let project_after = projection.project().clone();
-            let session_id_after = projection.snapshot().session.session_id.clone();
             let active_operation_after = projection.snapshot().active_operation.is_some();
             let event_sequence_after = projection.cursor().last_event_sequence;
             self.project = project_after;
-            if outcome.is_replaced() {
-                self.reconcile_composer_session(&previous_session_id, &session_id_after);
-                self.reconcile_conversation_session_view(&previous_session_id, &session_id_after);
-                self.reconcile_inspector_session_section(&previous_session_id, &session_id_after);
-            }
             let dirty =
                 ProjectionDirtyRouting::for_projection(outcome.is_replaced(), outcome.delta());
             if dirty.root {
@@ -1434,25 +1657,33 @@ impl NativeShell {
                 sessions_pane_dirty = true;
             }
             if outcome.is_replaced() {
-                if !active_operation_after && self.composer.submitted().is_some() {
-                    if let Some(projection) = self.projection.as_ref()
-                        && let Some((live_id, durable_id)) = self
+                let workspace = &mut self.active_workspace;
+                if !active_operation_after && workspace.composer.submitted().is_some() {
+                    if let Some(projection) = workspace.projection.as_ref()
+                        && let Some((live_id, durable_id)) = workspace
                             .composer
                             .reconcile_completed_submission(projection.conversation())
                     {
-                        self.conversation_controller
+                        workspace
+                            .conversation_controller
                             .reconcile_live_selection(&live_id, &durable_id);
                     }
-                    self.composer_needs_sync = true;
+                    workspace.composer_needs_sync = true;
                 }
-                if let Some(projection) = self.projection.as_ref() {
-                    let source = ConversationSource::new(projection, self.composer.submitted());
-                    self.conversation_controller
+                if let Some(projection) = workspace.projection.as_ref() {
+                    let source =
+                        ConversationSource::new(projection, workspace.composer.submitted());
+                    workspace
+                        .conversation_controller
                         .reconcile_hydration(&source, event_sequence_after);
                 }
-            } else if conversation_dirty && let Some(projection) = self.projection.as_ref() {
-                let source = ConversationSource::new(projection, self.composer.submitted());
-                self.conversation_controller
+            } else if conversation_dirty
+                && let workspace = &mut self.active_workspace
+                && let Some(projection) = workspace.projection.as_ref()
+            {
+                let source = ConversationSource::new(projection, workspace.composer.submitted());
+                workspace
+                    .conversation_controller
                     .reconcile_content(&source, event_sequence_after);
             }
             if let Some((command_id, authorization_id, _)) = self
@@ -1487,6 +1718,19 @@ impl NativeShell {
                 conversation_header_dirty = true;
                 overlay_host_dirty = true;
             }
+            if background_update {
+                let _ = self.swap_active_workspace(&foreground_session_id);
+                (
+                    sessions_pane_dirty,
+                    composer_pane_dirty,
+                    inspector_pane_dirty,
+                    inspector_telemetry_dirty,
+                    status_bar_dirty,
+                    conversation_header_dirty,
+                    overlay_host_dirty,
+                    root_dirty,
+                ) = dirty_before;
+            }
             applied += 1;
         }
         if let Some(writer) = &self.preference_writer
@@ -1498,6 +1742,18 @@ impl NativeShell {
         let conversation_needs_refresh = self.conversation_controller.needs_row_refresh();
         if conversation_needs_refresh && !self.refresh_conversation_rows_at_current_width(cx) {
             root_dirty = true;
+        }
+        #[cfg(test)]
+        if root_dirty
+            || sessions_pane_dirty
+            || composer_pane_dirty
+            || inspector_pane_dirty
+            || inspector_telemetry_dirty
+            || status_bar_dirty
+            || conversation_header_dirty
+            || overlay_host_dirty
+        {
+            self.runtime_ui_notification_count += 1;
         }
         if root_dirty {
             cx.notify();
@@ -1552,12 +1808,7 @@ impl NativeShell {
     }
 
     fn active_composer_running_mode(&self) -> ComposerRunningMode {
-        let session_id = self
-            .projection
-            .as_ref()
-            .map(|projection| projection.snapshot().session.session_id.as_str())
-            .unwrap_or(HOME_COMPOSER_SESSION_KEY);
-        composer_running_mode_for(&self.composer_running_modes, session_id)
+        self.composer_running_mode
     }
 
     fn set_active_composer_running_mode(
@@ -1565,63 +1816,8 @@ impl NativeShell {
         mode: ComposerRunningMode,
         cx: &mut Context<Self>,
     ) {
-        let session_id = self
-            .projection
-            .as_ref()
-            .map(|projection| projection.snapshot().session.session_id.clone())
-            .unwrap_or_else(|| HOME_COMPOSER_SESSION_KEY.to_owned());
-        if self.composer_running_modes.len() >= MAX_COMPOSER_SESSION_STATES
-            && !self.composer_running_modes.contains_key(&session_id)
-            && let Some(stale) = self.composer_running_modes.keys().next().cloned()
-        {
-            self.composer_running_modes.remove(&stale);
-        }
-        self.composer_running_modes.insert(session_id, mode);
+        self.composer_running_mode = mode;
         self.notify_composer_pane(cx);
-    }
-
-    fn reconcile_composer_session(&mut self, previous_session_id: &str, current_session_id: &str) {
-        if previous_session_id == HOME_COMPOSER_SESSION_KEY && !self.composer.draft().is_empty() {
-            self.composer_session_drafts.insert(
-                current_session_id.to_owned(),
-                self.composer.draft().to_owned(),
-            );
-        }
-        if reconcile_composer_session_state(
-            &mut self.composer,
-            &mut self.composer_session_drafts,
-            previous_session_id,
-            current_session_id,
-        ) {
-            self.composer_needs_sync = true;
-        }
-        if previous_session_id == HOME_COMPOSER_SESSION_KEY {
-            self.composer_session_drafts
-                .remove(HOME_COMPOSER_SESSION_KEY);
-        }
-    }
-
-    fn reconcile_conversation_session_view(
-        &mut self,
-        previous_session_id: &str,
-        current_session_id: &str,
-    ) {
-        let _ = self
-            .conversation_controller
-            .reconcile_session_view(previous_session_id, current_session_id);
-    }
-
-    fn reconcile_inspector_session_section(
-        &mut self,
-        previous_session_id: &str,
-        current_session_id: &str,
-    ) {
-        let _ = reconcile_inspector_session_section_state(
-            &mut self.inspector_section,
-            &mut self.inspector_session_sections,
-            previous_session_id,
-            current_session_id,
-        );
     }
 
     fn notify_composer_pane(&self, cx: &mut Context<Self>) {
@@ -2560,32 +2756,33 @@ impl NativeShell {
     }
 
     fn select_adjacent_conversation(&mut self, reverse: bool, cx: &mut Context<Self>) {
-        let Some(projection) = self.projection.as_ref() else {
+        let workspace = &mut self.active_workspace;
+        let Some(projection) = workspace.projection.as_ref() else {
             return;
         };
-        let row_count = self.conversation_controller.row_count();
+        let row_count = workspace.conversation_controller.row_count();
         if row_count == 0 {
             self.preference_notice = Some("The conversation is empty.".into());
             self.notify_status_bar(cx);
             return;
         }
-        let current_index = self
+        let current_index = workspace
             .conversation_controller
             .selected_block_id()
             .map(str::to_owned)
-            .and_then(|selected| self.conversation_controller.row_index(&selected));
+            .and_then(|selected| workspace.conversation_controller.row_index(&selected));
         let next_index = adjacent_conversation_index(row_count, current_index, reverse)
             .expect("non-empty conversation has an adjacent selection");
-        let row = self
+        let row = workspace
             .conversation_controller
             .row_at(next_index)
             .expect("adjacent index is inside the rendered rows");
-        self.conversation_controller.select_row(
+        workspace.conversation_controller.select_row(
             row.item_key.row_id().to_owned(),
             row.durable,
             projection.conversation(),
         );
-        self.conversation_controller.scroll_to_row(
+        workspace.conversation_controller.scroll_to_row(
             next_index,
             if reverse {
                 ScrollStrategy::Top
@@ -2644,14 +2841,10 @@ impl NativeShell {
             cx.notify();
             return;
         }
-        let command_id = match self.command_ledger.reserve(intent.clone()) {
-            Ok(command_id) => command_id,
-            Err(error) => {
-                self.preference_notice = Some(error.to_string());
-                self.notify_status_bar(cx);
-                cx.notify();
-                return;
-            }
+        let Some(command_id) = self.reserve_command(intent.clone()) else {
+            self.notify_status_bar(cx);
+            cx.notify();
+            return;
         };
         let admission = self
             .runtime
@@ -2738,14 +2931,10 @@ impl NativeShell {
         let intent = DesktopCommandIntent::ExternalEditor {
             project_relative_path: project_relative_path.clone(),
         };
-        let command_id = match self.command_ledger.reserve(intent.clone()) {
-            Ok(command_id) => command_id,
-            Err(error) => {
-                self.preference_notice = Some(error.to_string());
-                self.notify_status_bar(cx);
-                cx.notify();
-                return;
-            }
+        let Some(command_id) = self.reserve_command(intent.clone()) else {
+            self.notify_status_bar(cx);
+            cx.notify();
+            return;
         };
         let admission = self
             .runtime
@@ -3339,11 +3528,12 @@ impl NativeShell {
         measurement: &ConversationRowMeasurement,
         cx: &mut Context<Self>,
     ) {
-        let Some(projection) = self.projection.as_ref() else {
+        let workspace = &mut self.active_workspace;
+        let Some(projection) = workspace.projection.as_ref() else {
             return;
         };
-        let source = ConversationSource::new(projection, self.composer.submitted());
-        let outcome = self
+        let source = ConversationSource::new(projection, workspace.composer.submitted());
+        let outcome = workspace
             .conversation_controller
             .submit_row_measurement(&source, measurement);
         self.schedule_conversation_height_refresh(outcome.refresh, cx);
@@ -3353,13 +3543,14 @@ impl NativeShell {
     }
 
     fn refresh_conversation_rows_at_width(&mut self, layout_width: u32, cx: &mut Context<Self>) {
-        let Some(projection) = self.projection.as_ref() else {
+        let workspace = &mut self.active_workspace;
+        let Some(projection) = workspace.projection.as_ref() else {
             return;
         };
-        let pane_dirty = self.conversation_controller.needs_row_refresh()
-            || self.conversation_controller.active_width_bucket() != Some(layout_width);
-        let source = ConversationSource::new(projection, self.composer.submitted());
-        let refresh = self
+        let pane_dirty = workspace.conversation_controller.needs_row_refresh()
+            || workspace.conversation_controller.active_width_bucket() != Some(layout_width);
+        let source = ConversationSource::new(projection, workspace.composer.submitted());
+        let refresh = workspace
             .conversation_controller
             .prepare_rows(&source, layout_width);
         if pane_dirty {
@@ -4190,7 +4381,14 @@ mod tests {
     use desktop::shell::{COMPOSER_MAX_HEIGHT, CONVERSATION_ROW_VERTICAL_PADDING_PX};
 
     fn visual_test_snapshot() -> desktop::runtime::DesktopRuntimeHydratedSnapshot {
-        let session_id = "desktop-visual-test".to_owned();
+        visual_test_snapshot_for("desktop-visual-test")
+    }
+
+    fn visual_test_snapshot_for(
+        session_id: &str,
+    ) -> desktop::runtime::DesktopRuntimeHydratedSnapshot {
+        let session_id = session_id.to_owned();
+        let stream_id = format!("{session_id}-stream");
         desktop::runtime::DesktopRuntimeHydratedSnapshot {
             project: CodingAgentEmbeddingSnapshot {
                 cwd: std::path::PathBuf::from("/desktop-visual-test"),
@@ -4216,7 +4414,7 @@ mod tests {
             },
             session: CodingAgentSnapshot {
                 cursor: CodingAgentSnapshotCursor {
-                    stream_id: "desktop-visual-test-stream".into(),
+                    stream_id,
                     snapshot_protocol_major: UI_SNAPSHOT_PROTOCOL_VERSION.major,
                     last_event_sequence: 0,
                     last_session_sequence: 0,
@@ -4481,22 +4679,169 @@ mod tests {
         shell.update(cx, |shell, _| {
             shell.composer.edit("keep this home draft");
             shell.projection = Some(visual_test_projection());
-            let current_session_id = shell
-                .projection
-                .as_ref()
-                .expect("the test just installed a session projection")
-                .snapshot()
-                .session
-                .session_id
-                .clone();
-            shell.reconcile_composer_session(HOME_COMPOSER_SESSION_KEY, &current_session_id);
-
             assert_eq!(shell.composer.draft(), "keep this home draft");
-            assert!(
-                !shell
-                    .composer_session_drafts
-                    .contains_key(HOME_COMPOSER_SESSION_KEY)
+            assert_ne!(
+                shell.active_workspace.session_id(),
+                HOME_COMPOSER_SESSION_KEY
             );
+        });
+    }
+
+    #[gpui::test]
+    fn first_session_change_rekeys_the_home_workspace_and_completes_its_command(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, cx| {
+            shell.composer.edit("home draft");
+            let intent = DesktopCommandIntent::OpenSession {
+                session_id: "session-first".into(),
+            };
+            let command_id = shell
+                .reserve_command(intent.clone())
+                .expect("the first open command fits the home ledger");
+            shell.runtime_ui_notification_count = 0;
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::SessionChanged {
+                    command_id,
+                    snapshot: visual_test_snapshot_for("session-first"),
+                },
+            );
+
+            assert!(shell.poll_runtime(cx));
+            assert_eq!(shell.active_workspace.session_id(), "session-first");
+            assert_eq!(shell.composer.draft(), "home draft");
+            assert!(!shell.command_ledger.matches(command_id, &intent));
+            assert!(shell.runtime_ui_notification_count > 0);
+        });
+    }
+
+    #[gpui::test]
+    fn background_workspace_advances_silently_and_switching_restores_scoped_state(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let session_a_snapshot = visual_test_snapshot_for("session-a");
+        let session_a_projection = DesktopProjection::new(session_a_snapshot)
+            .expect("session A fixture is a valid product projection");
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, session_a_projection);
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        shell.update(cx, |shell, cx| {
+            let session_b_snapshot = visual_test_snapshot_for("session-b");
+            let session_b_projection = DesktopProjection::new(session_b_snapshot.clone())
+                .expect("session B fixture is a valid product projection");
+            let mut session_b = SessionWorkspace::new(
+                session_b_snapshot.project.clone(),
+                Some(session_b_projection),
+                None,
+                DesktopCommandLedger::default(),
+            );
+            let change = CodingAgentFileChangeSnapshot {
+                path: "session-b-only.rs".into(),
+                mutation_kind: "edit".into(),
+                operation_id: "operation-session-b".into(),
+                tool_call_id: None,
+                updated_sequence: 3,
+                first_changed_line: Some(4),
+                added_lines: Some(1),
+                removed_lines: Some(0),
+                diff: None,
+            };
+            let review_request = CodingAgentFileReviewRequest::from(&change);
+            session_b.composer.edit("draft b");
+            session_b.inspector_section = InspectorSection::Task;
+            session_b.file_review =
+                Arc::new(DesktopFileReviewState::Loading(review_request.clone()));
+            session_b
+                .command_ledger
+                .reserve_with_id(
+                    9_001,
+                    DesktopCommandIntent::FileReview {
+                        request: review_request.clone(),
+                    },
+                )
+                .expect("session B test command fits its bounded ledger");
+
+            shell.composer.edit("draft a");
+            shell.inspector_section = InspectorSection::Runtime;
+            shell.workspaces.insert("session-b".into(), session_b);
+            shell.refresh_conversation_rows_at_width(800, cx);
+            shell.runtime_ui_notification_count = 0;
+
+            let mut finished_snapshot = visual_test_snapshot_for("session-b");
+            finished_snapshot.session.cursor.last_event_sequence = 7;
+            finished_snapshot.session.cursor.last_session_sequence = 7;
+            finished_snapshot.session.context.changes.push(change);
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::PromptFinished {
+                    command_id: 9_002,
+                    operation_id: "operation-session-b".into(),
+                    snapshot: finished_snapshot,
+                    error: None,
+                },
+            );
+            assert!(shell.poll_runtime(cx));
+
+            assert_eq!(shell.active_workspace.session_id(), "session-a");
+            assert_eq!(shell.runtime_ui_notification_count, 0);
+            assert_eq!(shell.composer.draft(), "draft a");
+            assert_eq!(shell.inspector_section, InspectorSection::Runtime);
+            assert!(matches!(
+                shell.file_review.as_ref(),
+                DesktopFileReviewState::Empty
+            ));
+            assert!(shell.command_ledger.intent(9_001).is_none());
+
+            let background = shell
+                .workspaces
+                .get("session-b")
+                .expect("session B remains parked after its background update");
+            assert_eq!(
+                background
+                    .projection
+                    .as_ref()
+                    .expect("session B remains hydrated")
+                    .cursor()
+                    .last_event_sequence,
+                7
+            );
+            assert_eq!(background.composer.draft(), "draft b");
+            assert_eq!(background.inspector_section, InspectorSection::Task);
+            assert!(matches!(
+                background.file_review.as_ref(),
+                DesktopFileReviewState::Loading(request) if request == &review_request
+            ));
+            assert!(background.command_ledger.intent(9_001).is_some());
+
+            assert!(shell.swap_active_workspace("session-b"));
+            assert_eq!(shell.composer.draft(), "draft b");
+            assert_eq!(shell.inspector_section, InspectorSection::Task);
+            assert!(shell.swap_active_workspace("session-a"));
+            assert_eq!(shell.composer.draft(), "draft a");
+            assert_eq!(shell.inspector_section, InspectorSection::Runtime);
+
+            for session_id in ["session-c", "session-d"] {
+                let snapshot = visual_test_snapshot_for(session_id);
+                let projection = DesktopProjection::new(snapshot.clone())
+                    .expect("workspace-cap fixture is a valid projection");
+                shell.workspaces.insert(
+                    session_id.into(),
+                    SessionWorkspace::new(
+                        snapshot.project,
+                        Some(projection),
+                        None,
+                        DesktopCommandLedger::default(),
+                    ),
+                );
+            }
+            assert_eq!(shell.workspaces.len() + 1, MAX_SESSION_WORKSPACES);
+            let session_e = visual_test_snapshot_for("session-e");
+            assert!(!shell.install_hydrated_workspace(&session_e));
+            assert!(!shell.workspaces.contains_key("session-e"));
         });
     }
 
@@ -6292,147 +6637,49 @@ mod tests {
 
     #[test]
     fn composer_mode_and_draft_are_scoped_to_the_active_session() {
-        let mut modes = HashMap::new();
-        assert_eq!(
-            composer_running_mode_for(&modes, "session-a"),
-            ComposerRunningMode::SteerNow
+        let projection = visual_test_projection();
+        let project = projection.project().clone();
+        let mut session_a = SessionWorkspace::new(
+            project.clone(),
+            Some(projection),
+            None,
+            DesktopCommandLedger::default(),
         );
-        modes.insert("session-a".into(), ComposerRunningMode::QueueNext);
+        let mut session_b =
+            SessionWorkspace::new(project, None, None, DesktopCommandLedger::default());
+        session_a.composer.edit("draft a");
+        session_a.composer_running_mode = ComposerRunningMode::QueueNext;
+        session_b.composer.edit("draft b");
+
+        assert_eq!(session_a.composer.draft(), "draft a");
         assert_eq!(
-            composer_running_mode_for(&modes, "session-a").submission_kind(),
+            session_a.composer_running_mode.submission_kind(),
             ComposerSubmissionKind::FollowUp
         );
+        assert_eq!(session_b.composer.draft(), "draft b");
         assert_eq!(
-            composer_running_mode_for(&modes, "session-b").submission_kind(),
+            session_b.composer_running_mode.submission_kind(),
             ComposerSubmissionKind::Steer
         );
-
-        let mut composer = ComposerState::default();
-        let mut drafts = HashMap::from([("session-b".to_owned(), "draft b".to_owned())]);
-        composer.edit("draft a");
-        assert!(reconcile_composer_session_state(
-            &mut composer,
-            &mut drafts,
-            "session-a",
-            "session-b"
-        ));
-        assert_eq!(composer.draft(), "draft b");
-        assert!(reconcile_composer_session_state(
-            &mut composer,
-            &mut drafts,
-            "session-b",
-            "session-a"
-        ));
-        assert_eq!(composer.draft(), "draft a");
-        assert!(!reconcile_composer_session_state(
-            &mut composer,
-            &mut drafts,
-            "session-a",
-            "session-a"
-        ));
-    }
-
-    #[test]
-    fn conversation_scroll_selection_and_expansion_are_scoped_to_the_session() {
-        let mut controller = ConversationController::default();
-        controller.viewport_for_tests().on_content_changed(40, 1);
-        controller.viewport_for_tests().pause_follow_latest();
-        controller
-            .viewport_for_tests()
-            .select_live("tool:session-a");
-        controller
-            .expanded_details_for_tests()
-            .insert("tool:session-a".to_owned());
-        controller.set_scroll_top_for_tests(410.5);
-
-        assert!(controller.reconcile_session_view("session-a", "session-b"));
-        assert!(controller.follow_latest_enabled());
-        assert_eq!(controller.selected_block_id(), None);
-        assert!(controller.expanded_details().is_empty());
-        assert_eq!(controller.pending_scroll_restore_for_tests(), Some(0.));
-
-        controller.viewport_for_tests().on_content_changed(12, 2);
-        controller.viewport_for_tests().pause_follow_latest();
-        controller
-            .viewport_for_tests()
-            .select_live("assistant:session-b");
-        controller
-            .expanded_details_for_tests()
-            .insert("assistant:session-b".into());
-        controller.set_scroll_top_for_tests(95.);
-        assert!(controller.reconcile_session_view("session-b", "session-a"));
-
-        assert!(!controller.follow_latest_enabled());
-        assert_eq!(controller.selected_block_id(), Some("tool:session-a"));
-        assert_eq!(
-            controller.expanded_details().clone(),
-            HashSet::from(["tool:session-a".to_owned()])
-        );
-        assert_eq!(controller.pending_scroll_restore_for_tests(), Some(410.5));
-
-        let session_b = controller
-            .session_view_for_tests("session-b")
-            .expect("the outgoing session view should remain restorable");
-        assert_eq!(session_b.scroll_top(), 95.);
-        assert_eq!(
-            session_b.viewport().selected_block_id(),
-            Some("assistant:session-b")
-        );
-    }
-
-    #[test]
-    fn same_session_projection_replacement_keeps_conversation_view_untouched() {
-        let mut controller = ConversationController::default();
-        controller.viewport_for_tests().pause_follow_latest();
-        controller
-            .viewport_for_tests()
-            .select_live("assistant:current");
-        controller
-            .expanded_details_for_tests()
-            .insert("assistant:current".to_owned());
-        controller.set_scroll_top_for_tests(123.);
-
-        assert!(!controller.reconcile_session_view("session-a", "session-a"));
-        assert!(!controller.follow_latest_enabled());
-        assert_eq!(controller.selected_block_id(), Some("assistant:current"));
-        assert_eq!(
-            controller.expanded_details().clone(),
-            HashSet::from(["assistant:current".to_owned()])
-        );
-        assert!(controller.session_view_for_tests("session-a").is_none());
-        assert_eq!(controller.pending_scroll_restore_for_tests(), None);
     }
 
     #[test]
     fn inspector_section_selection_is_scoped_to_the_session() {
-        let mut selected = InspectorSection::Runtime;
-        let mut sections = HashMap::new();
+        let projection = visual_test_projection();
+        let project = projection.project().clone();
+        let mut session_a = SessionWorkspace::new(
+            project.clone(),
+            Some(projection),
+            None,
+            DesktopCommandLedger::default(),
+        );
+        let mut session_b =
+            SessionWorkspace::new(project, None, None, DesktopCommandLedger::default());
+        session_a.inspector_section = InspectorSection::Runtime;
+        session_b.inspector_section = InspectorSection::Task;
 
-        assert!(reconcile_inspector_session_section_state(
-            &mut selected,
-            &mut sections,
-            "session-a",
-            "session-b",
-        ));
-        assert_eq!(selected, InspectorSection::Changes);
-
-        selected = InspectorSection::Task;
-        assert!(reconcile_inspector_session_section_state(
-            &mut selected,
-            &mut sections,
-            "session-b",
-            "session-a",
-        ));
-        assert_eq!(selected, InspectorSection::Runtime);
-        assert_eq!(sections.get("session-b"), Some(&InspectorSection::Task));
-
-        assert!(!reconcile_inspector_session_section_state(
-            &mut selected,
-            &mut sections,
-            "session-a",
-            "session-a",
-        ));
-        assert_eq!(selected, InspectorSection::Runtime);
+        assert_eq!(session_a.inspector_section, InspectorSection::Runtime);
+        assert_eq!(session_b.inspector_section, InspectorSection::Task);
     }
 
     #[test]
@@ -7089,10 +7336,15 @@ mod tests {
         assert!(pane.contains("desktop-composer-state-notice"));
         let legacy_steer_button = ["Button::new(\"steer-", "operation\")"].concat();
         let legacy_follow_up_button = ["Button::new(\"follow-up-", "operation\")"].concat();
+        let legacy_draft_map = ["composer_session_", "drafts: HashMap"].concat();
+        let legacy_mode_map = ["composer_running_", "modes: HashMap"].concat();
         assert!(!pane.contains(&legacy_steer_button));
         assert!(!pane.contains(&legacy_follow_up_button));
-        assert!(shell.contains("composer_session_drafts: HashMap<String, String>"));
-        assert!(shell.contains("composer_running_modes: HashMap<String, ComposerRunningMode>"));
+        assert!(!shell.contains(&legacy_draft_map));
+        assert!(!shell.contains(&legacy_mode_map));
+        assert!(shell.contains("struct SessionWorkspace"));
+        assert!(shell.contains("composer_running_mode: ComposerRunningMode"));
+        assert!(shell.contains("workspaces: HashMap<String, SessionWorkspace>"));
         assert!(!pane.contains("conversation_controller.render_dirty_sequences"));
     }
 
@@ -7101,6 +7353,7 @@ mod tests {
         let shell = include_str!("native_shell.rs");
         let pane = include_str!("native_shell/inspector_pane.rs");
         let inspector_panel_id = [".id(\"inspector-", "panel\")"].concat();
+        let legacy_inspector_map = ["inspector_session_", "sections: HashMap"].concat();
 
         assert!(!shell.contains(&inspector_panel_id));
         assert!(pane.contains(&inspector_panel_id));
@@ -7121,7 +7374,9 @@ mod tests {
         assert!(shell.contains("fn inspector_pane_view_model(&self) -> InspectorPaneViewModel"));
         assert!(shell.contains("file_review: Arc<DesktopFileReviewState>"));
         assert!(shell.contains("inspector_telemetry_refresh_deadline: Option<Instant>"));
-        assert!(shell.contains("inspector_session_sections: HashMap<String, InspectorSection>"));
+        assert!(!shell.contains(&legacy_inspector_map));
+        assert!(shell.contains("inspector_section: InspectorSection"));
+        assert!(shell.contains("command_ledger: DesktopCommandLedger"));
         assert!(shell.contains("this.submit_recovery_action(identity.clone(), *action, cx)"));
         assert!(shell.contains("fn notify_inspector_pane("));
         assert!(!pane.contains("conversation_controller.render_dirty_sequences"));

@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -22,7 +22,6 @@ use desktop::projection::{
 };
 
 pub(super) const RESIZE_DEBOUNCE: Duration = Duration::from_millis(67);
-pub(super) const MAX_SESSION_VIEW_STATES: usize = 256;
 pub(super) const MAX_DIRTY_SEQUENCES: usize = 256;
 pub(super) const MAX_EXPANDED_DETAILS: usize = 256;
 
@@ -91,8 +90,6 @@ impl<'a> ConversationSource<'a> {
 pub(super) struct ConversationController {
     viewport: ConversationViewport,
     pub(super) scroll: VirtualListScrollHandle,
-    session_views: HashMap<String, ConversationSessionViewState>,
-    pending_scroll_restore: Option<f32>,
     layout: ConversationRowLayoutState,
     live_layout: ConversationRowLayoutState,
     render_cache: ConversationRowRenderCache,
@@ -116,8 +113,6 @@ impl Default for ConversationController {
         Self {
             viewport: ConversationViewport::new(INITIAL_VISIBLE_ROWS),
             scroll: VirtualListScrollHandle::new(),
-            session_views: HashMap::new(),
-            pending_scroll_restore: None,
             layout: ConversationRowLayoutState::default(),
             live_layout: ConversationRowLayoutState::default(),
             render_cache: ConversationRowRenderCache::default(),
@@ -164,24 +159,6 @@ impl ConversationRenderReader {
 
     pub(super) fn row_sizes(&self) -> Rc<Vec<gpui::Size<gpui::Pixels>>> {
         self.row_sizes.borrow().clone()
-    }
-}
-
-#[derive(Clone)]
-pub(super) struct ConversationSessionViewState {
-    viewport: ConversationViewport,
-    scroll_top: f32,
-    expanded_details: HashSet<String>,
-}
-
-#[cfg(test)]
-impl ConversationSessionViewState {
-    pub(super) const fn scroll_top(&self) -> f32 {
-        self.scroll_top
-    }
-
-    pub(super) const fn viewport(&self) -> &ConversationViewport {
-        &self.viewport
     }
 }
 
@@ -381,49 +358,6 @@ impl ConversationController {
 
     pub(super) fn mark_live_dirty(&mut self) {
         self.render_live_dirty = true;
-    }
-
-    // ---- session-scoped view state ----------------------------------------
-
-    /// Park the outgoing session's viewport/scroll/expansion and restore the
-    /// incoming session's, so conversation state never leaks across sessions.
-    pub(super) fn reconcile_session_view(
-        &mut self,
-        previous_session_id: &str,
-        next_session_id: &str,
-    ) -> bool {
-        if previous_session_id == next_session_id {
-            return false;
-        }
-        self.toggle_anchor = None;
-        let scroll_top = (-f32::from(self.scroll.offset().y)).max(0.);
-        if self.session_views.len() >= MAX_SESSION_VIEW_STATES
-            && !self.session_views.contains_key(previous_session_id)
-            && let Some(stale) = self.session_views.keys().next().cloned()
-        {
-            self.session_views.remove(&stale);
-        }
-        self.session_views.insert(
-            previous_session_id.to_owned(),
-            ConversationSessionViewState {
-                viewport: self.viewport.clone(),
-                scroll_top: if scroll_top.is_finite() {
-                    scroll_top.max(0.)
-                } else {
-                    0.
-                },
-                expanded_details: std::mem::take(&mut self.expanded_details),
-            },
-        );
-        if let Some(state) = self.session_views.remove(next_session_id) {
-            self.viewport = state.viewport;
-            self.expanded_details = state.expanded_details;
-            self.pending_scroll_restore = Some(state.scroll_top);
-        } else {
-            self.viewport = ConversationViewport::new(INITIAL_VISIBLE_ROWS);
-            self.pending_scroll_restore = Some(0.);
-        }
-        true
     }
 
     // ---- scrolling --------------------------------------------------------
@@ -981,15 +915,13 @@ impl ConversationController {
             visible_rows = visible_conversation_count
         )
         .entered();
-        let session_scroll_restore = self.pending_scroll_restore.take();
         let toggle_anchor = self
             .toggle_anchor
             .as_ref()
             .filter(|anchor| !anchor.layout_applied)
             .cloned();
-        let previous_scroll_top = (session_scroll_restore.is_none()
-            && !self.viewport.follow_latest())
-        .then(|| (-f32::from(self.scroll.offset().y)).max(0.0));
+        let previous_scroll_top =
+            (!self.viewport.follow_latest()).then(|| (-f32::from(self.scroll.offset().y)).max(0.0));
         let full_render_update =
             self.render_full_dirty || self.render_width_bucket != Some(layout_width);
         let mut paused_scroll_top = None;
@@ -1127,17 +1059,6 @@ impl ConversationController {
                 event = "toggle_scroll_anchor_apply",
                 scroll_top = toggle_scroll_top,
             );
-        } else if let Some(restored_scroll_top) = session_scroll_restore
-            && !self.viewport.follow_latest()
-        {
-            let mut offset = self.scroll.offset();
-            offset.y = px(-restored_scroll_top);
-            self.scroll.set_offset(offset);
-            tracing::trace!(
-                target: "desktop",
-                event = "session_scroll_restore",
-                scroll_top = restored_scroll_top,
-            );
         } else if let (Some(previous_scroll_top), Some(adjusted_scroll_top)) =
             (previous_scroll_top, paused_scroll_top)
             && (previous_scroll_top - adjusted_scroll_top).abs() > 0.5
@@ -1155,25 +1076,6 @@ impl ConversationController {
 
 #[cfg(test)]
 impl ConversationController {
-    pub(super) const fn viewport_for_tests(&mut self) -> &mut ConversationViewport {
-        &mut self.viewport
-    }
-
-    pub(super) const fn expanded_details_for_tests(&mut self) -> &mut HashSet<String> {
-        &mut self.expanded_details
-    }
-
-    pub(super) const fn pending_scroll_restore_for_tests(&self) -> Option<f32> {
-        self.pending_scroll_restore
-    }
-
-    pub(super) fn session_view_for_tests(
-        &self,
-        session_id: &str,
-    ) -> Option<&ConversationSessionViewState> {
-        self.session_views.get(session_id)
-    }
-
     pub(super) fn set_scroll_top_for_tests(&self, scroll_top: f32) {
         let mut offset = self.scroll.offset();
         offset.y = px(-scroll_top);

@@ -61,8 +61,14 @@ pub(super) fn reconcile_direct_update(
             omitted,
         } => {
             let sessions_dirty = shell
-                .command_ledger
-                .complete(command_id, &DesktopCommandIntent::ListSessions);
+                .command_owner_session_id(command_id)
+                .is_some_and(|owner| {
+                    shell.complete_workspace_command(
+                        &owner,
+                        command_id,
+                        &DesktopCommandIntent::ListSessions,
+                    )
+                });
             if sessions_dirty {
                 shell.session_controller.replace_catalog(sessions, omitted);
                 shell.preference_notice = Some(if omitted == 0 {
@@ -92,7 +98,7 @@ pub(super) struct ProjectionCommandCompletions {
     selection: Option<(u64, DesktopRuntimeSelectionKind)>,
     recovery: Option<(u64, DesktopRecoveryAction, String)>,
     resync: Option<u64>,
-    session: Option<(u64, DesktopCommandIntent)>,
+    session: Option<(String, u64, DesktopCommandIntent)>,
 }
 
 impl ProjectionCommandCompletions {
@@ -167,7 +173,13 @@ impl ProjectionCommandCompletions {
                     )
                 })
                 .cloned()
-                .map(|intent| (*command_id, intent)),
+                .map(|intent| {
+                    (
+                        shell.active_workspace.session_id().to_owned(),
+                        *command_id,
+                        intent,
+                    )
+                }),
             _ => None,
         };
         Self {
@@ -200,8 +212,8 @@ impl ProjectionCommandCompletions {
                 shell.request_session_catalog(cx);
             }
         }
-        if let Some((command_id, intent)) = self.session
-            && shell.command_ledger.complete(command_id, &intent)
+        if let Some((owner_session_id, command_id, intent)) = self.session
+            && shell.complete_workspace_command(&owner_session_id, command_id, &intent)
         {
             sessions_dirty = true;
             shell.preference_notice = Some(if projection_replaced {
@@ -295,8 +307,20 @@ pub(super) fn reserve_command(
     shell: &mut NativeShell,
     intent: DesktopCommandIntent,
 ) -> Option<u64> {
-    match shell.command_ledger.reserve(intent) {
-        Ok(command_id) => Some(command_id),
+    let command_id = shell.next_command_id;
+    let Some(next_command_id) = command_id.checked_add(1) else {
+        shell.preference_notice = Some("desktop command IDs are exhausted".into());
+        return None;
+    };
+    match shell
+        .active_workspace
+        .command_ledger
+        .reserve_with_id(command_id, intent)
+    {
+        Ok(()) => {
+            shell.next_command_id = next_command_id;
+            Some(command_id)
+        }
         Err(error) => {
             shell.preference_notice = Some(error.to_string());
             None

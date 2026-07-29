@@ -489,7 +489,12 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(commands.contains("struct ProjectionCommandCompletions"));
     assert!(commands.contains("fn reconcile_direct_update"));
     assert!(commands.contains("DesktopRuntimeUpdate::FileReviewed"));
-    assert!(!shell.contains("DesktopRuntimeUpdate::FileReviewed"));
+    assert_eq!(
+        shell.matches("DesktopRuntimeUpdate::FileReviewed").count(),
+        1,
+        "the root may recognize a file-review command id for workspace routing, but must not consume its payload",
+    );
+    assert!(shell.contains("fn runtime_update_command_id("));
     assert!(sessions.contains("struct SessionsPaneViewModel"));
     assert!(sessions.contains("search_input: gpui::Entity<InputState>"));
     assert!(!sessions.contains("WeakEntity<NativeShell>"));
@@ -516,8 +521,11 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(!shell.contains(&root_latency_field));
     assert!(shell.contains("fn composer_pane_view_model(&self) -> ComposerPaneViewModel"));
     assert!(shell.contains("composer: ComposerState"));
-    assert!(shell.contains("composer_session_drafts: HashMap<String, String>"));
-    assert!(shell.contains("composer_running_modes: HashMap<String, ComposerRunningMode>"));
+    assert!(!shell.contains("composer_session_drafts: HashMap<String, String>"));
+    assert!(!shell.contains("composer_running_modes: HashMap<String, ComposerRunningMode>"));
+    assert!(shell.contains("struct SessionWorkspace"));
+    assert!(shell.contains("composer_running_mode: ComposerRunningMode"));
+    assert!(shell.contains("workspaces: HashMap<String, SessionWorkspace>"));
 
     for (name, source) in [("inspector", &inspector), ("overlay", &overlay)] {
         assert!(
@@ -545,7 +553,8 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     assert!(shell.contains("fn inspector_pane_view_model(&self) -> InspectorPaneViewModel"));
     assert!(shell.contains("file_review: Arc<DesktopFileReviewState>"));
     assert!(shell.contains("inspector_telemetry_refresh_deadline: Option<Instant>"));
-    assert!(shell.contains("inspector_session_sections: HashMap<String, InspectorSection>"));
+    assert!(!shell.contains("inspector_session_sections: HashMap<String, InspectorSection>"));
+    assert!(shell.contains("inspector_section: InspectorSection"));
     assert!(overlay.contains("struct OverlayViewModel"));
     assert!(overlay.contains("view_model: Option<OverlayViewModel>"));
     assert!(overlay.contains("request: ToolAuthorizationRequest"));
@@ -571,10 +580,8 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
         "fn live_rows_match",
         "fn prepare_rows",
         "fn width_for_render",
-        "fn reconcile_session_view",
         "fn apply_delta",
         "ConversationRowRenderSource",
-        "event = \"session_scroll_restore\"",
     ] {
         assert!(
             conversation.contains(algorithm),
@@ -584,6 +591,13 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
             !shell_production.contains(algorithm),
             "native shell composition must not own {algorithm}"
         );
+    }
+    for obsolete_mover in [
+        "fn reconcile_session_view",
+        "event = \"session_scroll_restore\"",
+    ] {
+        assert!(!conversation.contains(obsolete_mover));
+        assert!(!shell_production.contains(obsolete_mover));
     }
 
     // The conversation controller is the sole owner of transcript cache,
@@ -598,7 +612,6 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
         "render_width_bucket: Option<u32>",
         "height_refresh_deadline: Option<Instant>",
         "expanded_details: HashSet<String>",
-        "session_views: HashMap<String, ConversationSessionViewState>",
     ] {
         assert!(
             conversation.contains(state),
@@ -611,6 +624,7 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
     }
     assert!(conversation.contains("struct ConversationSource<'a>"));
     assert!(shell.contains("conversation_controller: ConversationController"));
+    assert!(!conversation.contains("ConversationSessionViewState"));
     assert!(shell.contains("fn conversation_pane_view_model(&self) -> ConversationPaneViewModel"));
     for back_reference in [
         &weak_root_owner,
@@ -966,7 +980,7 @@ fn desktop_runtime_delivery_awaits_events_without_an_idle_poll_loop() {
 }
 
 #[test]
-fn desktop_pending_commands_use_one_bounded_checked_typed_ledger() {
+fn desktop_pending_commands_use_bounded_per_workspace_ledgers_and_one_checked_id_sequence() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let ledger = fs::read_to_string(manifest_dir.join("src/command_ledger.rs"))
         .expect("desktop command ledger should be readable");
@@ -979,10 +993,13 @@ fn desktop_pending_commands_use_one_bounded_checked_typed_ledger() {
     assert!(ledger.contains("pub(crate) enum DesktopCommandIntent"));
     assert!(ledger.contains("checked_add(1)"));
     assert!(!ledger.contains("saturating_add"));
+    assert!(ledger.contains("fn reserve_with_id("));
+    assert!(shell.contains("struct SessionWorkspace"));
     assert!(shell.contains("command_ledger: DesktopCommandLedger"));
-    assert!(commands.contains("shell.command_ledger.reserve(intent)"));
+    assert!(shell.contains("next_command_id: u64"));
+    assert!(commands.contains(".active_workspace\n        .command_ledger"));
+    assert!(commands.contains("reserve_with_id(command_id, intent)"));
     for obsolete_pending_field in [
-        "next_command_id:",
         "pending_abort_command",
         "pending_reload_command",
         "pending_selection_command",

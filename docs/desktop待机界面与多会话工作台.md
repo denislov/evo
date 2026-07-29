@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -1057,6 +1057,32 @@ Shell 持有多个会话工作台，前台渲染其一，后台持续投影。
 - 新增测试：切回后台会话时 transcript、草稿、Inspector 选中项与离开时一致；
 - 新增测试：`file_review` 与 `command_ledger` 不跨工作台串扰；
 - 全量测试与两组 performance gate 通过。
+
+**实施记录（2026-07-29）**
+
+- 提取 `SessionWorkspace`，把 `project / projection`、会话 notice、Conversation controller、
+  Composer（含 draft 与 pending submission）、running mode、thinking selection、Inspector section、
+  file review 与 typed command ledger 放到同一所有权边界。`NativeShell` 只保留一个前台
+  `active_workspace` 与至多 3 个 parked workspace；既有 draft / running mode / Inspector 三张
+  per-session `HashMap` 以及 Conversation controller 内的 session view 搬运缓存全部删除。
+- update 先用显式 session id、hydrated/metadata snapshot 或全局唯一 command id 找到 owner；后台
+  update 临时挂载目标 workspace，沿用原 projection/command/composer dirty 判定完成数据更新，再恢复
+  前台 workspace 与本轮全部 pane/root dirty flags，因此不会调用 `cx.notify()` 或任一 pane notify。
+  `SessionChanged` 则永久切换前台，并在同一轮推送完整 view model；Home 首次建会话保留原 draft 与
+  pending command，不制造额外 Home workspace。
+- command ledger 仍按 workspace 隔离且每个上限 32；为避免多 ledger 从 1 重复分配，shell 新增唯一的
+  checked command-id sequence，再由 `reserve_with_id` 写入目标 workspace ledger。session catalog 仍是
+  shell 全局事实，其 completion 可跨 parked workspace 精确完成发起方的 typed intent。
+- 新增 GPUI 回归覆盖：后台 B 的 projection sequence 前进而 runtime UI notify 计数保持 0；A/B 切换
+  恢复各自 transcript owner、draft 与 Inspector section；B 的 file review / ledger 不进入 A；四工作台
+  上限拒绝第 5 个；Home→首会话完成原 Home ledger command 并保留草稿。源码边界断言同步改为
+  per-workspace ledger/Workspace 所有权，移除旧搬运结构的假阳性文本断言。
+- 验证通过：Desktop `210 passed / 5 ignored`、dependency boundary `16/16`、all-target check、严格
+  Clippy、fmt 与 `git diff --check`。`desktop-native-perf-gate.sh` 通过（GPU/present frame p95
+  `6826µs`、input p95 `8355µs`、steady RSS growth `53248B`、markdown p95 `116µs`）；
+  `desktop-perf-gate.sh` 通过（10k blocks hydration `2600µs`、headless frame p95 `2741µs`、input
+  roundtrip p95 `5718µs`，200 events/s streaming p95 `4µs`）。本任务没有改变 pane view model、typed
+  event 边界或任何视觉 surface，因此不更新 golden。
 
 **建议提交**
 
