@@ -64,11 +64,11 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
         session_id,
     } = options;
     let native_replay = native_perf::request();
-    // Bundled Lucide icons back every icon-only control. Without an asset
-    // source `Icon` renders nothing, so this registration is what makes the
-    // shared control semantics in `desktop_controls` usable at all.
+    // Product-owned Evo vectors and bundled Lucide controls share one explicit
+    // application asset boundary. Without it GPUI's SVG elements render
+    // nothing.
     application()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(crate::assets::DesktopAssets::new())
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             crate::actions::bind_keys(cx);

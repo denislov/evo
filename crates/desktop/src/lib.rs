@@ -9,6 +9,7 @@ extern crate self as desktop;
 
 mod actions;
 mod app;
+mod assets;
 mod command_ledger;
 mod conversation;
 mod file_review;

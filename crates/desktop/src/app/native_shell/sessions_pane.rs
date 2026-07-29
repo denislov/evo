@@ -18,6 +18,7 @@ use super::{
         DesktopActionRow, DesktopControlSize, DesktopIcon, DesktopIconButton, DesktopRowState,
     },
     desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
+    evo_brand::{EvoBrand, EvoBrandMode},
     project_catalog_controller::{
         ProjectCatalogGroup, ProjectCatalogState, session_matches_query, workspace_matches_query,
     },
@@ -808,10 +809,8 @@ impl Render for SessionsPane {
                             .items_center()
                             .gap_token(DesignSpace::Xs)
                             .child(
-                                div()
-                                    .text_token(DesignText::Title)
-                                    .text_color(rgb(theme.text.value()))
-                                    .child("evo"),
+                                EvoBrand::compact("sidebar-evo-loop", 24., EvoBrandMode::Dark)
+                                    .build(),
                             )
                             .child(
                                 div()

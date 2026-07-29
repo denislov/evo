@@ -54,9 +54,10 @@ fn unstable_ui_dependencies_are_exactly_pinned() {
         dependencies["gpui-component"]["git"].as_str(),
         Some("https://github.com/longbridge/gpui-component.git")
     );
-    // Icons must come from one bundled, accessible set rather than hand-drawn
-    // SVGs, and the asset crate must track the component revision exactly so an
-    // `IconName` can never outrun the assets that back it.
+    // Control icons must come from one bundled, accessible set rather than
+    // pane-owned SVGs. Product brand vectors have a separate application asset
+    // boundary, while the icon asset crate must still track the component
+    // revision exactly so an `IconName` can never outrun its backing asset.
     assert_eq!(
         dependencies["gpui-component-assets"]["rev"].as_str(),
         dependencies["gpui-component"]["rev"].as_str(),
@@ -529,14 +530,48 @@ fn desktop_bootstrap_and_native_shell_have_distinct_module_owners() {
     assert!(bootstrap.contains("DesktopRuntimeBridge::spawn"));
     assert!(bootstrap.contains("resolve_scratch_workspace"));
     assert!(bootstrap.contains("projectless_workspace_selection"));
-    // Icon assets are an application-startup concern: registering the source
-    // anywhere else would leave icon-only controls rendering blank.
-    assert!(bootstrap.contains(".with_assets(gpui_component_assets::Assets)"));
+    // Product vectors and control icons share one application-startup asset
+    // boundary; registering either source deeper in the shell would leave
+    // consumers dependent on bootstrap order.
+    assert!(bootstrap.contains(".with_assets(crate::assets::DesktopAssets::new())"));
     assert!(!bootstrap.contains("impl Render for NativeShell"));
     assert!(shell.contains("impl Render for NativeShell"));
     assert!(shell.contains("fn submit_composer"));
     assert!(!shell.contains("application()"));
     assert!(!shell.contains("DesktopRuntimeBridge::spawn"));
+}
+
+#[test]
+fn evo_brand_vectors_have_one_asset_boundary_and_one_rendering_owner() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let assets = fs::read_to_string(manifest_dir.join("src/assets.rs"))
+        .expect("desktop asset owner should be readable");
+    let brand = fs::read_to_string(manifest_dir.join("src/app/native_shell/evo_brand.rs"))
+        .expect("Evo brand rendering owner should be readable");
+    let sessions = fs::read_to_string(manifest_dir.join("src/app/native_shell/sessions_pane.rs"))
+        .expect("sessions pane should be readable");
+
+    assert!(assets.contains("struct DesktopAssets"));
+    assert!(assets.contains("impl AssetSource for DesktopAssets"));
+    assert!(assets.contains("self.component_assets.load(path)"));
+    for path in [
+        "EVO_WORDMARK_PATH",
+        "EVO_WORDMARK_ACCENT_PATH",
+        "EVO_COMPACT_PATH",
+        "EVO_COMPACT_ACCENT_PATH",
+    ] {
+        assert!(assets.contains(path), "desktop assets must own {path}");
+    }
+
+    assert!(brand.contains("struct EvoBrand"));
+    assert!(brand.contains("enum EvoBrandMode"));
+    assert!(brand.contains(".role(Role::Image)"));
+    assert!(brand.contains(".path(body_path)"));
+    assert!(brand.contains(".path(accent_path)"));
+    assert!(!brand.contains("NativeShell"));
+    assert!(!brand.contains("project_catalog"));
+    assert!(!brand.contains("desktop::runtime"));
+    assert!(sessions.contains("EvoBrand::compact"));
 }
 
 #[test]

@@ -27,13 +27,14 @@ use gpui::{
 };
 use gpui_component::Root;
 
-use super::native_shell::{NativeShell, NativeShellInit};
+use super::native_shell::{EvoBrandFixture, EvoBrandMode, NativeShell, NativeShellInit};
 use crate::preferences::DesktopPreferences;
 use crate::projection::DesktopProjection;
 use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot, DesktopRuntimeUpdate};
 
 const PERFORMANCE_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_PERF_REPLAY";
 const VISUAL_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_VISUAL_REPLAY";
+const BRAND_VISUAL_REPLAY_ENV: &str = "EVO_DESKTOP_BRAND_VISUAL_REPLAY";
 const CLICK_TO_PHOTON_REPLAY_ENV: &str = "EVO_DESKTOP_CLICK_TO_PHOTON_REPLAY";
 const WARMUP_FRAMES: usize = 20;
 const SAMPLE_FRAMES: usize = 200;
@@ -44,6 +45,7 @@ const INPUT_SAMPLE_STRIDE: usize = SAMPLE_FRAMES / INPUT_SAMPLE_FRAMES;
 pub(super) enum NativeReplayRequest {
     Performance,
     Visual(VisualReplaySpec),
+    Brand(EvoBrandMode),
     ClickToPhoton,
 }
 
@@ -272,17 +274,29 @@ pub(super) fn request() -> Result<Option<NativeReplayRequest>, String> {
     let click_to_photon = std::env::var(CLICK_TO_PHOTON_REPLAY_ENV)
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let visual = std::env::var(VISUAL_REPLAY_ENV).ok();
-    request_from_values(performance, click_to_photon, visual.as_deref())
+    let brand = std::env::var(BRAND_VISUAL_REPLAY_ENV).ok();
+    request_from_values(
+        performance,
+        click_to_photon,
+        visual.as_deref(),
+        brand.as_deref(),
+    )
 }
 
 fn request_from_values(
     performance: bool,
     click_to_photon: bool,
     visual: Option<&str>,
+    brand: Option<&str>,
 ) -> Result<Option<NativeReplayRequest>, String> {
-    if usize::from(performance) + usize::from(click_to_photon) + usize::from(visual.is_some()) > 1 {
+    if usize::from(performance)
+        + usize::from(click_to_photon)
+        + usize::from(visual.is_some())
+        + usize::from(brand.is_some())
+        > 1
+    {
         return Err(format!(
-            "{PERFORMANCE_REPLAY_ENV}, {CLICK_TO_PHOTON_REPLAY_ENV}, and {VISUAL_REPLAY_ENV} are mutually exclusive"
+            "{PERFORMANCE_REPLAY_ENV}, {CLICK_TO_PHOTON_REPLAY_ENV}, {VISUAL_REPLAY_ENV}, and {BRAND_VISUAL_REPLAY_ENV} are mutually exclusive"
         ));
     }
     if performance {
@@ -290,6 +304,9 @@ fn request_from_values(
     }
     if click_to_photon {
         return Ok(Some(NativeReplayRequest::ClickToPhoton));
+    }
+    if let Some(brand) = brand {
+        return EvoBrandMode::parse(brand).map(|mode| Some(NativeReplayRequest::Brand(mode)));
     }
     visual
         .map(VisualReplaySpec::parse)
@@ -300,6 +317,9 @@ fn request_from_values(
 pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), String> {
     if request == NativeReplayRequest::ClickToPhoton {
         return open_click_to_photon(cx);
+    }
+    if let NativeReplayRequest::Brand(mode) = request {
+        return open_brand_fixture(cx, mode);
     }
     let (projection, viewport, title, replay) = match request {
         NativeReplayRequest::Performance => (
@@ -314,6 +334,7 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             format!("evo-desktop-visual-{}", spec.key()),
             None,
         ),
+        NativeReplayRequest::Brand(_) => unreachable!("handled before projection setup"),
         NativeReplayRequest::ClickToPhoton => unreachable!("handled before projection setup"),
     };
     let options = WindowOptions {
@@ -431,6 +452,26 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             });
         }
         root
+    })
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+fn open_brand_fixture(cx: &mut App, mode: EvoBrandMode) -> Result<(), String> {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(40.), px(40.)),
+            size: size(px(900.), px(700.)),
+        })),
+        window_min_size: Some(size(px(900.), px(700.))),
+        app_id: Some("evo.desktop.brand-fixture".into()),
+        ..WindowOptions::default()
+    };
+    let title = format!("evo-brand-visual-{}", mode.key());
+    cx.open_window(options, move |window, cx| {
+        window.set_window_title(&title);
+        let fixture = cx.new(|_| EvoBrandFixture::new(mode));
+        cx.new(|cx| Root::new(fixture, window, cx))
     })
     .map(|_| ())
     .map_err(|error| error.to_string())
@@ -901,29 +942,35 @@ mod tests {
     #[test]
     fn native_replay_request_parser_rejects_conflicts_and_unknown_layouts() {
         assert_eq!(
-            request_from_values(false, false, Some("medium")),
+            request_from_values(false, false, Some("medium"), None),
             Ok(Some(NativeReplayRequest::Visual(VisualReplaySpec {
                 layout: VisualReplayLayout::Medium,
                 state: VisualReplayState::Standard,
             })))
         );
         assert_eq!(
-            request_from_values(false, true, None),
+            request_from_values(false, true, None, None),
             Ok(Some(NativeReplayRequest::ClickToPhoton))
         );
-        assert!(request_from_values(true, false, Some("wide")).is_err());
-        assert!(request_from_values(true, true, None).is_err());
-        assert!(request_from_values(false, true, Some("wide")).is_err());
-        assert!(request_from_values(false, false, Some("compact")).is_err());
+        assert!(request_from_values(true, false, Some("wide"), None).is_err());
+        assert!(request_from_values(true, true, None, None).is_err());
+        assert!(request_from_values(false, true, Some("wide"), None).is_err());
+        assert!(request_from_values(false, false, Some("compact"), None).is_err());
         assert_eq!(
-            request_from_values(false, false, Some("wide-authorization")),
+            request_from_values(false, false, None, Some("monochrome")),
+            Ok(Some(NativeReplayRequest::Brand(EvoBrandMode::Monochrome)))
+        );
+        assert!(request_from_values(false, false, Some("wide"), Some("dark")).is_err());
+        assert!(request_from_values(false, false, None, Some("sepia")).is_err());
+        assert_eq!(
+            request_from_values(false, false, Some("wide-authorization"), None),
             Ok(Some(NativeReplayRequest::Visual(VisualReplaySpec {
                 layout: VisualReplayLayout::Wide,
                 state: VisualReplayState::Authorization,
             })))
         );
         assert_eq!(
-            request_from_values(false, false, Some("narrow-idle")),
+            request_from_values(false, false, Some("narrow-idle"), None),
             Ok(Some(NativeReplayRequest::Visual(VisualReplaySpec {
                 layout: VisualReplayLayout::Narrow,
                 state: VisualReplayState::Idle,

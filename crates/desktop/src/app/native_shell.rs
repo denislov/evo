@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use self::desktop_style::{DesignText, DesktopStyledExt as _};
+pub(super) use self::evo_brand::{EvoBrandFixture, EvoBrandMode};
 use crate::actions::{
     self, AbortActiveOperation, AuthorizationAllowForOperation, AuthorizationAllowOnce,
     AuthorizationDeny, CopySelectedConversation, DesktopCommandPalette, DesktopPaletteCommand,
@@ -10672,6 +10673,7 @@ mod conversation_header;
 mod conversation_pane;
 mod desktop_controls;
 mod desktop_style;
+mod evo_brand;
 mod home_pane;
 mod inspector_pane;
 mod project_catalog_controller;
