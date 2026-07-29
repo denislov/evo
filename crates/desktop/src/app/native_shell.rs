@@ -501,7 +501,7 @@ impl NativeShell {
         let sessions_pane = cx.new(|cx| SessionsPane::new(sessions_focus.clone(), window, cx));
         let composer_pane = cx.new(|cx| ComposerPane::new(window, cx));
         let home_pane = cx.new(|_| HomePane::new());
-        let inspector_pane = cx.new(|_| InspectorPane::new(context_focus.clone()));
+        let inspector_pane = cx.new(|cx| InspectorPane::new(context_focus.clone(), cx));
         let toast_host = cx.new(|cx| ToastHost::new(window, cx));
         let overlay_host = cx.new(|_| {
             OverlayHost::new(
@@ -5551,7 +5551,7 @@ mod tests {
     #[gpui::test]
     fn inspector_tabs_stay_on_one_line_in_docked_and_overlay_layouts(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
-        let (_, cx) = add_visual_shell(
+        let (shell, cx) = add_visual_shell(
             cx,
             DesktopRuntimeBridge::disconnected_for_test(),
             visual_test_projection(),
@@ -5561,13 +5561,21 @@ mod tests {
             cx.simulate_resize(size(px(width), px(900.)));
             cx.run_until_parked();
             if open_overlay {
-                cx.dispatch_action(ToggleInspectorPanel);
+                cx.update(|window, app| {
+                    shell.update(app, |shell, app| shell.toggle_context(window, app));
+                });
                 cx.run_until_parked();
             }
 
             let tabs = cx
                 .debug_bounds("desktop-inspector-tabs")
-                .expect("Inspector tab strip is visible");
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Inspector tab strip is visible at width {width}; panel={:?}, details={:?}",
+                        cx.debug_bounds("desktop-inspector-panel"),
+                        cx.debug_bounds("inspector-details")
+                    )
+                });
             let tab_bounds = [
                 "desktop-inspector-tab-changes",
                 "desktop-inspector-tab-task",
@@ -5583,8 +5591,42 @@ mod tests {
                 assert_eq!(bounds.top(), first.top());
                 assert_eq!(bounds.bottom(), first.bottom());
                 assert_eq!(f32::from(bounds.size.height), 32.);
-                assert!(bounds.left() >= tabs.left() && bounds.right() <= tabs.right());
             }
+            assert!(tab_bounds[0].size.width > tab_bounds[1].size.width);
+            assert!(tab_bounds[3].size.width > tab_bounds[2].size.width);
+            assert!(tab_bounds[0].left() >= tabs.left());
+
+            shell.update(cx, |shell, cx| {
+                shell.inspector_section = InspectorSection::Runtime;
+                shell.notify_inspector_pane(cx);
+            });
+            cx.run_until_parked();
+            let runtime = cx
+                .debug_bounds("desktop-inspector-tab-runtime")
+                .expect("selected Runtime tab remains mounted");
+            assert!(runtime.left() >= tabs.left() && runtime.right() <= tabs.right());
+            assert!(shell.read_with(cx, |shell, cx| {
+                shell.inspector_pane.read(cx).tab_scroll_offset().x <= px(0.)
+            }));
+
+            cx.update(|window, app| {
+                shell.update(app, |shell, app| {
+                    shell.inspector_pane.update(app, |pane, app| {
+                        pane.focus_tab(InspectorSection::Runtime, window, app)
+                    });
+                });
+            });
+            let left = gpui::Keystroke::parse("left").expect("left is a valid keystroke");
+            assert!(cx.update(|window, app| window.dispatch_keystroke(left, app)));
+            cx.run_until_parked();
+            assert_eq!(
+                shell.read_with(cx, |shell, _| shell.inspector_section),
+                InspectorSection::Usage
+            );
+            let usage = cx
+                .debug_bounds("desktop-inspector-tab-usage")
+                .expect("keyboard-selected Usage tab remains mounted");
+            assert!(usage.left() >= tabs.left() && usage.right() <= tabs.right());
         }
     }
 

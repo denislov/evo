@@ -5,10 +5,10 @@ use desktop::shell::{
     CONTEXT_PANEL_WIDTH, MONOSPACE_FONT_FAMILY, SemanticColor, SemanticTheme, truncate_label,
 };
 use gpui::{
-    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, Styled as _, Window,
-    div, prelude::*, px, rgb,
+    EventEmitter, FocusHandle, IntoElement, KeyDownEvent, ParentElement as _, Render, Role,
+    ScrollHandle, Styled as _, Window, div, prelude::*, px, rgb,
 };
-use gpui_component::{Disableable as _, Selectable as _, badge::Badge, button::Button};
+use gpui_component::{Disableable as _, badge::Badge, button::Button};
 use std::sync::Arc;
 
 use super::{
@@ -108,19 +108,38 @@ pub(super) struct InspectorPaneViewModel {
 
 pub(super) struct InspectorPane {
     focus: FocusHandle,
+    tab_focus: [FocusHandle; 4],
+    tab_scroll: ScrollHandle,
     view_model: Option<InspectorPaneViewModel>,
 }
 
 impl InspectorPane {
-    pub(super) fn new(focus: FocusHandle) -> Self {
+    pub(super) fn new(focus: FocusHandle, cx: &mut gpui::Context<Self>) -> Self {
         Self {
             focus,
+            tab_focus: std::array::from_fn(|index| cx.focus_handle().tab_index(index as isize)),
+            tab_scroll: ScrollHandle::new(),
             view_model: None,
         }
     }
 
     pub(super) fn set_view_model(&mut self, view_model: InspectorPaneViewModel) {
         self.view_model = Some(view_model);
+    }
+
+    #[cfg(test)]
+    pub(super) fn focus_tab(
+        &self,
+        section: InspectorSection,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.tab_focus[inspector_section_index(section)].focus(window, cx);
+    }
+
+    #[cfg(test)]
+    pub(super) fn tab_scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.tab_scroll.offset()
     }
 }
 
@@ -358,6 +377,8 @@ impl Render for InspectorPane {
         let context_is_overlay = view_model.context_is_overlay;
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let selected_section = view_model.selected_section;
+        let selected_section_index = inspector_section_index(selected_section);
+        self.tab_scroll.scroll_to_item(selected_section_index);
         let selected_section_label = match selected_section {
             InspectorSection::Changes => "Changes",
             InspectorSection::Task => "Task",
@@ -426,47 +447,57 @@ impl Render for InspectorPane {
                     .debug_selector(|| "desktop-inspector-tabs".into())
                     .role(Role::TabList)
                     .aria_label("Inspector sections")
+                    .w_full()
                     .px_token(DesignSpace::Sm)
                     .py_token(DesignSpace::Sm)
                     .flex()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.tab_scroll)
                     .gap_token(DesignSpace::Xs)
                     .border_b_1()
                     .border_color(rgb(theme.divider.value()))
-                    .child(inspector_section_button(
+                    .child(inspector_section_tab(
                         "inspector-changes",
                         "Changes",
                         InspectorSection::Changes,
                         selected_section,
+                        self.tab_focus.clone(),
+                        self.tab_scroll.clone(),
                         cx,
                     ))
-                    .child(inspector_section_button(
+                    .child(inspector_section_tab(
                         "inspector-task",
                         "Task",
                         InspectorSection::Task,
                         selected_section,
+                        self.tab_focus.clone(),
+                        self.tab_scroll.clone(),
                         cx,
                     ))
-                    .child(inspector_section_button(
+                    .child(inspector_section_tab(
                         "inspector-usage",
                         "Usage",
                         InspectorSection::Usage,
                         selected_section,
+                        self.tab_focus.clone(),
+                        self.tab_scroll.clone(),
                         cx,
                     ))
                     .child(
-                        div().flex_1().min_w_0().child(
-                            Badge::new()
-                                .count(runtime_attention_count)
-                                .max(99)
-                                .color(rgb(theme.warning.value()))
-                                .child(inspector_section_button(
-                                    "inspector-runtime",
-                                    "Runtime",
-                                    InspectorSection::Runtime,
-                                    selected_section,
-                                    cx,
-                                )),
-                        ),
+                        Badge::new()
+                            .count(runtime_attention_count)
+                            .max(99)
+                            .color(rgb(theme.warning.value()))
+                            .child(inspector_section_tab(
+                                "inspector-runtime",
+                                "Runtime",
+                                InspectorSection::Runtime,
+                                selected_section,
+                                self.tab_focus.clone(),
+                                self.tab_scroll.clone(),
+                                cx,
+                            )),
                     ),
             )
             .child(
@@ -634,26 +665,94 @@ fn colored_section(label: &'static str, color: SemanticColor) -> gpui::Div {
         .child(label)
 }
 
-fn inspector_section_button(
+const INSPECTOR_SECTIONS: [InspectorSection; 4] = [
+    InspectorSection::Changes,
+    InspectorSection::Task,
+    InspectorSection::Usage,
+    InspectorSection::Runtime,
+];
+
+fn inspector_section_index(section: InspectorSection) -> usize {
+    INSPECTOR_SECTIONS
+        .iter()
+        .position(|candidate| *candidate == section)
+        .unwrap_or_default()
+}
+
+fn inspector_section_tab(
     id: &'static str,
     label: &'static str,
     section: InspectorSection,
     selected: InspectorSection,
+    tab_focus: [FocusHandle; 4],
+    tab_scroll: ScrollHandle,
     cx: &gpui::Context<InspectorPane>,
-) -> Button {
+) -> impl IntoElement {
     let active = section == selected;
-    Button::new(id)
-        .compact()
+    let index = inspector_section_index(section);
+    let focus = tab_focus[index].clone().tab_stop(active);
+    let click_focus = focus.clone();
+    let click_scroll = tab_scroll.clone();
+    let key_focus = tab_focus;
+    let key_scroll = tab_scroll;
+    let theme = SemanticTheme::GEEK_DARK;
+    div()
+        .id(id)
+        .role(Role::Tab)
+        .aria_label(label)
+        .aria_selected(active)
+        .track_focus(&focus)
         .h(px(DesktopControlSize::Compact.pixels()))
-        .w_full()
-        .flex_1()
-        .min_w_0()
-        .selected(active)
-        .label(label)
-        .tooltip(format!("Show {label} details"))
+        .px_token(DesignSpace::Md)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_token(DesignRadius::Sm)
+        .border_1()
+        .border_color(rgb(if active {
+            theme.accent.value()
+        } else {
+            theme.border.value()
+        }))
+        .bg(rgb(if active {
+            theme.selection.value()
+        } else {
+            theme.surface.value()
+        }))
+        .text_token(DesignText::Metadata)
+        .text_color(rgb(if active {
+            theme.text.value()
+        } else {
+            theme.muted_text.value()
+        }))
+        .cursor_pointer()
+        .hover(move |style| style.bg(rgb(theme.hover.value())))
+        .focus(move |style| style.border_color(rgb(theme.focus_ring.value())))
+        .child(label)
         .debug_selector(move || format!("desktop-inspector-tab-{}", label.to_lowercase()))
-        .on_click(cx.listener(move |_, _, _, cx| {
+        .on_click(cx.listener(move |_, _, window, cx| {
+            click_focus.focus(window, cx);
+            click_scroll.scroll_to_item(index);
             cx.emit(InspectorPaneEvent::SelectSection(section));
+        }))
+        .on_key_down(cx.listener(move |_, event: &KeyDownEvent, window, cx| {
+            let next_index = match event.keystroke.key.as_str() {
+                "left" => Some(index.checked_sub(1).unwrap_or(INSPECTOR_SECTIONS.len() - 1)),
+                "right" => Some((index + 1) % INSPECTOR_SECTIONS.len()),
+                "enter" | "space" => Some(index),
+                _ => None,
+            };
+            let Some(next_index) = next_index else {
+                return;
+            };
+            window.prevent_default();
+            cx.stop_propagation();
+            key_focus[next_index].focus(window, cx);
+            key_scroll.scroll_to_item(next_index);
+            cx.emit(InspectorPaneEvent::SelectSection(
+                INSPECTOR_SECTIONS[next_index],
+            ));
         }))
 }
 

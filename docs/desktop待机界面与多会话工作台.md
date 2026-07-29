@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302、VUI-303、VUI-304、VUI-305、VUI-306 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302、VUI-303、VUI-304、VUI-305、VUI-306、VUI-307 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -1467,12 +1467,12 @@ feat(desktop): show session names in the sessions list
 
 **目标**
 
-Tab 由四等分改为固定宽度 + 横向滚动，为未来扩展留出空间。
+Tab 由四等分改为内容宽度 + 横向滚动，为未来扩展留出空间，并保证标签文案不被固定槽截断。
 
 **工作**
 
-1. `flex_1().min_w_0()`（`inspector_pane.rs:645-651`）改为固定宽度 tab +
-   容器 `overflow_x_scroll`。
+1. `flex_1().min_w_0()`（`inspector_pane.rs:645-651`）改为内容自适应宽度 tab，并保留设计 token
+   驱动的左右内边距；容器使用 `overflow_x_scroll`。
 2. 选中 tab 在滚出视口时需自动滚入。
 3. 键盘导航（左右方向键在 TabList 内移动）不得因滚动失效。
 4. Runtime tab 的 badge 在滚动容器中位置正确。
@@ -1487,6 +1487,23 @@ Tab 由四等分改为固定宽度 + 横向滚动，为未来扩展留出空间�
 - 新增测试：最小 / 最大面板宽度下 tab 不换行、不裁切；
 - 窄视口 overlay 形态正常；
 - 三档 golden 更新并附 review note。
+
+**实现记录（2026-07-29）**
+
+- 按执行中的 UI 修订取消固定 tab 宽度：四个 tab 由完整 label 内容决定宽度，使用 `DesignSpace::Md`
+  提供左右内边距并保持 `flex_none`，因此较长的 `Changes` / `Runtime` 不会被固定槽截断，也不会恢复
+  四等分挤压。TabList 继续单行，超出时由独立 `ScrollHandle` 和 `overflow_x_scroll` 有界承载。
+- 每个 tab 新增稳定焦点句柄与显式 `Role::Tab` / selected state；只有当前 tab 进入顺序 Tab 导航。
+  Left / Right 在四个 section 间循环时同步移动焦点、per-session section selection，并通过
+  `scroll_to_item` 只滚动保持目标完整可见所需的最小距离；Enter / Space 语义同样保持。既有
+  `Role::TabList`、`Role::TabPanel`、aria label 与四个 panel 内容未改变。
+- Runtime attention badge 作为 Runtime tab 的滚动项保留在同一内容槽中，不再依赖 `flex_1().min_w_0()`
+  wrapper。新增 GPUI 回归覆盖 docked / narrow overlay 的单行布局、内容宽度差异、选中 Runtime 自动滚入，
+  以及 Left 键切到 Usage 后 selection、focus 与可见区域一致；既有 per-session selection 回归继续通过。
+- 最终验证为 Desktop `224 passed / 5 ignored`、dependency boundary `16/16`、严格 Clippy、fmt 与
+  `git diff --check`。wide / medium / narrow 及 idle、authorization、reduced-motion、keyboard-focus、
+  no-color 共 10 个 native fixture 已人工审图并附 review note；安装后确定性复播 RMSE 全部为 `0`，低于
+  `0.015` 预算。VUI-307 不新增性能通道；click-to-photon 外部传感器脚本继续跳过，不计为通过或失败。
 
 **建议提交**
 
