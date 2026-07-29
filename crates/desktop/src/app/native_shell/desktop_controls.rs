@@ -758,29 +758,4 @@ mod tests {
         assert!(focused_selection.selected);
         assert!(focused_selection.focus_visible);
     }
-
-    #[test]
-    fn primitives_do_not_reach_product_state() {
-        // Check the implementation only: the module header names these types in
-        // prose precisely to state that the code must not touch them, and the
-        // test module below is not shipped.
-        let source = include_str!("desktop_controls.rs");
-        let implementation = source
-            .split_once("\nuse gpui::{")
-            .expect("module implementation follows the header")
-            .1
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("tests follow the implementation")
-            .0;
-        let projection = ["Desktop", "Projection"].concat();
-        let root = ["Native", "Shell"].concat();
-        let controller = ["Conversation", "Controller"].concat();
-        let ledger = ["command_", "ledger"].concat();
-        for forbidden in [&projection, &root, &controller, &ledger] {
-            assert!(
-                !implementation.contains(forbidden.as_str()),
-                "shared controls must stay independent of {forbidden}"
-            );
-        }
-    }
 }

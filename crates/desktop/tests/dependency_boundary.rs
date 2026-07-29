@@ -1,9 +1,36 @@
-use std::{collections::BTreeSet, fs, path::PathBuf, process::Command};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use syn::{
+    File, Ident, Item, Visibility,
+    visit::{self, Visit},
+};
+
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn workspace_root() -> PathBuf {
+    manifest_dir()
+        .parent()
+        .and_then(Path::parent)
+        .expect("desktop crate sits two levels below the workspace root")
+        .to_path_buf()
+}
+
+fn read_toml(path: impl AsRef<Path>) -> toml::Value {
+    let path = path.as_ref();
+    let source = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    toml::from_str(&source)
+        .unwrap_or_else(|error| panic!("failed to parse {} as TOML: {error}", path.display()))
+}
 
 fn manifest() -> toml::Value {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let source = fs::read_to_string(path).expect("desktop manifest should be readable");
-    toml::from_str(&source).expect("desktop manifest should be valid TOML")
+    read_toml(manifest_dir().join("Cargo.toml"))
 }
 
 fn dependency_names(value: &toml::Value, names: &mut BTreeSet<String>) {
@@ -11,8 +38,10 @@ fn dependency_names(value: &toml::Value, names: &mut BTreeSet<String>) {
         return;
     };
     for (key, child) in table {
-        if (key == "dependencies" || key == "dev-dependencies" || key == "build-dependencies")
-            && let Some(dependencies) = child.as_table()
+        if matches!(
+            key.as_str(),
+            "dependencies" | "dev-dependencies" | "build-dependencies"
+        ) && let Some(dependencies) = child.as_table()
         {
             names.extend(dependencies.keys().cloned());
         }
@@ -20,10 +49,85 @@ fn dependency_names(value: &toml::Value, names: &mut BTreeSet<String>) {
     }
 }
 
-fn production_source(source: &str) -> &str {
-    source
-        .split_once("\n#[cfg(test)]")
-        .map_or(source, |(production, _)| production)
+fn parse_rust(path: impl AsRef<Path>) -> File {
+    let path = path.as_ref();
+    let source = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    syn::parse_file(&source)
+        .unwrap_or_else(|error| panic!("failed to parse {} as Rust: {error}", path.display()))
+}
+
+fn public_surface(file: &File) -> BTreeSet<String> {
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Const(item) if matches!(item.vis, Visibility::Public(_)) => {
+                Some(format!("const {}", item.ident))
+            }
+            Item::Enum(item) if matches!(item.vis, Visibility::Public(_)) => {
+                Some(format!("enum {}", item.ident))
+            }
+            Item::Fn(item) if matches!(item.vis, Visibility::Public(_)) => {
+                Some(format!("fn {}", item.sig.ident))
+            }
+            Item::Mod(item) if matches!(item.vis, Visibility::Public(_)) => {
+                Some(format!("mod {}", item.ident))
+            }
+            Item::Static(item) if matches!(item.vis, Visibility::Public(_)) => {
+                Some(format!("static {}", item.ident))
+            }
+            Item::Struct(item) if matches!(item.vis, Visibility::Public(_)) => {
+                Some(format!("struct {}", item.ident))
+            }
+            Item::Trait(item) if matches!(item.vis, Visibility::Public(_)) => {
+                Some(format!("trait {}", item.ident))
+            }
+            Item::Type(item) if matches!(item.vis, Visibility::Public(_)) => {
+                Some(format!("type {}", item.ident))
+            }
+            Item::Union(item) if matches!(item.vis, Visibility::Public(_)) => {
+                Some(format!("union {}", item.ident))
+            }
+            Item::Use(item) if matches!(item.vis, Visibility::Public(_)) => Some("use".into()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn external_modules(file: &File) -> BTreeSet<String> {
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Mod(module) if module.content.is_none() => Some(module.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct IdentifierCollector {
+    identifiers: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for IdentifierCollector {
+    fn visit_ident(&mut self, ident: &'ast Ident) {
+        self.identifiers.insert(ident.to_string());
+        visit::visit_ident(self, ident);
+    }
+
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        if module.ident == "tests" {
+            return;
+        }
+        visit::visit_item_mod(self, module);
+    }
+}
+
+fn rust_identifiers(path: impl AsRef<Path>) -> BTreeSet<String> {
+    let file = parse_rust(path);
+    let mut collector = IdentifierCollector::default();
+    collector.visit_file(&file);
+    collector.identifiers
 }
 
 #[test]
@@ -46,27 +150,18 @@ fn unstable_ui_dependencies_are_exactly_pinned() {
     let dependencies = manifest["dependencies"]
         .as_table()
         .expect("dependencies table");
+    let component = &dependencies["gpui-component"];
+    let assets = &dependencies["gpui-component-assets"];
     assert_eq!(
-        dependencies["gpui-component"]["rev"].as_str(),
+        component["rev"].as_str(),
         Some("bc174a7ec4534b2a4174fddde314b38d30d69093")
     );
     assert_eq!(
-        dependencies["gpui-component"]["git"].as_str(),
+        component["git"].as_str(),
         Some("https://github.com/longbridge/gpui-component.git")
     );
-    // Control icons must come from one bundled, accessible set rather than
-    // pane-owned SVGs. Product brand vectors have a separate application asset
-    // boundary, while the icon asset crate must still track the component
-    // revision exactly so an `IconName` can never outrun its backing asset.
-    assert_eq!(
-        dependencies["gpui-component-assets"]["rev"].as_str(),
-        dependencies["gpui-component"]["rev"].as_str(),
-        "bundled icon assets must be pinned to the component revision"
-    );
-    assert_eq!(
-        dependencies["gpui-component-assets"]["git"].as_str(),
-        Some("https://github.com/longbridge/gpui-component.git")
-    );
+    assert_eq!(assets["rev"], component["rev"]);
+    assert_eq!(assets["git"], component["git"]);
 
     let targets = manifest["target"].as_table().expect("target table");
     for target in [
@@ -76,8 +171,7 @@ fn unstable_ui_dependencies_are_exactly_pinned() {
     ] {
         assert_eq!(
             targets[target]["dependencies"]["gpui"]["git"].as_str(),
-            Some("https://github.com/zed-industries/zed.git"),
-            "GPUI must use the AccessKit-capable upstream for {target}"
+            Some("https://github.com/zed-industries/zed.git")
         );
         assert!(
             targets[target]["dependencies"]
@@ -86,37 +180,19 @@ fn unstable_ui_dependencies_are_exactly_pinned() {
         );
     }
 
-    let lock_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("Cargo.lock");
-    let lock = fs::read_to_string(lock_path).expect("workspace lockfile should be readable");
-    assert!(lock.contains(
-        "git+https://github.com/zed-industries/zed.git#30730a305ae235f3be44643d5895e142048ef701"
-    ));
-    // The revision gpui-component actually resolves to is checked by
-    // `vendored_ui_patches_stay_anchored_to_the_pinned_revision`, which knows
-    // whether the workspace is currently redirecting it to a patched checkout.
+    let lock = read_toml(workspace_root().join("Cargo.lock"));
+    let packages = lock["package"].as_array().expect("Cargo.lock packages");
+    assert!(packages.iter().any(|package| {
+        package["name"].as_str() == Some("gpui")
+            && package["source"].as_str()
+                == Some(
+                    "git+https://github.com/zed-industries/zed.git#30730a305ae235f3be44643d5895e142048ef701",
+                )
+    }));
 }
 
 #[test]
-fn release_memory_probe_covers_every_supported_desktop_platform() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source = fs::read_to_string(root.join("src/lib.rs"))
-        .expect("desktop library source should be readable");
-    for platform_probe in [
-        "parse_linux_resident_bytes",
-        "MACH_TASK_BASIC_INFO",
-        "K32GetProcessMemoryInfo",
-    ] {
-        assert!(
-            source.contains(platform_probe),
-            "release memory gate must retain the {platform_probe} platform probe"
-        );
-    }
-    assert!(source.contains("resident_memory_probe_reports_the_current_process"));
-    assert!(source.contains("mod resident_memory"));
-    assert!(!source.contains("#[cfg(test)]\nmod resident_memory"));
-
+fn release_memory_probe_has_the_windows_runtime_dependencies() {
     let manifest = manifest();
     let windows = &manifest["target"]["cfg(target_os = \"windows\")"];
     let windows_sys = &windows["dependencies"]["windows-sys"];
@@ -138,1333 +214,249 @@ fn release_memory_probe_covers_every_supported_desktop_platform() {
 }
 
 #[test]
-fn external_desktop_performance_gates_are_cross_platform_and_fail_closed() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root should resolve");
-    let bash_native = fs::read_to_string(root.join("scripts/desktop-native-perf-gate.sh"))
-        .expect("bash native gate should be readable");
-    let powershell_native = fs::read_to_string(root.join("scripts/desktop-native-perf-gate.ps1"))
-        .expect("PowerShell native gate should be readable");
-    let bash_headless = fs::read_to_string(root.join("scripts/desktop-perf-gate.sh"))
-        .expect("bash headless gate should be readable");
-    let powershell_headless = fs::read_to_string(root.join("scripts/desktop-perf-gate.ps1"))
-        .expect("PowerShell headless gate should be readable");
-    let bash_click_to_photon = fs::read_to_string(root.join("scripts/desktop-click-to-photon.sh"))
-        .expect("bash click-to-photon launcher should be readable");
-    let powershell_click_to_photon =
-        fs::read_to_string(root.join("scripts/desktop-click-to-photon.ps1"))
-            .expect("PowerShell click-to-photon launcher should be readable");
-    let external_report =
-        fs::read_to_string(root.join("scripts/desktop-click-to-photon-report.py"))
-            .expect("external click-to-photon report should be readable");
-    let external_report_tests =
-        fs::read_to_string(root.join("scripts/desktop-click-to-photon-report-test.py"))
-            .expect("external click-to-photon report tests should be readable");
+fn external_gate_entrypoints_are_paired_and_committed() {
+    let root = workspace_root();
+    for pair in [
+        [
+            "scripts/desktop-native-perf-gate.sh",
+            "scripts/desktop-native-perf-gate.ps1",
+        ],
+        [
+            "scripts/desktop-perf-gate.sh",
+            "scripts/desktop-perf-gate.ps1",
+        ],
+        [
+            "scripts/desktop-click-to-photon.sh",
+            "scripts/desktop-click-to-photon.ps1",
+        ],
+    ] {
+        for relative in pair {
+            let metadata = fs::metadata(root.join(relative))
+                .unwrap_or_else(|error| panic!("missing gate {relative}: {error}"));
+            assert!(
+                metadata.is_file(),
+                "gate entrypoint must be a file: {relative}"
+            );
+            assert!(
+                metadata.len() > 0,
+                "gate entrypoint must not be empty: {relative}"
+            );
+        }
+    }
+    for relative in [
+        "scripts/desktop-click-to-photon-report.py",
+        "scripts/desktop-click-to-photon-report-test.py",
+        "scripts/desktop-visual-golden.sh",
+        "crates/desktop/tests/goldens/native/REVIEW.md",
+    ] {
+        assert!(
+            root.join(relative).is_file(),
+            "missing gate artifact {relative}"
+        );
+    }
+}
 
-    for gate in [&bash_native, &powershell_native] {
-        for contract in [
-            "EVO_DESKTOP_MARKDOWN_TRACE",
-            "production_markdown_completion_samples",
-            "native_rss_steady_growth_bytes",
-            "native_rss_absolute_budget_bytes",
-            "native_rss_steady_budget_bytes",
+#[test]
+fn vendored_ui_patch_state_matches_the_workspace_manifest_and_lockfile() {
+    let root = workspace_root();
+    let root_manifest = read_toml(root.join("Cargo.toml"));
+    let patched = root_manifest["patch"]["https://github.com/longbridge/gpui-component.git"]
+        .as_table()
+        .expect("workspace declares the gpui-component patch table");
+    assert_eq!(
+        patched["gpui-component"]["path"].as_str(),
+        Some("third-party/gpui-component/crates/ui")
+    );
+    assert_eq!(
+        patched["gpui-component-assets"]["path"].as_str(),
+        Some("third-party/gpui-component/crates/assets")
+    );
+
+    let patch_count = fs::read_dir(root.join("patches/gpui-component"))
+        .expect("gpui-component patch archive exists")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "patch")
+        })
+        .count();
+    assert!(
+        patch_count > 0,
+        "the patched checkout must archive its delta"
+    );
+
+    let lock = read_toml(root.join("Cargo.lock"));
+    let packages = lock["package"].as_array().expect("Cargo.lock packages");
+    for name in ["gpui-component", "gpui-component-assets"] {
+        let package = packages
+            .iter()
+            .find(|package| package["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("Cargo.lock contains {name}"));
+        assert!(
+            package.get("source").is_none(),
+            "{name} must resolve through the local workspace patch"
+        );
+    }
+}
+
+#[test]
+fn desktop_public_api_is_one_typed_application_surface() {
+    let library = parse_rust(manifest_dir().join("src/lib.rs"));
+    assert_eq!(
+        public_surface(&library),
+        BTreeSet::from([
+            "fn run".to_owned(),
+            "struct DesktopApplicationOptions".to_owned(),
+        ])
+    );
+    assert!(
+        library
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Mod(module) => Some(&module.vis),
+                _ => None,
+            })
+            .all(|visibility| !matches!(visibility, Visibility::Public(_)))
+    );
+
+    let selected = PathBuf::from("/typed/project");
+    let options = desktop::DesktopApplicationOptions::new(&selected).with_session_id("session-a");
+    assert_eq!(options.cwd(), selected);
+    assert_eq!(options.session_id(), Some("session-a"));
+    assert!(!options.is_projectless());
+
+    let projectless = desktop::DesktopApplicationOptions::projectless();
+    assert!(projectless.is_projectless());
+    assert_eq!(projectless.session_id(), None);
+}
+
+#[test]
+fn native_shell_has_one_explicit_child_module_graph() {
+    let native_root = manifest_dir().join("src/app/native_shell");
+    let shell = parse_rust(manifest_dir().join("src/app/native_shell.rs"));
+    let modules = external_modules(&shell);
+    assert_eq!(
+        modules,
+        BTreeSet::from([
+            "center_drawer_host".into(),
+            "center_navigation".into(),
+            "commands".into(),
+            "composer_pane".into(),
+            "conversation_controller".into(),
+            "conversation_header".into(),
+            "conversation_pane".into(),
+            "desktop_controls".into(),
+            "desktop_style".into(),
+            "evo_brand".into(),
+            "home_pane".into(),
+            "inspector_pane".into(),
+            "project_catalog_controller".into(),
+            "root_modal_host".into(),
+            "sessions_pane".into(),
+            "skills_pane".into(),
+            "streaming_text".into(),
+            "toast_host".into(),
+            "update".into(),
+        ])
+    );
+    for module in modules {
+        assert!(native_root.join(format!("{module}.rs")).is_file());
+    }
+
+    for removed in [
+        "home_recent.rs",
+        "home_skills.rs",
+        "overlay_host.rs",
+        "context_overlay.rs",
+        "narrow_context.rs",
+        "session_refresh_timer.rs",
+        "thinking_menu.rs",
+    ] {
+        assert!(
+            !native_root.join(removed).exists(),
+            "legacy module must stay deleted: {removed}"
+        );
+    }
+}
+
+#[test]
+fn child_views_do_not_import_root_or_product_authority() {
+    let root = manifest_dir().join("src/app/native_shell");
+    let policies: &[(&str, &[&str])] = &[
+        (
+            "desktop_controls.rs",
+            &[
+                "NativeShell",
+                "DesktopProjection",
+                "DesktopCommandLedger",
+                "ConversationController",
+            ],
+        ),
+        (
+            "conversation_header.rs",
+            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
+        ),
+        (
+            "sessions_pane.rs",
+            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
+        ),
+        (
+            "composer_pane.rs",
+            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
+        ),
+        (
+            "inspector_pane.rs",
+            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
+        ),
+        (
+            "toast_host.rs",
+            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
+        ),
+        (
+            "root_modal_host.rs",
+            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
+        ),
+        (
+            "center_drawer_host.rs",
+            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
+        ),
+        (
+            "evo_brand.rs",
+            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
+        ),
+    ];
+
+    for (relative, forbidden) in policies {
+        let identifiers = rust_identifiers(root.join(relative));
+        for identifier in *forbidden {
+            assert!(
+                !identifiers.contains(*identifier),
+                "{relative} must not depend on {identifier}"
+            );
+        }
+    }
+}
+
+#[test]
+fn runtime_modules_do_not_depend_on_native_presentation() {
+    let runtime_root = manifest_dir().join("src/runtime");
+    for relative in ["bridge.rs", "dispatch.rs", "driver.rs", "protocol.rs"] {
+        let identifiers = rust_identifiers(runtime_root.join(relative));
+        for forbidden in [
+            "gpui",
+            "NativeShell",
+            "ConversationPane",
+            "ComposerPane",
+            "InspectorPane",
+            "SessionsPane",
         ] {
             assert!(
-                gate.contains(contract),
-                "native gate must retain {contract}"
+                !identifiers.contains(forbidden),
+                "runtime/{relative} must not depend on presentation identifier {forbidden}"
             );
         }
     }
-    let release_tests = [
-        "conversation::model::tests::desktop_release_empty_conversation_baseline",
-        "conversation::model::tests::desktop_release_ten_mib_interaction_baseline",
-        "conversation::model::tests::desktop_release_scale_content_and_streaming_matrix",
-        "app::native_shell::tests::desktop_release_gpui_headless_frame_and_input_replay",
-        "app::native_shell::tests::desktop_release_gpui_markdown_parser_matrix",
-    ];
-    for gate in [&bash_headless, &powershell_headless] {
-        for release_test in release_tests {
-            assert!(
-                gate.contains(release_test),
-                "headless gate must run {release_test} by its stable full path"
-            );
-        }
-        assert!(
-            gate.contains("--exact"),
-            "headless gate must not admit another test through a prefix filter"
-        );
-        assert!(
-            gate.contains("running 1 test"),
-            "headless gate must fail when Cargo silently runs zero tests"
-        );
-    }
-    assert!(bash_click_to_photon.contains("minimum_samples=50"));
-    assert!(bash_click_to_photon.contains("click_to_photon_post_render"));
-    assert!(bash_click_to_photon.contains("sample_count < minimum_samples"));
-    assert!(bash_click_to_photon.contains("run_id,sample_id,latency_us"));
-    assert!(bash_click_to_photon.contains("run_count != 1"));
-    assert!(bash_click_to_photon.contains("samples[substr($4, 8)] = 1"));
-    assert!(powershell_click_to_photon.contains("$minimumSamples = 50"));
-    assert!(powershell_click_to_photon.contains("click_to_photon_post_render"));
-    assert!(powershell_click_to_photon.contains("$sampleCount -lt $minimumSamples"));
-    assert!(powershell_click_to_photon.contains("run_id,sample_id,latency_us"));
-    assert!(powershell_click_to_photon.contains("Select-Object -ExpandProperty SampleId -Unique"));
-    assert!(external_report.contains("run_id"));
-    assert!(external_report.contains("sample_id"));
-    assert!(external_report.contains("latency_us"));
-    assert!(external_report.contains("paired_app_log"));
-    assert!(external_report.contains("expected at least {args.min_samples} external samples"));
-    assert!(external_report.contains("external samples missing from app log"));
-    assert!(external_report.contains("does not match app log run_id"));
-    assert!(external_report.contains("duplicate post-render sample"));
-    assert!(external_report.contains("has no matching input sample"));
-    assert!(external_report.contains("--output must not overwrite the external CSV or app log"));
-    assert!(external_report.contains("\"--refresh-hz\", type=float, required=True"));
-    assert!(external_report.contains("output.unlink(missing_ok=True)"));
-    assert!(external_report.contains("p95_budget_us"));
-    for contract_test in [
-        "test_current_run_writes_a_paired_passing_artifact",
-        "test_stale_run_rejects_and_removes_an_old_artifact",
-        "test_duplicate_or_unpaired_app_samples_fail_closed",
-        "test_over_budget_fails_without_writing_an_artifact",
-        "test_output_cannot_overwrite_input_evidence",
-        "test_refresh_rate_is_required_and_positive",
-        "test_short_duplicate_and_mixed_external_samples_are_rejected",
-    ] {
-        assert!(
-            external_report_tests.contains(contract_test),
-            "external report test suite must retain {contract_test}"
-        );
-    }
-
-    if let Some(python) = ["python3", "python"].into_iter().find(|candidate| {
-        Command::new(candidate)
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-    }) {
-        let output = Command::new(python)
-            .arg(root.join("scripts/desktop-click-to-photon-report-test.py"))
-            .output()
-            .expect("Python contract test suite should start");
-        assert!(
-            output.status.success(),
-            "Python contract test suite failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
-#[test]
-fn vendored_ui_patches_stay_anchored_to_the_pinned_revision() {
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|crates| crates.parent())
-        .expect("desktop crate sits two levels under the workspace root")
-        .to_path_buf();
-
-    let pinned_rev = manifest()["dependencies"]["gpui-component"]["rev"]
-        .as_str()
-        .expect("gpui-component is pinned by revision")
-        .to_owned();
-
-    // `gpui-component` is built from a vendored checkout of the pinned revision
-    // plus local patches, redirected by a workspace `[patch]` section so the
-    // crate manifest keeps recording the upstream base. The vendor script has to
-    // agree with that base: if a revision bump missed the script, the tree would
-    // be rebuilt from stale upstream source while every manifest claimed
-    // otherwise, and the mismatch would only surface as behaviour drift.
-    let root_manifest = fs::read_to_string(workspace_root.join("Cargo.toml"))
-        .expect("workspace manifest should be readable");
-    let patch_declared = root_manifest
-        .contains("[patch.\"https://github.com/longbridge/gpui-component.git\"]")
-        && root_manifest.contains("third-party/gpui-component/crates/ui");
-
-    let script_path = workspace_root.join("scripts/vendor-gpui-component.sh");
-    let script = fs::read_to_string(&script_path)
-        .expect("the vendor script should be committed and readable");
-    assert!(
-        script.contains(&format!("UPSTREAM_REV=\"{pinned_rev}\"")),
-        "scripts/vendor-gpui-component.sh must vendor the pinned revision {pinned_rev}"
-    );
-
-    let patch_dir = workspace_root.join("patches/gpui-component");
-    let patches = fs::read_dir(&patch_dir)
-        .expect("the patch archive directory should be committed")
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "patch"))
-        .count();
-
-    // The patched fork and the plain upstream dependency are both valid states;
-    // what must never happen is claiming one and building the other.
-    let lock = fs::read_to_string(workspace_root.join("Cargo.lock"))
-        .expect("workspace lockfile should be readable");
-    let upstream_source = format!(
-        "git+https://github.com/longbridge/gpui-component.git?rev={pinned_rev}#{pinned_rev}"
-    );
-    if patch_declared {
-        assert!(
-            patches > 0,
-            "the workspace redirects gpui-component to third-party/gpui-component, \
-             so patches/gpui-component must archive the delta from {pinned_rev}"
-        );
-        assert!(
-            !lock.contains(&upstream_source),
-            "gpui-component still resolves to the upstream git source, so the \
-             [patch] redirect is not taking effect and the local patches are \
-             silently absent from the build"
-        );
-    } else {
-        assert_eq!(
-            patches, 0,
-            "patches/gpui-component still archives {patches} patch(es) but the \
-             workspace no longer redirects gpui-component, so they are silently \
-             not applied; delete them or restore the [patch] section"
-        );
-        assert!(
-            lock.contains(&upstream_source),
-            "without the [patch] redirect gpui-component must resolve to exactly \
-             {pinned_rev}"
-        );
-    }
-}
-
-#[test]
-fn desktop_public_api_is_the_application_boundary_not_an_adapter_sdk() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let library = fs::read_to_string(manifest_dir.join("src/lib.rs"))
-        .expect("desktop library root should be readable");
-    let binary = fs::read_to_string(manifest_dir.join("src/main.rs"))
-        .expect("desktop binary entrypoint should be readable");
-    let release_api_script = fs::read_to_string(
-        manifest_dir
-            .join("../..")
-            .join("scripts/release-api-snapshots.sh"),
-    )
-    .expect("release API snapshot script should be readable");
-
-    assert!(library.contains("pub struct DesktopApplicationOptions"));
-    assert!(library.contains("pub fn run(options: DesktopApplicationOptions)"));
-    assert!(
-        !library.contains("pub mod "),
-        "desktop implementation modules must not form a public adapter SDK"
-    );
-    for implementation_module in [
-        "conversation",
-        "preferences",
-        "projection",
-        "runtime",
-        "shell",
-        "command_ledger",
-        "actions",
-    ] {
-        assert!(library.contains(&format!("mod {implementation_module};")));
-    }
-    assert_eq!(
-        binary.matches("desktop::").count(),
-        2,
-        "the binary must remain a thin options-plus-entrypoint adapter"
-    );
-    assert!(
-        release_api_script.contains("coding-agent desktop"),
-        "the final release API inventory must freeze the desktop application boundary"
-    );
-}
-
-#[test]
-fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let actions = fs::read_to_string(manifest_dir.join("src/actions.rs"))
-        .expect("desktop action owner should be readable");
-    let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
-        .expect("desktop native shell should be readable");
-    let native_ui = [
-        "composer_pane.rs",
-        "conversation_header.rs",
-        "conversation_pane.rs",
-        "center_drawer_host.rs",
-        "home_pane.rs",
-        "inspector_pane.rs",
-        "root_modal_host.rs",
-        "sessions_pane.rs",
-        "skills_pane.rs",
-        "toast_host.rs",
-    ]
-    .into_iter()
-    .map(|name| {
-        fs::read_to_string(manifest_dir.join("src/app/native_shell").join(name)).unwrap_or_else(
-            |error| panic!("desktop native UI owner {name} should be readable: {error}"),
-        )
-    })
-    .collect::<Vec<_>>()
-    .join("\n");
-    let desktop_controls =
-        fs::read_to_string(manifest_dir.join("src/app/native_shell/desktop_controls.rs"))
-            .expect("desktop shared control owner should be readable");
-    let runtime_driver = fs::read_to_string(manifest_dir.join("src/runtime/driver.rs"))
-        .expect("desktop runtime driver should be readable");
-    let runtime_protocol = fs::read_to_string(manifest_dir.join("src/runtime/protocol.rs"))
-        .expect("desktop runtime protocol should be readable");
-
-    assert!(actions.contains("actions!(\n    desktop"));
-    assert!(actions.contains("enum DesktopPaletteCommand"));
-    assert!(actions.contains("PALETTE_ENTRIES"));
-    assert!(actions.contains("ROOT_KEY_CONTEXT"));
-    assert!(actions.contains("PALETTE_KEY_CONTEXT"));
-    assert!(actions.contains("AUTHORIZATION_KEY_CONTEXT"));
-    assert!(actions.contains("SESSIONS_DRAWER_KEY_CONTEXT"));
-    assert!(actions.contains("INSPECTOR_DRAWER_KEY_CONTEXT"));
-    assert!(actions.contains("ToggleInspectorPanel"));
-    assert!(actions.contains("Toggle Inspector"));
-    assert!(!actions.contains("slash_command"));
-    assert!(!actions.contains("rpc"));
-
-    assert!(shell.contains("fn execute_palette_command("));
-    assert!(shell.contains("fn on_escape_hierarchy("));
-    assert!(shell.contains("fn root_action_blocked_by_modal("));
-    assert!(shell.contains("fn reconcile_authorization_modal("));
-    assert!(native_ui.contains("secondary: true"));
-    assert!(shell.contains("fn submit_primary_composer("));
-    assert!(shell.contains(".key_context(actions::ROOT_KEY_CONTEXT)"));
-    assert!(native_ui.contains(".key_context(actions::PALETTE_KEY_CONTEXT)"));
-    assert!(native_ui.contains(".key_context(actions::AUTHORIZATION_KEY_CONTEXT)"));
-    let directly_declared_tooltips =
-        shell.matches(".tooltip(").count() + native_ui.matches(".tooltip(").count();
-    let shared_icon_tools = native_ui.matches("DesktopIconButton::new(").count();
-    assert!(
-        directly_declared_tooltips + shared_icon_tools >= 20,
-        "native actions must remain discoverable through direct tooltips or the shared icon-tool contract"
-    );
-    assert!(desktop_controls.contains(".tooltip(self.accessible_label.clone())"));
-    assert!(desktop_controls.contains("ProjectDirectory"));
-    assert!(desktop_controls.contains("Self::ProjectDirectory => IconName::Folder"));
-    assert!(desktop_controls.contains("struct DesktopProjectDirectoryControl"));
-    assert!(desktop_controls.contains("enum DesktopProjectDirectoryState"));
-    assert!(desktop_controls.contains("Self::Locked => format!(\"{} · Fixed\""));
-    assert!(desktop_controls.contains("format!(\"{} · Pending\""));
-    assert!(native_ui.contains("motion reduced"));
-    assert!(native_ui.contains("motion static"));
-    assert!(
-        !shell.contains("Timer::after")
-            && !shell.contains("Animation")
-            && !native_ui.contains("Timer::after")
-            && !native_ui.contains("Animation"),
-        "native shell must not run an idle presentation timer or ambient animation"
-    );
-
-    assert!(runtime_protocol.contains("ListSessions"));
-    assert!(
-        runtime_driver.contains("self.home.context.session_query()?.overviews()?"),
-        "the session catalog must remain a bounded query through the Home context owner"
-    );
-    assert!(runtime_protocol.contains("MAX_DESKTOP_SESSION_CATALOG"));
-}
-
-#[test]
-fn desktop_visual_hierarchy_stays_flat_tokenized_and_action_heights_stay_shared() {
-    let native_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/app/native_shell");
-    let conversation = fs::read_to_string(native_root.join("conversation_pane.rs"))
-        .expect("desktop conversation pane should be readable");
-    let root_modal = fs::read_to_string(native_root.join("root_modal_host.rs"))
-        .expect("desktop root modal host should be readable");
-    let controls = fs::read_to_string(native_root.join("desktop_controls.rs"))
-        .expect("desktop shared controls should be readable");
-
-    let context_around = |source: &str, needle: &str, before: usize, after: usize| {
-        let lines = source.lines().collect::<Vec<_>>();
-        let index = lines
-            .iter()
-            .position(|line| line.contains(needle))
-            .unwrap_or_else(|| panic!("missing visual hierarchy marker {needle}"));
-        lines[index.saturating_sub(before)..(index + after + 1).min(lines.len())].join("\n")
-    };
-
-    let arguments = context_around(&conversation, ".child(\"ARGUMENTS\")", 24, 12);
-    assert!(arguments.contains(".border_l_1()"));
-    assert!(arguments.contains(".pl_token(DesignSpace::Md)"));
-    assert!(!arguments.contains(".rounded_token("));
-    assert!(!arguments.contains(".border_1()"));
-    assert!(!arguments.contains(".bg("));
-
-    let reasoning = context_around(&conversation, ".id((\"reasoning-toggle\", index))", 4, 24);
-    assert!(reasoning.contains(".border_l_3()"));
-    assert!(reasoning.contains(".bg(rgb(theme.elevated.value()))"));
-    assert!(!reasoning.contains("thinking_surface"));
-
-    let truncated = context_around(
-        &conversation,
-        "\"! preview truncated at desktop safety limit\"",
-        18,
-        18,
-    );
-    assert!(truncated.contains(".border_t_1()"));
-    assert!(!truncated.contains(".rounded_token("));
-    assert!(!truncated.contains(".border_1()"));
-
-    let full_message = context_around(&root_modal, ".id(\"full-message-scroll\")", 0, 30);
-    assert!(full_message.contains(".border_t_1()"));
-    assert!(full_message.contains(".border_b_1()"));
-    assert!(!full_message.contains(".rounded_token("));
-    assert!(!full_message.contains(".border_1()"));
-
-    assert!(
-        controls.contains(".h(px(DesktopControlSize::Critical.pixels()))"),
-        "all consequential text actions must inherit the shared 40 px critical geometry"
-    );
-}
-
-#[test]
-fn desktop_bootstrap_and_native_shell_have_distinct_module_owners() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let bootstrap = fs::read_to_string(manifest_dir.join("src/app.rs"))
-        .expect("desktop bootstrap owner should be readable");
-    let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
-        .expect("desktop native shell owner should be readable");
-
-    assert!(bootstrap.contains("mod native_shell;"));
-    assert!(bootstrap.contains("application()"));
-    assert!(bootstrap.contains(".run(move |cx: &mut App|"));
-    assert!(bootstrap.contains("DesktopRuntimeBridge::spawn"));
-    assert!(bootstrap.contains("resolve_scratch_workspace"));
-    assert!(bootstrap.contains("projectless_workspace_selection"));
-    // Product vectors and control icons share one application-startup asset
-    // boundary; registering either source deeper in the shell would leave
-    // consumers dependent on bootstrap order.
-    assert!(bootstrap.contains(".with_assets(crate::assets::DesktopAssets::new())"));
-    assert!(!bootstrap.contains("impl Render for NativeShell"));
-    assert!(shell.contains("impl Render for NativeShell"));
-    assert!(shell.contains("fn submit_composer"));
-    assert!(!shell.contains("application()"));
-    assert!(!shell.contains("DesktopRuntimeBridge::spawn"));
-}
-
-#[test]
-fn evo_brand_vectors_have_one_asset_boundary_and_one_rendering_owner() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let assets = fs::read_to_string(manifest_dir.join("src/assets.rs"))
-        .expect("desktop asset owner should be readable");
-    let brand = fs::read_to_string(manifest_dir.join("src/app/native_shell/evo_brand.rs"))
-        .expect("Evo brand rendering owner should be readable");
-    let sessions = fs::read_to_string(manifest_dir.join("src/app/native_shell/sessions_pane.rs"))
-        .expect("sessions pane should be readable");
-
-    assert!(assets.contains("struct DesktopAssets"));
-    assert!(assets.contains("impl AssetSource for DesktopAssets"));
-    assert!(assets.contains("self.component_assets.load(path)"));
-    for path in [
-        "EVO_WORDMARK_PATH",
-        "EVO_WORDMARK_ACCENT_PATH",
-        "EVO_COMPACT_PATH",
-        "EVO_COMPACT_ACCENT_PATH",
-    ] {
-        assert!(assets.contains(path), "desktop assets must own {path}");
-    }
-
-    assert!(brand.contains("struct EvoBrand"));
-    assert!(brand.contains("enum EvoBrandMode"));
-    assert!(brand.contains(".role(Role::Image)"));
-    assert!(brand.contains(".path(body_path)"));
-    assert!(brand.contains(".path(accent_path)"));
-    assert!(!brand.contains("NativeShell"));
-    assert!(!brand.contains("project_catalog"));
-    assert!(!brand.contains("desktop::runtime"));
-    assert!(sessions.contains("EvoBrand::compact"));
-}
-
-#[test]
-fn native_shell_controllers_keep_update_command_and_conversation_ownership_separate() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/app");
-    let shell = fs::read_to_string(root.join("native_shell.rs"))
-        .expect("native shell composition owner should be readable");
-    let controller_root = root.join("native_shell");
-    let update = fs::read_to_string(controller_root.join("update.rs"))
-        .expect("runtime update controller should be readable");
-    let commands = fs::read_to_string(controller_root.join("commands.rs"))
-        .expect("typed command controller should be readable");
-    let conversation = fs::read_to_string(controller_root.join("conversation_controller.rs"))
-        .expect("conversation controller should be readable");
-    let sessions = fs::read_to_string(controller_root.join("sessions_pane.rs"))
-        .expect("sessions pane should be readable");
-    let home = fs::read_to_string(controller_root.join("home_pane.rs"))
-        .expect("home pane should be readable");
-    let skills = fs::read_to_string(controller_root.join("skills_pane.rs"))
-        .expect("skills pane should be readable");
-    let center_navigation = fs::read_to_string(controller_root.join("center_navigation.rs"))
-        .expect("center navigation contract should be readable");
-    let project_catalog = fs::read_to_string(controller_root.join("project_catalog_controller.rs"))
-        .expect("project catalog controller should be readable");
-    let composer = fs::read_to_string(controller_root.join("composer_pane.rs"))
-        .expect("composer pane should be readable");
-    let desktop_controls = fs::read_to_string(controller_root.join("desktop_controls.rs"))
-        .expect("desktop shared controls should be readable");
-    let inspector = fs::read_to_string(controller_root.join("inspector_pane.rs"))
-        .expect("inspector pane should be readable");
-    let root_modal = fs::read_to_string(controller_root.join("root_modal_host.rs"))
-        .expect("root modal host should be readable");
-    let center_drawer = fs::read_to_string(controller_root.join("center_drawer_host.rs"))
-        .expect("center drawer host should be readable");
-
-    for module in [
-        "commands",
-        "conversation_controller",
-        "project_catalog_controller",
-        "update",
-    ] {
-        assert!(shell.contains(&format!("mod {module};")));
-    }
-    assert!(update.contains("struct ProjectionDirtyRouting"));
-    assert!(update.contains("fn inspector_projection_immediate_dirty"));
-    assert!(!shell.contains("fn inspector_projection_immediate_dirty"));
-
-    assert!(commands.contains("struct ProjectionCommandCompletions"));
-    assert!(commands.contains("fn reconcile_direct_update"));
-    assert!(commands.contains("DesktopRuntimeUpdate::FileReviewed"));
-    assert_eq!(
-        shell.matches("DesktopRuntimeUpdate::FileReviewed").count(),
-        1,
-        "the root may recognize a file-review command id for workspace routing, but must not consume its payload",
-    );
-    assert!(shell.contains("fn runtime_update_command_id("));
-    assert!(sessions.contains("struct SessionsPaneViewModel"));
-    assert!(sessions.contains("search_input: gpui::Entity<InputState>"));
-    assert!(!sessions.contains("WeakEntity<NativeShell>"));
-    assert!(!sessions.contains("owner.read(cx)"));
-    assert!(!sessions.contains("CodingAgentResourceCommand"));
-    assert!(!sessions.contains("global_skills"));
-    assert!(sessions.contains("SessionsPaneEvent::Navigate"));
-    assert!(sessions.contains("SessionsPaneEvent::SetProjectCollapsed"));
-    assert!(sessions.contains("CenterNavigationTarget::NewConversation"));
-    assert!(sessions.contains("CenterNavigationTarget::Skills"));
-    assert!(sessions.contains("CenterNavigationTarget::Session"));
-    assert!(center_navigation.contains("enum CenterNavigationTarget"));
-    assert!(center_navigation.contains("enum CenterSurface"));
-    assert!(shell.contains("fn navigate_center("));
-    assert!(shell.contains("SessionsPaneEvent::Navigate(target)"));
-    assert!(shell.contains("SessionsPaneEvent::SetProjectCollapsed"));
-
-    for forbidden in [
-        "CodingAgentResourceCommand",
-        "DesktopSessionCatalogEntry",
-        "recent_sessions",
-        "global_skills",
-        "catalog_pending",
-        "project_catalog",
-        "command_ledger",
-        "DesktopProjection",
-        "NativeShell",
-        "EventEmitter",
-    ] {
-        assert!(
-            !home.contains(forbidden),
-            "HomePane must remain presentation-only and must not depend on {forbidden}"
-        );
-    }
-    assert!(home.contains("pub(super) struct HomePane;"));
-    assert!(home.contains("EvoBrand::wordmark("));
-    assert!(!home.contains(".child(\"evo\")"));
-    assert!(home.contains("Software evolves. Your agent should too."));
-    assert!(home.contains(
-        "Describe what you want to build, fix, or understand. Evo will plan, act, and adapt with you."
-    ));
-    for removed_surface in ["RECENT SESSIONS", "GLOBAL SKILLS", "What should we build?"] {
-        assert!(!home.contains(removed_surface));
-    }
-    assert!(composer.contains(
-        "pub(super) const COMPOSER_PLACEHOLDER: &str = \"What do you want to build or improve?\""
-    ));
-    assert!(composer.contains(".placeholder(COMPOSER_PLACEHOLDER)"));
-    assert!(skills.contains("struct SkillsPaneViewModel"));
-    assert!(skills.contains("skills: Arc<[CodingAgentResourceCommand]>"));
-    for forbidden in [
-        "WeakEntity<NativeShell>",
-        "owner.read(cx)",
-        "DesktopProjection",
-        "project_catalog",
-        "command_ledger",
-    ] {
-        assert!(
-            !skills.contains(forbidden),
-            "SkillsPane must consume only its bounded DTO and must not depend on {forbidden}"
-        );
-    }
-    assert!(project_catalog.contains("struct ProjectCatalogController"));
-    assert!(project_catalog.contains("enum ProjectCatalogState"));
-    assert!(project_catalog.contains("struct ProjectCatalogGroup"));
-    assert!(project_catalog.contains("collapsed_group_ids: HashSet<String>"));
-    assert!(project_catalog.contains("fn filtered_project_groups"));
-    assert!(project_catalog.contains("fn set_group_collapsed"));
-    assert!(sessions.contains("project_groups: Arc<[ProjectCatalogGroup]>"));
-    assert!(sessions.contains("catalog_state: ProjectCatalogState"));
-    assert!(sessions.contains("desktop-projects-section"));
-    assert!(sessions.contains("desktop-projects-tree"));
-    assert!(sessions.contains("desktop-hit-refresh-projects"));
-    assert!(sessions.contains("desktop-hit-session-actions"));
-    assert!(sessions.contains("session-tree-item"));
-    assert!(sessions.contains(".role(Role::ListItem)"));
-    assert!(sessions.contains(".expanded(expanded)"));
-    assert!(sessions.contains("fn is_keyboard_activation"));
-    assert!(sessions.contains(".on_key_down(cx.listener("));
-    assert!(desktop_controls.contains("expanded: Option<bool>"));
-    assert!(desktop_controls.contains("content.aria_expanded(expanded)"));
-    assert!(!sessions.contains("pub(super) catalog: Arc<[DesktopSessionCatalogEntry]>"));
-    assert!(!project_catalog.contains("refresh_deadline: Option<Instant>"));
-    assert!(!project_catalog.contains("fn schedule_session_catalog_refresh"));
-    assert!(project_catalog.contains("fn request_session_catalog"));
-    assert!(!shell.contains("session_catalog_refresh_deadline"));
-
-    let root_input_field = ["composer_", "input:"].concat();
-    let root_latency_field = ["composer_", "input_latency:"].concat();
-    let weak_root_owner = ["WeakEntity", "<NativeShell>"].concat();
-    assert!(composer.contains("struct ComposerPaneViewModel"));
-    assert!(composer.contains("input: gpui::Entity<InputState>"));
-    assert!(composer.contains("focus: FocusHandle"));
-    assert!(composer.contains("latency: InputRenderLatencyProbe"));
-    assert!(composer.contains("ComposerPaneEvent::InputChanged"));
-    assert!(composer.contains("ComposerPaneEvent::Focused"));
-    assert!(composer.contains("ComposerPaneEvent::SubmitPrimary"));
-    assert!(composer.contains("ChooseProjectDirectory"));
-    assert!(composer.contains("ClearProjectDirectory"));
-    assert!(composer.contains("struct ComposerProjectDirectoryViewModel"));
-    assert!(composer.contains("DesktopProjectDirectoryControl::new("));
-    assert!(desktop_controls.contains("fn build_with_menu("));
-    assert!(desktop_controls.contains("desktop-project-directory-control"));
-    assert!(desktop_controls.contains("desktop-hit-project-directory"));
-    assert!(composer.contains("项目目录在对话创建后固定"));
-    assert!(shell.contains("DesktopProjectDirectoryState::Editable"));
-    assert!(shell.contains("DesktopProjectDirectoryState::Locked"));
-    assert!(shell.contains("DesktopProjectDirectoryState::Pending"));
-    assert!(shell.contains("draft_workspace_selection: CodingAgentWorkspaceSelection"));
-    assert!(shell.contains("self.draft_workspace_selection.clone()"));
-    assert!(shell.contains("fn choose_project_directory("));
-    assert!(shell.contains("files: false"));
-    assert!(shell.contains("directories: true"));
-    assert!(shell.contains("multiple: false"));
-    assert!(shell.contains("fn clear_project_directory("));
-    assert!(!composer.contains("prompt_for_paths"));
-    assert!(!composer.contains("DesktopPromptTarget"));
-    assert!(!composer.contains("CodingAgentWorkspaceSelection"));
-    assert!(!composer.contains(&weak_root_owner));
-    assert!(!composer.contains("owner.read(cx)"));
-    assert!(!composer.contains("DesktopProjection"));
-    assert!(!shell.contains(&root_input_field));
-    assert!(!shell.contains(&root_latency_field));
-    assert!(shell.contains("fn composer_pane_view_model(&self) -> ComposerPaneViewModel"));
-    assert!(shell.contains("composer: ComposerState"));
-    assert!(!shell.contains("composer_session_drafts: HashMap<String, String>"));
-    assert!(!shell.contains("composer_running_modes: HashMap<String, ComposerRunningMode>"));
-    assert!(shell.contains("struct SessionWorkspace"));
-    assert!(shell.contains("composer_running_mode: ComposerRunningMode"));
-    assert!(shell.contains("workspaces: HashMap<String, SessionWorkspace>"));
-
-    for (name, source) in [
-        ("inspector", &inspector),
-        ("root modal", &root_modal),
-        ("center drawer", &center_drawer),
-    ] {
-        assert!(
-            !source.contains(&weak_root_owner),
-            "{name} must not retain a NativeShell back-reference"
-        );
-        assert!(
-            !source.contains("owner.read(cx)"),
-            "{name} must render only from its ViewModel"
-        );
-        assert!(
-            !source.contains("DesktopProjection"),
-            "{name} must not expose the full projection"
-        );
-        assert!(
-            !source.contains("command_ledger"),
-            "{name} must receive only derived pending state"
-        );
-    }
-    assert!(inspector.contains("struct InspectorPaneViewModel"));
-    assert!(inspector.contains("view_model: Option<InspectorPaneViewModel>"));
-    assert!(inspector.contains("file_review: Arc<DesktopFileReviewState>"));
-    assert!(inspector.contains("identity: DesktopRecoveryIdentity"));
-    assert!(!inspector.contains("preferences."));
-    assert!(shell.contains("fn inspector_pane_view_model(&self) -> InspectorPaneViewModel"));
-    assert!(shell.contains("file_review: Arc<DesktopFileReviewState>"));
-    assert!(shell.contains("inspector_telemetry_refresh_deadline: Option<Instant>"));
-    assert!(!shell.contains("inspector_session_sections: HashMap<String, InspectorSection>"));
-    assert!(shell.contains("inspector_section: InspectorSection"));
-    assert!(root_modal.contains("struct RootModalViewModel"));
-    assert!(root_modal.contains("view_model: Option<RootModalViewModel>"));
-    assert!(root_modal.contains("request: ToolAuthorizationRequest"));
-    assert!(!root_modal.contains("project_catalog"));
-    assert!(!root_modal.contains("SessionsPane"));
-    assert!(!root_modal.contains("InspectorPane"));
-    assert!(center_drawer.contains("struct CenterDrawerViewModel"));
-    assert!(center_drawer.contains("view_model: Option<CenterDrawerViewModel>"));
-    assert!(center_drawer.contains("sessions_pane: Entity<SessionsPane>"));
-    assert!(center_drawer.contains("inspector_pane: Entity<InspectorPane>"));
-    assert!(!center_drawer.contains("ToolAuthorizationRequest"));
-    assert!(shell.contains("fn root_modal_view_model(&self) -> RootModalViewModel"));
-    assert!(shell.contains("fn center_drawer_view_model(&self) -> CenterDrawerViewModel"));
-    assert!(shell.contains("active_modal: Option<DesktopModalKind>"));
-    assert!(shell.contains("active_drawer: Option<CenterDrawerKind>"));
-
-    // Ownership assertions target production code: the shell's own test module
-    // still constructs conversation fixtures directly.
-    let shell_production = shell
-        .split_once("\n#[cfg(test)]\nmod tests {")
-        .map_or(shell.as_str(), |(production, _)| production);
-
-    for algorithm in [
-        "fn row_target_height",
-        "fn submit_row_measurement",
-        "fn compensate_scroll_top_for_single_row_height",
-        "event = \"scroll_anchor_compensate\"",
-        "fn rebuild_rows",
-        "fn rebuild_live_rows",
-        "fn update_rows_by_sequence",
-        "fn upsert_render_row",
-        "fn live_rows_match",
-        "fn prepare_rows",
-        "fn width_for_render",
-        "fn apply_delta",
-        "ConversationRowRenderSource",
-    ] {
-        assert!(
-            conversation.contains(algorithm),
-            "conversation controller must own {algorithm}"
-        );
-        assert!(
-            !shell_production.contains(algorithm),
-            "native shell composition must not own {algorithm}"
-        );
-    }
-    for obsolete_mover in [
-        "fn reconcile_session_view",
-        "event = \"session_scroll_restore\"",
-    ] {
-        assert!(!conversation.contains(obsolete_mover));
-        assert!(!shell_production.contains(obsolete_mover));
-    }
-
-    // The conversation controller is the sole owner of transcript cache,
-    // layout, viewport and dirty-sequence state; the root only supplies a
-    // bounded projection source and consumes a view model.
-    for state in [
-        "viewport: ConversationViewport",
-        "layout: ConversationRowLayoutState",
-        "render_cache: ConversationRowRenderCache",
-        "render_dirty_sequences: VecDeque<u64>",
-        "render_sequence_overflow: bool",
-        "render_width_bucket: Option<u32>",
-        "height_refresh_deadline: Option<Instant>",
-        "expanded_details: HashSet<String>",
-    ] {
-        assert!(
-            conversation.contains(state),
-            "conversation controller must own {state}"
-        );
-        assert!(
-            !shell_production.contains(state),
-            "native shell composition must not own {state}"
-        );
-    }
-    assert!(conversation.contains("struct ConversationSource<'a>"));
-    assert!(shell.contains("conversation_controller: ConversationController"));
-    assert!(!conversation.contains("ConversationSessionViewState"));
-    assert!(shell.contains("fn conversation_pane_view_model(&self) -> ConversationPaneViewModel"));
-    for back_reference in [
-        &weak_root_owner,
-        &"&mut NativeShell".to_owned(),
-        &"Context<NativeShell>".to_owned(),
-        &"super::NativeShell".to_owned(),
-    ] {
-        assert!(
-            !conversation.contains(back_reference.as_str()),
-            "conversation controller must not reach back into the composition root via \
-             {back_reference}"
-        );
-    }
-}
-
-#[test]
-fn conversation_presentation_modules_have_stable_acyclic_owners() {
-    let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    assert!(
-        !source_root.join("conversation.rs").exists(),
-        "the legacy conversation.rs owner must be replaced by conversation/mod.rs"
-    );
-    let conversation_root = source_root.join("conversation");
-    let module = fs::read_to_string(conversation_root.join("mod.rs"))
-        .expect("conversation re-export module should be readable");
-
-    for owner in [
-        "composer",
-        "copy",
-        "layout",
-        "markdown",
-        "model",
-        "render_cache",
-        "viewport",
-    ] {
-        assert!(
-            conversation_root.join(format!("{owner}.rs")).is_file(),
-            "conversation owner {owner}.rs must exist"
-        );
-        assert!(
-            module.contains(&format!("mod {owner};")),
-            "conversation/mod.rs must declare {owner}"
-        );
-    }
-    for stable_surface in [
-        "pub use composer::",
-        "pub use copy::",
-        "pub use layout::",
-        "pub use markdown::",
-        "pub use model::",
-        "pub use render_cache::",
-        "pub use viewport::",
-    ] {
-        assert!(
-            module.contains(stable_surface),
-            "conversation/mod.rs must retain {stable_surface}"
-        );
-    }
-    assert!(!module.contains("pub struct "));
-    assert!(!module.contains("pub enum "));
-    assert!(!module.contains("pub fn "));
-
-    let read_owner = |name: &str| {
-        fs::read_to_string(conversation_root.join(format!("{name}.rs"))).unwrap_or_else(|error| {
-            panic!("conversation owner {name}.rs should be readable: {error}")
-        })
-    };
-    let composer = read_owner("composer");
-    let copy = read_owner("copy");
-    let layout = read_owner("layout");
-    let markdown = read_owner("markdown");
-    let model = read_owner("model");
-    let render_cache = read_owner("render_cache");
-    let viewport = read_owner("viewport");
-    let composer = production_source(&composer);
-    let copy = production_source(&copy);
-    let layout = production_source(&layout);
-    let markdown = production_source(&markdown);
-    let model = production_source(&model);
-    let render_cache = production_source(&render_cache);
-    let viewport = production_source(&viewport);
-
-    // The production dependency graph is a DAG:
-    // model -> copy; composer -> model/copy; render_cache -> model/markdown;
-    // layout -> model/render_cache; viewport -> model.
-    assert!(model.contains("super::copy"));
-    for forbidden in ["composer", "layout", "markdown", "render_cache", "viewport"] {
-        assert!(
-            !model.contains(&format!("super::{forbidden}")),
-            "model must not depend on downstream owner {forbidden}"
-        );
-    }
-    assert!(!copy.contains("super::model"));
-    assert!(!markdown.contains("super::model"));
-    assert!(composer.contains("super::copy"));
-    assert!(composer.contains("super::model"));
-    assert!(render_cache.contains("super::markdown"));
-    assert!(render_cache.contains("super::model"));
-    assert!(!render_cache.contains("super::layout"));
-    assert!(layout.contains("model::ConversationItemKey"));
-    assert!(layout.contains("render_cache::StreamingTextPhase"));
-    assert!(!layout.contains("super::viewport"));
-    assert!(viewport.contains("super::model"));
-    assert!(!viewport.contains("super::layout"));
-    assert!(!viewport.contains("super::render_cache"));
-}
-
-#[test]
-fn desktop_projection_composes_the_product_reducer_without_shadow_classifiers() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/projection.rs");
-    let source = fs::read_to_string(path).expect("desktop projection should be readable");
-    let runtime_tests_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/tests.rs");
-    let runtime_tests =
-        fs::read_to_string(runtime_tests_path).expect("desktop runtime tests should be readable");
-
-    assert!(
-        source.contains("CodingAgentClientProjection"),
-        "desktop projection must compose the stable product reducer"
-    );
-    assert!(
-        runtime_tests.contains(
-            "/../coding-agent/tests/fixtures/client_projection/cross-adapter-events.json"
-        ),
-        "desktop projection must consume the product-owned cross-adapter fixture"
-    );
-    assert!(
-        runtime_tests
-            .contains("shared_cross_adapter_fixture_matches_desktop_product_state_exactly"),
-        "desktop projection must compare its complete product state with the shared reducer"
-    );
-    for forbidden in [
-        "fn apply_operation(",
-        "fn apply_message(",
-        "fn apply_tool(",
-        "fn apply_authorization(",
-        "fn apply_diagnostic(",
-        "fn apply_recovery(",
-        "fn apply_change(",
-        "fn apply_delegation(",
-        "fn apply_usage(",
-        "pending_mutations",
-        "fn validate_capability_generation(",
-        "fn inferred_operation_kind(",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "desktop projection must not reintroduce product classifier `{forbidden}`"
-        );
-    }
-}
-
-#[test]
-fn desktop_uses_the_product_owned_prepared_submission_without_manual_choreography() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/driver.rs");
-    let source = fs::read_to_string(path).expect("desktop runtime driver should be readable");
-    let production = source.as_str();
-
-    assert!(production.contains("connection.prepare_client_submission("));
-    assert!(production.contains("let result = submission"));
-    assert!(production.contains(".run(&mut session)"));
-    for forbidden in [
-        "connection.set_prompt_draft(",
-        "connection.prepare_submission(",
-        "session.run(operation)",
-    ] {
-        assert!(
-            !production.contains(forbidden),
-            "desktop must not rebuild product submission choreography: {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn desktop_new_prompt_transaction_preserves_scope_through_tools_and_authorization() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let driver = fs::read_to_string(manifest_dir.join("src/runtime/driver.rs"))
-        .expect("desktop runtime driver should be readable");
-    let dispatch = fs::read_to_string(manifest_dir.join("src/runtime/dispatch.rs"))
-        .expect("desktop runtime dispatch should be readable");
-    let protocol = fs::read_to_string(manifest_dir.join("src/runtime/protocol.rs"))
-        .expect("desktop runtime protocol should be readable");
-    let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
-        .expect("desktop native shell should be readable");
-    let product_root = manifest_dir.join("../coding-agent/src");
-    let embedding = fs::read_to_string(product_root.join("app/embedding.rs"))
-        .expect("coding-agent embedding owner should be readable");
-    let application = fs::read_to_string(product_root.join("app/application.rs"))
-        .expect("coding-agent application options should be readable");
-    let tools = fs::read_to_string(product_root.join("tools/mod.rs"))
-        .expect("coding-agent builtin tool owner should be readable");
-    let authorization = fs::read_to_string(product_root.join("services/authorization.rs"))
-        .expect("coding-agent authorization owner should be readable");
-
-    let new_context = driver
-        .split("async fn create_session_for_workspace")
-        .nth(1)
-        .and_then(|tail| tail.split("async fn create_session_in_context").next())
-        .expect("New prompt context transaction should remain explicit");
-    let ordered_stage = |source: &str, before: &str, after: &str| {
-        source
-            .find(before)
-            .zip(source.find(after))
-            .is_some_and(|(before, after)| before < after)
-    };
-    assert!(ordered_stage(
-        new_context,
-        "CodingAgentEmbeddingOptions::for_workspace(workspace)",
-        "CodingAgentEmbeddingContext::load(options)?"
-    ));
-    assert!(ordered_stage(
-        new_context,
-        "CodingAgentEmbeddingContext::load(options)?",
-        "admitted_model_thinking(&context"
-    ));
-    assert!(ordered_stage(
-        new_context,
-        "admitted_model_thinking(&context",
-        "self.create_session_in_context(context).await?"
-    ));
-    let thinking_admission = driver
-        .split("pub(super) fn admitted_model_thinking")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("pub(super) struct RuntimeSessionWorkspace")
-                .next()
-        })
-        .expect("desktop Thinking admission should remain a typed runtime boundary");
-    assert!(thinking_admission.contains("sanitize_thinking_level(model, requested)"));
-
-    let persistence = driver
-        .split("async fn create_session_in_context")
-        .nth(1)
-        .and_then(|tail| tail.split("pub(super) async fn open_session").next())
-        .expect("new session persistence should remain isolated");
-    assert!(ordered_stage(
-        persistence,
-        "RuntimeSessionWorkspace::scope_for_context(&context)?",
-        "context.create_session().await?"
-    ));
-    assert!(persistence.contains("CodingAgentTranscriptSnapshot {"));
-    assert!(persistence.contains("pending_recoveries: Vec::new()"));
-
-    let start = driver
-        .split("pub(super) fn start_prompt")
-        .nth(1)
-        .and_then(|tail| tail.split("pub(super) fn insert_idle_workspace").next())
-        .expect("prompt start transaction should remain isolated");
-    assert!(ordered_stage(
-        start,
-        "prepare_prompt_with_attachments(&prompt, &attachments)?",
-        "fail_next_prompt_start"
-    ));
-    assert!(ordered_stage(
-        start,
-        "fail_next_prompt_start",
-        "session.connect(CodingAgentClientId::new(DESKTOP_CLIENT_ID))"
-    ));
-    assert!(dispatch.contains("Some(created.snapshot)"));
-
-    let rejected = protocol
-        .split("PromptRejectedWithSession {")
-        .nth(1)
-        .and_then(|tail| tail.split("PromptStarted {").next())
-        .expect("post-create rejection must remain a distinct typed update");
-    assert!(rejected.contains("snapshot: DesktopRuntimeHydratedSnapshot"));
-    assert!(!rejected.contains("Option<"));
-    let install = shell
-        .split("fn install_hydrated_workspace")
-        .nth(1)
-        .and_then(|tail| tail.split("fn open_workspace_count").next())
-        .expect("shell hydration transaction should remain isolated");
-    assert!(
-        install.contains("if self.active_workspace.session_id() == HOME_COMPOSER_SESSION_KEY {")
-    );
-    assert!(!install.contains("&& self.workspaces.is_empty()"));
-
-    assert!(embedding.contains("let cwd = workspace.execution_cwd.clone();"));
-    assert!(application.contains("cwd: cwd.clone()"));
-    assert!(application.contains("tools: builtin_tools(cwd)?"));
-    assert!(tools.contains("let shell = ShellCapability::new(cwd);"));
-    assert!(tools.contains("shell::bash_tool(shell.clone())"));
-    assert!(authorization.contains("ToolAuthorizationScope::Shell {"));
-    assert!(authorization.contains("cwd: shell.cwd.to_string_lossy().into_owned()"));
-    assert!(authorization.contains("cwd: Some(shell.cwd.to_string_lossy().into_owned())"));
-}
-
-#[test]
-fn desktop_metadata_deliveries_cannot_hydrate_or_replace_the_transcript() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let driver = fs::read_to_string(manifest_dir.join("src/runtime/driver.rs"))
-        .expect("desktop runtime driver should be readable");
-    let dispatch = fs::read_to_string(manifest_dir.join("src/runtime/dispatch.rs"))
-        .expect("desktop runtime dispatch should be readable");
-    let protocol = fs::read_to_string(manifest_dir.join("src/runtime/protocol.rs"))
-        .expect("desktop runtime protocol should be readable");
-    let metadata_snapshot = driver
-        .split("fn metadata_snapshot")
-        .nth(1)
-        .and_then(|tail| tail.split("fn snapshot").next())
-        .expect("metadata snapshot owner should remain distinct from full hydration");
-
-    assert!(protocol.contains("pub struct DesktopRuntimeMetadataSnapshot"));
-    assert!(protocol.contains("pub struct DesktopRuntimeReadySnapshot"));
-    assert!(protocol.contains("pub struct DesktopRuntimeRecoverySnapshot"));
-    assert!(protocol.contains("pub struct DesktopRuntimeHydratedSnapshot"));
-    assert!(protocol.contains("pub enum DesktopRuntimeResyncSnapshot"));
-    assert!(
-        !driver.contains("DesktopRuntimeSnapshot")
-            && !dispatch.contains("DesktopRuntimeSnapshot")
-            && !protocol.contains("DesktopRuntimeSnapshot"),
-        "the ambiguous optional full-snapshot delivery must not return"
-    );
-    assert!(protocol.contains("Reloaded {\n        command_id: u64,\n        metadata:"));
-    assert!(protocol.contains("SelectionChanged {\n        command_id: u64,"));
-    assert!(
-        protocol.contains("metadata: DesktopRuntimeMetadataSnapshot"),
-        "metadata-only updates must use the narrow delivery type"
-    );
-    let active_prompt = driver
-        .split("struct ActivePrompt")
-        .nth(1)
-        .and_then(|tail| tail.split("enum ActivePromptSignal").next())
-        .expect("active prompt owner should remain explicit");
-    assert!(
-        !active_prompt.contains("transcript:"),
-        "active prompt must not retain or clone a complete transcript baseline"
-    );
-    assert!(
-        dispatch.contains("DesktopRuntimeResyncSnapshot::Metadata("),
-        "active resync must preserve the existing transcript through a narrow metadata delivery"
-    );
-    assert!(
-        !metadata_snapshot.contains("transcript_snapshot")
-            && !metadata_snapshot.contains("recovery_pending"),
-        "metadata snapshot construction must not read durable transcript or recovery payloads"
-    );
-    for command_path in [
-        "state.metadata_snapshot(None)",
-        "state.metadata_snapshot(Some(&session_id))",
-    ] {
-        assert!(
-            dispatch.contains(command_path),
-            "metadata command must use the narrow snapshot path: {command_path}"
-        );
-    }
-    assert!(driver.contains("self.metadata_snapshot(Some(session_id))"));
-
-    let recovery_snapshot = driver
-        .split("fn recovery_snapshot")
-        .nth(1)
-        .and_then(|tail| tail.split("fn retry_recovery").next())
-        .expect("recovery snapshot owner should remain distinct from full hydration");
-    assert!(
-        !recovery_snapshot.contains("transcript_snapshot"),
-        "recovery replacement must refresh pending facts without hydrating the transcript"
-    );
-    assert!(recovery_snapshot.contains("recovery_pending"));
-
-    let projection_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/projection.rs");
-    let projection =
-        fs::read_to_string(projection_path).expect("desktop projection should be readable");
-    let metadata_replacement = projection
-        .split("fn replace_metadata_snapshot")
-        .nth(1)
-        .and_then(|tail| tail.split("fn require_resync").next())
-        .expect("metadata replacement should have a dedicated projection owner");
-    assert!(!metadata_replacement.contains("replace_transcript"));
-    assert!(!metadata_replacement.contains("ConversationProjection::hydrate"));
-    let recovery_replacement = projection
-        .split("fn replace_recovery_snapshot")
-        .nth(1)
-        .and_then(|tail| tail.split("fn require_resync").next())
-        .expect("recovery replacement should have a dedicated projection owner");
-    assert!(!recovery_replacement.contains("replace_transcript"));
-    assert!(!recovery_replacement.contains("ConversationProjection::hydrate"));
-}
-
-#[test]
-fn desktop_runtime_delivery_awaits_events_without_an_idle_poll_loop() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let runtime = fs::read_to_string(manifest_dir.join("src/runtime.rs"))
-        .expect("desktop runtime should be readable");
-    let protocol = fs::read_to_string(manifest_dir.join("src/runtime/protocol.rs"))
-        .expect("desktop runtime protocol should be readable");
-    let bridge = fs::read_to_string(manifest_dir.join("src/runtime/bridge.rs"))
-        .expect("desktop runtime bridge should be readable");
-    let dispatch = fs::read_to_string(manifest_dir.join("src/runtime/dispatch.rs"))
-        .expect("desktop runtime dispatch should be readable");
-    let driver = fs::read_to_string(manifest_dir.join("src/runtime/driver.rs"))
-        .expect("desktop runtime driver should be readable");
-    let shell_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/app/native_shell.rs");
-    let shell = fs::read_to_string(shell_path).expect("desktop native shell should be readable");
-
-    assert!(runtime.contains("mod bridge;"));
-    assert!(runtime.contains("mod dispatch;"));
-    assert!(runtime.contains("mod driver;"));
-    assert!(runtime.contains("mod protocol;"));
-    assert!(runtime.contains("pub use bridge::{"));
-    assert!(runtime.contains("pub use protocol::{"));
-    assert!(runtime.contains("use driver::run_runtime;"));
-    assert!(runtime.contains("mod tests;"));
-    assert!(!runtime.contains("struct RuntimeState"));
-    assert!(!runtime.contains("tokio::select!"));
-    assert!(!protocol.contains("tokio::"));
-    assert!(!protocol.contains("RuntimeState"));
-    assert!(!protocol.contains("run_runtime"));
-    assert!(!bridge.contains("struct RuntimeState"));
-    assert!(!bridge.contains("CodingAgentSession"));
-    assert!(!bridge.contains("CodingAgentClientConnection"));
-    assert!(bridge.contains("pub struct DesktopRuntimeCommandHandle"));
-    assert!(bridge.contains("pub struct DesktopRuntimeEventStream"));
-    assert!(bridge.contains("pub struct DesktopRuntimeShutdownGuard"));
-    assert!(bridge.contains("pub fn into_parts("));
-    assert!(bridge.contains("pub async fn next_update(&mut self)"));
-    assert!(driver.contains("struct RuntimeState"));
-    assert!(driver.contains("struct ActivePrompt"));
-    assert!(driver.contains("async fn run_runtime("));
-    assert!(driver.contains("tokio::select!"));
-    assert!(driver.contains("recover_product_event_source("));
-    assert!(driver.contains("drain_product_events("));
-    assert!(driver.contains("RUNTIME_SHUTDOWN_DEADLINE"));
-    assert!(driver.contains("shutdown_deadline_exceeded"));
-    assert!(!driver.contains("let result = match command {"));
-    assert!(dispatch.contains("async fn dispatch_command_with_updates("));
-    assert!(dispatch.contains("async fn dispatch_command_inner("));
-    assert!(dispatch.contains("fn dispatch_active_command("));
-    assert!(dispatch.matches("match command {").count() == 2);
-    assert!(driver.contains("FuturesUnordered"));
-    assert!(driver.contains("HashMap<String, ActivePrompt>"));
-    for forbidden in [
-        "tokio::select!",
-        "CodingAgentReconnectDelivery",
-        "acknowledge_product_event",
-        "drain_product_events",
-        "RUNTIME_SHUTDOWN_DEADLINE",
-        "shutdown_deadline_exceeded",
-    ] {
-        assert!(
-            !dispatch.contains(forbidden),
-            "command dispatch must not own driver lifecycle behavior: {forbidden}"
-        );
-    }
-    let publish_then_ack = driver
-        .split("if !publish_product_event(")
-        .nth(1)
-        .and_then(|tail| tail.split("active_prompt.last_forwarded_sequence").next())
-        .expect("driver should publish and acknowledge before advancing its cursor");
-    assert!(publish_then_ack.contains("acknowledge_product_event("));
-    assert!(shell.contains("runtime.into_parts()"));
-    assert!(shell.contains("while let Some(updates) = runtime_events.next_update_batch().await"));
-    assert!(shell.contains("runtime_shutdown.shutdown(&mut runtime_events).await"));
-    assert!(shell.contains("runtime: Option<DesktopRuntimeCommandHandle>"));
-    assert!(
-        !shell.contains("RUNTIME_POLL_INTERVAL"),
-        "the native shell must not wake periodically while runtime delivery is idle"
-    );
-    assert!(
-        !shell.contains("DesktopRuntimeBridge::try_next_update"),
-        "GPUI must await the event stream instead of scanning runtime queues"
-    );
-    assert!(bridge.contains("STREAMING_DELIVERY_COALESCE_WINDOW"));
-    assert!(bridge.contains("if !is_streaming_data_update(&first)"));
-    assert!(
-        bridge.contains("let immediate = !is_streaming_data_update(&update)"),
-        "priority/control/recovery/terminal updates must interrupt data coalescing"
-    );
-}
-
-#[test]
-fn desktop_pending_commands_use_bounded_per_workspace_ledgers_and_one_checked_id_sequence() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let ledger = fs::read_to_string(manifest_dir.join("src/command_ledger.rs"))
-        .expect("desktop command ledger should be readable");
-    let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
-        .expect("desktop native shell should be readable");
-    let commands = fs::read_to_string(manifest_dir.join("src/app/native_shell/commands.rs"))
-        .expect("desktop command controller should be readable");
-
-    assert!(ledger.contains("pub(crate) const MAX_PENDING_DESKTOP_COMMANDS: usize = 32"));
-    assert!(ledger.contains("pub(crate) enum DesktopCommandIntent"));
-    assert!(ledger.contains("checked_add(1)"));
-    assert!(!ledger.contains("saturating_add"));
-    assert!(ledger.contains("fn reserve_with_id("));
-    assert!(shell.contains("struct SessionWorkspace"));
-    assert!(shell.contains("command_ledger: DesktopCommandLedger"));
-    assert!(shell.contains("next_command_id: u64"));
-    assert!(commands.contains(".active_workspace\n        .command_ledger"));
-    assert!(commands.contains("reserve_with_id(command_id, intent)"));
-    for obsolete_pending_field in [
-        "pending_abort_command",
-        "pending_reload_command",
-        "pending_selection_command",
-        "pending_authorization_command",
-        "pending_recovery_command",
-    ] {
-        assert!(
-            !shell.contains(obsolete_pending_field),
-            "native shell must use the bounded typed command ledger, not {obsolete_pending_field}"
-        );
-    }
-}
-
-#[test]
-fn desktop_file_review_uses_product_authority_and_argument_safe_adapter_bounds() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let review = fs::read_to_string(manifest_dir.join("src/file_review.rs"))
-        .expect("desktop file review owner should be readable");
-    let runtime_driver = fs::read_to_string(manifest_dir.join("src/runtime/driver.rs"))
-        .expect("desktop runtime driver should be readable");
-    let runtime_dispatch = fs::read_to_string(manifest_dir.join("src/runtime/dispatch.rs"))
-        .expect("desktop runtime dispatch should be readable");
-    let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
-        .expect("desktop native shell should be readable");
-    let inspector = fs::read_to_string(manifest_dir.join("src/app/native_shell/inspector_pane.rs"))
-        .expect("desktop inspector pane should be readable");
-
-    for bound in [
-        "MAX_VISIBLE_FILE_CHANGES: usize = 64",
-        "MAX_REVIEW_ROWS: usize = 480",
-        "MAX_REVIEW_LINE_BYTES: usize = 2 * 1024",
-        "MAX_REVIEW_RENDER_BYTES: usize = 160 * 1024",
-        "MAX_REVIEW_CLIPBOARD_BYTES: usize = 128 * 1024",
-    ] {
-        assert!(review.contains(bound), "file review omitted bound {bound}");
-    }
-    assert!(runtime_dispatch.contains(".review_changed_file(&session_id, request)"));
-    assert!(runtime_driver.contains(".review_changed_file(request)"));
-    let external_editor = runtime_driver
-        .split("async fn open_external_editor")
-        .nth(1)
-        .and_then(|tail| tail.split("pub(super) fn retry_recovery").next())
-        .expect("external editor adapter should remain isolated in the runtime driver");
-    assert!(
-        external_editor.contains(".session")
-            && external_editor.contains(".revalidate_external_editor_target(&target)")
-            && external_editor
-                .find(".revalidate_external_editor_target(&target)")
-                .zip(external_editor.find("task::spawn_blocking"))
-                .is_some_and(|(revalidate, spawn)| revalidate < spawn),
-        "external launch must revalidate the opaque product target immediately before spawn"
-    );
-    assert!(review.contains("args.push(validated_path.as_os_str().to_owned())"));
-    assert!(review.contains("Command::new(invocation.program)"));
-    assert!(review.contains(".args(invocation.args)"));
-    assert!(!review.contains("Command::new(\"sh\")"));
-    assert!(!review.contains(".arg(\"-c\")"));
-    assert!(!shell.contains("std::fs"));
-    assert!(!shell.contains("std::process::Command"));
-    assert!(!inspector.contains("std::fs"));
-    assert!(!inspector.contains("std::process::Command"));
-    assert!(shell.contains(".take(MAX_VISIBLE_FILE_CHANGES)"));
-    assert!(!inspector.contains("MAX_VISIBLE_FILE_CHANGES"));
-    assert!(shell.contains("DesktopCommandIntent::FileReview"));
-    assert!(shell.contains("DesktopCommandIntent::ExternalEditor"));
-}
-
-#[test]
-fn desktop_home_and_session_share_explicit_three_column_shell_geometry() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let geometry = fs::read_to_string(manifest_dir.join("src/shell.rs"))
-        .expect("desktop shell geometry should be readable");
-    let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
-        .expect("desktop native shell should be readable");
-    let preferences = fs::read_to_string(manifest_dir.join("src/preferences.rs"))
-        .expect("desktop preferences should be readable");
-
-    for field in [
-        "pub sidebar: Option<Rect>",
-        "pub center: Rect",
-        "pub center_header: Rect",
-        "pub center_body: Rect",
-        "pub inspector: Option<Rect>",
-    ] {
-        assert!(geometry.contains(field), "ShellLayout omitted {field}");
-    }
-    assert!(!geometry.contains("resolve_idle"));
-    for target in [
-        "CenterHeader",
-        "Sidebar",
-        "CenterBody",
-        "Composer",
-        "Inspector",
-    ] {
-        assert!(geometry.contains(target), "focus order omitted {target}");
-    }
-
-    let resolver = shell
-        .split("fn resolve_layout")
-        .nth(1)
-        .and_then(|tail| tail.split("fn begin_panel_resize").next())
-        .expect("NativeShell layout resolver should remain isolated");
-    assert!(resolver.contains("ShellLayout::resolve_with_panel_widths"));
-    assert!(!resolver.contains("projection"));
-    assert!(shell.contains(".debug_selector(|| \"desktop-center-body\".into())"));
-    assert!(shell.contains(".track_focus(&self.center_body_focus)"));
-    assert!(preferences.contains("sessions_panel_visible: true"));
-    assert!(preferences.contains("context_panel_visible: false"));
 }

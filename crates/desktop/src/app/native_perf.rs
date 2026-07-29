@@ -1023,29 +1023,4 @@ mod tests {
         assert_eq!(projection.snapshot().context.changes.len(), 2);
         assert_eq!(projection.snapshot().pending_authorizations.len(), 1);
     }
-
-    #[test]
-    fn visual_golden_updates_require_reviewed_before_after_artifacts() {
-        let script = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/desktop-visual-golden.sh"
-        ));
-        assert!(script.contains("--review | --update --review-note FILE"));
-        assert!(script.contains("manifest.sha256"));
-        assert!(script.contains("park_pointer_outside_replay"));
-        assert!(script.contains("-before.png"));
-        assert!(script.contains("-after.png"));
-        assert!(script.contains("-diff.png"));
-        for fixture in [
-            "wide-idle",
-            "medium-idle",
-            "narrow-idle",
-            "wide-authorization",
-            "wide-reduced-motion",
-            "wide-keyboard-focus",
-            "wide-no-color",
-        ] {
-            assert!(script.contains(fixture), "missing visual fixture {fixture}");
-        }
-    }
 }
