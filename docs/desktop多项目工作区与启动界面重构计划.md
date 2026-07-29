@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -715,10 +715,11 @@ CenterDrawerHost
 > create/start/recovery/rename/close 与 active command 均通过对应 workspace owner。最多 4 个 open
 > session、command id、priority/data queue、shutdown/join 与 recovery 语义保持不变。
 >
-> 过渡债务：DSK-612 已清偿首次 prompt 的原子创建与失败恢复。DSK-613 仍负责从 durable manifest
-> 先解析历史 session scope 再构造跨项目 context（当前尚未打开的 persisted session 仍从 Home options
-> 建 context）；DSK-630/631 负责把当前 Home-scope session query 替换为用户驱动、按项目分组的
-> catalog。产品层 raw-cwd options 与可空 workspace snapshot 仍按 CAG-204 债务在计划收敛前删除。
+> 债务清偿：DSK-612 已清偿首次 prompt 的原子创建与失败恢复；DSK-613 已清偿 persisted session
+> 从 Home options 建 context 的错误路径，历史 session 现在先从 durable manifest 取得完整 scope，
+> 再建立目标 workspace context。DSK-630/631 仍负责把当前 Home-scope session query 替换为用户驱动、
+> 按项目分组的 catalog。产品层 raw-cwd options 与可空 workspace snapshot 仍按 CAG-204 债务在计划
+> 收敛前删除。
 >
 > Gate：Desktop 246 个 tests 通过、5 个既有用例保持 ignored，17 个 dependency boundary tests
 > 全部通过；严格 Clippy、格式、CodeGraph 与 `ast-grep outline` owner/call-path 审计通过。
@@ -780,6 +781,29 @@ CenterDrawerHost
 完成标准：所选 cwd 同时出现在 context、session scope、tool execution 和 authorization；无项目走 Projectless。
 
 #### DSK-613：跨项目历史 session open
+
+> 状态：已完成。产品层新增 `CodingAgentSessionOpenTarget` 与
+> `CodingAgentSessionQuery::open_target`：按 product session id 读取 durable workspace identity，Legacy
+> 可恢复时先原子迁移 manifest，再返回完整 `CodingAgentWorkspaceScope + migration/availability` 证据；
+> 查询不 hydrate transcript，也不向 adapter 暴露 session repository path。Projectless 因而保留真实
+> `workspace_id`，不再从 list overview 的展示字段反推 scratch。
+>
+> Desktop `OpenSession` 现在固定执行 `open_target -> for_workspace -> context load -> session open`。
+> Project 使用持久化 canonical identity，Projectless 按持久化 id 恢复或重建 managed scratch，Legacy
+> 无法恢复及已删除/不可用 Project 统一返回可继续操作的 `CommandRejected(workspace_unavailable)`；失败
+> 不安装半初始化 owner。新 context 只继承 Home 已冻结的 product-global session root，不继承 Home 的
+> workspace 配置或可变 model/profile selection。
+>
+> 每个历史 session 均建立独立 `RuntimeSessionWorkspace`，即使 scope 指向同一 Project 也不共享 mutable
+> context。定向验收覆盖 Project A -> B -> A 重开后的 transcript、project settings、skills 与 cwd；同一
+> Project 两个 owner 的 model/profile 独立变化；当前 Projectless scratch 删除后的受管恢复；v1 Legacy
+> manifest 在 context load 前迁移；deleted Project 的有界诊断及 rejection 后 runtime 可继续接收命令。
+>
+> Gate：`coding-agent` 786 个 library tests、API contract 14/14 与严格 Clippy 通过；Desktop 255 个 tests
+> 通过、5 个既有 release 性能用例保持 ignored，18 个 dependency boundary tests、严格 Clippy、格式、
+> CodeGraph 与 `ast-grep-outline` API/owner 审计通过。`coding-agent` boundary 为 64/67，仍严格保持
+> DSK-600 登记的 frozen write count、session naming operation id、session method ledger 三个既有失败，
+> 没有新增回归。
 
 工作：
 
