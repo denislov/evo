@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -658,6 +658,33 @@ CenterDrawerHost
 ### Phase 2：Desktop runtime 多 context
 
 #### DSK-610：Typed DesktopPromptTarget
+
+> 状态：已完成。`DesktopRuntimeCommand::SubmitPrompt` 已删除
+> `session_id: Option<String>`，统一持有 `DesktopPromptTarget`。`New` 必须显式携带
+> `CodingAgentWorkspaceSelection + model_id + profile_id`，`Existing` 只能携带 session id，因而
+> 已有 session 的 cwd/workspace override 在类型层面不可表达。Bridge/command handle 已删除
+> `*_for_session` 平行 API，所有生产与测试 caller 均通过同一 typed submit 入口。
+>
+> Admission 在入队前统一验证 Existing session id、New model/profile id、16 KiB workspace path
+> 上限、NUL、存在性、directory 与可用性，并把 workspace resolution failure 投影为 bounded typed
+> error。Command Debug 仅保留 command kind、command id 与 target kind，不输出 prompt、附件、
+> workspace path、model/profile/session selection。Test harness 直接捕获 `DesktopPromptTarget`，不再把
+> `None` 解释为 New。
+>
+> Dispatch 中 `New` 即使在已有 session 打开时也会创建独立 session，并返回
+> `PromptAcceptedWithSession`；`Existing` 只路由到显式 session。Desktop 启动 context 同时切换到
+> `CodingAgentEmbeddingOptions::for_workspace`，Home submission 可以从 snapshot 构造真实 typed
+> workspace target，而不是依赖 scratch cwd 猜 Projectless。
+>
+> 过渡债务：DSK-610 只完成 command/admission 事务边界。当前 `RuntimeState` 仍由单一 context
+> 创建新 session，`New` 中的 workspace/model/profile 只完成可信传输与校验，尚未用于构造 per-session
+> context；DSK-611 建立 `RuntimeSessionWorkspace` owner、DSK-612 实现 scope-aware 原子创建时必须消费
+> 这些字段并删除该债务。
+>
+> Gate：Desktop 245 个 tests 通过、5 个既有用例保持 ignored，17 个 dependency boundary tests
+> 全部通过；严格 Clippy、格式和结构删除审计通过。`coding-agent` boundary 为 64/67，仍严格保持
+> DSK-600 登记的 3 个既有失败，没有新增回归。新增验收覆盖 typed target admission/debug redaction、
+> harness 的完整 New/Existing payload，以及已有 session 存在时显式 New 仍创建新 session。
 
 主要文件：
 
