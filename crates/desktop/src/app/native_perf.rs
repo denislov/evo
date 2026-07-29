@@ -364,17 +364,14 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
     );
     let project = projection.project().clone();
     let projection = (!idle_replay).then_some(projection);
-    let global_skills: Arc<[CodingAgentResourceCommand]> = Arc::from(if idle_replay {
-        vec![CodingAgentResourceCommand {
+    let global_skills: Arc<[CodingAgentResourceCommand]> =
+        Arc::from([CodingAgentResourceCommand {
             name: "review-plan".into(),
             command: "/review-plan".into(),
             description: "Review an implementation plan before coding.".into(),
             kind: CodingAgentResourceCommandKind::Skill,
             model_invocable: true,
-        }]
-    } else {
-        Vec::new()
-    });
+        }]);
     cx.open_window(options, move |window, cx| {
         window.set_window_title(&title);
         let preferences = DesktopPreferences {

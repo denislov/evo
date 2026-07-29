@@ -1647,6 +1647,28 @@ style(desktop): show the header status only when not idle
 - 新增测试：点击新建对话不产生会话目录；
 - 三档 golden 更新并附 review note。
 
+**实施记录（2026-07-29）**
+
+- `SessionsPane` 保留完整顶栏与 overflow / overlay 关闭动作，主内容改为同一有界纵向滚动区内的
+  「New conversation / Global skills / History」三段。新建对话使用整行入口；停靠态只显示完整主标签，
+  宽 overlay 增加 `Start from Home` 辅助文案。历史会话继续复用既有搜索、整行打开、内联重命名、
+  关闭动作与运行状态表达；
+- skills 只接收 `NativeShell` 启动时由 CAG-103 全局目录提供的 `global_skills` bounded view model，
+  不读取 cwd、项目快照中的 `skills_dirs` 或项目级 `.evo/skills`。列表最多展示 8 项并明确提示省略数，
+  空目录也保留命名分区；
+- 新增 `show_home_workspace`：已有 Home 时切回其草稿槽，否则以当前项目、thinking 选择和空 command
+  ledger 建立纯 UI Home workspace，并把当前真实会话留在多会话工作台。该入口不调用
+  `create_session`、不预留 `DesktopCommandIntent::CreateSession`、不派发任何 runtime command；窄屏点击后
+  同步关闭 Sessions overlay 并把焦点交还 Composer。新增 GPUI 测试严格断言命令队列为空，结合既有
+  sessionless runtime 测试对 `sessions` 根始终不存在的断言，覆盖「点击不产生会话目录」的完整副作用链；
+- 新增待机 overlay 与有会话停靠态的三段渲染测试，均验证全局 skill、历史行和搜索框真实挂载；
+  有会话测试还验证点击后 projection 为空、原会话 workspace 仍可恢复。wide / medium / narrow、三档
+  idle 及 authorization / reduced-motion / keyboard-focus / no-color 共 10 个 fixture 已按原始分辨率人工
+  审图并附 VUI-310 review note；安装后确定性复播全部 `RMSE=0`。click-to-photon `--drive 60` 烟测产生
+  60 个唯一 post-render 样本（只验证 app-side 链路，不宣称外部光子延迟）；
+- 最终验证通过 Desktop `230 passed / 5 ignored`、dependency boundary `16/16`、all-target check、
+  严格 Clippy `-D warnings`、fmt 与 `git diff --check`。
+
 **建议提交**
 
 ```text

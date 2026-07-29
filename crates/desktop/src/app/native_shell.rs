@@ -598,7 +598,9 @@ impl NativeShell {
                 &sessions_pane,
                 window,
                 |this, _, event: &SessionsPaneEvent, window, cx| match event {
-                    SessionsPaneEvent::Create => this.create_session(cx),
+                    SessionsPaneEvent::NewConversation => {
+                        this.show_home_workspace(window, cx);
+                    }
                     SessionsPaneEvent::Refresh => this.request_session_catalog(cx),
                     SessionsPaneEvent::Open(session_id) => {
                         this.open_session(session_id.clone(), cx);
@@ -900,6 +902,37 @@ impl NativeShell {
         self.workspaces
             .insert(previous.session_id().to_owned(), previous);
         true
+    }
+
+    fn show_home_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_workspace.session_id() != HOME_COMPOSER_SESSION_KEY
+            && !self.swap_active_workspace(HOME_COMPOSER_SESSION_KEY)
+        {
+            let home = SessionWorkspace::new_with_thinking(
+                self.project.clone(),
+                None,
+                None,
+                DesktopCommandLedger::default(),
+                self.thinking_selection,
+            );
+            let previous = std::mem::replace(&mut self.active_workspace, home);
+            self.workspaces
+                .insert(previous.session_id().to_owned(), previous);
+        }
+
+        self.narrow_sessions_open = false;
+        if self.active_overlay == Some(DesktopOverlayKind::NarrowSessions) {
+            self.dismiss_overlay(window, cx);
+        }
+        self.record_focus(FocusTarget::Composer, window, cx);
+        self.notify_sessions_pane(cx);
+        self.notify_home_pane(cx);
+        self.notify_composer_pane(cx);
+        self.notify_conversation_pane(cx);
+        self.notify_conversation_header(cx);
+        self.notify_inspector_pane(cx);
+        self.notify_overlay_host(cx);
+        cx.notify();
     }
 
     fn install_hydrated_workspace(
@@ -3923,13 +3956,13 @@ impl NativeShell {
             panel_width: self.preferences.sessions_panel_width,
             catalog: Arc::from(self.session_controller.catalog().to_vec()),
             omitted_sessions: self.session_controller.omitted(),
+            global_skills: Arc::clone(&self.global_skills),
             active_session_id: Arc::from(
                 snapshot
                     .map(|snapshot| snapshot.session.session_id.as_str())
                     .unwrap_or_default(),
             ),
             runtime_states: Arc::from(runtime_states),
-            workspace_limit_reached: self.open_workspace_count() >= MAX_SESSION_WORKSPACES,
             composer_running,
             awaiting_prompt_start: self.composer.submitted().is_some() && !composer_running,
             session_pending: self.command_ledger.contains_where(|intent| {
@@ -4962,6 +4995,16 @@ mod tests {
         });
     }
 
+    fn visual_global_skills() -> Arc<[CodingAgentResourceCommand]> {
+        Arc::from([CodingAgentResourceCommand {
+            name: "review-plan".into(),
+            command: "/review-plan".into(),
+            description: "Review an implementation plan before coding.".into(),
+            kind: CodingAgentResourceCommandKind::Skill,
+            model_invocable: true,
+        }])
+    }
+
     fn add_visual_shell(
         cx: &mut TestAppContext,
         runtime: DesktopRuntimeBridge,
@@ -4985,7 +5028,7 @@ mod tests {
                         runtime,
                         project: projection.project().clone(),
                         projection: Some(projection),
-                        global_skills: Arc::from([]),
+                        global_skills: visual_global_skills(),
                         preferences,
                         preference_writer: None,
                         preference_notice: None,
@@ -5029,13 +5072,7 @@ mod tests {
                         runtime,
                         project,
                         projection: None,
-                        global_skills: Arc::from([CodingAgentResourceCommand {
-                            name: "review-plan".into(),
-                            command: "/review-plan".into(),
-                            description: "Review an implementation plan before coding.".into(),
-                            kind: CodingAgentResourceCommandKind::Skill,
-                            model_invocable: true,
-                        }]),
+                        global_skills: visual_global_skills(),
                         preferences: DesktopPreferences::default(),
                         preference_writer: None,
                         preference_notice: None,
@@ -5095,6 +5132,97 @@ mod tests {
             assert!(cx.debug_bounds("desktop-inspector-panel").is_none());
             assert!(cx.debug_bounds("desktop-composer-panel").is_some());
         }
+    }
+
+    #[gpui::test]
+    fn idle_sessions_overlay_renders_new_conversation_skills_and_history(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, cx| {
+            shell.session_controller.replace_catalog(
+                vec![desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id: "idle-recent-session".into(),
+                    name: Some("Idle recent session".into()),
+                    updated_at: "2026-07-29T08:00:00Z".into(),
+                    ..Default::default()
+                }],
+                0,
+            );
+            shell.notify_sessions_pane(cx);
+        });
+        cx.simulate_resize(size(px(700.), px(800.)));
+        cx.run_until_parked();
+
+        let toggle = cx
+            .debug_bounds("desktop-hit-toggle-sessions")
+            .expect("idle Header exposes the Sessions overlay toggle");
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("desktop-new-conversation-section")
+                .is_some()
+        );
+        assert!(cx.debug_bounds("desktop-global-skills-section").is_some());
+        assert!(cx.debug_bounds("desktop-sessions-skill-0").is_some());
+        assert!(cx.debug_bounds("desktop-session-history-section").is_some());
+        assert!(cx.debug_bounds("desktop-session-row-0").is_some());
+        assert!(cx.debug_bounds("sessions-search").is_some());
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_overlay),
+            Some(DesktopOverlayKind::NarrowSessions)
+        );
+    }
+
+    #[gpui::test]
+    fn session_panel_renders_all_sections_and_new_conversation_returns_home(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_visual_shell(cx, runtime, visual_test_projection());
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+        shell.update(cx, |shell, cx| {
+            shell.session_controller.replace_catalog(
+                vec![desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id: "desktop-visual-test".into(),
+                    name: Some("Active visual session".into()),
+                    updated_at: "2026-07-29T08:00:00Z".into(),
+                    ..Default::default()
+                }],
+                0,
+            );
+            shell.notify_sessions_pane(cx);
+        });
+        cx.simulate_resize(size(px(1_300.), px(900.)));
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("desktop-new-conversation-section")
+                .is_some()
+        );
+        assert!(cx.debug_bounds("desktop-global-skills-section").is_some());
+        assert!(cx.debug_bounds("desktop-sessions-skill-0").is_some());
+        assert!(cx.debug_bounds("desktop-session-history-section").is_some());
+        assert!(cx.debug_bounds("desktop-session-row-0").is_some());
+
+        let new_conversation = cx
+            .debug_bounds("desktop-hit-new-conversation")
+            .expect("the panel exposes the new-conversation row");
+        cx.simulate_click(new_conversation.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(shell.read_with(cx, |shell, _| shell.projection.is_none()));
+        assert!(shell.read_with(cx, |shell, _| {
+            shell.workspaces.contains_key("desktop-visual-test")
+        }));
+        assert!(cx.debug_bounds("desktop-home-workspace").is_some());
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [],
+            "entering Home must not dispatch any runtime command or touch session persistence"
+        );
     }
 
     #[gpui::test]
@@ -6397,7 +6525,7 @@ mod tests {
 
         cx.simulate_resize(size(px(1_300.), px(900.)));
         cx.run_until_parked();
-        assert_minimum_hit_target(cx, "desktop-hit-create-session");
+        assert_minimum_hit_target(cx, "desktop-hit-new-conversation");
         assert_minimum_hit_target(cx, "desktop-session-row-1");
     }
 

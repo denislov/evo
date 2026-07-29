@@ -1,3 +1,4 @@
+use coding_agent::api::embedding::CodingAgentResourceCommand;
 use desktop::runtime::DesktopSessionCatalogEntry;
 use desktop::shell::{SESSION_PANEL_WIDTH, SemanticTheme, truncate_label};
 use gpui::{
@@ -6,7 +7,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{
-    Disableable as _, Icon, Sizable as _,
+    Icon, Sizable as _,
     menu::{DropdownMenu as _, PopupMenuItem},
 };
 use std::sync::Arc;
@@ -16,13 +17,15 @@ use super::{
     desktop_controls::{
         DesktopActionRow, DesktopControlSize, DesktopIcon, DesktopIconButton, DesktopRowState,
     },
-    desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
+    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
     semantic_status_color,
 };
 
+const MAX_SESSIONS_PANE_SKILLS: usize = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SessionsPaneEvent {
-    Create,
+    NewConversation,
     Refresh,
     Open(String),
     Rename(String, String),
@@ -41,9 +44,9 @@ pub(super) struct SessionsPaneViewModel {
     pub(super) panel_width: u32,
     pub(super) catalog: Arc<[DesktopSessionCatalogEntry]>,
     pub(super) omitted_sessions: usize,
+    pub(super) global_skills: Arc<[CodingAgentResourceCommand]>,
     pub(super) active_session_id: Arc<str>,
     pub(super) runtime_states: Arc<[SessionRuntimeState]>,
-    pub(super) workspace_limit_reached: bool,
     pub(super) composer_running: bool,
     pub(super) awaiting_prompt_start: bool,
     pub(super) session_pending: bool,
@@ -199,6 +202,10 @@ impl Render for SessionsPane {
         let renaming_session_id = self.renaming_session_id.clone();
         let search = search_input.read(cx).value().trim().to_lowercase();
         let omitted_sessions = view_model.omitted_sessions;
+        let omitted_skills = view_model
+            .global_skills
+            .len()
+            .saturating_sub(MAX_SESSIONS_PANE_SKILLS);
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let active_semantic_status = view_model.active_status;
         let runtime_states = Arc::clone(&view_model.runtime_states);
@@ -411,6 +418,35 @@ impl Render for SessionsPane {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
+        let skill_rows = view_model
+            .global_skills
+            .iter()
+            .take(MAX_SESSIONS_PANE_SKILLS)
+            .enumerate()
+            .map(|(index, skill)| {
+                div()
+                    .id(("sessions-skill", index))
+                    .debug_selector(move || format!("desktop-sessions-skill-{index}"))
+                    .role(Role::ListItem)
+                    .px_token(DesignSpace::Md)
+                    .py_token(DesignSpace::Sm)
+                    .rounded_token(DesignRadius::Sm)
+                    .border_1()
+                    .border_color(rgb(theme.divider.value()))
+                    .child(
+                        div()
+                            .text_token(DesignText::Body)
+                            .child(format!("/{}", truncate_label(&skill.name, 24))),
+                    )
+                    .child(
+                        div()
+                            .mt_token(DesignSpace::Xs)
+                            .text_token(DesignText::Metadata)
+                            .text_color(rgb(theme.muted_text.value()))
+                            .child(truncate_label(&skill.description, 52)),
+                    )
+            })
+            .collect::<Vec<_>>();
         let empty_state = if visible_session_count > 0 {
             None
         } else if session_catalog_pending && view_model.catalog.is_empty() {
@@ -422,6 +458,23 @@ impl Render for SessionsPane {
             ))
         } else {
             Some("No recent sessions yet. Create one to begin.".to_owned())
+        };
+        let new_conversation_row = DesktopActionRow::new(
+            "new-conversation",
+            "New conversation",
+            "Open the new conversation home without creating a session",
+        )
+        .state(DesktopRowState {
+            selected: active_session_id.is_empty(),
+            disabled: false,
+            focus_visible: false,
+        })
+        .size(DesktopControlSize::Critical)
+        .leading(Icon::new(DesktopIcon::Plus.name()).small());
+        let new_conversation_row = if context_is_overlay {
+            new_conversation_row.detail("Start from Home")
+        } else {
+            new_conversation_row
         };
 
         div()
@@ -457,30 +510,6 @@ impl Render for SessionsPane {
                             .flex()
                             .items_center()
                             .gap_token(DesignSpace::Xs)
-                            .child(
-                                DesktopIconButton::new(
-                                    "create-session",
-                                    DesktopIcon::Plus,
-                                    if view_model.workspace_limit_reached {
-                                        "Session limit reached · close one first"
-                                    } else {
-                                        "Create a new session · Ctrl/Cmd+N"
-                                    },
-                                )
-                                .build()
-                                .debug_selector(|| "desktop-hit-create-session".into())
-                                .disabled(
-                                    composer_running
-                                        || awaiting_prompt_start
-                                        || session_pending
-                                        || view_model.workspace_limit_reached,
-                                )
-                                .on_click(cx.listener(
-                                    |_, _, _, cx| {
-                                        cx.emit(SessionsPaneEvent::Create);
-                                    },
-                                )),
-                            )
                             .child(
                                 DesktopIconButton::new(
                                     "sessions-overflow",
@@ -532,8 +561,7 @@ impl Render for SessionsPane {
             .child(
                 div()
                     .id("sessions-list")
-                    .role(Role::List)
-                    .aria_label("Recent coding sessions")
+                    .aria_label("New conversation, global skills, and session history")
                     .w_full()
                     .flex_1()
                     .min_h_0()
@@ -541,56 +569,139 @@ impl Render for SessionsPane {
                     .p_token(DesignSpace::Md)
                     .flex()
                     .flex_col()
-                    .gap_token(DesignSpace::Sm)
+                    .gap_token(DesignSpace::Lg)
                     .child(
                         div()
-                            .id("sessions-search")
-                            .debug_selector(|| "sessions-search".into())
-                            .role(Role::Search)
-                            .aria_label("Search sessions")
+                            .id("new-conversation-section")
+                            .debug_selector(|| "desktop-new-conversation-section".into())
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap_token(DesignSpace::Sm)
                             .child(
-                                Input::new(&search_input)
-                                    .role(Role::SearchInput)
-                                    .prefix(Icon::new(DesktopIcon::Search.name()).small())
-                                    .when(!search.is_empty(), |input| {
-                                        input.suffix(
-                                            DesktopIconButton::new(
-                                                "clear-session-search",
-                                                DesktopIcon::Clear,
-                                                "Clear session search",
-                                            )
-                                            .size(DesktopControlSize::Tool)
-                                            .build()
-                                            .on_click(
-                                                move |_, window, cx| {
-                                                    clear_search_input.update(cx, |input, cx| {
-                                                        input.set_value("", window, cx);
-                                                    });
-                                                },
-                                            ),
-                                        )
-                                    })
-                                    .appearance(false),
+                                div()
+                                    .text_token(DesignText::Metadata)
+                                    .text_color(rgb(theme.muted_text.value()))
+                                    .child("NEW CONVERSATION"),
+                            )
+                            .child(
+                                new_conversation_row
+                                    .build(theme)
+                                    .debug_selector(|| "desktop-hit-new-conversation".into())
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(SessionsPaneEvent::NewConversation);
+                                    })),
                             ),
                     )
-                    .children(session_rows)
-                    .when_some(empty_state, |panel, message| {
-                        panel.child(
-                            div()
-                                .debug_selector(|| "desktop-sessions-empty-state".into())
-                                .p_token(DesignSpace::Sm)
-                                .text_color(rgb(theme.muted_text.value()))
-                                .child(message),
-                        )
-                    })
-                    .when(omitted_sessions > 0, |panel| {
-                        panel.child(
-                            div()
-                                .text_token(DesignText::Body)
-                                .text_color(rgb(theme.warning.value()))
-                                .child(format!("+ {omitted_sessions} older session(s) omitted")),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .id("global-skills-section")
+                            .debug_selector(|| "desktop-global-skills-section".into())
+                            .role(Role::List)
+                            .aria_label("Global skills")
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap_token(DesignSpace::Sm)
+                            .border_t_1()
+                            .border_color(rgb(theme.divider.value()))
+                            .py_token(DesignSpace::Lg)
+                            .child(
+                                div()
+                                    .text_token(DesignText::Metadata)
+                                    .text_color(rgb(theme.muted_text.value()))
+                                    .child("GLOBAL SKILLS"),
+                            )
+                            .children(skill_rows)
+                            .when(view_model.global_skills.is_empty(), |section| {
+                                section.child(
+                                    div()
+                                        .p_token(DesignSpace::Sm)
+                                        .text_color(rgb(theme.muted_text.value()))
+                                        .child("No global skills installed."),
+                                )
+                            })
+                            .when(omitted_skills > 0, |section| {
+                                section.child(
+                                    div()
+                                        .text_token(DesignText::Metadata)
+                                        .text_color(rgb(theme.muted_text.value()))
+                                        .child(format!("+ {omitted_skills} more global skill(s)")),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("session-history-section")
+                            .debug_selector(|| "desktop-session-history-section".into())
+                            .role(Role::List)
+                            .aria_label("Session history")
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap_token(DesignSpace::Sm)
+                            .border_t_1()
+                            .border_color(rgb(theme.divider.value()))
+                            .py_token(DesignSpace::Lg)
+                            .child(
+                                div()
+                                    .text_token(DesignText::Metadata)
+                                    .text_color(rgb(theme.muted_text.value()))
+                                    .child("HISTORY"),
+                            )
+                            .child(
+                                div()
+                                    .id("sessions-search")
+                                    .debug_selector(|| "sessions-search".into())
+                                    .role(Role::Search)
+                                    .aria_label("Search sessions")
+                                    .child(
+                                        Input::new(&search_input)
+                                            .role(Role::SearchInput)
+                                            .prefix(Icon::new(DesktopIcon::Search.name()).small())
+                                            .when(!search.is_empty(), |input| {
+                                                input.suffix(
+                                                    DesktopIconButton::new(
+                                                        "clear-session-search",
+                                                        DesktopIcon::Clear,
+                                                        "Clear session search",
+                                                    )
+                                                    .size(DesktopControlSize::Tool)
+                                                    .build()
+                                                    .on_click(move |_, window, cx| {
+                                                        clear_search_input.update(
+                                                            cx,
+                                                            |input, cx| {
+                                                                input.set_value("", window, cx);
+                                                            },
+                                                        );
+                                                    }),
+                                                )
+                                            })
+                                            .appearance(false),
+                                    ),
+                            )
+                            .children(session_rows)
+                            .when_some(empty_state, |section, message| {
+                                section.child(
+                                    div()
+                                        .debug_selector(|| "desktop-sessions-empty-state".into())
+                                        .p_token(DesignSpace::Sm)
+                                        .text_color(rgb(theme.muted_text.value()))
+                                        .child(message),
+                                )
+                            })
+                            .when(omitted_sessions > 0, |section| {
+                                section.child(
+                                    div()
+                                        .text_token(DesignText::Body)
+                                        .text_color(rgb(theme.warning.value()))
+                                        .child(format!(
+                                            "+ {omitted_sessions} older session(s) omitted"
+                                        )),
+                                )
+                            }),
+                    ),
             )
             .into_any_element()
     }
