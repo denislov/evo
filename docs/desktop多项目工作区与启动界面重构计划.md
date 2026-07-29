@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -95,8 +95,11 @@
 `sessions` 和 `context` 固定为 `None`。虽然 `DesktopPreferences` 与 `PanelVisibility::default()`
 都把 Sidebar 设为 visible，Home 仍永远隐藏它。
 
-实施结论：删除「idle 必须无 panel」这一布局特例。Idle 只影响 center body 内容与焦点顺序，
-不再改变 shell 的列模型。
+实施结论：删除「idle 必须无 panel」这一布局特例。Idle 只影响 center body 内容，不再改变 shell
+的列模型或区域焦点顺序。
+
+> DSK-640 已清偿：`resolve_idle` 与 layout 的 idle 分支已删除，Home/Conversation 统一通过同一个
+> panel-width-aware resolver 计算 `sidebar / center / inspector`，Home 在可 dock 宽度正常显示 Sidebar。
 
 ### 4.2 Home DTO 与视图直接承载 Recent/Skills
 
@@ -907,6 +910,33 @@ CenterDrawerHost
 ### Phase 4：Shell 与 pane 结构
 
 #### DSK-640：统一三栏 ShellLayout
+
+> 状态：已完成。`ShellLayout` 已删除 `idle + sessions/workspace/context` 特例字段，改为显式持有
+> `viewport / sidebar / center / center_header / center_body / inspector` bounds。Home 与 Conversation
+> 均调用同一个 `resolve_with_panel_widths`，`NativeShell::resolve_layout` 不再读取 projection 或切换
+> 几何算法。Center header 使用同一 `CENTER_HEADER_HEIGHT=48` 同时驱动纯 geometry 与 GPUI 实际高度；
+> center body 成为独立容器，为 DSK-641 的非模态 drawer host 提供稳定挂载边界。
+>
+> Fresh `DesktopPreferences` 现在是 Sidebar open、Inspector closed；布局不再针对 Home 写死 panel
+> visibility，因此已有或用户后续保存的 Inspector open/close preference 会原样生效。Sidebar/Inspector
+> resize 仍使用既有持久化宽度、min/max clamp，并继续优先隐藏 Inspector、再隐藏 Sidebar，从而始终
+> 保证 `MIN_CONVERSATION_WIDTH`。
+>
+> `FocusState` 已从 Sessions/Conversation/Context 粗粒度 owner 拆为
+> `CenterHeader → Sidebar → CenterBody → Composer → Inspector` 稳定顺序；GPUI Header 与 center body
+> 分别持有独立 focus handle，隐藏的响应式 panel 自动从 focus order 排除，overlay trap/restore 保持
+> 既有语义。当前 narrow Sidebar/Inspector 仍由 root `OverlayHost` 承载，其 drawer/modal 状态拆分明确
+> 留给 DSK-641，本任务未提前改变该边界。
+>
+> 完成标准验证：纯 geometry 测试覆盖 session 的 wide/medium/narrow、精确 breakpoint、可配置宽度
+> clamp、center header/body 高度分割，以及 fresh Home 的 wide/medium/narrow Sidebar/Inspector bounds；
+> GPUI 回归验证 Home Sidebar 在 dockable 宽度可见、fresh Inspector 关闭、显式 Inspector preference
+> 在 Home 不被覆盖、实际 center header/body 坐标一致，以及 FocusNext 的 Composer→Inspector→Header
+> 顺序不改变 panel geometry。
+>
+> Gate：Desktop library 264 个 tests 通过、5 个既有 release 性能用例保持 ignored，19 个 dependency
+> boundary tests 与严格 all-target Clippy 通过；格式、diff、旧 idle layout/FocusTarget 符号扫描、
+> CodeGraph call-path 与 `ast-grep-outline` 变更后结构审计通过。
 
 工作：
 
