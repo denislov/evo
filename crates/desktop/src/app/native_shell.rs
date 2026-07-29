@@ -5105,7 +5105,9 @@ mod tests {
     use gpui::TestAppContext;
     use gpui_component::{Theme, ThemeMode, text::TextViewState};
 
-    use desktop::shell::{COMPOSER_MAX_HEIGHT, CONVERSATION_ROW_VERTICAL_PADDING_PX};
+    use desktop::shell::{
+        COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, CONVERSATION_ROW_VERTICAL_PADDING_PX,
+    };
 
     fn visual_test_snapshot() -> desktop::runtime::DesktopRuntimeHydratedSnapshot {
         visual_test_snapshot_for("desktop-visual-test")
@@ -5878,6 +5880,95 @@ mod tests {
             assert!(cx.debug_bounds("desktop-evo-wordmark").is_some());
             assert!(cx.debug_bounds("desktop-composer-panel").is_some());
         }
+    }
+
+    #[gpui::test]
+    fn home_hero_scales_across_idle_viewports_and_yields_height_to_the_composer(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_idle_visual_shell(cx);
+
+        for (width, height, expected_wordmark_width) in [
+            (1_300., 900., 360.),
+            (900., 800., 320.),
+            (700., 800., 280.),
+            (1_300., 480., 280.),
+        ] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.run_until_parked();
+
+            let body = cx.debug_bounds("desktop-center-body").unwrap();
+            let home = cx.debug_bounds("desktop-home-pane").unwrap();
+            let hero = cx.debug_bounds("desktop-home-hero").unwrap();
+            let wordmark = cx.debug_bounds("desktop-evo-wordmark").unwrap();
+            let headline = cx.debug_bounds("desktop-home-headline").unwrap();
+            let description = cx.debug_bounds("desktop-home-description").unwrap();
+            let composer = cx.debug_bounds("desktop-composer-panel").unwrap();
+
+            assert_eq!(f32::from(wordmark.size.width), expected_wordmark_width);
+            assert!(
+                (f32::from(wordmark.size.height) - expected_wordmark_width * 128. / 360.).abs()
+                    <= 1.,
+                "wordmark must retain its vector aspect ratio at {width}x{height}"
+            );
+            assert!(hero.top() >= home.top());
+            assert!(wordmark.top() >= hero.top());
+            assert!(headline.top() >= wordmark.bottom());
+            assert!(description.top() >= headline.bottom());
+            assert!(description.bottom() <= hero.bottom());
+            assert!(home.bottom() <= composer.top() + px(1.));
+            assert!(composer.bottom() <= body.bottom() + px(1.));
+            assert!(f32::from(composer.size.height) >= COMPOSER_MIN_HEIGHT as f32);
+        }
+    }
+
+    #[gpui::test]
+    fn home_geometry_is_independent_of_sidebar_catalog_refresh_state(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        cx.simulate_resize(size(px(1_300.), px(900.)));
+        cx.run_until_parked();
+
+        let selectors = [
+            "desktop-home-pane",
+            "desktop-home-hero",
+            "desktop-evo-wordmark",
+            "desktop-home-headline",
+            "desktop-home-description",
+            "desktop-composer-panel",
+        ];
+        let initial = selectors.map(|selector| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("missing Home geometry selector {selector}"))
+        });
+
+        shell.update(cx, |shell, cx| {
+            shell.project_catalog.begin_refresh();
+            shell.notify_sessions_pane(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-projects-state-loading").is_some());
+        let loading = selectors.map(|selector| cx.debug_bounds(selector).unwrap());
+        assert_eq!(loading, initial);
+
+        shell.update(cx, |shell, cx| {
+            shell.project_catalog.replace_catalog(
+                vec![desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id: "catalog-layout-probe".into(),
+                    name: Some("Catalog layout probe".into()),
+                    ..Default::default()
+                }],
+                0,
+            );
+            shell.notify_sessions_pane(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("desktop-projects-tree").is_some());
+        let ready = selectors.map(|selector| cx.debug_bounds(selector).unwrap());
+        assert_eq!(ready, initial);
     }
 
     #[gpui::test]

@@ -22,6 +22,8 @@ use super::{
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 
+pub(super) const COMPOSER_PLACEHOLDER: &str = "What do you want to build or improve?";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ComposerPaneEvent {
     InputChanged(String),
@@ -145,7 +147,7 @@ impl ComposerPane {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 8)
-                .placeholder("Describe the change you want to make…")
+                .placeholder(COMPOSER_PLACEHOLDER)
         });
         let focus = input.focus_handle(cx).clone();
         let input_subscription = cx.subscribe_in(
@@ -575,6 +577,14 @@ impl Render for ComposerPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_uses_the_home_task_prompt_contract() {
+        assert_eq!(
+            COMPOSER_PLACEHOLDER,
+            "What do you want to build or improve?"
+        );
+    }
 
     #[test]
     fn project_directory_accessibility_preserves_full_value_and_state() {

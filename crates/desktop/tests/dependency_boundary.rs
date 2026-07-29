@@ -663,7 +663,19 @@ fn native_shell_controllers_keep_update_command_and_conversation_ownership_separ
         );
     }
     assert!(home.contains("pub(super) struct HomePane;"));
+    assert!(home.contains("EvoBrand::wordmark("));
+    assert!(!home.contains(".child(\"evo\")"));
     assert!(home.contains("Software evolves. Your agent should too."));
+    assert!(home.contains(
+        "Describe what you want to build, fix, or understand. Evo will plan, act, and adapt with you."
+    ));
+    for removed_surface in ["RECENT SESSIONS", "GLOBAL SKILLS", "What should we build?"] {
+        assert!(!home.contains(removed_surface));
+    }
+    assert!(composer.contains(
+        "pub(super) const COMPOSER_PLACEHOLDER: &str = \"What do you want to build or improve?\""
+    ));
+    assert!(composer.contains(".placeholder(COMPOSER_PLACEHOLDER)"));
     assert!(skills.contains("struct SkillsPaneViewModel"));
     assert!(skills.contains("skills: Arc<[CodingAgentResourceCommand]>"));
     for forbidden in [
