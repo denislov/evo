@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -635,9 +635,9 @@ CenterDrawerHost
 > prompt 与 session query/hydration 均通过同一个 resolved-workspace 转换点，不再把已解析 scope
 > 退化为裸 `cwd`；model/profile override 继续由 typed options builder 叠加。
 >
-> 过渡债务：`CodingAgentEmbeddingOptions::new(cwd)` 与 snapshot 中可空的 `workspace` 暂时保留，
-> 供尚未迁移的 Desktop 单 context 调用点使用。DSK-611 切换为 `RuntimeSessionWorkspace` 后应删除
-> raw-cwd 构造路径并把 snapshot workspace 收紧为必填；完整计划收敛前必须清偿。
+> 过渡债务：`CodingAgentEmbeddingOptions::new(cwd)` 与 snapshot 中可空的 `workspace` 暂时保留。
+> DSK-611 已把 Desktop runtime 全部切到 typed workspace options，并在 runtime 边界拒绝无 workspace
+> snapshot；产品层 raw-cwd 构造路径与可空 snapshot 字段仍须在完整计划收敛前删除。
 >
 > Gate：`coding-agent` 785 个 library tests（单线程全量）、14 个 API contract 与严格 Clippy
 > 全部通过；Desktop 243 个 tests、17 个 dependency boundary tests 通过，5 个既有用例保持
@@ -703,6 +703,30 @@ CenterDrawerHost
 完成标准：所有 caller 使用显式 target；不存在 `None` 代表 New 的隐式分支。
 
 #### DSK-611：RuntimeSessionWorkspace owner
+
+> 状态：已完成。`RuntimeState` 已删除全局唯一的 `context + sessions` 所有权，改为
+> `HomeRuntimeContext + HashMap<session_id, RuntimeSessionWorkspace>`。Home owner 只保存启动界面的
+> context 与可派生 session context 的 typed options；每个 idle workspace owner 独立持有最终
+> `CodingAgentWorkspaceScope + CodingAgentEmbeddingContext + CodingAgentSession`。`ActivePrompt` 在运行期间
+> 接管同一 scope/context/session，完成或失败后再把 session 放回原 owner，不会从当前焦点重新推断 cwd。
+>
+> `New` prompt 已实际消费 target 中的 workspace/model/profile，按目标 workspace 加载独立 context，
+> 同时继承 Home 已冻结的 durable session root。Reload、model/profile selection 使用显式
+> `DesktopRuntimeOwnerTarget::{Home, Session}`；review 与 external editor 必须携带明确 session id；
+> create/start/recovery/rename/close 与 active command 均通过对应 workspace owner。最多 4 个 open
+> session、command id、priority/data queue、shutdown/join 与 recovery 语义保持不变。
+>
+> 过渡债务：DSK-612 继续收紧首次 prompt 的完整原子事务与逐阶段失败恢复；DSK-613 负责从 durable
+> manifest 先解析历史 session scope 再构造跨项目 context（当前尚未打开的 persisted session 仍从
+> Home options 建 context）；DSK-630/631 负责把当前 Home-scope session query 替换为用户驱动、按项目
+> 分组的 catalog。产品层 raw-cwd options 与可空 workspace snapshot 仍按 CAG-204 债务在计划收敛前删除。
+>
+> Gate：Desktop 246 个 tests 通过、5 个既有用例保持 ignored，17 个 dependency boundary tests
+> 全部通过；严格 Clippy、格式、CodeGraph 与 `ast-grep outline` owner/call-path 审计通过。
+> `coding-agent` boundary 为 64/67，仍严格保持 DSK-600 登记的 3 个既有失败，没有新增回归。
+> 新增验收覆盖两个 Project prompt 同时运行时 cwd、resources、model/profile、context files 与 product
+> event session id 隔离；Home/Session selection target 隔离；后台 workspace 静默推进并在切换后恢复；
+> 关闭后台 owner、file review 显式路由及 runtime shutdown/join 均不影响其他 owner。
 
 工作：
 
