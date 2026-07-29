@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410、VUI-411 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410、VUI-411、VUI-412 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -1161,6 +1161,25 @@ CenterDrawerHost
 完成标准：无 raster fallback、无嵌入文字字体依赖、no-color 仍可辨识、缩放无模糊。
 
 #### VUI-412：Home hero
+
+> 状态：已完成。`HomePane` 已删除字体渲染的 `evo` 占位，直接消费 VUI-411 的 production
+> `EvoBrand::wordmark`；按 1300/900/700 px viewport 分别使用 360/320/280 px vector，并保留确认后的
+> `Software evolves. Your agent should too.` 主文案和完整辅助文案。Composer placeholder 已统一改为
+> `What do you want to build or improve?`，旧 Recent Sessions、Global Skills、Model/Thinking/Project 摘要
+> 和卡片墙均不在 Home source 或 dependency contract 中。
+>
+> Hero 成为独立、可增长且可滚动的纯展示 region，Composer 仍由 composition root 作为固定高度 sibling
+> 挂在 center body 底部。viewport 高度低于 640 px 时，Hero 将 wordmark 收敛到 280 px，并减少自身
+> min-height/padding/gap；480 px GPUI 回归验证 Composer 仍完整位于 center body 内，logo、headline、辅助
+> 文案保持顺序且不重叠。另一条回归在同一 Home 上把 Sidebar catalog 从 NotLoaded 切到 Loading 再到
+> Ready，并逐项比较 Hero、wordmark、两段文案与 Composer bounds，确认 refresh 不驱动 center reflow。
+>
+> Gate：已人工 review wide/medium/narrow idle 的 360/320/280 px wordmark、文案重心、Composer 留白与新
+> placeholder，同时检查 authorization、reduced-motion、keyboard-focus 和 no-color；review manifest 哈希
+> 校验后正式安装全部 10 张 native golden，再次实拍 compare 的 normalized RMSE 全部为 `0`（预算
+> `0.015`）。Desktop 292 个 library tests 通过、5 个既有 release 性能用例保持 ignored，20 个 dependency
+> boundary tests 与严格 all-target/all-features Clippy 通过；格式、diff、CodeGraph 与
+> `ast-grep-outline` owner 审计通过。
 
 工作：
 
