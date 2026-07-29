@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -984,6 +984,32 @@ CenterDrawerHost
 完成标准：Inspector drawer 打开时 selector 可点击；authorization 出现时 drawer 被关闭并正确恢复焦点。
 
 #### DSK-642：HomePane 精简与 Skills surface
+
+> 状态：已完成。`HomePane` 已删除整个 ViewModel/EventEmitter 边界，不再接收 model、thinking、workspace、
+> recent sessions、global skills、catalog/pending 等任何产品 DTO，也不再发出 open session 事件。当前
+> Home 只渲染无状态的 `evo` 品牌锚点、确认后的主/辅助文案；Composer 仍由 composition root 独立挂载，
+> 因而 Home render 不会查询 catalog、创建 projection、调用 runtime 或触碰 durable session。
+>
+> 新增独立 `SkillsPane` 与 `SkillsPaneViewModel`，只接收 bounded
+> `Arc<[CodingAgentResourceCommand]>` 并在 center surface 展示完整全局 skills 列表。`SessionsPane` 已删除
+> skills DTO、截断常量和内联 skill cards，只保留固定一级 `Skills` action；Skills surface 不挂载 Composer，
+> 可从 Home 或已有 Conversation 打开，底层 session owner 保持不变。
+>
+> 新增 `CenterNavigationTarget::{NewConversation, Skills, Session}` typed contract，并以
+> `SessionsPaneEvent::Navigate` 统一三个入口；`NativeShell::navigate_center` 是唯一 surface/session 路由点。
+> 独立 `CenterSurface::{Primary, Skills}` 只描述展示 surface，不复制 projection/session id；从 Skills 点击
+> 当前 session 会纯本地恢复 Conversation，点击其他 session 才进入既有 typed `OpenSession` 流程，点击
+> New conversation 则恢复/创建仅用于 draft 的 Home workspace，但不发 runtime command 或创建 durable
+> session。
+>
+> GPUI 定向回归覆盖 Home/Skills/Conversation 三个 surface、Sidebar 与 drawer 的固定 Skills action、Skills
+> 列表只在独立 surface 挂载、Skills 不挂载 Composer、当前 session 纯本地返回，以及 Skills/Home 导航
+> 全程零 runtime command。Dependency boundary 进一步禁止 Home 引入 catalog、projection、command ledger、
+> NativeShell back-reference 或事件，禁止 SkillsPane 越过 bounded DTO，并禁止 SessionsPane 重新持有 skills。
+>
+> Gate：Desktop library 265 个 tests 通过、5 个既有 release 性能用例保持 ignored，19 个 dependency
+> boundary tests 与严格 all-target/all-features Clippy 通过；格式、diff、CodeGraph typed call-path 与
+> `ast-grep-outline` 变更后 Home/Skills/navigation owner 审计通过。
 
 工作：
 
