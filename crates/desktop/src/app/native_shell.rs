@@ -385,11 +385,8 @@ fn runtime_update_hydrated_snapshot(
     match update {
         desktop::runtime::DesktopRuntimeUpdate::SessionChanged { snapshot, .. }
         | desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession { snapshot, .. }
+        | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession { snapshot, .. }
         | desktop::runtime::DesktopRuntimeUpdate::PromptFinished { snapshot, .. } => Some(snapshot),
-        desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
-            snapshot: Some(snapshot),
-            ..
-        } => Some(snapshot),
         desktop::runtime::DesktopRuntimeUpdate::Resynced {
             replacement: desktop::runtime::DesktopRuntimeResyncSnapshot::Hydrated(snapshot),
             ..
@@ -904,8 +901,7 @@ impl NativeShell {
             }
             DesktopRuntimeUpdate::Reloaded { metadata, .. }
             | DesktopRuntimeUpdate::SelectionChanged { metadata, .. }
-            | DesktopRuntimeUpdate::PromptStarted { metadata, .. }
-            | DesktopRuntimeUpdate::PromptRejectedWithSession { metadata, .. } => metadata
+            | DesktopRuntimeUpdate::PromptStarted { metadata, .. } => metadata
                 .session
                 .as_ref()
                 .map(|snapshot| snapshot.session.session_id.clone()),
@@ -1010,9 +1006,7 @@ impl NativeShell {
             self.preferences
                 .thinking_level_for_session(target_session_id)
         };
-        if self.active_workspace.session_id() == HOME_COMPOSER_SESSION_KEY
-            && self.workspaces.is_empty()
-        {
+        if self.active_workspace.session_id() == HOME_COMPOSER_SESSION_KEY {
             self.project = snapshot.project.clone();
             self.projection = Some(projection);
             self.thinking_selection = thinking_selection;
@@ -1377,10 +1371,7 @@ impl NativeShell {
             );
             let inherit_home_thinking = match &update {
                 desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession { .. }
-                | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
-                    snapshot: Some(_),
-                    ..
-                } => true,
+                | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession { .. } => true,
                 desktop::runtime::DesktopRuntimeUpdate::SessionChanged { command_id, .. } => self
                     .command_ledger
                     .matches(*command_id, &DesktopCommandIntent::CreateSession),
@@ -1801,9 +1792,9 @@ impl NativeShell {
                         Some(snapshot)
                     }
                     desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
-                        snapshot: Some(snapshot),
+                        snapshot,
                         ..
-                    } => Some(snapshot.as_ref()),
+                    } => Some(snapshot),
                     desktop::runtime::DesktopRuntimeUpdate::Resynced {
                         replacement:
                             desktop::runtime::DesktopRuntimeResyncSnapshot::Hydrated(snapshot),
@@ -1830,10 +1821,6 @@ impl NativeShell {
                     | desktop::runtime::DesktopRuntimeUpdate::PromptStarted { metadata, .. } => {
                         Some(metadata)
                     }
-                    desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
-                        metadata,
-                        ..
-                    } => Some(metadata),
                     _ => None,
                 } {
                     self.project = metadata.project.clone();
@@ -5382,6 +5369,73 @@ mod tests {
             assert_eq!(shell.composer.draft(), "home draft");
             assert!(!shell.command_ledger.matches(command_id, &intent));
             assert!(shell.runtime_ui_notification_count > 0);
+        });
+    }
+
+    #[gpui::test]
+    fn rejected_new_prompt_promotes_home_owner_with_background_sessions(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, cx| {
+            let background_snapshot = visual_test_snapshot_for("session-background");
+            let background_projection = DesktopProjection::new(background_snapshot.clone())
+                .expect("the background fixture is valid");
+            shell.workspaces.insert(
+                "session-background".into(),
+                SessionWorkspace::new(
+                    background_snapshot.project,
+                    Some(background_projection),
+                    None,
+                    DesktopCommandLedger::default(),
+                ),
+            );
+            shell.composer.edit("retain this exact Home draft");
+            shell
+                .composer_attachments
+                .push(PathBuf::from("/tmp/retained-home-attachment.txt"));
+            let command_id = shell
+                .reserve_command(DesktopCommandIntent::Prompt)
+                .expect("the Home prompt command fits the ledger");
+            shell
+                .composer
+                .begin_submit(command_id, ComposerSubmissionKind::Prompt)
+                .expect("the Home draft enters pending admission");
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
+                    command_id,
+                    snapshot: visual_test_snapshot_for("session-created"),
+                    error: desktop::runtime::DesktopRuntimeError {
+                        code: "prompt_prepare".into(),
+                        message: "the created session retained the rejected prompt".into(),
+                    },
+                },
+            );
+
+            assert!(shell.poll_runtime(cx));
+            assert_eq!(shell.active_workspace.session_id(), "session-created");
+            assert!(shell.workspaces.contains_key("session-background"));
+            assert!(!shell.workspaces.contains_key(HOME_COMPOSER_SESSION_KEY));
+            assert_eq!(shell.composer.draft(), "retain this exact Home draft");
+            assert_eq!(
+                shell.composer_attachments,
+                [PathBuf::from("/tmp/retained-home-attachment.txt")]
+            );
+            assert_eq!(shell.composer.admission(), &ComposerAdmission::Idle);
+            assert!(shell.composer.rejection().is_some());
+            assert!(
+                !shell
+                    .command_ledger
+                    .matches(command_id, &DesktopCommandIntent::Prompt)
+            );
+            assert!(
+                shell
+                    .projection
+                    .as_ref()
+                    .unwrap()
+                    .issues()
+                    .iter()
+                    .any(|issue| issue.code == "prompt_prepare")
+            );
         });
     }
 

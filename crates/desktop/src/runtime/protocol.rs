@@ -508,8 +508,7 @@ pub enum DesktopRuntimeUpdate {
     },
     PromptRejectedWithSession {
         command_id: u64,
-        metadata: DesktopRuntimeMetadataSnapshot,
-        snapshot: Option<Box<DesktopRuntimeHydratedSnapshot>>,
+        snapshot: DesktopRuntimeHydratedSnapshot,
         error: DesktopRuntimeError,
     },
     PromptStarted {

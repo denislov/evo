@@ -875,6 +875,111 @@ fn desktop_uses_the_product_owned_prepared_submission_without_manual_choreograph
 }
 
 #[test]
+fn desktop_new_prompt_transaction_preserves_scope_through_tools_and_authorization() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let driver = fs::read_to_string(manifest_dir.join("src/runtime/driver.rs"))
+        .expect("desktop runtime driver should be readable");
+    let dispatch = fs::read_to_string(manifest_dir.join("src/runtime/dispatch.rs"))
+        .expect("desktop runtime dispatch should be readable");
+    let protocol = fs::read_to_string(manifest_dir.join("src/runtime/protocol.rs"))
+        .expect("desktop runtime protocol should be readable");
+    let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
+        .expect("desktop native shell should be readable");
+    let product_root = manifest_dir.join("../coding-agent/src");
+    let embedding = fs::read_to_string(product_root.join("app/embedding.rs"))
+        .expect("coding-agent embedding owner should be readable");
+    let application = fs::read_to_string(product_root.join("app/application.rs"))
+        .expect("coding-agent application options should be readable");
+    let tools = fs::read_to_string(product_root.join("tools/mod.rs"))
+        .expect("coding-agent builtin tool owner should be readable");
+    let authorization = fs::read_to_string(product_root.join("services/authorization.rs"))
+        .expect("coding-agent authorization owner should be readable");
+
+    let new_context = driver
+        .split("async fn create_session_for_workspace")
+        .nth(1)
+        .and_then(|tail| tail.split("async fn create_session_in_context").next())
+        .expect("New prompt context transaction should remain explicit");
+    let ordered_stage = |source: &str, before: &str, after: &str| {
+        source
+            .find(before)
+            .zip(source.find(after))
+            .is_some_and(|(before, after)| before < after)
+    };
+    assert!(ordered_stage(
+        new_context,
+        "CodingAgentEmbeddingOptions::for_workspace(workspace)",
+        "CodingAgentEmbeddingContext::load(options)?"
+    ));
+    assert!(ordered_stage(
+        new_context,
+        "CodingAgentEmbeddingContext::load(options)?",
+        "sanitize_thinking_level(selected_model, requested)"
+    ));
+    assert!(ordered_stage(
+        new_context,
+        "sanitize_thinking_level(selected_model, requested)",
+        "self.create_session_in_context(context).await?"
+    ));
+
+    let persistence = driver
+        .split("async fn create_session_in_context")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) async fn open_session").next())
+        .expect("new session persistence should remain isolated");
+    assert!(ordered_stage(
+        persistence,
+        "RuntimeSessionWorkspace::scope_for_context(&context)?",
+        "context.create_session().await?"
+    ));
+    assert!(persistence.contains("CodingAgentTranscriptSnapshot {"));
+    assert!(persistence.contains("pending_recoveries: Vec::new()"));
+
+    let start = driver
+        .split("pub(super) fn start_prompt")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) fn insert_idle_workspace").next())
+        .expect("prompt start transaction should remain isolated");
+    assert!(ordered_stage(
+        start,
+        "prepare_prompt_with_attachments(&prompt, &attachments)?",
+        "fail_next_prompt_start"
+    ));
+    assert!(ordered_stage(
+        start,
+        "fail_next_prompt_start",
+        "session.connect(CodingAgentClientId::new(DESKTOP_CLIENT_ID))"
+    ));
+    assert!(dispatch.contains("Some(created.snapshot)"));
+
+    let rejected = protocol
+        .split("PromptRejectedWithSession {")
+        .nth(1)
+        .and_then(|tail| tail.split("PromptStarted {").next())
+        .expect("post-create rejection must remain a distinct typed update");
+    assert!(rejected.contains("snapshot: DesktopRuntimeHydratedSnapshot"));
+    assert!(!rejected.contains("Option<"));
+    let install = shell
+        .split("fn install_hydrated_workspace")
+        .nth(1)
+        .and_then(|tail| tail.split("fn open_workspace_count").next())
+        .expect("shell hydration transaction should remain isolated");
+    assert!(
+        install.contains("if self.active_workspace.session_id() == HOME_COMPOSER_SESSION_KEY {")
+    );
+    assert!(!install.contains("&& self.workspaces.is_empty()"));
+
+    assert!(embedding.contains("let cwd = workspace.execution_cwd.clone();"));
+    assert!(application.contains("cwd: cwd.clone()"));
+    assert!(application.contains("tools: builtin_tools(cwd)?"));
+    assert!(tools.contains("let shell = ShellCapability::new(cwd);"));
+    assert!(tools.contains("shell::bash_tool(shell.clone())"));
+    assert!(authorization.contains("ToolAuthorizationScope::Shell {"));
+    assert!(authorization.contains("cwd: shell.cwd.to_string_lossy().into_owned()"));
+    assert!(authorization.contains("cwd: Some(shell.cwd.to_string_lossy().into_owned())"));
+}
+
+#[test]
 fn desktop_metadata_deliveries_cannot_hydrate_or_replace_the_transcript() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let driver = fs::read_to_string(manifest_dir.join("src/runtime/driver.rs"))

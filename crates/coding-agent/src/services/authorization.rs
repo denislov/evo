@@ -1499,6 +1499,15 @@ mod tests {
                 .await
         });
         let request = wait_for_request(&service).await;
+        assert!(matches!(
+            &request.scope,
+            ToolAuthorizationScope::Shell { cwd, .. }
+                if cwd == &temp.path().to_string_lossy()
+        ));
+        assert_eq!(
+            request.preview.cwd.as_deref(),
+            Some(temp.path().to_string_lossy().as_ref())
+        );
         let serialized = serde_json::to_string(&request).unwrap();
         assert!(!serialized.contains("secret-value"));
         assert!(!serialized.contains("bearer-value"));

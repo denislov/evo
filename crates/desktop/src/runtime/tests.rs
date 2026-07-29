@@ -14,7 +14,8 @@ use coding_agent::api::client::{
     CodingAgentReconnectDelivery, CodingAgentRecoveryPending, CodingAgentRecoveryReason,
 };
 use coding_agent::api::embedding::{
-    CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentWorkspaceSelection,
+    CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentThinkingLevel,
+    CodingAgentWorkspaceSelection,
 };
 use coding_agent::api::error::{
     CodingAgentErrorCategory, CodingAgentErrorContext, CodingAgentPublicError,
@@ -1270,6 +1271,214 @@ async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
 }
 
 #[tokio::test]
+async fn new_prompt_context_load_failure_creates_no_session_owner_or_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let home = temp.path().join("home");
+    let target = temp.path().join("target");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+    let _env = ProcessEnvGuard::isolated(&global);
+    let home_options =
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(&home))
+            .unwrap()
+            .with_session_dir(&sessions)
+            .with_model_id("claude-sonnet-4-5");
+    let mut state = RuntimeState {
+        home: HomeRuntimeContext::load(home_options).unwrap(),
+        workspaces: std::collections::HashMap::new(),
+        focused_session_id: None,
+        fail_next_prompt_start: false,
+    };
+    let mut active = std::collections::HashMap::new();
+
+    let update = dispatch_command(
+        &mut state,
+        &mut active,
+        DesktopRuntimeCommand::SubmitPrompt {
+            command_id: 131,
+            target: DesktopPromptTarget::new(
+                CodingAgentWorkspaceSelection::project(&target),
+                "missing-desktop-context-model",
+                "default",
+            ),
+            prompt: "context must load before persistence".into(),
+            attachments: Vec::new(),
+            thinking_level: None,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        update,
+        DesktopRuntimeUpdate::CommandRejected {
+            command_id: 131,
+            command: DesktopRuntimeCommandKind::SubmitPrompt,
+            ..
+        }
+    ));
+    assert!(state.workspaces.is_empty());
+    assert!(active.is_empty());
+    assert!(!sessions.exists());
+}
+
+#[tokio::test]
+async fn workspace_deleted_after_admission_creates_no_session_owner_or_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let home = temp.path().join("home");
+    let target = temp.path().join("target");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+    let _env = ProcessEnvGuard::isolated(&global);
+    let home_options =
+        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(&home))
+            .unwrap()
+            .with_session_dir(&sessions)
+            .with_model_id("claude-sonnet-4-5");
+    let mut state = RuntimeState {
+        home: HomeRuntimeContext::load(home_options).unwrap(),
+        workspaces: std::collections::HashMap::new(),
+        focused_session_id: None,
+        fail_next_prompt_start: false,
+    };
+    let prompt_target = DesktopPromptTarget::new(
+        CodingAgentWorkspaceSelection::project(&target),
+        "claude-sonnet-4-5",
+        "default",
+    );
+    validate_prompt_target(&prompt_target).expect("the target is valid at admission time");
+    std::fs::remove_dir(&target).unwrap();
+    let mut active = std::collections::HashMap::new();
+
+    let update = dispatch_command(
+        &mut state,
+        &mut active,
+        DesktopRuntimeCommand::SubmitPrompt {
+            command_id: 132,
+            target: prompt_target,
+            prompt: "the runtime must resolve the target again".into(),
+            attachments: Vec::new(),
+            thinking_level: None,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        update,
+        DesktopRuntimeUpdate::CommandRejected {
+            command_id: 132,
+            command: DesktopRuntimeCommandKind::SubmitPrompt,
+            ..
+        }
+    ));
+    assert!(state.workspaces.is_empty());
+    assert!(active.is_empty());
+    assert!(!sessions.exists());
+}
+
+#[tokio::test]
+async fn new_prompt_binds_model_profile_and_sanitized_thinking_before_persistence() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let mut state = RuntimeState {
+        home: HomeRuntimeContext::load(options).unwrap(),
+        workspaces: std::collections::HashMap::new(),
+        focused_session_id: None,
+        fail_next_prompt_start: false,
+    };
+
+    let created = state
+        .create_session_for_workspace(
+            CodingAgentWorkspaceSelection::project(temp.path().join("project")),
+            "gpt-5".into(),
+            "review".into(),
+            Some(CodingAgentThinkingLevel::Off),
+            0,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        created.thinking_level, None,
+        "unsupported Off must fall back to Auto"
+    );
+    let session_id = created.session_id;
+    let owner = state.workspaces.get(&session_id).unwrap();
+    assert_eq!(owner.context.snapshot().selected_model_id, "gpt-5");
+    assert_eq!(
+        owner.context.snapshot().default_agent_profile_id.as_str(),
+        "review"
+    );
+    assert_eq!(
+        owner.session.view().default_agent_profile_id.as_str(),
+        "review"
+    );
+    state.close_idle_session(&session_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn prompt_prepare_failure_retains_the_persisted_scoped_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let attachment = temp.path().join("project/deleted-attachment.txt");
+    std::fs::write(&attachment, "prepare me").unwrap();
+    let mut state = RuntimeState {
+        home: HomeRuntimeContext::load(options).unwrap(),
+        workspaces: std::collections::HashMap::new(),
+        focused_session_id: None,
+        fail_next_prompt_start: false,
+    };
+    validate_prompt_with_attachments("prepare failure", std::slice::from_ref(&attachment))
+        .expect("the attachment path is admitted before it disappears");
+    std::fs::remove_file(&attachment).unwrap();
+    let mut active = std::collections::HashMap::new();
+
+    let update = dispatch_command(
+        &mut state,
+        &mut active,
+        DesktopRuntimeCommand::SubmitPrompt {
+            command_id: 133,
+            target: new_project_prompt_target(&temp),
+            prompt: "prepare failure".into(),
+            attachments: vec![attachment],
+            thinking_level: None,
+        },
+    )
+    .await;
+    let DesktopRuntimeUpdate::PromptRejectedWithSession {
+        command_id: 133,
+        snapshot,
+        ..
+    } = update
+    else {
+        panic!("a post-persistence prepare failure must install the created session");
+    };
+
+    let session_id = snapshot.session.session.session_id.clone();
+    let owner = state.workspaces.get(&session_id).unwrap();
+    let resolved = snapshot.project.workspace.as_ref().unwrap();
+    assert_eq!(&snapshot.project, owner.context.snapshot());
+    assert_eq!(resolved.scope, owner.scope);
+    assert_eq!(resolved.execution_cwd, snapshot.project.cwd);
+    assert!(snapshot.transcript.items.is_empty());
+    assert!(active.is_empty());
+    let overview = state
+        .session_catalog()
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|overview| overview.session_id == session_id)
+        .expect("the rejected prompt session remains durable");
+    assert_eq!(overview.cwd.as_deref(), snapshot.project.cwd.to_str());
+    state.close_idle_session(&session_id).await.unwrap();
+}
+
+#[tokio::test]
 async fn explicit_new_prompt_target_creates_a_session_when_another_is_open() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
@@ -1396,6 +1605,16 @@ async fn session_creation_failure_rejects_the_first_prompt_without_an_active_own
             ..
         })
     ));
+    bridge.try_resync(151).unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 151,
+            command: DesktopRuntimeCommandKind::Resync,
+            code,
+            ..
+        }) if code == "session"
+    ));
     assert!(blocked_session_root.is_file());
     bridge.shutdown().await.unwrap();
 }
@@ -1404,6 +1623,11 @@ async fn session_creation_failure_rejects_the_first_prompt_without_an_active_own
 async fn prompt_start_failure_reports_the_session_that_was_already_created() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);
+    std::fs::write(
+        temp.path().join("project/scope-proof.txt"),
+        "the selected context resolved this relative attachment",
+    )
+    .unwrap();
     let mut state = RuntimeState {
         home: HomeRuntimeContext::load(options).unwrap(),
         workspaces: std::collections::HashMap::new(),
@@ -1419,15 +1643,14 @@ async fn prompt_start_failure_reports_the_session_that_was_already_created() {
             command_id: 16,
             target: new_project_prompt_target(&temp),
             prompt: "prompt start failure".into(),
-            attachments: Vec::new(),
+            attachments: vec![std::path::PathBuf::from("scope-proof.txt")],
             thinking_level: None,
         },
     )
     .await;
     let DesktopRuntimeUpdate::PromptRejectedWithSession {
         command_id: 16,
-        metadata,
-        snapshot: Some(snapshot),
+        snapshot,
         error,
     } = update
     else {
@@ -1435,12 +1658,13 @@ async fn prompt_start_failure_reports_the_session_that_was_already_created() {
     };
     assert_eq!(error.code, "session");
     assert_eq!(error.message, "injected desktop prompt start failure");
-    assert_eq!(
-        metadata.session.as_ref().unwrap().session.session_id,
-        snapshot.session.session.session_id
-    );
     assert!(active.is_empty());
     let retained_session_id = snapshot.session.session.session_id.clone();
+    let owner = state.workspaces.get(&retained_session_id).unwrap();
+    let resolved = snapshot.project.workspace.as_ref().unwrap();
+    assert_eq!(&snapshot.project, owner.context.snapshot());
+    assert_eq!(resolved.scope, owner.scope);
+    assert_eq!(resolved.execution_cwd, snapshot.project.cwd);
     assert_eq!(
         state
             .workspaces

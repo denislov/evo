@@ -205,25 +205,30 @@ async fn dispatch_command_inner(
             thinking_level,
             ..
         } => {
-            let (created, session_id) = match target {
+            let (created_snapshot, session_id, thinking_level) = match target {
                 DesktopPromptTarget::New {
                     workspace,
                     model_id,
                     profile_id,
                 } => {
-                    let session_id = state
+                    let created = state
                         .create_session_for_workspace(
                             workspace,
                             model_id,
                             profile_id,
+                            thinking_level,
                             open_session_count(state, active),
                         )
                         .await?;
-                    (Some(session_id.clone()), session_id)
+                    (
+                        Some(created.snapshot),
+                        created.session_id,
+                        created.thinking_level,
+                    )
                 }
                 DesktopPromptTarget::Existing { session_id } => {
                     let session_id = resolve_target(state, active, Some(&session_id))?;
-                    (None, session_id)
+                    (None, session_id, thinking_level)
                 }
             };
             if active.contains_key(&session_id) {
@@ -231,10 +236,6 @@ async fn dispatch_command_inner(
                     operation: format!("session {session_id} already has an active prompt"),
                 });
             }
-            let created_snapshot = created
-                .as_ref()
-                .map(|session_id| state.snapshot(session_id))
-                .transpose()?;
             match state.start_prompt(&session_id, command_id, prompt, attachments, thinking_level) {
                 Ok(prompt) => {
                     active.insert(session_id, prompt);
@@ -249,8 +250,7 @@ async fn dispatch_command_inner(
                 Err(error) => match created_snapshot {
                     Some(snapshot) => Ok(DesktopRuntimeUpdate::PromptRejectedWithSession {
                         command_id,
-                        metadata: state.metadata_snapshot(Some(&session_id)),
-                        snapshot: Some(Box::new(state.snapshot(&session_id).unwrap_or(snapshot))),
+                        snapshot: state.snapshot(&session_id).unwrap_or(snapshot),
                         error: runtime_error(&error),
                     }),
                     None => Err(error),

@@ -473,15 +473,9 @@ impl DesktopProjection {
                 self.replace_runtime_snapshot(snapshot, true, None)
             }
             DesktopRuntimeUpdate::PromptRejectedWithSession {
-                metadata,
-                snapshot,
-                error,
-                ..
+                snapshot, error, ..
             } => {
-                let outcome = match snapshot {
-                    Some(snapshot) => self.replace_runtime_snapshot(*snapshot, true, None),
-                    None => self.replace_metadata_snapshot(metadata),
-                };
+                let outcome = self.replace_runtime_snapshot(snapshot, true, None);
                 self.push_issue(DesktopProjectionIssue::new(error.code, error.message));
                 outcome
             }

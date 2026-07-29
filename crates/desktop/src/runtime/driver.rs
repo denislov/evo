@@ -10,7 +10,8 @@ use coding_agent::api::client::{
 };
 use coding_agent::api::embedding::{
     CodingAgentEmbeddingContext, CodingAgentEmbeddingOptions, CodingAgentThinkingLevel,
-    CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
+    CodingAgentThinkingLevelSanitization, CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
+    sanitize_thinking_level,
 };
 use coding_agent::api::event::{
     CodingAgentProductEvent, CodingAgentProductEventDeliveryClass, CodingAgentProductEventFamily,
@@ -23,7 +24,7 @@ use coding_agent::api::review::{
 use coding_agent::api::runtime::{
     CodingAgentRecoveryResolutionRequest, CodingAgentRecoveryRetryRequest, CodingAgentSession,
 };
-use coding_agent::api::view::ProfileId;
+use coding_agent::api::view::{CodingAgentTranscriptSnapshot, ProfileId};
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{mpsc, watch};
 use tokio::task;
@@ -99,24 +100,36 @@ pub(super) struct RuntimeSessionWorkspace {
 }
 
 impl RuntimeSessionWorkspace {
-    fn new(
-        context: CodingAgentEmbeddingContext,
-        session: CodingAgentSession,
-    ) -> Result<Self, DesktopBridgeError> {
-        let scope = context
+    fn scope_for_context(
+        context: &CodingAgentEmbeddingContext,
+    ) -> Result<CodingAgentWorkspaceScope, DesktopBridgeError> {
+        context
             .snapshot()
             .workspace
             .as_ref()
             .map(|workspace| workspace.scope.clone())
             .ok_or_else(|| DesktopBridgeError::Session {
                 message: "desktop session context has no typed workspace scope".into(),
-            })?;
+            })
+    }
+
+    fn new(
+        context: CodingAgentEmbeddingContext,
+        session: CodingAgentSession,
+    ) -> Result<Self, DesktopBridgeError> {
+        let scope = Self::scope_for_context(&context)?;
         Ok(Self {
             scope,
             context,
             session,
         })
     }
+}
+
+pub(super) struct NewPromptSession {
+    pub(super) session_id: String,
+    pub(super) snapshot: DesktopRuntimeHydratedSnapshot,
+    pub(super) thinking_level: Option<CodingAgentThinkingLevel>,
 }
 
 pub(super) struct RuntimeState {
@@ -374,7 +387,9 @@ impl RuntimeState {
     ) -> Result<String, DesktopBridgeError> {
         self.ensure_capacity(open_session_count)?;
         let context = self.home.load_session_context()?;
-        self.create_session_in_context(context).await
+        self.create_session_in_context(context)
+            .await
+            .map(|(session_id, _)| session_id)
     }
 
     pub(super) async fn create_session_for_workspace(
@@ -382,8 +397,9 @@ impl RuntimeState {
         workspace: CodingAgentWorkspaceSelection,
         model_id: String,
         profile_id: String,
+        thinking_level: Option<CodingAgentThinkingLevel>,
         open_session_count: usize,
-    ) -> Result<String, DesktopBridgeError> {
+    ) -> Result<NewPromptSession, DesktopBridgeError> {
         self.ensure_capacity(open_session_count)?;
         let mut options = CodingAgentEmbeddingOptions::for_workspace(workspace)
             .map_err(|error| DesktopBridgeError::Input {
@@ -395,19 +411,57 @@ impl RuntimeState {
             options = options.with_session_dir(session_root);
         }
         let context = CodingAgentEmbeddingContext::load(options)?;
-        self.create_session_in_context(context).await
+        let thinking_level = match thinking_level {
+            Some(requested) => {
+                let snapshot = context.snapshot();
+                let selected_model = snapshot
+                    .models
+                    .iter()
+                    .find(|model| model.id == snapshot.selected_model_id)
+                    .ok_or_else(|| DesktopBridgeError::Session {
+                        message: "desktop prompt context has no selected model capability".into(),
+                    })?;
+                match sanitize_thinking_level(selected_model, requested) {
+                    CodingAgentThinkingLevelSanitization::Explicit(level) => Some(level),
+                    CodingAgentThinkingLevelSanitization::AutoFallback => None,
+                }
+            }
+            None => None,
+        };
+        let (session_id, snapshot) = self.create_session_in_context(context).await?;
+        Ok(NewPromptSession {
+            session_id,
+            snapshot,
+            thinking_level,
+        })
     }
 
     async fn create_session_in_context(
         &mut self,
         context: CodingAgentEmbeddingContext,
-    ) -> Result<String, DesktopBridgeError> {
+    ) -> Result<(String, DesktopRuntimeHydratedSnapshot), DesktopBridgeError> {
+        let scope = RuntimeSessionWorkspace::scope_for_context(&context)?;
+        let project = context.snapshot().clone();
         let session = context.create_session().await?;
         let session_id = session.view().session_id.clone();
-        let workspace = RuntimeSessionWorkspace::new(context, session)?;
+        let snapshot = DesktopRuntimeHydratedSnapshot {
+            project,
+            session: session.snapshot(),
+            transcript: CodingAgentTranscriptSnapshot {
+                session_id: session_id.clone(),
+                active_leaf_id: None,
+                items: Vec::new(),
+            },
+            pending_recoveries: Vec::new(),
+        };
+        let workspace = RuntimeSessionWorkspace {
+            scope,
+            context,
+            session,
+        };
         self.workspaces.insert(session_id.clone(), workspace);
         self.focused_session_id = Some(session_id.clone());
-        Ok(session_id)
+        Ok((session_id, snapshot))
     }
 
     pub(super) async fn open_session(
@@ -436,12 +490,6 @@ impl RuntimeState {
         attachments: Vec<std::path::PathBuf>,
         thinking_level: Option<CodingAgentThinkingLevel>,
     ) -> Result<ActivePrompt, DesktopBridgeError> {
-        #[cfg(test)]
-        if std::mem::take(&mut self.fail_next_prompt_start) {
-            return Err(DesktopBridgeError::Session {
-                message: "injected desktop prompt start failure".into(),
-            });
-        }
         let workspace =
             self.workspaces
                 .get(session_id)
@@ -455,6 +503,12 @@ impl RuntimeState {
         let operation = workspace
             .context
             .prepared_prompt_operation(prepared, thinking_level);
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_prompt_start) {
+            return Err(DesktopBridgeError::Session {
+                message: "injected desktop prompt start failure".into(),
+            });
+        }
         let RuntimeSessionWorkspace {
             scope,
             context,

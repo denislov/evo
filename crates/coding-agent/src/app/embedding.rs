@@ -1025,9 +1025,11 @@ mod tests {
     use crate::config::AuthStore;
     use crate::runtime::facade::CodingAgentErrorCategory;
     use crate::workspace::CodingAgentWorkspaceKind;
+    use agent_core::api::tool::ToolExecutionContext;
     use ai::api::compatibility::{
         AnthropicMessagesCompat, OpenAICompletionsCompat, ThinkingLevelValue,
     };
+    use ai::api::conversation::ContentBlock;
     use ai::api::model::ModelCost;
 
     fn thinking_model(api: &str, reasoning: bool) -> Model {
@@ -1210,6 +1212,29 @@ mod tests {
                 .context_files
                 .contains(&canonical_b.join("AGENTS.md"))
         );
+
+        let bash = context_a
+            .resolved
+            .tools
+            .iter()
+            .find(|tool| tool.name == "bash")
+            .expect("the scoped context exposes the product bash tool");
+        let output = (bash.execute)(
+            ToolExecutionContext::standalone("bash"),
+            serde_json::json!({"command": "pwd"}),
+            None,
+        )
+        .await
+        .unwrap();
+        let output = output
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(output.trim(), canonical_a.to_string_lossy());
 
         let options_a = context_a.session_options().unwrap();
         let options_b = context_b.session_options().unwrap();
