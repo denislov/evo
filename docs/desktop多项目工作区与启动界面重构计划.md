@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -1053,6 +1053,32 @@ CenterDrawerHost
 完成标准：键盘 Tab/Enter/Space、tooltip、no-color、长路径、中文文本、窄宽度均可用。
 
 #### DSK-650：Project picker state 与事件
+
+> 状态：已完成。`ComposerPaneEvent` 已新增 typed `ChooseProjectDirectory` / `ClearProjectDirectory`，
+> editable control 使用同一个 keyboard-capable PopupMenu 提供“选择项目目录…”与“无项目”；Pane 只发事件，
+> 不持有 `prompt_for_paths`、workspace selection 或 runtime target。`NativeShell` 是唯一 picker owner，调用
+> `files=false`、`directories=true`、`multiple=false` 的原生 path prompt；取消保持原 selection，打开失败、
+> 空结果和异常多选均给出 bounded notice，且不会覆盖既有选择。
+>
+> `SessionWorkspace` 已新增显式 `draft_workspace_selection`。Home 切换到历史 session 后仍完整保留 composer
+> draft 与 project selection；首次 prompt 建立 session 后，下一次 New conversation 使用新的 managed
+> Projectless selection。Desktop bootstrap 现在无论显式启动 cwd 与否都会准备并持久化稳定 scratch workspace
+> identity，因此 clear/reset 不再从当前 session snapshot 或裸启动 cwd 反推 `无项目`。Home metadata template
+> 与 per-workspace draft 分离保存，避免首个 Home 被 rekey 为 session 后丢失新会话的 Home context 基线。
+>
+> `SessionWorkspace::prompt_target` 在 admission 时 clone 当前 selection 到 owned `DesktopPromptTarget::New`；
+> admission pending、等待 start 和 existing session 都在 shell guard 层拒绝后续 choose/clear，不只依赖 disabled
+> UI。同步 validation 失败会完成 command ledger 并保留精确 draft/selection；已选目录随后被删除的回归确认不会
+> 发出 runtime prompt。收到首个 `PromptAcceptedWithSession` 后 UI 立即从 pending 进入 durable locked scope。
+>
+> Gate：新增 GPUI 回归覆盖 directory-only options、中文目录、替换、取消、清除、picker failure、异常多选、
+> 零 runtime command、历史 session 往返、immutable admission、pending mutation guard、目录删除后提交、成功
+> 锁定和新 Projectless draft。Desktop library 274 个 tests 通过、5 个既有 release 性能用例保持 ignored，
+> 19 个 dependency boundary tests 与严格 all-target/all-features Clippy 通过；格式与 diff 检查通过。完整
+> wide/medium/narrow、idle、authorization、keyboard-focus、reduced-motion、no-color visual review 已生成，
+> 并抽查 wide/narrow idle 与 no-color；golden 仍留给 VUI-411/VUI-412 的最终品牌构图统一安装。CodeGraph
+> 变更前 call-path 与 `ast-grep-outline` 变更后 owner 审计确认 Pane、shared control、Home draft 和 shell picker
+> authority 没有重新混合。
 
 工作：
 
