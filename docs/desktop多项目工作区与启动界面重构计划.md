@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -540,9 +540,10 @@ CenterDrawerHost
 > Projectless 仅解析到受管 scratch execution cwd，不把 scratch 暴露为 UI 项目身份。稳定 group id、
 > typed path error、workspace id 越界/逃逸和 scratch symlink 防护均有定向测试。
 >
-> 过渡债务：现有持久化记录只有 `cwd`，因此轻量 session overview 暂时把它投影成 `Legacy`
-> workspace，并保留旧 `CodingAgentSessionOverview.cwd` 字段。CAG-202 写入并迁移 typed scope 后，
-> DSK-630 完成 Desktop 消费切换时删除该兼容字段；新 session selection 不允许构造 `Legacy`。
+> 过渡债务：CAG-202 已让持久化记录写入并迁移 typed scope，DSK-613 也已让 Desktop open
+> 直接消费 product-owned open target，不再从 overview 的展示 cwd 反推 workspace；旧
+> `CodingAgentSessionOverview.cwd` 兼容字段仍保留，须在完整计划收敛前删除。新 session selection
+> 不允许构造 `Legacy`。
 >
 > Gate：格式、diff、Clippy、API compile-pass 与新增的 7 个 workspace tests 通过；`coding-agent`
 > 767 个 library tests 全部通过，boundary 仍严格保持 DSK-600 登记的 3 个既有失败；TUI 全量通过。
@@ -717,7 +718,7 @@ CenterDrawerHost
 >
 > 债务清偿：DSK-612 已清偿首次 prompt 的原子创建与失败恢复；DSK-613 已清偿 persisted session
 > 从 Home options 建 context 的错误路径，历史 session 现在先从 durable manifest 取得完整 scope，
-> 再建立目标 workspace context。DSK-630/631 仍负责把当前 Home-scope session query 替换为用户驱动、
+> 再建立目标 workspace context；DSK-630 已把 session query 收敛为严格用户驱动。DSK-631 仍负责
 > 按项目分组的 catalog。产品层 raw-cwd options 与可空 workspace snapshot 仍按 CAG-204 债务在计划
 > 收敛前删除。
 >
@@ -816,6 +817,30 @@ CenterDrawerHost
 ### Phase 3：Catalog 变为用户驱动
 
 #### DSK-630：删除所有 session catalog 自动加载
+
+> 状态：已完成。`SessionController` 已删除 15 秒 refresh interval、deadline、schedule/take API 与
+> `NativeShell` timer；启动、静置、Sidebar toggle/focus、session create/open/close、resync 及
+> admission failure 均不会再隐式发出 `ListSessions`。生产代码中唯一 catalog request caller 是
+> `SessionsPaneEvent::Refresh`，重复点击继续由 typed command ledger 做 pending 去重；失败仍释放 pending
+> 并显示错误 toast，成功只替换 catalog，不再生成 “Loaded N sessions” 全局提示，也不安排后续 timer。
+>
+> Create（包括 Home 首次 prompt 创建）、rename、close 改为本地增量 mutation：新建项置于 recent
+> 首位并遵守 `MAX_DESKTOP_SESSION_CATALOG` 上限，rename 原位更新，close 直接删除；open 与 resync
+> 只安装各自 projection/owner，不触发全量查询。Projectless/Legacy 本地新建项不把受管 scratch cwd
+> 暴露成普通项目路径。删除自动 request 后，narrow Sidebar 打开改为显式通知 `SessionsPane` 更新
+> view-model，保持 drawer close control 与焦点行为而不访问 runtime。
+>
+> 完成标准验证：instrumented GPUI 回归在启动后、静置 60 秒和打开 Sessions overlay 后均观测到
+> 0 个 command；模拟点击 overflow 中的 Refresh 后恰好观测到 1 个 `ListSessions`，pending 期间再次
+> 请求仍为 0；成功响应后再静置 60 秒仍为 0。另有定向测试覆盖刷新失败不重试、首次 prompt/create
+> 本地插入、open/resync 零查询、close 本地删除、catalog recent order/rename/remove/bounds，以及
+> responsive drawer 在纯本地 pane 通知下保持可用。
+>
+> Gate：Desktop library 257 个 tests 通过、5 个既有 release 性能用例保持 ignored，18 个 dependency
+> boundary tests 与严格 Clippy 通过；`coding-agent` 786 个 library tests、API contract 14/14 与严格
+> Clippy 通过；格式、diff、禁止符号扫描、CodeGraph call-path 与 `ast-grep-outline` 变更后结构审计通过。
+> `coding-agent` boundary 为 64/67，仍严格保持 DSK-600 登记的 frozen write count、session naming
+> operation id、session method ledger 三个既有失败，没有新增回归。
 
 删除：
 
