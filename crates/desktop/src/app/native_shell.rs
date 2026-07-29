@@ -5093,6 +5093,20 @@ mod tests {
     }
 
     #[gpui::test]
+    fn baseline_idle_shell_automatically_requests_the_session_catalog(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (_shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+
+        cx.run_until_parked();
+
+        assert_eq!(
+            runtime_harness.drain_command_kinds(),
+            [desktop::runtime::DesktopRuntimeCommandKind::ListSessions]
+        );
+    }
+
+    #[gpui::test]
     fn idle_shell_constructs_all_bounded_view_models_without_session_facts(
         cx: &mut TestAppContext,
     ) {
