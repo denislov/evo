@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -1023,6 +1023,24 @@ CenterDrawerHost
 ### Phase 5：Composer project selector
 
 #### VUI-401：ProjectDirectory control
+
+> 状态：已完成。`DesktopIcon::ProjectDirectory` 已集中映射 Lucide `Folder`，新的
+> `DesktopProjectDirectoryControl` 作为共享 compact control 持有 folder icon、label、tooltip、ARIA、
+> 36 px hit target 与最大 280 px 宽度。控件显式区分 `Editable`、`Locked`、`Pending`：editable 保留
+> selector caret 与 Button 键盘语义，locked/pending 以结构和 `Fixed`/`Pending` 文本双重表达状态，
+> 因而不依赖颜色；长路径使用 Unicode-safe ellipsis，完整中文路径仍保留在 tooltip 与 accessibility label。
+>
+> Composer bottom-left 已改为 attachment + project selector，左侧容器可收缩、右侧 action 固定不缩。
+> Home draft 显示 `无项目`，已有 session 从 typed workspace scope 显示不可变目录，提交 admission 与等待
+> runtime 启动期间进入 pending。wide/narrow GPUI 回归同时约束 attachment、project selector、submit 的顺序、
+> selector 宽度上限以及三个 action 的最小 hit target；editable 的实际 choose/clear event 与 directory-only
+> picker 仍由下一项 DSK-650 接入，本项不在视觉 primitive 中提前持有 runtime/picker authority。
+>
+> Gate：Desktop library 268 个 tests 通过、5 个既有 release 性能用例保持 ignored，19 个 dependency
+> boundary tests 与严格 all-target/all-features Clippy 通过；格式与 diff 检查通过。实际 visual review 已检查
+> wide、narrow、idle 与 no-color 输出，确认中文长路径压缩、`无项目`、`Fixed` 和 hit target；未提前安装
+> golden，因为最终 Home 品牌与 idle 构图仍由 VUI-411/VUI-412 收敛。CodeGraph 变更前 call-path 与
+> `ast-grep-outline` 变更后结构审计确认 shared control、Composer DTO 与 shell scope derivation 的职责边界。
 
 工作：
 
