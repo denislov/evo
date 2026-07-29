@@ -1,5 +1,7 @@
 use desktop::preferences::DesktopThinkingLevel;
-use desktop::shell::{PanelVisibility, SemanticStatus, SemanticTheme, ShellLayout};
+use desktop::shell::{
+    CENTER_HEADER_HEIGHT, PanelVisibility, SemanticStatus, SemanticTheme, ShellLayout,
+};
 use gpui::{
     EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, Styled as _, Window,
     div, prelude::*, px, rgb,
@@ -106,7 +108,7 @@ impl EventEmitter<ConversationHeaderEvent> for ConversationHeader {}
 impl Render for ConversationHeader {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let Some(view_model) = self.view_model.clone() else {
-            return div().h_12().into_any_element();
+            return div().h(px(CENTER_HEADER_HEIGHT as f32)).into_any_element();
         };
         let theme = SemanticTheme::GEEK_DARK;
         let status = view_model.status;
@@ -125,19 +127,19 @@ impl Render for ConversationHeader {
             view_model.sessions_panel_width,
             view_model.context_panel_width,
         );
-        let sessions_open = if forced_layout.sessions.is_some() {
+        let sessions_open = if forced_layout.sidebar.is_some() {
             view_model.panel_visibility.sessions
         } else {
             view_model.narrow_sessions_open
         };
-        let inspector_open = if forced_layout.context.is_some() {
+        let inspector_open = if forced_layout.inspector.is_some() {
             view_model.panel_visibility.context
         } else {
             view_model.narrow_context_open
         };
         let viewport_width = u32::from(viewport.width);
         let expanded_chrome =
-            layout.workspace.width >= 900 || (view_model.idle && viewport_width >= 1_100);
+            layout.center.width >= 900 || (view_model.idle && viewport_width >= 1_100);
         let (model_label, profile_label, thinking_label) = if expanded_chrome {
             (
                 format!("Model · {}", view_model.model),
@@ -180,7 +182,8 @@ impl Render for ConversationHeader {
         div()
             .id("conversation-header")
             .debug_selector(|| "desktop-conversation-header".into())
-            .h_12()
+            .track_focus(&self.focus)
+            .h(px(CENTER_HEADER_HEIGHT as f32))
             .px_token(DesignSpace::Lg)
             .flex()
             .items_center()

@@ -112,7 +112,7 @@ impl Default for DesktopPreferences {
             schema_version: PREFERENCES_SCHEMA_VERSION,
             window: WindowGeometry::default(),
             sessions_panel_visible: true,
-            context_panel_visible: true,
+            context_panel_visible: false,
             sessions_panel_width: SESSION_PANEL_WIDTH,
             context_panel_width: CONTEXT_PANEL_WIDTH,
             reduced_motion: false,
@@ -683,6 +683,13 @@ fn sync_directory(_directory: &Path) -> Result<(), PreferenceStoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_preferences_open_sidebar_and_close_inspector() {
+        let preferences = DesktopPreferences::default();
+        assert!(preferences.sessions_panel_visible);
+        assert!(!preferences.context_panel_visible);
+    }
 
     #[test]
     fn missing_preferences_return_bounded_defaults() {

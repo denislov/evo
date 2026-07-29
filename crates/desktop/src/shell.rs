@@ -12,6 +12,7 @@ pub const SESSION_PANEL_MAX_WIDTH: u32 = 420;
 pub const CONTEXT_PANEL_MIN_WIDTH: u32 = 280;
 pub const CONTEXT_PANEL_MAX_WIDTH: u32 = 520;
 pub const MIN_CONVERSATION_WIDTH: u32 = 520;
+pub const CENTER_HEADER_HEIGHT: u32 = 48;
 pub const COMPOSER_MIN_HEIGHT: u32 = 88;
 pub const COMPOSER_MAX_HEIGHT: u32 = 236;
 pub const USER_MESSAGE_MAX_WIDTH: u32 = 920;
@@ -116,13 +117,15 @@ impl Default for PanelVisibility {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShellLayout {
-    pub idle: bool,
     pub viewport: Rect,
-    pub sessions: Option<Rect>,
-    /// The complete center column. GPUI owns the dynamic transcript/composer
-    /// split inside this rectangle because the composer auto-grows.
-    pub workspace: Rect,
-    pub context: Option<Rect>,
+    pub sidebar: Option<Rect>,
+    /// The complete center column, including its header and body.
+    pub center: Rect,
+    pub center_header: Rect,
+    /// Everything below the center header. GPUI owns the dynamic
+    /// Home/Conversation and composer split inside this rectangle.
+    pub center_body: Rect,
+    pub inspector: Option<Rect>,
 }
 
 impl ShellLayout {
@@ -157,57 +160,47 @@ impl ShellLayout {
 
         let sessions_width = if sessions_visible { sessions_width } else { 0 };
         let context_width = if context_visible { context_width } else { 0 };
-        let conversation_width = width
+        let center_width = width
             .saturating_sub(sessions_width)
             .saturating_sub(context_width);
+        let center = Rect::new(sessions_width, 0, center_width, body_height);
+        let center_header_height = body_height.min(CENTER_HEADER_HEIGHT);
 
         Self {
-            idle: false,
             viewport: Rect::new(0, 0, width, height),
-            sessions: sessions_visible.then(|| Rect::new(0, 0, sessions_width, body_height)),
-            workspace: Rect::new(sessions_width, 0, conversation_width, body_height),
-            context: context_visible.then(|| {
-                Rect::new(
-                    sessions_width + conversation_width,
-                    0,
-                    context_width,
-                    body_height,
-                )
-            }),
-        }
-    }
-
-    pub fn resolve_idle(width: u32, height: u32) -> Self {
-        Self {
-            idle: true,
-            viewport: Rect::new(0, 0, width, height),
-            sessions: None,
-            workspace: Rect::new(0, 0, width, height),
-            context: None,
+            sidebar: sessions_visible.then(|| Rect::new(0, 0, sessions_width, body_height)),
+            center,
+            center_header: Rect::new(center.x, center.y, center.width, center_header_height),
+            center_body: Rect::new(
+                center.x,
+                center.y.saturating_add(center_header_height),
+                center.width,
+                center.height.saturating_sub(center_header_height),
+            ),
+            inspector: context_visible
+                .then(|| Rect::new(sessions_width + center_width, 0, context_width, body_height)),
         }
     }
 
     pub fn is_visible(self, target: FocusTarget) -> bool {
         match target {
-            FocusTarget::Sessions => self.sessions.is_some(),
-            FocusTarget::Context => self.context.is_some(),
-            FocusTarget::Conversation => !self.idle,
-            FocusTarget::Composer => true,
+            FocusTarget::CenterHeader | FocusTarget::CenterBody | FocusTarget::Composer => true,
+            FocusTarget::Sidebar => self.sidebar.is_some(),
+            FocusTarget::Inspector => self.inspector.is_some(),
             FocusTarget::Overlay => false,
         }
     }
 
     pub fn focus_order(self) -> Vec<FocusTarget> {
-        let mut order = Vec::with_capacity(4);
-        if self.sessions.is_some() {
-            order.push(FocusTarget::Sessions);
+        let mut order = Vec::with_capacity(5);
+        order.push(FocusTarget::CenterHeader);
+        if self.sidebar.is_some() {
+            order.push(FocusTarget::Sidebar);
         }
-        if !self.idle {
-            order.push(FocusTarget::Conversation);
-        }
+        order.push(FocusTarget::CenterBody);
         order.push(FocusTarget::Composer);
-        if self.context.is_some() {
-            order.push(FocusTarget::Context);
+        if self.inspector.is_some() {
+            order.push(FocusTarget::Inspector);
         }
         order
     }
@@ -215,10 +208,11 @@ impl ShellLayout {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
-    Sessions,
-    Conversation,
+    CenterHeader,
+    Sidebar,
+    CenterBody,
     Composer,
-    Context,
+    Inspector,
     Overlay,
 }
 
@@ -482,19 +476,19 @@ mod tests {
     #[test]
     fn responsive_layout_hides_context_before_sessions() {
         let wide = ShellLayout::resolve(1_300, 900, PanelVisibility::default());
-        assert!(wide.sessions.is_some());
-        assert!(wide.context.is_some());
-        assert_eq!(wide.workspace.width, 740);
+        assert!(wide.sidebar.is_some());
+        assert!(wide.inspector.is_some());
+        assert_eq!(wide.center.width, 740);
 
         let medium = ShellLayout::resolve(1_000, 900, PanelVisibility::default());
-        assert!(medium.sessions.is_some());
-        assert!(medium.context.is_none());
-        assert_eq!(medium.workspace.width, 760);
+        assert!(medium.sidebar.is_some());
+        assert!(medium.inspector.is_none());
+        assert_eq!(medium.center.width, 760);
 
         let narrow = ShellLayout::resolve(700, 900, PanelVisibility::default());
-        assert!(narrow.sessions.is_none());
-        assert!(narrow.context.is_none());
-        assert_eq!(narrow.workspace.width, 700);
+        assert!(narrow.sidebar.is_none());
+        assert!(narrow.inspector.is_none());
+        assert_eq!(narrow.center.width, 700);
     }
 
     #[test]
@@ -506,9 +500,9 @@ mod tests {
             300,
             380,
         );
-        assert_eq!(layout.sessions.unwrap().width, 300);
-        assert_eq!(layout.context.unwrap().width, 380);
-        assert_eq!(layout.workspace.width, 720);
+        assert_eq!(layout.sidebar.unwrap().width, 300);
+        assert_eq!(layout.inspector.unwrap().width, 380);
+        assert_eq!(layout.center.width, 720);
 
         let clamped = ShellLayout::resolve_with_panel_widths(
             1_600,
@@ -517,31 +511,37 @@ mod tests {
             1,
             u32::MAX,
         );
-        assert_eq!(clamped.sessions.unwrap().width, SESSION_PANEL_MIN_WIDTH);
-        assert_eq!(clamped.context.unwrap().width, CONTEXT_PANEL_MAX_WIDTH);
+        assert_eq!(clamped.sidebar.unwrap().width, SESSION_PANEL_MIN_WIDTH);
+        assert_eq!(clamped.inspector.unwrap().width, CONTEXT_PANEL_MAX_WIDTH);
     }
 
     #[test]
-    fn workspace_uses_the_full_height_without_a_status_strip() {
+    fn center_header_and_body_partition_the_full_center_column() {
         let layout = ShellLayout::resolve(320, 100, PanelVisibility::default());
-        assert_eq!(layout.workspace, Rect::new(0, 0, 320, 100));
+        assert_eq!(layout.center, Rect::new(0, 0, 320, 100));
+        assert_eq!(layout.center_header, Rect::new(0, 0, 320, 48));
+        assert_eq!(layout.center_body, Rect::new(0, 48, 320, 52));
+
+        let short = ShellLayout::resolve(320, 32, PanelVisibility::default());
+        assert_eq!(short.center_header, Rect::new(0, 0, 320, 32));
+        assert_eq!(short.center_body, Rect::new(0, 32, 320, 0));
     }
 
     #[test]
     fn responsive_breakpoints_change_once_at_the_exact_width() {
         let before_sessions = ShellLayout::resolve(759, 900, PanelVisibility::default());
         let at_sessions = ShellLayout::resolve(760, 900, PanelVisibility::default());
-        assert!(before_sessions.sessions.is_none());
-        assert_eq!(before_sessions.workspace.width, 759);
-        assert_eq!(at_sessions.sessions.unwrap().width, SESSION_PANEL_WIDTH);
-        assert_eq!(at_sessions.workspace.width, MIN_CONVERSATION_WIDTH);
+        assert!(before_sessions.sidebar.is_none());
+        assert_eq!(before_sessions.center.width, 759);
+        assert_eq!(at_sessions.sidebar.unwrap().width, SESSION_PANEL_WIDTH);
+        assert_eq!(at_sessions.center.width, MIN_CONVERSATION_WIDTH);
 
         let before_context = ShellLayout::resolve(1_079, 900, PanelVisibility::default());
         let at_context = ShellLayout::resolve(1_080, 900, PanelVisibility::default());
-        assert!(before_context.context.is_none());
-        assert_eq!(before_context.workspace.width, 839);
-        assert_eq!(at_context.context.unwrap().width, CONTEXT_PANEL_WIDTH);
-        assert_eq!(at_context.workspace.width, MIN_CONVERSATION_WIDTH);
+        assert!(before_context.inspector.is_none());
+        assert_eq!(before_context.center.width, 839);
+        assert_eq!(at_context.inspector.unwrap().width, CONTEXT_PANEL_WIDTH);
+        assert_eq!(at_context.center.width, MIN_CONVERSATION_WIDTH);
     }
 
     #[test]
@@ -554,13 +554,13 @@ mod tests {
                 context: true,
             },
         );
-        assert!(hidden.sessions.is_none());
-        assert!(hidden.context.is_some());
+        assert!(hidden.sidebar.is_none());
+        assert!(hidden.inspector.is_some());
 
         let constrained = ShellLayout::resolve(800, 800, PanelVisibility::default());
-        assert!(constrained.sessions.is_some());
-        assert!(constrained.context.is_none());
-        assert!(constrained.workspace.width >= MIN_CONVERSATION_WIDTH);
+        assert!(constrained.sidebar.is_some());
+        assert!(constrained.inspector.is_none());
+        assert!(constrained.center.width >= MIN_CONVERSATION_WIDTH);
     }
 
     #[test]
@@ -569,7 +569,7 @@ mod tests {
         let narrow = ShellLayout::resolve(700, 900, PanelVisibility::default());
         let mut focus = FocusState::default();
 
-        assert!(focus.request(FocusTarget::Context, wide));
+        assert!(focus.request(FocusTarget::Inspector, wide));
         focus.open_overlay();
         assert_eq!(focus.active(), FocusTarget::Overlay);
         focus.cycle(wide, false);
@@ -585,11 +585,11 @@ mod tests {
         let medium = ShellLayout::resolve(1_000, 900, PanelVisibility::default());
         let mut focus = FocusState::default();
 
-        assert!(focus.request(FocusTarget::Conversation, wide));
+        assert!(focus.request(FocusTarget::CenterBody, wide));
         focus.reconcile_layout(medium);
-        assert_eq!(focus.active(), FocusTarget::Conversation);
+        assert_eq!(focus.active(), FocusTarget::CenterBody);
 
-        assert!(focus.request(FocusTarget::Sessions, medium));
+        assert!(focus.request(FocusTarget::Sidebar, medium));
         focus.reconcile_layout(ShellLayout::resolve(700, 900, PanelVisibility::default()));
         assert_eq!(focus.active(), FocusTarget::Composer);
     }
@@ -599,20 +599,49 @@ mod tests {
         let layout = ShellLayout::resolve(700, 900, PanelVisibility::default());
         assert_eq!(
             layout.focus_order(),
-            vec![FocusTarget::Conversation, FocusTarget::Composer]
+            vec![
+                FocusTarget::CenterHeader,
+                FocusTarget::CenterBody,
+                FocusTarget::Composer
+            ]
         );
     }
 
     #[test]
-    fn idle_layout_hides_session_panels_and_gives_home_the_full_workspace() {
-        for (width, height) in [(1_300, 900), (900, 800), (700, 800)] {
-            let layout = ShellLayout::resolve_idle(width, height);
-            assert!(layout.idle);
-            assert!(layout.sessions.is_none());
-            assert!(layout.context.is_none());
-            assert_eq!(layout.workspace, Rect::new(0, 0, width, height));
-            assert_eq!(layout.focus_order(), vec![FocusTarget::Composer]);
-        }
+    fn home_uses_the_same_columns_with_sidebar_open_and_inspector_closed() {
+        let home_visibility = PanelVisibility {
+            sessions: true,
+            context: false,
+        };
+        let wide = ShellLayout::resolve(1_300, 900, home_visibility);
+        assert!(wide.sidebar.is_some());
+        assert!(wide.inspector.is_none());
+        assert_eq!(wide.center, Rect::new(240, 0, 1_060, 900));
+
+        let medium = ShellLayout::resolve(900, 800, home_visibility);
+        assert!(medium.sidebar.is_some());
+        assert!(medium.inspector.is_none());
+        assert_eq!(medium.center, Rect::new(240, 0, 660, 800));
+
+        let narrow = ShellLayout::resolve(700, 800, home_visibility);
+        assert!(narrow.sidebar.is_none());
+        assert!(narrow.inspector.is_none());
+        assert_eq!(narrow.center, Rect::new(0, 0, 700, 800));
+    }
+
+    #[test]
+    fn focus_cycle_has_a_stable_wide_region_order() {
+        let layout = ShellLayout::resolve(1_300, 900, PanelVisibility::default());
+        assert_eq!(
+            layout.focus_order(),
+            vec![
+                FocusTarget::CenterHeader,
+                FocusTarget::Sidebar,
+                FocusTarget::CenterBody,
+                FocusTarget::Composer,
+                FocusTarget::Inspector,
+            ]
+        );
     }
 
     #[test]

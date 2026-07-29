@@ -1256,3 +1256,46 @@ fn desktop_file_review_uses_product_authority_and_argument_safe_adapter_bounds()
     assert!(shell.contains("DesktopCommandIntent::FileReview"));
     assert!(shell.contains("DesktopCommandIntent::ExternalEditor"));
 }
+
+#[test]
+fn desktop_home_and_session_share_explicit_three_column_shell_geometry() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let geometry = fs::read_to_string(manifest_dir.join("src/shell.rs"))
+        .expect("desktop shell geometry should be readable");
+    let shell = fs::read_to_string(manifest_dir.join("src/app/native_shell.rs"))
+        .expect("desktop native shell should be readable");
+    let preferences = fs::read_to_string(manifest_dir.join("src/preferences.rs"))
+        .expect("desktop preferences should be readable");
+
+    for field in [
+        "pub sidebar: Option<Rect>",
+        "pub center: Rect",
+        "pub center_header: Rect",
+        "pub center_body: Rect",
+        "pub inspector: Option<Rect>",
+    ] {
+        assert!(geometry.contains(field), "ShellLayout omitted {field}");
+    }
+    assert!(!geometry.contains("resolve_idle"));
+    for target in [
+        "CenterHeader",
+        "Sidebar",
+        "CenterBody",
+        "Composer",
+        "Inspector",
+    ] {
+        assert!(geometry.contains(target), "focus order omitted {target}");
+    }
+
+    let resolver = shell
+        .split("fn resolve_layout")
+        .nth(1)
+        .and_then(|tail| tail.split("fn begin_panel_resize").next())
+        .expect("NativeShell layout resolver should remain isolated");
+    assert!(resolver.contains("ShellLayout::resolve_with_panel_widths"));
+    assert!(!resolver.contains("projection"));
+    assert!(shell.contains(".debug_selector(|| \"desktop-center-body\".into())"));
+    assert!(shell.contains(".track_focus(&self.center_body_focus)"));
+    assert!(preferences.contains("sessions_panel_visible: true"));
+    assert!(preferences.contains("context_panel_visible: false"));
+}

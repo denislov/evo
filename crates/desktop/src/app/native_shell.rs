@@ -443,9 +443,10 @@ pub(super) struct NativeShell {
     toast_host: gpui::Entity<ToastHost>,
     overlay_host: gpui::Entity<OverlayHost>,
     focus: FocusState,
-    sessions_focus: FocusHandle,
-    conversation_focus: FocusHandle,
-    context_focus: FocusHandle,
+    center_header_focus: FocusHandle,
+    sidebar_focus: FocusHandle,
+    center_body_focus: FocusHandle,
+    inspector_focus: FocusHandle,
     authorization_focus: FocusHandle,
     command_palette_focus: FocusHandle,
     narrow_sessions_focus: FocusHandle,
@@ -518,19 +519,20 @@ impl NativeShell {
                 Err(error) => preference_notice = Some(error.to_string()),
             }
         }
-        let sessions_focus = cx.focus_handle().tab_stop(true).tab_index(1);
-        let conversation_focus = cx.focus_handle().tab_stop(true).tab_index(2);
-        let context_focus = cx.focus_handle().tab_stop(true).tab_index(4);
-        let authorization_focus = cx.focus_handle().tab_stop(true).tab_index(3);
-        let command_palette_focus = cx.focus_handle().tab_stop(true).tab_index(3);
-        let narrow_sessions_focus = cx.focus_handle().tab_stop(true).tab_index(3);
-        let full_message_focus = cx.focus_handle().tab_stop(true).tab_index(3);
+        let center_header_focus = cx.focus_handle().tab_stop(true).tab_index(1);
+        let sidebar_focus = cx.focus_handle().tab_stop(true).tab_index(2);
+        let center_body_focus = cx.focus_handle().tab_stop(true).tab_index(3);
+        let inspector_focus = cx.focus_handle().tab_stop(true).tab_index(5);
+        let authorization_focus = cx.focus_handle().tab_stop(true).tab_index(6);
+        let command_palette_focus = cx.focus_handle().tab_stop(true).tab_index(6);
+        let narrow_sessions_focus = cx.focus_handle().tab_stop(true).tab_index(6);
+        let full_message_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let conversation_pane = cx.new(|_| ConversationPane::new());
-        let conversation_header = cx.new(|_| ConversationHeader::new(conversation_focus.clone()));
-        let sessions_pane = cx.new(|cx| SessionsPane::new(sessions_focus.clone(), window, cx));
+        let conversation_header = cx.new(|_| ConversationHeader::new(center_header_focus.clone()));
+        let sessions_pane = cx.new(|cx| SessionsPane::new(sidebar_focus.clone(), window, cx));
         let composer_pane = cx.new(|cx| ComposerPane::new(window, cx));
         let home_pane = cx.new(|_| HomePane::new());
-        let inspector_pane = cx.new(|cx| InspectorPane::new(context_focus.clone(), cx));
+        let inspector_pane = cx.new(|cx| InspectorPane::new(inspector_focus.clone(), cx));
         let toast_host = cx.new(|cx| ToastHost::new(window, cx));
         let overlay_host = cx.new(|_| {
             OverlayHost::new(
@@ -544,21 +546,24 @@ impl NativeShell {
         });
 
         let subscriptions = vec![
-            cx.on_focus(&sessions_focus, window, |this, window, cx| {
-                this.record_focus(FocusTarget::Sessions, window, cx);
+            cx.on_focus(&center_header_focus, window, |this, window, cx| {
+                this.record_focus(FocusTarget::CenterHeader, window, cx);
             }),
-            cx.on_focus(&conversation_focus, window, |this, window, cx| {
-                this.record_focus(FocusTarget::Conversation, window, cx);
+            cx.on_focus(&sidebar_focus, window, |this, window, cx| {
+                this.record_focus(FocusTarget::Sidebar, window, cx);
             }),
-            cx.on_focus(&context_focus, window, |this, window, cx| {
-                this.record_focus(FocusTarget::Context, window, cx);
+            cx.on_focus(&center_body_focus, window, |this, window, cx| {
+                this.record_focus(FocusTarget::CenterBody, window, cx);
+            }),
+            cx.on_focus(&inspector_focus, window, |this, window, cx| {
+                this.record_focus(FocusTarget::Inspector, window, cx);
             }),
             cx.subscribe_in(
                 &conversation_pane,
                 window,
                 |this, _, event: &ConversationPaneEvent, window, cx| match event {
                     ConversationPaneEvent::Select { block_id, durable } => {
-                        this.record_focus(FocusTarget::Conversation, window, cx);
+                        this.record_focus(FocusTarget::CenterBody, window, cx);
                         let workspace = &mut this.active_workspace;
                         let Some(projection) = workspace.projection.as_ref() else {
                             return;
@@ -798,9 +803,10 @@ impl NativeShell {
             toast_host,
             overlay_host,
             focus: FocusState::default(),
-            sessions_focus,
-            conversation_focus,
-            context_focus,
+            center_header_focus,
+            sidebar_focus,
+            center_body_focus,
+            inspector_focus,
             authorization_focus,
             command_palette_focus,
             narrow_sessions_focus,
@@ -1142,9 +1148,6 @@ impl NativeShell {
     }
 
     fn resolve_layout(&self, width: u32, height: u32, visibility: PanelVisibility) -> ShellLayout {
-        if self.projection.is_none() {
-            return ShellLayout::resolve_idle(width, height);
-        }
         ShellLayout::resolve_with_panel_widths(
             width,
             height,
@@ -1208,12 +1211,12 @@ impl NativeShell {
             ResizablePanel::Sessions => (
                 SESSION_PANEL_MIN_WIDTH,
                 SESSION_PANEL_MAX_WIDTH,
-                layout.context.map_or(0, |bounds| bounds.width),
+                layout.inspector.map_or(0, |bounds| bounds.width),
             ),
             ResizablePanel::Context => (
                 CONTEXT_PANEL_MIN_WIDTH,
                 CONTEXT_PANEL_MAX_WIDTH,
-                layout.sessions.map_or(0, |bounds| bounds.width),
+                layout.sidebar.map_or(0, |bounds| bounds.width),
             ),
         };
         let viewport_width = u32::from(window.viewport_size().width);
@@ -1279,16 +1282,16 @@ impl NativeShell {
         if self.focus.request(target, layout) {
             cx.notify();
         }
-        if previous == FocusTarget::Sessions || target == FocusTarget::Sessions {
+        if previous == FocusTarget::Sidebar || target == FocusTarget::Sidebar {
             self.notify_sessions_pane(cx);
         }
-        if previous == FocusTarget::Conversation || target == FocusTarget::Conversation {
+        if previous == FocusTarget::CenterHeader || target == FocusTarget::CenterHeader {
             self.notify_conversation_header(cx);
         }
         if previous == FocusTarget::Composer || target == FocusTarget::Composer {
             self.notify_composer_pane(cx);
         }
-        if previous == FocusTarget::Context || target == FocusTarget::Context {
+        if previous == FocusTarget::Inspector || target == FocusTarget::Inspector {
             self.notify_inspector_pane(cx);
         }
     }
@@ -1308,7 +1311,7 @@ impl NativeShell {
             u32::from(viewport.height),
             PanelVisibility::default(),
         );
-        if self.narrow_sessions_open && forced_layout.sessions.is_some() {
+        if self.narrow_sessions_open && forced_layout.sidebar.is_some() {
             self.narrow_sessions_open = false;
             self.preferences.sessions_panel_visible = true;
             if self.active_overlay == Some(DesktopOverlayKind::NarrowSessions) {
@@ -1316,7 +1319,7 @@ impl NativeShell {
                 self.focus.close_overlay(self.layout(window));
             }
         }
-        if self.narrow_context_open && forced_layout.context.is_some() {
+        if self.narrow_context_open && forced_layout.inspector.is_some() {
             self.narrow_context_open = false;
             self.preferences.context_panel_visible = true;
             if self.active_overlay == Some(DesktopOverlayKind::NarrowContext) {
@@ -2237,7 +2240,7 @@ impl NativeShell {
                     context: self.preferences.context_panel_visible,
                 },
             )
-            .sessions
+            .sidebar
             .is_some();
         if !dockable {
             self.command_palette.close();
@@ -2283,7 +2286,7 @@ impl NativeShell {
                     context: true,
                 },
             )
-            .context
+            .inspector
             .is_some();
         if !dockable {
             self.command_palette.close();
@@ -3382,7 +3385,7 @@ impl NativeShell {
             DesktopOverlayKind::Authorization => self.authorization_focus.focus(window, cx),
             DesktopOverlayKind::CommandPalette => self.command_palette_focus.focus(window, cx),
             DesktopOverlayKind::NarrowSessions => self.narrow_sessions_focus.focus(window, cx),
-            DesktopOverlayKind::NarrowContext => self.context_focus.focus(window, cx),
+            DesktopOverlayKind::NarrowContext => self.inspector_focus.focus(window, cx),
             DesktopOverlayKind::FullMessage => self.full_message_focus.focus(window, cx),
         }
         if inspector_overlay_changed {
@@ -3431,13 +3434,13 @@ impl NativeShell {
             return;
         }
         let layout = self.layout(window);
-        if target == FocusTarget::Sessions && !layout.is_visible(target) {
+        if target == FocusTarget::Sidebar && !layout.is_visible(target) {
             self.narrow_sessions_open = true;
             self.activate_overlay(DesktopOverlayKind::NarrowSessions, window, cx);
             self.notify_sessions_pane(cx);
             return;
         }
-        if target == FocusTarget::Context && !layout.is_visible(target) {
+        if target == FocusTarget::Inspector && !layout.is_visible(target) {
             self.narrow_context_open = true;
             self.activate_overlay(DesktopOverlayKind::NarrowContext, window, cx);
             return;
@@ -3572,16 +3575,16 @@ impl NativeShell {
             DesktopPaletteCommand::ToggleSessions => self.toggle_sessions(window, cx),
             DesktopPaletteCommand::ToggleInspector => self.toggle_context(window, cx),
             DesktopPaletteCommand::FocusSessions => {
-                self.focus_target(FocusTarget::Sessions, window, cx);
+                self.focus_target(FocusTarget::Sidebar, window, cx);
             }
             DesktopPaletteCommand::FocusConversation => {
-                self.focus_target(FocusTarget::Conversation, window, cx);
+                self.focus_target(FocusTarget::CenterBody, window, cx);
             }
             DesktopPaletteCommand::FocusComposer => {
                 self.focus_target(FocusTarget::Composer, window, cx);
             }
             DesktopPaletteCommand::FocusInspector => {
-                self.focus_target(FocusTarget::Context, window, cx);
+                self.focus_target(FocusTarget::Inspector, window, cx);
             }
             DesktopPaletteCommand::SubmitPrompt => {
                 if self
@@ -3666,7 +3669,7 @@ impl NativeShell {
             return;
         }
         self.review_next_file(cx);
-        self.focus_target(FocusTarget::Context, window, cx);
+        self.focus_target(FocusTarget::Inspector, window, cx);
     }
 
     fn on_new_session(&mut self, _: &NewSession, window: &mut Window, cx: &mut Context<Self>) {
@@ -3998,10 +4001,11 @@ impl NativeShell {
 
     fn focus_active_target(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.focus.active() {
-            FocusTarget::Sessions => self.sessions_focus.focus(window, cx),
-            FocusTarget::Conversation => self.conversation_focus.focus(window, cx),
+            FocusTarget::CenterHeader => self.center_header_focus.focus(window, cx),
+            FocusTarget::Sidebar => self.sidebar_focus.focus(window, cx),
+            FocusTarget::CenterBody => self.center_body_focus.focus(window, cx),
             FocusTarget::Composer => self.focus_composer_input(window, cx),
-            FocusTarget::Context => self.context_focus.focus(window, cx),
+            FocusTarget::Inspector => self.inspector_focus.focus(window, cx),
             FocusTarget::Overlay => match self.active_overlay {
                 Some(DesktopOverlayKind::Authorization) => {
                     self.authorization_focus.focus(window, cx)
@@ -4012,7 +4016,7 @@ impl NativeShell {
                 Some(DesktopOverlayKind::NarrowSessions) => {
                     self.narrow_sessions_focus.focus(window, cx);
                 }
-                Some(DesktopOverlayKind::NarrowContext) => self.context_focus.focus(window, cx),
+                Some(DesktopOverlayKind::NarrowContext) => self.inspector_focus.focus(window, cx),
                 Some(DesktopOverlayKind::FullMessage) => self.full_message_focus.focus(window, cx),
                 None => self.focus_composer_input(window, cx),
             },
@@ -4525,7 +4529,7 @@ impl Render for NativeShell {
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
         if self.projection.is_some() {
-            let requested_layout_width = conversation_width_bucket(layout.workspace.width);
+            let requested_layout_width = conversation_width_bucket(layout.center.width);
             let (layout_width, width_refresh) = self
                 .conversation_controller
                 .width_for_render(requested_layout_width);
@@ -4552,7 +4556,7 @@ impl Render for NativeShell {
             .as_ref()
             .is_some_and(|projection| !projection.snapshot().pending_authorizations.is_empty());
         self.reconcile_authorization_overlay(authorization_present, window, cx);
-        let sessions_panel = layout.sessions.map(|bounds| {
+        let sidebar_panel = layout.sidebar.map(|bounds| {
             div()
                 .relative()
                 .flex_none()
@@ -4577,7 +4581,7 @@ impl Render for NativeShell {
                 )
         });
 
-        let context_panel = layout.context.map(|bounds| {
+        let inspector_panel = layout.inspector.map(|bounds| {
             div()
                 .relative()
                 .flex_none()
@@ -4602,7 +4606,7 @@ impl Render for NativeShell {
                 )
         });
 
-        let workspace = if self.projection.is_some() {
+        let center = if self.projection.is_some() {
             div()
                 .id("conversation-panel")
                 .role(Role::Main)
@@ -4611,37 +4615,60 @@ impl Render for NativeShell {
                     "Conversation history and message composer. Use Up and Down to select messages.",
                 )
                 .debug_selector(|| "desktop-conversation-panel".into())
-                .key_context(actions::CONVERSATION_KEY_CONTEXT)
-                .track_focus(&self.conversation_focus)
-                .flex_1()
+                .flex_none()
+                .w(px(layout.center.width as f32))
                 .min_w_0()
                 .min_h_0()
                 .flex()
                 .flex_col()
                 .bg(rgb(theme.canvas.value()))
                 .child(self.conversation_header.clone())
-                .child(self.conversation_pane.clone())
-                .child(self.composer_pane.clone())
+                .child(
+                    div()
+                        .id("center-body")
+                        .debug_selector(|| "desktop-center-body".into())
+                        .key_context(actions::CONVERSATION_KEY_CONTEXT)
+                        .track_focus(&self.center_body_focus)
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(self.conversation_pane.clone())
+                        .child(self.composer_pane.clone()),
+                )
         } else {
             div()
                 .id("home-workspace")
+                .role(Role::Main)
+                .aria_label("Home workspace")
                 .debug_selector(|| "desktop-home-workspace".into())
-                .flex_1()
+                .flex_none()
+                .w(px(layout.center.width as f32))
                 .min_w_0()
                 .min_h_0()
                 .flex()
                 .flex_col()
                 .bg(rgb(theme.canvas.value()))
                 .child(self.conversation_header.clone())
-                .child(self.home_pane.clone())
                 .child(
                     div()
-                        .w_full()
-                        .max_w(px(900.))
-                        .mx_auto()
-                        .px_6()
-                        .pb_8()
-                        .child(self.composer_pane.clone()),
+                        .id("center-body")
+                        .debug_selector(|| "desktop-center-body".into())
+                        .track_focus(&self.center_body_focus)
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(self.home_pane.clone())
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(px(900.))
+                                .mx_auto()
+                                .px_6()
+                                .pb_8()
+                                .child(self.composer_pane.clone()),
+                        ),
                 )
         };
 
@@ -4696,9 +4723,9 @@ impl Render for NativeShell {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .children(sessions_panel)
-                    .child(workspace)
-                    .children(context_panel),
+                    .children(sidebar_panel)
+                    .child(center)
+                    .children(inspector_panel),
             )
             .child(overlay_host)
             .child(toast_host)
@@ -4727,10 +4754,11 @@ impl Render for NativeShell {
 
 fn focus_target_label(target: FocusTarget) -> &'static str {
     match target {
-        FocusTarget::Sessions => "Sessions",
-        FocusTarget::Conversation => "Conversation",
+        FocusTarget::CenterHeader => "Center header",
+        FocusTarget::Sidebar => "Sidebar",
+        FocusTarget::CenterBody => "Center workspace",
         FocusTarget::Composer => "Composer",
-        FocusTarget::Context => "Inspector",
+        FocusTarget::Inspector => "Inspector",
         FocusTarget::Overlay => "Overlay",
     }
 }
@@ -5107,6 +5135,13 @@ mod tests {
         add_visual_shell_with_preferences(cx, runtime, projection, DesktopPreferences::default())
     }
 
+    fn visual_preferences_with_inspector() -> DesktopPreferences {
+        DesktopPreferences {
+            context_panel_visible: true,
+            ..DesktopPreferences::default()
+        }
+    }
+
     fn add_visual_shell_with_preferences(
         cx: &mut TestAppContext,
         runtime: DesktopRuntimeBridge,
@@ -5152,6 +5187,14 @@ mod tests {
         cx: &mut TestAppContext,
         runtime: DesktopRuntimeBridge,
     ) -> (gpui::Entity<NativeShell>, &mut gpui::VisualTestContext) {
+        add_idle_visual_shell_with_preferences(cx, runtime, DesktopPreferences::default())
+    }
+
+    fn add_idle_visual_shell_with_preferences(
+        cx: &mut TestAppContext,
+        runtime: DesktopRuntimeBridge,
+        preferences: DesktopPreferences,
+    ) -> (gpui::Entity<NativeShell>, &mut gpui::VisualTestContext) {
         let shell_slot = Rc::new(RefCell::new(None));
         let shell_slot_for_window = Rc::clone(&shell_slot);
         let mut project = visual_test_snapshot().project;
@@ -5167,7 +5210,7 @@ mod tests {
                         project,
                         projection: None,
                         global_skills: visual_global_skills(),
-                        preferences: DesktopPreferences::default(),
+                        preferences,
                         preference_writer: None,
                         preference_notice: None,
                         initial_session_id: None,
@@ -5397,17 +5440,61 @@ mod tests {
             assert!(shell.home_pane_view_model().workspace.contains("scratch"));
         });
 
-        for (width, height) in [(1_300., 900.), (900., 800.), (700., 800.)] {
+        for (width, height, expected_center_width, sidebar_visible) in [
+            (1_300., 900., 1_060., true),
+            (900., 800., 660., true),
+            (700., 800., 700., false),
+        ] {
             cx.simulate_resize(size(px(width), px(height)));
             cx.run_until_parked();
             let home = cx
                 .debug_bounds("desktop-home-workspace")
                 .expect("idle workspace is visible");
-            assert_eq!(f32::from(home.size.width), width);
+            assert_eq!(f32::from(home.size.width), expected_center_width);
+            assert_eq!(
+                cx.debug_bounds("desktop-sessions-panel").is_some(),
+                sidebar_visible
+            );
             assert!(cx.debug_bounds("desktop-conversation-panel").is_none());
             assert!(cx.debug_bounds("desktop-inspector-panel").is_none());
+            let header = cx
+                .debug_bounds("desktop-conversation-header")
+                .expect("center header remains mounted on Home");
+            let body = cx
+                .debug_bounds("desktop-center-body")
+                .expect("center body remains mounted on Home");
+            assert_eq!(f32::from(header.size.width), expected_center_width);
+            assert_eq!(f32::from(header.size.height), 48.);
+            assert_eq!(f32::from(body.size.width), expected_center_width);
+            assert_eq!(f32::from(body.origin.y - header.origin.y), 48.);
             assert!(cx.debug_bounds("desktop-composer-panel").is_some());
         }
+    }
+
+    #[gpui::test]
+    fn home_respects_an_explicit_inspector_preference(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let preferences = visual_preferences_with_inspector();
+        let (shell, cx) = add_idle_visual_shell_with_preferences(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            preferences,
+        );
+        cx.simulate_resize(size(px(1_300.), px(900.)));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("desktop-sessions-panel").is_some());
+        assert!(cx.debug_bounds("desktop-inspector-panel").is_some());
+        assert_eq!(
+            f32::from(
+                cx.debug_bounds("desktop-home-workspace")
+                    .expect("Home center remains visible")
+                    .size
+                    .width
+            ),
+            740.
+        );
+        assert!(shell.read_with(cx, |shell, _| shell.preferences.context_panel_visible));
     }
 
     #[gpui::test]
@@ -5961,18 +6048,33 @@ mod tests {
     #[gpui::test]
     fn native_shell_focus_and_responsive_bounds_are_stable(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
-        let (_, cx) = add_visual_shell(
+        let (shell, cx) = add_visual_shell_with_preferences(
             cx,
             DesktopRuntimeBridge::disconnected_for_test(),
             visual_test_projection(),
+            visual_preferences_with_inspector(),
         );
 
         cx.simulate_resize(size(px(1_300.), px(900.)));
         cx.run_until_parked();
         let wide_before_focus = desktop_region_bounds(cx);
         assert!(wide_before_focus.iter().all(Option::is_some));
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Composer
+        );
         cx.dispatch_action(FocusNextRegion);
         cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::Inspector
+        );
+        cx.dispatch_action(FocusNextRegion);
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.focus.active()),
+            FocusTarget::CenterHeader
+        );
         assert_eq!(desktop_region_bounds(cx), wide_before_focus);
 
         cx.simulate_resize(size(px(1_000.), px(900.)));
@@ -6008,11 +6110,11 @@ mod tests {
         }
 
         let medium_layout = ShellLayout::resolve(1_000, 900, PanelVisibility::default());
-        assert!(medium_layout.sessions.is_some());
-        assert!(medium_layout.context.is_none());
+        assert!(medium_layout.sidebar.is_some());
+        assert!(medium_layout.inspector.is_none());
         let narrow_layout = ShellLayout::resolve(700, 900, PanelVisibility::default());
-        assert!(narrow_layout.sessions.is_none());
-        assert!(narrow_layout.context.is_none());
+        assert!(narrow_layout.sidebar.is_none());
+        assert!(narrow_layout.inspector.is_none());
     }
 
     #[gpui::test]
@@ -6175,10 +6277,11 @@ mod tests {
     #[gpui::test]
     fn inspector_tabs_stay_on_one_line_in_docked_and_overlay_layouts(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
-        let (shell, cx) = add_visual_shell(
+        let (shell, cx) = add_visual_shell_with_preferences(
             cx,
             DesktopRuntimeBridge::disconnected_for_test(),
             visual_test_projection(),
+            visual_preferences_with_inspector(),
         );
 
         for (width, open_overlay) in [(1_300., false), (700., true)] {
@@ -7763,7 +7866,12 @@ mod tests {
         let projection = DesktopProjection::new(snapshot)
             .expect("inspector visual fixture is a valid product projection");
         let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
-        let (shell, cx) = add_visual_shell(cx, runtime, projection);
+        let (shell, cx) = add_visual_shell_with_preferences(
+            cx,
+            runtime,
+            projection,
+            visual_preferences_with_inspector(),
+        );
         cx.run_until_parked();
         runtime_harness.drain_command_kinds();
         let inspector = shell.read_with(cx, |shell, _| shell.inspector_pane.clone());
