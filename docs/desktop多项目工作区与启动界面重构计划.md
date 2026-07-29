@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202 已完成）
+> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203 已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -594,6 +594,24 @@ CenterDrawerHost
 完成标准：旧 fixture、project fixture、projectless fixture、损坏/已删除目录 fixture 全覆盖；迁移写盘原子。
 
 #### CAG-203：模型 thinking capability
+
+> 状态：已完成。`CodingAgentThinkingCapability` 以 provider-neutral 的
+> `supported + explicit_levels + can_disable` 描述模型能力，并同时进入配置无关 model catalog、configured
+> catalog 与当前 embedding model selection snapshot。缺失 `thinkingLevelMap` 或 map 中缺失的
+> level 沿用对应 API 的默认支持，显式 `Null` level 被剔除；非 reasoning 不支持 thinking，不能表达
+> 显式 thinking 的 reasoning API 保留 Auto-only capability。Anthropic 与 Mistral 支持显式关闭，OpenAI Responses 的 Off 回落 Auto，
+> OpenAI Completions 仅在 compatibility 明确支持 reasoning effort 或 DeepSeek thinking format 时
+> 暴露显式 level，且只有 DeepSeek format 支持显式关闭。
+>
+> `sanitize_thinking_level` 只接收产品 `CodingAgentModelChoice`，返回合法的 `Explicit(level)` 或
+> `AutoFallback`，Desktop 无需读取 `ai::Model`、provider compat 或 wire payload。Anthropic、OpenAI
+> Responses、OpenAI DeepSeek compatibility、非 reasoning、显式 null mapping、无 mapping 与 sanitize
+> fallback 均有定向测试。
+>
+> Gate：`coding-agent` 783 个 library tests（单线程全量）、14 个 API contract、Clippy、Desktop
+> 243 个 tests 与 17 个 dependency boundary tests 全部通过；`coding-agent` boundary 仍严格保持
+> DSK-600 登记的 3 个既有失败，没有新增回归。并发全量 library 首轮曾因同一 fixture 的
+> `.writer.lock` 竞争失败 1 项，该项单独重跑和单线程全量均通过。
 
 工作：
 
