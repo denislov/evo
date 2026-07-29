@@ -23,6 +23,7 @@ pub(crate) fn default_application_options(
         mode: session_mode,
         cwd: cwd.clone(),
         session_dir,
+        workspace: None,
     };
     Ok(ApplicationRunOptions {
         model_override,

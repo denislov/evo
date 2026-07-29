@@ -208,8 +208,7 @@ impl CodingAgentSessionBootstrap {
         };
         if !matches!(session_options.mode, SessionMode::Enabled) {
             return CodingAgentSession::non_persistent_internal(
-                CodingAgentSessionOptions::new()
-                    .with_cwd(session_options.cwd.clone())
+                session_options_for_run(session_options)
                     .with_default_agent_profile_id(self.default_agent_profile_id.clone())
                     .with_tool_authorization_mode(ToolAuthorizationMode::Interactive),
             )
@@ -217,8 +216,7 @@ impl CodingAgentSessionBootstrap {
         }
 
         let session_root = headless_session_root(session_options)?;
-        let mut options = CodingAgentSessionOptions::new()
-            .with_cwd(session_options.cwd.clone())
+        let mut options = session_options_for_run(session_options)
             .with_session_log_root(session_root)
             .with_default_agent_profile_id(self.default_agent_profile_id.clone())
             .with_tool_authorization_mode(ToolAuthorizationMode::Interactive);
@@ -1094,7 +1092,7 @@ pub(crate) async fn open_headless_prompt_session(
     if !matches!(session_options.mode, SessionMode::Enabled) {
         ensure_non_persistent_target(options.session_target.as_ref())?;
         return CodingAgentSession::non_persistent_internal(with_ai_client(
-            CodingAgentSessionOptions::new().with_cwd(session_options.cwd.clone()),
+            session_options_for_run(session_options),
             options.ai_client.as_ref(),
         ))
         .await;
@@ -1102,9 +1100,7 @@ pub(crate) async fn open_headless_prompt_session(
 
     let session_root = headless_session_root(session_options)?;
     let session_options = with_ai_client(
-        CodingAgentSessionOptions::new()
-            .with_cwd(session_options.cwd.clone())
-            .with_session_log_root(session_root),
+        session_options_for_run(session_options).with_session_log_root(session_root),
         options.ai_client.as_ref(),
     );
     open_persistent_session(session_options, options.session_target.as_ref()).await
@@ -1202,9 +1198,17 @@ fn enabled_session_options(
 fn interactive_navigation_options(
     session_options: &SessionRunOptions,
 ) -> Result<CodingAgentSessionOptions, CodingSessionError> {
-    Ok(CodingAgentSessionOptions::new()
-        .with_cwd(session_options.cwd.clone())
+    Ok(session_options_for_run(session_options)
         .with_session_log_root(headless_session_root(session_options)?))
+}
+
+fn session_options_for_run(options: &SessionRunOptions) -> CodingAgentSessionOptions {
+    match options.workspace.as_ref() {
+        Some(workspace) => {
+            CodingAgentSessionOptions::new().with_resolved_workspace(workspace.clone())
+        }
+        None => CodingAgentSessionOptions::new().with_cwd(options.cwd.clone()),
+    }
 }
 
 fn hydration_matches_cwd(hydration: &CodingAgentSessionHydration, cwd: &Path) -> bool {

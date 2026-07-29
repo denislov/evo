@@ -4761,6 +4761,7 @@ mod tests {
         desktop::runtime::DesktopRuntimeHydratedSnapshot {
             project: CodingAgentEmbeddingSnapshot {
                 cwd: std::path::PathBuf::from("/desktop-visual-test"),
+                workspace: None,
                 global_config_dir: std::path::PathBuf::from("/desktop-visual-test/config"),
                 selected_model_id: "test-model".into(),
                 default_agent_profile_id: ProfileId::from("default"),

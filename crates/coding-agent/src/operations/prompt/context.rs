@@ -1690,6 +1690,7 @@ mod tests {
                 mode: SessionMode::Enabled,
                 cwd: ".".into(),
                 session_dir: Some("sessions".into()),
+                workspace: None,
             }),
             session_target: Some(ResolvedSessionTarget::New),
             session_name: Some("test".into()),

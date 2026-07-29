@@ -33,6 +33,10 @@ use crate::runtime::facade::{
     CodingAgentSessionOptions, CodingAgentSessionSummary, CodingSessionError,
 };
 use crate::runtime::public_error::safe_public_summary;
+use crate::workspace::{
+    CodingAgentResolvedWorkspace, CodingAgentWorkspaceResolutionError, CodingAgentWorkspaceScope,
+    CodingAgentWorkspaceSelection,
+};
 
 /// Product-owned options for loading one embeddable project context.
 ///
@@ -41,6 +45,7 @@ use crate::runtime::public_error::safe_public_summary;
 #[derive(Debug, Clone)]
 pub struct CodingAgentEmbeddingOptions {
     cwd: PathBuf,
+    workspace: Option<CodingAgentResolvedWorkspace>,
     session_mode: SessionMode,
     session_dir: Option<PathBuf>,
     model_id: Option<String>,
@@ -52,12 +57,41 @@ impl CodingAgentEmbeddingOptions {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self {
             cwd: cwd.into(),
+            workspace: None,
             session_mode: SessionMode::Enabled,
             session_dir: None,
             model_id: None,
             default_agent_profile_id: ProfileId::from("default"),
             global_config_only: false,
         }
+    }
+
+    /// Resolve a typed workspace selection into options for one immutable
+    /// workspace context.
+    ///
+    /// Project contexts load project configuration and resources. Projectless
+    /// contexts use only user-global state while executing in a managed scratch
+    /// directory. Both freeze the same product-global durable session root so a
+    /// project's local settings cannot redirect session persistence.
+    pub fn for_workspace(
+        selection: CodingAgentWorkspaceSelection,
+    ) -> Result<Self, CodingAgentWorkspaceResolutionError> {
+        let global_config_dir = global_config_directory();
+        let workspace = selection.resolve(&global_config_dir)?;
+        let global_config_only = matches!(
+            &workspace.scope,
+            CodingAgentWorkspaceScope::Projectless { .. }
+        );
+        let cwd = workspace.execution_cwd.clone();
+        Ok(Self {
+            cwd,
+            workspace: Some(workspace),
+            session_mode: SessionMode::Enabled,
+            session_dir: Some(workspace_session_root(&global_config_dir)),
+            model_id: None,
+            default_agent_profile_id: ProfileId::from("default"),
+            global_config_only,
+        })
     }
 
     pub fn with_session_mode(mut self, mode: SessionMode) -> Self {
@@ -91,6 +125,10 @@ impl CodingAgentEmbeddingOptions {
         &self.cwd
     }
 
+    pub fn workspace(&self) -> Option<&CodingAgentResolvedWorkspace> {
+        self.workspace.as_ref()
+    }
+
     pub fn session_mode(&self) -> SessionMode {
         self.session_mode.clone()
     }
@@ -115,6 +153,14 @@ impl CodingAgentEmbeddingOptions {
 /// Return the product-resolved root for user-global configuration.
 pub fn global_config_directory() -> PathBuf {
     crate::config::resolve_paths(Path::new(".")).global_dir
+}
+
+fn workspace_session_root(global_config_dir: &Path) -> PathBuf {
+    load_global_settings_state()
+        .session_dir
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("EVO_SESSION_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| global_config_dir.join("sessions"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +382,11 @@ pub struct CodingAgentSettingsSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingAgentEmbeddingSnapshot {
     pub cwd: PathBuf,
+    /// Typed workspace identity and execution cwd for scope-aware contexts.
+    ///
+    /// `None` is retained only for callers still using the transitional raw
+    /// [`CodingAgentEmbeddingOptions::new`] constructor.
+    pub workspace: Option<CodingAgentResolvedWorkspace>,
     /// Product-resolved root for client-local adapter state.
     ///
     /// This is path information only: it grants no authority over product
@@ -387,14 +438,29 @@ impl CodingAgentEmbeddingContext {
             options.session_mode.clone(),
             options.session_dir.clone(),
         )?;
-        run_options.global_config_only = options.global_config_only;
-        let resolved = resolve_application_context_from_options(
+        run_options.global_config_only =
+            options
+                .workspace
+                .as_ref()
+                .map_or(options.global_config_only, |workspace| {
+                    matches!(
+                        &workspace.scope,
+                        CodingAgentWorkspaceScope::Projectless { .. }
+                    )
+                });
+        run_options.session.workspace = options.workspace.clone();
+        let mut resolved = resolve_application_context_from_options(
             CodingAgentInvocationOptions::default(),
             run_options,
         )
         .map_err(|error| CodingSessionError::Config {
             message: error.to_string(),
         })?;
+        if options.workspace.is_some()
+            && let Some(session) = resolved.session.as_mut()
+        {
+            session.session_dir = options.session_dir.clone();
+        }
         let profile_registry =
             resolve_profile_registry(&resolved).map_err(|error| CodingSessionError::Config {
                 message: error.to_string(),
@@ -589,8 +655,13 @@ impl CodingAgentEmbeddingContext {
     pub(crate) fn session_options_internal(
         &self,
     ) -> Result<CodingAgentSessionOptions, CodingSessionError> {
-        let mut options = CodingAgentSessionOptions::new()
-            .with_cwd(self.options.cwd.clone())
+        let options = match self.options.workspace.as_ref() {
+            Some(workspace) => {
+                CodingAgentSessionOptions::new().with_resolved_workspace(workspace.clone())
+            }
+            None => CodingAgentSessionOptions::new().with_cwd(self.options.cwd.clone()),
+        };
+        let mut options = options
             .with_default_agent_profile_id(self.options.default_agent_profile_id.clone())
             .with_tool_authorization_mode(ToolAuthorizationMode::Interactive);
         if let Some(root) = self
@@ -875,6 +946,7 @@ fn build_snapshot(
 
     CodingAgentEmbeddingSnapshot {
         cwd: resolved.cwd.clone(),
+        workspace: options.workspace.clone(),
         global_config_dir: resolved.config_paths.global_dir.clone(),
         selected_model_id: resolved.model.id.clone(),
         default_agent_profile_id: options.default_agent_profile_id.clone(),
@@ -952,6 +1024,7 @@ mod tests {
     use crate::app::settings::global_settings_snapshot;
     use crate::config::AuthStore;
     use crate::runtime::facade::CodingAgentErrorCategory;
+    use crate::workspace::CodingAgentWorkspaceKind;
     use ai::api::compatibility::{
         AnthropicMessagesCompat, OpenAICompletionsCompat, ThinkingLevelValue,
     };
@@ -973,6 +1046,291 @@ mod tests {
             headers: None,
             compat: None,
         }
+    }
+
+    fn write_test_skill(root: &Path, name: &str) {
+        let directory = root.join("skills").join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} description\n---\n{name} body\n"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_contexts_isolate_project_state_and_share_the_global_session_root() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR", "EVO_SESSION_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let shared_sessions = temp.path().join("shared-sessions");
+        let project_a = temp.path().join("project-a");
+        let project_b = temp.path().join("project-b");
+        std::fs::create_dir_all(global.as_path()).unwrap();
+        std::fs::create_dir_all(project_a.join(".evo/agents")).unwrap();
+        std::fs::create_dir_all(project_b.join(".evo")).unwrap();
+        std::fs::write(
+            global.join("settings.toml"),
+            format!(
+                "session_dir = {}\n",
+                toml::Value::String(shared_sessions.to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            project_a.join(".evo/settings.toml"),
+            format!(
+                "default_thinking_level = \"low\"\nsession_dir = {}\n",
+                toml::Value::String(
+                    temp.path()
+                        .join("project-a-sessions")
+                        .to_string_lossy()
+                        .into_owned()
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            project_b.join(".evo/settings.toml"),
+            format!(
+                "default_thinking_level = \"high\"\nsession_dir = {}\n",
+                toml::Value::String(
+                    temp.path()
+                        .join("project-b-sessions")
+                        .to_string_lossy()
+                        .into_owned()
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::write(project_a.join("AGENTS.md"), "project a context").unwrap();
+        std::fs::write(project_b.join("AGENTS.md"), "project b context").unwrap();
+        write_test_skill(&project_a.join(".evo"), "project-a-skill");
+        write_test_skill(&project_b.join(".evo"), "project-b-skill");
+        std::fs::write(
+            project_a.join(".evo/agents/project-a.toml"),
+            "schema_version = 1\nid = \"project-a\"\ndisplay_name = \"Project A\"\n",
+        )
+        .unwrap();
+        env.set_evo_dir(&global);
+
+        let context_a = CodingAgentEmbeddingContext::load(
+            CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(
+                &project_a,
+            ))
+            .unwrap()
+            .with_model_id("gpt-5")
+            .with_default_agent_profile_id("project-a"),
+        )
+        .unwrap();
+        let context_b = CodingAgentEmbeddingContext::load(
+            CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(
+                &project_b,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let canonical_a = project_a.canonicalize().unwrap();
+        let canonical_b = project_b.canonicalize().unwrap();
+        assert_eq!(context_a.snapshot().cwd, canonical_a);
+        assert_eq!(context_b.snapshot().cwd, canonical_b);
+        assert_eq!(
+            context_a
+                .snapshot()
+                .workspace
+                .as_ref()
+                .map(|workspace| &workspace.scope),
+            Some(&CodingAgentWorkspaceScope::Project {
+                cwd: canonical_a.clone(),
+            })
+        );
+        assert_eq!(context_a.snapshot().selected_model_id, "gpt-5");
+        assert_eq!(
+            context_a.snapshot().default_agent_profile_id.as_str(),
+            "project-a"
+        );
+        assert!(
+            context_a
+                .snapshot()
+                .profiles
+                .iter()
+                .any(|profile| profile.id.as_str() == "project-a")
+        );
+        assert!(
+            !context_b
+                .snapshot()
+                .profiles
+                .iter()
+                .any(|profile| profile.id.as_str() == "project-a")
+        );
+        assert_eq!(
+            context_a
+                .snapshot()
+                .settings
+                .default_thinking_level
+                .as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            context_b
+                .snapshot()
+                .settings
+                .default_thinking_level
+                .as_deref(),
+            Some("high")
+        );
+        assert!(
+            context_a
+                .snapshot()
+                .resources
+                .skill_names
+                .iter()
+                .any(|name| name == "project-a-skill")
+        );
+        assert!(
+            !context_a
+                .snapshot()
+                .resources
+                .skill_names
+                .iter()
+                .any(|name| name == "project-b-skill")
+        );
+        assert!(
+            context_a
+                .snapshot()
+                .resources
+                .context_files
+                .contains(&canonical_a.join("AGENTS.md"))
+        );
+        assert!(
+            !context_a
+                .snapshot()
+                .resources
+                .context_files
+                .contains(&canonical_b.join("AGENTS.md"))
+        );
+
+        let options_a = context_a.session_options().unwrap();
+        let options_b = context_b.session_options().unwrap();
+        assert_eq!(
+            options_a.session_log_root(),
+            Some(shared_sessions.as_path())
+        );
+        assert_eq!(
+            options_b.session_log_root(),
+            Some(shared_sessions.as_path())
+        );
+
+        let _session_a = context_a
+            .create_session_with_id("workspace-project-a")
+            .await
+            .unwrap();
+        let _session_b = context_b
+            .session_bootstrap()
+            .with_new_session()
+            .open()
+            .await
+            .unwrap();
+        let overviews_a = context_a.session_query().unwrap().overviews().unwrap();
+        let overviews_b = context_b.session_query().unwrap().overviews().unwrap();
+        assert_eq!(overviews_a.overviews.len(), 1);
+        assert_eq!(overviews_b.overviews.len(), 1);
+        assert_eq!(
+            overviews_a.overviews[0].workspace.kind,
+            CodingAgentWorkspaceKind::Project
+        );
+        assert_ne!(
+            overviews_a.overviews[0].workspace.group_id,
+            overviews_b.overviews[0].workspace.group_id
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn projectless_context_ignores_managed_scratch_project_state() {
+        let env = crate::test_support::EnvGuard::new(&["EVO_DIR", "EVO_SESSION_DIR"]);
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(
+            global.join("settings.toml"),
+            "default_thinking_level = \"low\"\n",
+        )
+        .unwrap();
+        std::fs::write(global.join("AGENTS.md"), "global context").unwrap();
+        write_test_skill(&global, "global-skill");
+        env.set_evo_dir(&global);
+
+        let options = CodingAgentEmbeddingOptions::for_workspace(
+            CodingAgentWorkspaceSelection::projectless("home-workspace"),
+        )
+        .unwrap();
+        let workspace = options.workspace().unwrap().clone();
+        std::fs::create_dir_all(workspace.execution_cwd.join(".evo")).unwrap();
+        std::fs::write(
+            workspace.execution_cwd.join(".evo/settings.toml"),
+            "default_thinking_level = \"xhigh\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.execution_cwd.join("AGENTS.md"),
+            "scratch project context must not load",
+        )
+        .unwrap();
+        write_test_skill(
+            &workspace.execution_cwd.join(".evo"),
+            "scratch-project-skill",
+        );
+
+        let context = CodingAgentEmbeddingContext::load(options).unwrap();
+
+        assert_eq!(context.snapshot().cwd, workspace.execution_cwd);
+        assert_eq!(context.snapshot().workspace.as_ref(), Some(&workspace));
+        assert_eq!(
+            workspace.overview.kind,
+            CodingAgentWorkspaceKind::Projectless
+        );
+        assert_eq!(workspace.overview.display_path, None);
+        assert_eq!(
+            context
+                .snapshot()
+                .settings
+                .default_thinking_level
+                .as_deref(),
+            Some("low")
+        );
+        assert!(
+            context
+                .snapshot()
+                .resources
+                .skill_names
+                .iter()
+                .any(|name| name == "global-skill")
+        );
+        assert!(
+            !context
+                .snapshot()
+                .resources
+                .skill_names
+                .iter()
+                .any(|name| name == "scratch-project-skill")
+        );
+        assert_eq!(
+            context.snapshot().resources.context_files,
+            vec![global.join("AGENTS.md")]
+        );
+
+        let _session = context
+            .create_session_with_id("workspace-projectless")
+            .await
+            .unwrap();
+        let overviews = context.session_query().unwrap().overviews().unwrap();
+        assert_eq!(overviews.overviews.len(), 1);
+        assert_eq!(
+            overviews.overviews[0].workspace.kind,
+            CodingAgentWorkspaceKind::Projectless
+        );
+        assert_eq!(overviews.overviews[0].workspace.display_path, None);
     }
 
     #[test]

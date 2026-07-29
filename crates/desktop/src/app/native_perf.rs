@@ -732,6 +732,7 @@ fn hydrated_snapshot(
     DesktopRuntimeHydratedSnapshot {
         project: CodingAgentEmbeddingSnapshot {
             cwd: std::path::PathBuf::from("/desktop-native-replay"),
+            workspace: None,
             global_config_dir: std::path::PathBuf::from("/desktop-native-replay/config"),
             selected_model_id: "performance-fixture".into(),
             default_agent_profile_id: ProfileId::from("default"),

@@ -69,6 +69,8 @@ fn prompt() -> PromptTurnOptions {
 
 fn workspace_contract() {
     let selection = CodingAgentWorkspaceSelection::project("project");
+    let _: Result<CodingAgentEmbeddingOptions, CodingAgentWorkspaceResolutionError> =
+        CodingAgentEmbeddingOptions::for_workspace(selection.clone());
     let _: CodingAgentWorkspaceSelection =
         CodingAgentWorkspaceSelection::projectless("workspace-stable");
     let _: Option<Result<CodingAgentResolvedWorkspace, CodingAgentWorkspaceResolutionError>> = None;
@@ -78,6 +80,10 @@ fn workspace_contract() {
     let _: Option<CodingAgentWorkspaceMigration> = None;
     let _: CodingAgentWorkspaceMigrationOutcome = CodingAgentWorkspaceMigrationOutcome::Pending;
     touch(selection);
+}
+
+fn embedding_workspace_snapshot(snapshot: &CodingAgentEmbeddingSnapshot) {
+    let _: Option<&CodingAgentResolvedWorkspace> = snapshot.workspace.as_ref();
 }
 
 fn thinking_contract(model: &CodingAgentModelChoice) {

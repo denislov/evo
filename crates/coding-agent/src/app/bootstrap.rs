@@ -10,6 +10,8 @@ use ai::api::model::Model;
 use ai::api::stream::StreamOptions;
 use std::path::PathBuf;
 
+use crate::workspace::CodingAgentResolvedWorkspace;
+
 pub const DEFAULT_MODEL_ID: &str = "claude-sonnet-4-5";
 
 /// Default system prompt mirroring TS `buildSystemPrompt` in
@@ -43,6 +45,7 @@ pub struct SessionRunOptions {
     pub mode: SessionMode,
     pub cwd: PathBuf,
     pub session_dir: Option<PathBuf>,
+    pub(crate) workspace: Option<CodingAgentResolvedWorkspace>,
 }
 
 impl SessionRunOptions {
@@ -51,6 +54,7 @@ impl SessionRunOptions {
             mode: SessionMode::Disabled,
             cwd,
             session_dir: None,
+            workspace: None,
         }
     }
 
@@ -59,6 +63,7 @@ impl SessionRunOptions {
             mode: SessionMode::Enabled,
             cwd,
             session_dir: None,
+            workspace: None,
         }
     }
 }
