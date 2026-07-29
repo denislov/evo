@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302、VUI-303 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -164,8 +164,8 @@ if width_changed || phase_changed || details_changed || revision_changed {
 
 ### 2.12 其他被本计划触及的现状
 
-- 顶栏「Next model / Next profile」循环：`conversation_header.rs:216-243`。运行时早已接受
-  显式 `SelectModel { model_id }` / `SelectSessionProfile { profile_id }`，循环是 UI 侧限制。
+- 顶栏原「Next model / Next profile」循环已由 VUI-303 移除。运行时继续接受显式
+  `SelectModel { model_id }` / `SelectSessionProfile { profile_id }`，Desktop 直接提交所选 id。
 - 底栏承载：状态 glyph + label、changed file 计数、**notice 下拉**、命令面板提示
   （`status_bar.rs`）。`preference_notice` 是全应用唯一的瞬时反馈通道。
 - `FocusTarget::Status` 是键盘焦点环的一站（`crates/desktop/src/shell.rs:190-202`）。
@@ -1242,6 +1242,30 @@ refactor(desktop): replace the status bar with transient toasts
 - 新增测试：选择非相邻模型可一步到位，产生正确的 command intent；
 - 新增测试：待机态可选择模型；
 - 三档 golden 更新并附 review note。
+
+**实施记录（2026-07-29）**
+
+- `ConversationHeader` 将原合并循环菜单拆为模型与 Profile 两个独立 `DropdownMenu`。菜单直接消费项目
+  快照的完整 `models` / `profiles`，当前项使用 checked 状态；模型项同时显示 name、provider 与 id，
+  不支持文本或未配置的模型保留在完整目录中但明确禁用；Team Profile 同样保留可见，但因产品只接受
+  default agent Profile 而不可选择。超过 8 项时复用既有 `PopupMenu` 的滚动能力并将高度限制为 320 px，
+  没有引入第二套控件或循环降级路径。
+- header 事件改为携带精确 `Arc<str>` id，shell 直接生成既有 `SelectModel` /
+  `SelectSessionProfile` intent；重复选择当前项不产生命令。旧 `next_*` 计算、`SelectNext*` 事件以及命令
+  面板中的循环入口全部删除，因而非相邻目标可一步选择。运行中、等待首轮启动、reload 或已有 selection
+  pending 时仍沿用原禁用条件。
+- 待机 Home 现在挂载同一个 header，并以 `New task` 标识；模型与 Profile 来自 cwd-free 项目快照，选择时
+  不要求 session projection。宽视口显示 `Model` / `Profile`，中窄视口保持原紧凑降级为 `M` / `P`，
+  完整 accessible label 始终包含当前值。
+- 新增 GPUI 回归覆盖待机态完整模型目录、禁用的不兼容模型、一步选择非相邻模型并提交精确 id，以及待机
+  Profile 精确选择；测试运行时 harness 只暴露测试态的选择命令解包。源码边界测试同时锁定 checked、
+  长列表滚动与旧循环路径消失，三档响应式和最小命中区测试保持通过。
+- 全部 10 个 fixture（standard / idle 三档及 authorization、reduced-motion、keyboard-focus、no-color）
+  已人工审图并附 review note；安装后复播 RMSE 均为 `0`。最终验证为 Desktop `214 passed / 5 ignored`、
+  dependency boundary `16/16`、all-target check、严格 Clippy、fmt 与 `git diff --check`。
+- native 性能门：GPU/present frame p95 `5655µs`、input p95 `8353µs`、steady RSS growth
+  `28672B`、production Markdown p95 `178µs`；headless 门：10k hydration `2984µs`、frame p95
+  `2744µs`、input roundtrip p95 `5748µs`，200 events/s streaming p95 `5µs`。
 
 **建议提交**
 

@@ -58,8 +58,6 @@ pub(crate) enum DesktopPaletteCommand {
     FollowLatest,
     ReloadResources,
     CopyConversation,
-    SelectNextModel,
-    SelectNextProfile,
     CycleThinking,
     ReviewNextFile,
     CopyReviewPath,
@@ -169,18 +167,6 @@ pub(crate) const PALETTE_ENTRIES: &[DesktopPaletteEntry] = &[
         "Copy selected conversation block",
         None,
         "Copy the selected durable conversation block",
-    ),
-    entry(
-        DesktopPaletteCommand::SelectNextModel,
-        "Select next model",
-        None,
-        "Select the next configured text model",
-    ),
-    entry(
-        DesktopPaletteCommand::SelectNextProfile,
-        "Select next agent profile",
-        None,
-        "Select the next available session agent profile",
     ),
     entry(
         DesktopPaletteCommand::CycleThinking,

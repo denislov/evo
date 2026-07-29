@@ -1,7 +1,7 @@
 use desktop::shell::{PanelVisibility, SemanticStatus, SemanticTheme, ShellLayout};
 use gpui::{
     EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
-    prelude::*, rgb,
+    prelude::*, px, rgb,
 };
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use std::sync::Arc;
@@ -15,27 +15,37 @@ use super::{
     semantic_status_color,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConversationHeaderEvent {
     ToggleSessions,
     ToggleInspector,
-    SelectNextModel,
-    SelectNextSessionProfile,
+    SelectModel(Arc<str>),
+    SelectSessionProfile(Arc<str>),
     Reload,
     Abort,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConversationHeaderSelectorOption {
+    pub(super) id: Arc<str>,
+    pub(super) label: Arc<str>,
+    pub(super) selectable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConversationHeaderViewModel {
+    pub(super) idle: bool,
     pub(super) status: SemanticStatus,
     pub(super) composer_running: bool,
     pub(super) abort_pending: bool,
     pub(super) reload_pending: bool,
     pub(super) selector_disabled: bool,
-    pub(super) model_cycle_available: bool,
-    pub(super) profile_cycle_available: bool,
     pub(super) model: Arc<str>,
     pub(super) profile: Arc<str>,
+    pub(super) current_model_id: Arc<str>,
+    pub(super) current_profile_id: Arc<str>,
+    pub(super) model_options: Arc<[ConversationHeaderSelectorOption]>,
+    pub(super) profile_options: Arc<[ConversationHeaderSelectorOption]>,
     pub(super) project_name: Arc<str>,
     pub(super) keyboard_focus_visible: bool,
     pub(super) panel_visibility: PanelVisibility,
@@ -97,19 +107,34 @@ impl Render for ConversationHeader {
         } else {
             view_model.narrow_context_open
         };
-        let model_profile_label = if layout.workspace.width >= 680 {
-            format!("{} / {}", view_model.model, view_model.profile)
+        let (model_label, profile_label) = if layout.workspace.width >= 720 {
+            (
+                format!("Model · {}", view_model.model),
+                format!("Profile · {}", view_model.profile),
+            )
         } else {
-            view_model.model.to_string()
+            (
+                format!("M · {}", view_model.model),
+                format!("P · {}", view_model.profile),
+            )
         };
-        let model_profile_accessible_label =
-            format!("Model {}, profile {}", view_model.model, view_model.profile);
+        let model_accessible_label =
+            format!("Select model; current {}", view_model.current_model_id);
+        let profile_accessible_label = format!(
+            "Select session profile; current {}",
+            view_model.current_profile_id
+        );
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let focus_accent = conversation_focus_accent(focused, theme);
 
         let model_target = cx.entity().downgrade();
         let profile_target = cx.entity().downgrade();
         let reload_target = cx.entity().downgrade();
+        let model_options = Arc::clone(&view_model.model_options);
+        let profile_options = Arc::clone(&view_model.profile_options);
+        let current_model_id = Arc::clone(&view_model.current_model_id);
+        let current_profile_id = Arc::clone(&view_model.current_profile_id);
+        let selector_disabled = view_model.selector_disabled;
 
         div()
             .id("conversation-header")
@@ -165,7 +190,11 @@ impl Render for ConversationHeader {
                                 div()
                                     .text_token(DesignText::Title)
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child("Current task"),
+                                    .child(if view_model.idle {
+                                        "New task"
+                                    } else {
+                                        "Current task"
+                                    }),
                             )
                             .child(
                                 div()
@@ -200,48 +229,77 @@ impl Render for ConversationHeader {
                     )
                     .child(
                         DesktopSelector::new(
-                            "header-model-profile",
-                            model_profile_label,
-                            model_profile_accessible_label,
+                            "header-model-selector",
+                            model_label,
+                            model_accessible_label,
                         )
-                        .disabled(view_model.selector_disabled)
+                        .disabled(selector_disabled)
                         .build()
-                        .debug_selector(|| "desktop-header-model-profile".into())
+                        .debug_selector(|| "desktop-header-model-selector".into())
                         .dropdown_menu(move |menu, _, _| {
-                            let model_target = model_target.clone();
-                            let profile_target = profile_target.clone();
-                            menu.item(
-                                PopupMenuItem::new(format!("Next model · {}", view_model.model))
-                                    .disabled(
-                                        view_model.selector_disabled
-                                            || !view_model.model_cycle_available,
+                            model_options.iter().fold(
+                                menu.min_w(px(280.))
+                                    .max_w(px(480.))
+                                    .max_h(px(320.))
+                                    .scrollable(model_options.len() > 8),
+                                |menu, option| {
+                                    let target = model_target.clone();
+                                    let id = Arc::clone(&option.id);
+                                    menu.item(
+                                        PopupMenuItem::new(option.label.to_string())
+                                            .checked(option.id == current_model_id)
+                                            .disabled(!option.selectable)
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(target) = target.upgrade() {
+                                                    let id = Arc::clone(&id);
+                                                    target.update(cx, |_, cx| {
+                                                        cx.emit(ConversationHeaderEvent::SelectModel(
+                                                            id,
+                                                        ));
+                                                    });
+                                                }
+                                            }),
                                     )
-                                    .on_click(move |_, _, cx| {
-                                        if let Some(target) = model_target.upgrade() {
-                                            target.update(cx, |_, cx| {
-                                                cx.emit(ConversationHeaderEvent::SelectNextModel);
-                                            });
-                                        }
-                                    }),
+                                },
                             )
-                            .item(
-                                PopupMenuItem::new(format!(
-                                    "Next profile · {}",
-                                    view_model.profile
-                                ))
-                                .disabled(
-                                    view_model.selector_disabled
-                                        || !view_model.profile_cycle_available,
-                                )
-                                .on_click(move |_, _, cx| {
-                                    if let Some(target) = profile_target.upgrade() {
-                                        target.update(cx, |_, cx| {
-                                            cx.emit(
-                                                ConversationHeaderEvent::SelectNextSessionProfile,
-                                            );
-                                        });
-                                    }
-                                }),
+                        }),
+                    )
+                    .child(
+                        DesktopSelector::new(
+                            "header-profile-selector",
+                            profile_label,
+                            profile_accessible_label,
+                        )
+                        .disabled(selector_disabled)
+                        .build()
+                        .debug_selector(|| "desktop-header-profile-selector".into())
+                        .dropdown_menu(move |menu, _, _| {
+                            profile_options.iter().fold(
+                                menu.min_w(px(240.))
+                                    .max_w(px(420.))
+                                    .max_h(px(320.))
+                                    .scrollable(profile_options.len() > 8),
+                                |menu, option| {
+                                    let target = profile_target.clone();
+                                    let id = Arc::clone(&option.id);
+                                    menu.item(
+                                        PopupMenuItem::new(option.label.to_string())
+                                            .checked(option.id == current_profile_id)
+                                            .disabled(!option.selectable)
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(target) = target.upgrade() {
+                                                    let id = Arc::clone(&id);
+                                                    target.update(cx, |_, cx| {
+                                                        cx.emit(
+                                                            ConversationHeaderEvent::SelectSessionProfile(
+                                                                id,
+                                                            ),
+                                                        );
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                },
                             )
                         }),
                     )

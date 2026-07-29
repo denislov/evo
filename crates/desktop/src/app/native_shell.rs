@@ -6,6 +6,7 @@ use coding_agent::api::embedding::{
 };
 use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
+use coding_agent::api::view::ProfileKind;
 use desktop::conversation::{
     ComposerAdmission, ComposerState, ComposerSubmissionKind, ConversationBlockKind,
     ConversationRowMeasurement, MAX_COPY_BYTES, conversation_copy_text, conversation_width_bucket,
@@ -573,10 +574,17 @@ impl NativeShell {
                     ConversationHeaderEvent::ToggleSessions => this.toggle_sessions(window, cx),
                     ConversationHeaderEvent::ToggleInspector => this.toggle_context(window, cx),
                     ConversationHeaderEvent::Reload => this.reload_local_resources(cx),
-                    ConversationHeaderEvent::SelectNextModel => this.select_next_model(cx),
-                    ConversationHeaderEvent::SelectNextSessionProfile => {
-                        this.select_next_session_profile(cx);
-                    }
+                    ConversationHeaderEvent::SelectModel(model_id) => this.submit_selection(
+                        DesktopRuntimeSelectionKind::Model,
+                        model_id.to_string(),
+                        cx,
+                    ),
+                    ConversationHeaderEvent::SelectSessionProfile(profile_id) => this
+                        .submit_selection(
+                            DesktopRuntimeSelectionKind::SessionProfile,
+                            profile_id.to_string(),
+                            cx,
+                        ),
                     ConversationHeaderEvent::Abort => this.abort_active_operation(cx),
                 },
             ),
@@ -2478,29 +2486,13 @@ impl NativeShell {
         cx.notify();
     }
 
-    fn next_model_id(&self) -> Option<String> {
-        let project = &self.project;
-        let candidates = project
-            .models
-            .iter()
-            .filter(|model| model.supports_text && (model.configured || model.selected))
-            .collect::<Vec<_>>();
-        if candidates.len() < 2 {
-            return None;
-        }
-        let current = candidates
-            .iter()
-            .position(|model| model.id == project.selected_model_id)
-            .unwrap_or(0);
-        Some(candidates[(current + 1) % candidates.len()].id.clone())
-    }
-
-    fn next_session_profile_id(&self) -> Option<String> {
-        let profiles = &self.project.profiles;
-        if profiles.len() < 2 {
-            return None;
-        }
-        let current_profile = self
+    fn submit_selection(
+        &mut self,
+        selection: DesktopRuntimeSelectionKind,
+        id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let selected_profile_id = self
             .projection
             .as_ref()
             .map(|projection| {
@@ -2511,19 +2503,13 @@ impl NativeShell {
                     .as_str()
             })
             .unwrap_or_else(|| self.project.default_agent_profile_id.as_str());
-        let next = profiles
-            .iter()
-            .position(|profile| profile.id.as_str() == current_profile)
-            .map_or(0, |current| (current + 1) % profiles.len());
-        Some(profiles[next].id.as_str().to_owned())
-    }
-
-    fn submit_selection(
-        &mut self,
-        selection: DesktopRuntimeSelectionKind,
-        id: String,
-        cx: &mut Context<Self>,
-    ) {
+        let already_selected = match selection {
+            DesktopRuntimeSelectionKind::Model => id == self.project.selected_model_id,
+            DesktopRuntimeSelectionKind::SessionProfile => id == selected_profile_id,
+        };
+        if already_selected {
+            return;
+        }
         if self
             .command_ledger
             .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)))
@@ -2573,26 +2559,6 @@ impl NativeShell {
         self.notify_toast_host(cx);
         self.notify_conversation_header(cx);
         cx.notify();
-    }
-
-    fn select_next_model(&mut self, cx: &mut Context<Self>) {
-        let Some(model_id) = self.next_model_id() else {
-            self.set_preference_notice("No other configured text model is available.".into());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        self.submit_selection(DesktopRuntimeSelectionKind::Model, model_id, cx);
-    }
-
-    fn select_next_session_profile(&mut self, cx: &mut Context<Self>) {
-        let Some(profile_id) = self.next_session_profile_id() else {
-            self.set_preference_notice("No other session profile is available.".into());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        self.submit_selection(DesktopRuntimeSelectionKind::SessionProfile, profile_id, cx);
     }
 
     fn cycle_thinking_selection(&mut self, cx: &mut Context<Self>) {
@@ -3330,8 +3296,6 @@ impl NativeShell {
             DesktopPaletteCommand::FollowLatest => self.follow_latest(cx),
             DesktopPaletteCommand::ReloadResources => self.reload_local_resources(cx),
             DesktopPaletteCommand::CopyConversation => self.copy_selected_conversation(cx),
-            DesktopPaletteCommand::SelectNextModel => self.select_next_model(cx),
-            DesktopPaletteCommand::SelectNextProfile => self.select_next_session_profile(cx),
             DesktopPaletteCommand::CycleThinking => self.cycle_thinking_selection(cx),
             DesktopPaletteCommand::ReviewNextFile => self.review_next_file(cx),
             DesktopPaletteCommand::CopyReviewPath => self.copy_review_path(cx),
@@ -4125,6 +4089,63 @@ impl NativeShell {
         let selection_pending = self
             .command_ledger
             .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)));
+        let current_model_id = project.selected_model_id.as_str();
+        let current_profile_id = snapshot
+            .map(|snapshot| snapshot.session.default_agent_profile_id.as_str())
+            .unwrap_or_else(|| project.default_agent_profile_id.as_str());
+        let model = project
+            .models
+            .iter()
+            .find(|model| model.id == current_model_id)
+            .map(|model| model.name.as_str())
+            .unwrap_or(current_model_id);
+        let profile = project
+            .profiles
+            .iter()
+            .find(|profile| profile.id.as_str() == current_profile_id)
+            .map(|profile| profile.display_name.as_str())
+            .unwrap_or(current_profile_id);
+        let model_options = project
+            .models
+            .iter()
+            .map(|model| {
+                let selectable =
+                    model.supports_text && (model.configured || model.id == current_model_id);
+                let availability = if !model.supports_text {
+                    " · no text input"
+                } else if !selectable {
+                    " · not configured"
+                } else {
+                    ""
+                };
+                ConversationHeaderSelectorOption {
+                    id: Arc::from(model.id.as_str()),
+                    label: Arc::from(format!(
+                        "{} · {} · {}{}",
+                        model.name, model.provider, model.id, availability
+                    )),
+                    selectable,
+                }
+            })
+            .collect::<Vec<_>>();
+        let profile_options = project
+            .profiles
+            .iter()
+            .map(|profile| ConversationHeaderSelectorOption {
+                id: Arc::from(profile.id.as_str()),
+                label: Arc::from(format!(
+                    "{} · {}{}",
+                    profile.display_name,
+                    profile.id.as_str(),
+                    if profile.kind == ProfileKind::Team {
+                        " · team profile"
+                    } else {
+                        ""
+                    }
+                )),
+                selectable: profile.kind == ProfileKind::Agent,
+            })
+            .collect::<Vec<_>>();
         let project_name = project
             .cwd
             .file_name()
@@ -4133,6 +4154,7 @@ impl NativeShell {
             .unwrap_or_else(|| "Project".into());
 
         ConversationHeaderViewModel {
+            idle: self.projection.is_none(),
             status: self.semantic_status(),
             composer_running,
             abort_pending: self
@@ -4143,21 +4165,12 @@ impl NativeShell {
                 || awaiting_prompt_start
                 || reload_pending
                 || selection_pending,
-            model_cycle_available: project
-                .models
-                .iter()
-                .filter(|model| model.supports_text && (model.configured || model.selected))
-                .take(2)
-                .count()
-                > 1,
-            profile_cycle_available: project.profiles.len() > 1,
-            model: Arc::from(truncate_label(&project.selected_model_id, 10)),
-            profile: Arc::from(truncate_label(
-                snapshot
-                    .map(|snapshot| snapshot.session.default_agent_profile_id.as_str())
-                    .unwrap_or_else(|| project.default_agent_profile_id.as_str()),
-                9,
-            )),
+            model: Arc::from(truncate_label(model, 10)),
+            profile: Arc::from(truncate_label(profile, 9)),
+            current_model_id: Arc::from(current_model_id),
+            current_profile_id: Arc::from(current_profile_id),
+            model_options: model_options.into(),
+            profile_options: profile_options.into(),
             project_name: Arc::from(project_name),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             panel_visibility: self.visibility(),
@@ -4294,6 +4307,7 @@ impl Render for NativeShell {
                 .flex()
                 .flex_col()
                 .bg(rgb(theme.canvas.value()))
+                .child(self.conversation_header.clone())
                 .child(self.home_pane.clone())
                 .child(
                     div()
@@ -4476,12 +4490,13 @@ mod tests {
         CodingAgentSnapshot, CodingAgentSnapshotCursor, UI_SNAPSHOT_PROTOCOL_VERSION,
     };
     use coding_agent::api::embedding::{
-        CodingAgentEmbeddingSnapshot, CodingAgentResourceSummary, CodingAgentSettingsSummary,
+        CodingAgentEmbeddingSnapshot, CodingAgentModelChoice, CodingAgentProfileChoice,
+        CodingAgentResourceSummary, CodingAgentSettingsSummary,
     };
     use coding_agent::api::review::CodingAgentFileReview;
     use coding_agent::api::view::{
         CodingAgentCapabilities, CodingAgentSessionTranscriptItem, CodingAgentSessionView,
-        CodingAgentTranscriptSnapshot, ProfileId,
+        CodingAgentTranscriptSnapshot, ProfileId, ProfileKind, ProfileSource,
     };
     use gpui::TestAppContext;
     use gpui_component::{Theme, ThemeMode, text::TextViewState};
@@ -4503,8 +4518,82 @@ mod tests {
                 global_config_dir: std::path::PathBuf::from("/desktop-visual-test/config"),
                 selected_model_id: "test-model".into(),
                 default_agent_profile_id: ProfileId::from("default"),
-                models: Vec::new(),
-                profiles: Vec::new(),
+                models: vec![
+                    CodingAgentModelChoice {
+                        id: "test-model".into(),
+                        name: "Test Model".into(),
+                        provider: "fixture".into(),
+                        reasoning: true,
+                        supports_text: true,
+                        supports_images: true,
+                        context_window: 200_000,
+                        max_output_tokens: 32_000,
+                        configured: true,
+                        selected: true,
+                    },
+                    CodingAgentModelChoice {
+                        id: "adjacent-model".into(),
+                        name: "Adjacent Model".into(),
+                        provider: "fixture".into(),
+                        reasoning: false,
+                        supports_text: true,
+                        supports_images: false,
+                        context_window: 80_000,
+                        max_output_tokens: 8_000,
+                        configured: true,
+                        selected: false,
+                    },
+                    CodingAgentModelChoice {
+                        id: "exact-target-model".into(),
+                        name: "Exact Target".into(),
+                        provider: "fixture".into(),
+                        reasoning: false,
+                        supports_text: true,
+                        supports_images: false,
+                        context_window: 100_000,
+                        max_output_tokens: 16_000,
+                        configured: true,
+                        selected: false,
+                    },
+                    CodingAgentModelChoice {
+                        id: "image-only-model".into(),
+                        name: "Image Only".into(),
+                        provider: "fixture".into(),
+                        reasoning: false,
+                        supports_text: false,
+                        supports_images: true,
+                        context_window: 32_000,
+                        max_output_tokens: 4_000,
+                        configured: true,
+                        selected: false,
+                    },
+                ],
+                profiles: vec![
+                    CodingAgentProfileChoice {
+                        id: ProfileId::from("default"),
+                        display_name: "Default".into(),
+                        description: Some("General coding work".into()),
+                        kind: ProfileKind::Agent,
+                        source: ProfileSource::BuiltIn,
+                        model_id: None,
+                    },
+                    CodingAgentProfileChoice {
+                        id: ProfileId::from("exact-reviewer"),
+                        display_name: "Exact Reviewer".into(),
+                        description: Some("Review changes before completion".into()),
+                        kind: ProfileKind::Agent,
+                        source: ProfileSource::Project,
+                        model_id: Some("exact-target-model".into()),
+                    },
+                    CodingAgentProfileChoice {
+                        id: ProfileId::from("review-team"),
+                        display_name: "Review Team".into(),
+                        description: Some("Delegated review team".into()),
+                        kind: ProfileKind::Team,
+                        source: ProfileSource::Project,
+                        model_id: None,
+                    },
+                ],
                 resources: CodingAgentResourceSummary {
                     skill_names: Vec::new(),
                     prompt_template_names: Vec::new(),
@@ -4697,6 +4786,13 @@ mod tests {
     fn add_idle_visual_shell(
         cx: &mut TestAppContext,
     ) -> (gpui::Entity<NativeShell>, &mut gpui::VisualTestContext) {
+        add_idle_visual_shell_with_runtime(cx, DesktopRuntimeBridge::disconnected_for_test())
+    }
+
+    fn add_idle_visual_shell_with_runtime(
+        cx: &mut TestAppContext,
+        runtime: DesktopRuntimeBridge,
+    ) -> (gpui::Entity<NativeShell>, &mut gpui::VisualTestContext) {
         let shell_slot = Rc::new(RefCell::new(None));
         let shell_slot_for_window = Rc::clone(&shell_slot);
         let mut project = visual_test_snapshot().project;
@@ -4708,7 +4804,7 @@ mod tests {
             let shell = cx.new(|cx| {
                 NativeShell::new(
                     NativeShellInit {
-                        runtime: DesktopRuntimeBridge::disconnected_for_test(),
+                        runtime,
                         project,
                         projection: None,
                         global_skills: Arc::from([CodingAgentResourceCommand {
@@ -4758,10 +4854,9 @@ mod tests {
             assert!(shell.overlay_view_model().authorization.is_none());
             assert!(shell.toast_host.read(cx).messages().len() <= 3);
             assert_eq!(shell.conversation_pane_view_model().visible_count, 0);
-            assert_eq!(
-                shell.conversation_header_view_model().profile.as_ref(),
-                "default"
-            );
+            let header = shell.conversation_header_view_model();
+            assert_eq!(header.profile.as_ref(), "Default");
+            assert_eq!(header.current_profile_id.as_ref(), "default");
             assert_eq!(shell.home_pane_view_model().global_skills.len(), 1);
             assert!(shell.home_pane_view_model().scratch_workspace);
             assert!(shell.home_pane_view_model().workspace.contains("scratch"));
@@ -5087,6 +5182,16 @@ mod tests {
             "{selector} must retain a 32x32 desktop hit target, got {:?}",
             bounds.size
         );
+    }
+
+    fn choose_popup_item(cx: &mut gpui::VisualTestContext, index: usize) {
+        for key in std::iter::repeat_n("down", index + 1).chain(std::iter::once("enter")) {
+            let keystroke = gpui::Keystroke::parse(key)
+                .unwrap_or_else(|error| panic!("popup-menu key {key} is valid: {error}"));
+            let dispatched = cx.update(|window, cx| window.dispatch_keystroke(keystroke, cx));
+            assert!(dispatched, "popup menu handles {key}");
+            cx.run_until_parked();
+        }
     }
 
     fn test_percentile_95(samples: &mut [u128]) -> u128 {
@@ -5915,7 +6020,8 @@ mod tests {
                 "desktop-hit-toggle-sessions",
                 "desktop-hit-toggle-inspector",
                 "desktop-hit-submit-composer",
-                "desktop-header-model-profile",
+                "desktop-header-model-selector",
+                "desktop-header-profile-selector",
                 "desktop-composer-thinking",
             ] {
                 assert_minimum_hit_target(cx, selector);
@@ -5926,6 +6032,96 @@ mod tests {
         cx.run_until_parked();
         assert_minimum_hit_target(cx, "desktop-hit-create-session");
         assert_minimum_hit_target(cx, "desktop-session-row-1");
+    }
+
+    #[gpui::test]
+    fn idle_model_selector_lists_the_complete_catalog_and_submits_the_exact_id(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        let view_model = shell.read_with(cx, |shell, _| shell.conversation_header_view_model());
+        assert!(view_model.idle);
+        assert!(shell.read_with(cx, |shell, _| shell.projection.is_none()));
+        assert_eq!(
+            view_model
+                .model_options
+                .iter()
+                .map(|option| option.id.as_ref())
+                .collect::<Vec<_>>(),
+            [
+                "test-model",
+                "adjacent-model",
+                "exact-target-model",
+                "image-only-model"
+            ]
+        );
+        assert!(view_model.model_options[0].selectable);
+        assert!(view_model.model_options[1].selectable);
+        assert!(view_model.model_options[2].selectable);
+        assert!(!view_model.model_options[3].selectable);
+
+        let selector = cx
+            .debug_bounds("desktop-header-model-selector")
+            .expect("the model selector is visible");
+        cx.simulate_click(selector.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        choose_popup_item(cx, 2);
+
+        assert_eq!(
+            runtime_harness.drain_selections(),
+            [(
+                desktop::runtime::DesktopRuntimeCommandKind::SelectModel,
+                None,
+                "exact-target-model".into(),
+            )]
+        );
+    }
+
+    #[gpui::test]
+    fn idle_profile_selector_uses_project_choices_and_submits_without_a_session(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+        let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
+        cx.run_until_parked();
+        runtime_harness.drain_command_kinds();
+
+        let view_model = shell.read_with(cx, |shell, _| shell.conversation_header_view_model());
+        assert!(view_model.idle);
+        assert_eq!(view_model.current_profile_id.as_ref(), "default");
+        assert_eq!(
+            view_model
+                .profile_options
+                .iter()
+                .map(|option| option.id.as_ref())
+                .collect::<Vec<_>>(),
+            ["default", "exact-reviewer", "review-team"]
+        );
+        assert!(view_model.profile_options[0].selectable);
+        assert!(view_model.profile_options[1].selectable);
+        assert!(!view_model.profile_options[2].selectable);
+
+        let selector = cx
+            .debug_bounds("desktop-header-profile-selector")
+            .expect("the idle header exposes the profile selector");
+        cx.simulate_click(selector.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        choose_popup_item(cx, 1);
+
+        assert_eq!(
+            runtime_harness.drain_selections(),
+            [(
+                desktop::runtime::DesktopRuntimeCommandKind::SelectSessionProfile,
+                None,
+                "exact-reviewer".into(),
+            )]
+        );
     }
 
     #[test]
@@ -7726,7 +7922,11 @@ mod tests {
     fn conversation_header_rendering_is_owned_by_a_non_streaming_child_entity() {
         let shell = include_str!("native_shell.rs");
         let header = include_str!("native_shell/conversation_header.rs");
+        let actions = include_str!("../actions.rs");
         let header_id = [".id(\"conversation-", "header\")"].concat();
+        let old_model_cycle = ["SelectNext", "Model"].concat();
+        let old_profile_cycle = ["SelectNext", "Profile"].concat();
+        let old_session_profile_cycle = ["SelectNext", "SessionProfile"].concat();
 
         assert!(!shell.contains(&header_id));
         assert!(header.contains(&header_id));
@@ -7736,8 +7936,21 @@ mod tests {
         assert!(shell.contains("ConversationHeaderEvent::ToggleSessions"));
         assert!(shell.contains("ConversationHeaderEvent::ToggleInspector"));
         assert!(shell.contains("ConversationHeaderEvent::Reload"));
-        assert!(shell.contains("ConversationHeaderEvent::SelectNextModel"));
-        assert!(shell.contains("ConversationHeaderEvent::SelectNextSessionProfile"));
+        assert!(shell.contains("ConversationHeaderEvent::SelectModel(model_id)"));
+        assert!(shell.contains("ConversationHeaderEvent::SelectSessionProfile(profile_id)"));
+        assert!(header.contains("SelectModel(Arc<str>)"));
+        assert!(header.contains("SelectSessionProfile(Arc<str>)"));
+        assert!(header.contains("desktop-header-model-selector"));
+        assert!(header.contains("desktop-header-profile-selector"));
+        assert!(header.contains(".checked(option.id == current_model_id)"));
+        assert!(header.contains(".checked(option.id == current_profile_id)"));
+        assert!(header.contains(".scrollable(model_options.len() > 8)"));
+        assert!(header.contains(".scrollable(profile_options.len() > 8)"));
+        for owner in [shell, header, actions] {
+            assert!(!owner.contains(&old_model_cycle));
+            assert!(!owner.contains(&old_profile_cycle));
+            assert!(!owner.contains(&old_session_profile_cycle));
+        }
         assert!(!header.contains("ConversationHeaderEvent::CycleThinking"));
         assert!(shell.contains("ConversationHeaderEvent::Abort"));
         assert!(header.contains("ConversationHeaderViewModel"));
@@ -7931,7 +8144,8 @@ use conversation_controller::{
     row_target_height as conversation_row_target_height, upsert_indexed_item,
 };
 use conversation_header::{
-    ConversationHeader, ConversationHeaderEvent, ConversationHeaderViewModel,
+    ConversationHeader, ConversationHeaderEvent, ConversationHeaderSelectorOption,
+    ConversationHeaderViewModel,
 };
 use conversation_pane::{ConversationPane, ConversationPaneEvent, ConversationPaneViewModel};
 use home_pane::{HomePane, HomePaneEvent, HomePaneViewModel};

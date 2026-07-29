@@ -567,6 +567,32 @@ impl DesktopRuntimeTestHarness {
         }
         kinds
     }
+
+    pub(crate) fn drain_selections(
+        &mut self,
+    ) -> Vec<(DesktopRuntimeCommandKind, Option<String>, String)> {
+        let mut selections = Vec::new();
+        while let Ok(command) = self.commands.try_recv() {
+            match command {
+                DesktopRuntimeCommand::SelectModel { model_id, .. } => {
+                    selections.push((DesktopRuntimeCommandKind::SelectModel, None, model_id));
+                }
+                DesktopRuntimeCommand::SelectSessionProfile {
+                    session_id,
+                    profile_id,
+                    ..
+                } => {
+                    selections.push((
+                        DesktopRuntimeCommandKind::SelectSessionProfile,
+                        session_id,
+                        profile_id,
+                    ));
+                }
+                _ => {}
+            }
+        }
+        selections
+    }
 }
 
 impl DesktopRuntimeEventStream {

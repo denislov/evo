@@ -12,13 +12,14 @@ use coding_agent::api::client::{
     CodingAgentSnapshotCursor, UI_SNAPSHOT_PROTOCOL_VERSION,
 };
 use coding_agent::api::embedding::{
-    CodingAgentEmbeddingSnapshot, CodingAgentResourceCommand, CodingAgentResourceCommandKind,
-    CodingAgentResourceSummary, CodingAgentSettingsSummary,
+    CodingAgentEmbeddingSnapshot, CodingAgentModelChoice, CodingAgentProfileChoice,
+    CodingAgentResourceCommand, CodingAgentResourceCommandKind, CodingAgentResourceSummary,
+    CodingAgentSettingsSummary,
 };
 use coding_agent::api::event::CodingAgentProductEvent;
 use coding_agent::api::view::{
     CodingAgentCapabilities, CodingAgentSessionTranscriptItem, CodingAgentSessionView,
-    CodingAgentTranscriptSnapshot, ProfileId,
+    CodingAgentTranscriptSnapshot, ProfileId, ProfileKind, ProfileSource,
 };
 use gpui::{
     App, Bounds, Context, FocusHandle, KeyDownEvent, Keystroke, Render, Window, WindowBounds,
@@ -715,8 +716,62 @@ fn hydrated_snapshot(
             global_config_dir: std::path::PathBuf::from("/desktop-native-replay/config"),
             selected_model_id: "performance-fixture".into(),
             default_agent_profile_id: ProfileId::from("default"),
-            models: Vec::new(),
-            profiles: Vec::new(),
+            models: vec![
+                CodingAgentModelChoice {
+                    id: "performance-fixture".into(),
+                    name: "Performance Fixture".into(),
+                    provider: "fixture".into(),
+                    reasoning: true,
+                    supports_text: true,
+                    supports_images: true,
+                    context_window: 200_000,
+                    max_output_tokens: 32_000,
+                    configured: true,
+                    selected: true,
+                },
+                CodingAgentModelChoice {
+                    id: "review-fixture".into(),
+                    name: "Review Fixture".into(),
+                    provider: "fixture".into(),
+                    reasoning: false,
+                    supports_text: true,
+                    supports_images: false,
+                    context_window: 100_000,
+                    max_output_tokens: 16_000,
+                    configured: true,
+                    selected: false,
+                },
+                CodingAgentModelChoice {
+                    id: "image-fixture".into(),
+                    name: "Image Fixture".into(),
+                    provider: "fixture".into(),
+                    reasoning: false,
+                    supports_text: false,
+                    supports_images: true,
+                    context_window: 32_000,
+                    max_output_tokens: 4_000,
+                    configured: true,
+                    selected: false,
+                },
+            ],
+            profiles: vec![
+                CodingAgentProfileChoice {
+                    id: ProfileId::from("default"),
+                    display_name: "Default".into(),
+                    description: Some("General coding work".into()),
+                    kind: ProfileKind::Agent,
+                    source: ProfileSource::BuiltIn,
+                    model_id: None,
+                },
+                CodingAgentProfileChoice {
+                    id: ProfileId::from("reviewer"),
+                    display_name: "Reviewer".into(),
+                    description: Some("Review changes before completion".into()),
+                    kind: ProfileKind::Agent,
+                    source: ProfileSource::Project,
+                    model_id: Some("review-fixture".into()),
+                },
+            ],
             resources: CodingAgentResourceSummary {
                 skill_names: Vec::new(),
                 prompt_template_names: Vec::new(),
