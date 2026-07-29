@@ -313,7 +313,7 @@ fn desktop_keyboard_actions_are_typed_modal_semantic_and_idle_static() {
         "inspector_pane.rs",
         "overlay_host.rs",
         "sessions_pane.rs",
-        "status_bar.rs",
+        "toast_host.rs",
     ]
     .into_iter()
     .map(|name| {

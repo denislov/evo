@@ -264,6 +264,7 @@ pub(super) struct SessionWorkspace {
     project: CodingAgentEmbeddingSnapshot,
     projection: Option<DesktopProjection>,
     preference_notice: Option<String>,
+    preference_notice_revision: u64,
     conversation_controller: ConversationController,
     inspector_section: InspectorSection,
     composer: ComposerState,
@@ -281,10 +282,12 @@ impl SessionWorkspace {
         preference_notice: Option<String>,
         command_ledger: DesktopCommandLedger,
     ) -> Self {
+        let preference_notice_revision = u64::from(preference_notice.is_some());
         Self {
             project,
             projection,
             preference_notice,
+            preference_notice_revision,
             conversation_controller: ConversationController::default(),
             inspector_section: InspectorSection::default(),
             composer: ComposerState::default(),
@@ -301,6 +304,11 @@ impl SessionWorkspace {
             .as_ref()
             .map(|projection| projection.snapshot().session.session_id.as_str())
             .unwrap_or(HOME_COMPOSER_SESSION_KEY)
+    }
+
+    fn set_preference_notice(&mut self, message: String) {
+        self.preference_notice = Some(message);
+        self.preference_notice_revision = self.preference_notice_revision.wrapping_add(1).max(1);
     }
 }
 
@@ -392,13 +400,12 @@ pub(super) struct NativeShell {
     composer_pane: gpui::Entity<ComposerPane>,
     home_pane: gpui::Entity<HomePane>,
     inspector_pane: gpui::Entity<InspectorPane>,
-    status_bar: gpui::Entity<StatusBar>,
+    toast_host: gpui::Entity<ToastHost>,
     overlay_host: gpui::Entity<OverlayHost>,
     focus: FocusState,
     sessions_focus: FocusHandle,
     conversation_focus: FocusHandle,
     context_focus: FocusHandle,
-    status_focus: FocusHandle,
     authorization_focus: FocusHandle,
     command_palette_focus: FocusHandle,
     narrow_sessions_focus: FocusHandle,
@@ -474,7 +481,6 @@ impl NativeShell {
         let sessions_focus = cx.focus_handle().tab_stop(true).tab_index(1);
         let conversation_focus = cx.focus_handle().tab_stop(true).tab_index(2);
         let context_focus = cx.focus_handle().tab_stop(true).tab_index(4);
-        let status_focus = cx.focus_handle().tab_stop(true).tab_index(5);
         let authorization_focus = cx.focus_handle().tab_stop(true).tab_index(3);
         let command_palette_focus = cx.focus_handle().tab_stop(true).tab_index(3);
         let narrow_sessions_focus = cx.focus_handle().tab_stop(true).tab_index(3);
@@ -485,7 +491,7 @@ impl NativeShell {
         let composer_pane = cx.new(|cx| ComposerPane::new(window, cx));
         let home_pane = cx.new(|_| HomePane::new());
         let inspector_pane = cx.new(|_| InspectorPane::new(context_focus.clone()));
-        let status_bar = cx.new(|_| StatusBar::new(status_focus.clone()));
+        let toast_host = cx.new(|cx| ToastHost::new(window, cx));
         let overlay_host = cx.new(|_| {
             OverlayHost::new(
                 inspector_pane.clone(),
@@ -506,9 +512,6 @@ impl NativeShell {
             }),
             cx.on_focus(&context_focus, window, |this, window, cx| {
                 this.record_focus(FocusTarget::Context, window, cx);
-            }),
-            cx.on_focus(&status_focus, window, |this, window, cx| {
-                this.record_focus(FocusTarget::Status, window, cx);
             }),
             cx.subscribe_in(
                 &conversation_pane,
@@ -727,13 +730,12 @@ impl NativeShell {
             composer_pane,
             home_pane,
             inspector_pane,
-            status_bar,
+            toast_host,
             overlay_host,
             focus: FocusState::default(),
             sessions_focus,
             conversation_focus,
             context_focus,
-            status_focus,
             authorization_focus,
             command_palette_focus,
             narrow_sessions_focus,
@@ -752,10 +754,7 @@ impl NativeShell {
             runtime_ui_notification_count: 0,
             _subscriptions: subscriptions,
         };
-        let status_bar_view_model = shell.status_bar_view_model();
-        shell.status_bar.update(cx, |status_bar, _| {
-            status_bar.set_view_model(status_bar_view_model);
-        });
+        shell.notify_toast_host(cx);
         let conversation_header_view_model = shell.conversation_header_view_model();
         shell
             .conversation_header
@@ -883,7 +882,7 @@ impl NativeShell {
             return self.swap_active_workspace(target_session_id);
         }
         if self.open_workspace_count() >= MAX_SESSION_WORKSPACES {
-            self.preference_notice = Some(format!(
+            self.set_preference_notice(format!(
                 "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
             ));
             return false;
@@ -891,7 +890,7 @@ impl NativeShell {
         let projection = match DesktopProjection::new(snapshot.clone()) {
             Ok(projection) => projection,
             Err(issue) => {
-                self.preference_notice = Some(format!(
+                self.set_preference_notice(format!(
                     "Session response failed projection validation ({}).",
                     truncate_label(&issue.code, 28)
                 ));
@@ -953,7 +952,7 @@ impl NativeShell {
         let command_id = match self.reserve_session_command(session_id, intent.clone()) {
             Ok(command_id) => command_id,
             Err(error) => {
-                self.preference_notice = Some(error);
+                self.set_preference_notice(error);
                 self.notify_sessions_pane(cx);
                 return;
             }
@@ -969,7 +968,7 @@ impl NativeShell {
             });
         if let Err(error) = admission {
             let _ = self.complete_workspace_command(session_id, command_id, &intent);
-            self.preference_notice = Some(error);
+            self.set_preference_notice(error);
         }
         self.notify_sessions_pane(cx);
     }
@@ -1148,7 +1147,7 @@ impl NativeShell {
         self.notify_conversation_header(cx);
         self.notify_composer_pane(cx);
         self.notify_inspector_pane(cx);
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
         cx.notify();
     }
 
@@ -1181,9 +1180,6 @@ impl NativeShell {
         }
         if previous == FocusTarget::Context || target == FocusTarget::Context {
             self.notify_inspector_pane(cx);
-        }
-        if previous == FocusTarget::Status || target == FocusTarget::Status {
-            self.notify_status_bar(cx);
         }
     }
 
@@ -1240,7 +1236,7 @@ impl NativeShell {
         let mut composer_pane_dirty = false;
         let mut inspector_pane_dirty = false;
         let mut inspector_telemetry_dirty = false;
-        let mut status_bar_dirty = false;
+        let mut toast_host_dirty = false;
         let mut conversation_header_dirty = false;
         let mut overlay_host_dirty = false;
         let mut root_dirty = false;
@@ -1254,7 +1250,7 @@ impl NativeShell {
                 composer_pane_dirty,
                 inspector_pane_dirty,
                 inspector_telemetry_dirty,
-                status_bar_dirty,
+                toast_host_dirty,
                 conversation_header_dirty,
                 overlay_host_dirty,
                 root_dirty,
@@ -1280,7 +1276,7 @@ impl NativeShell {
                 &update,
                 desktop::runtime::DesktopRuntimeUpdate::ProductEvent { .. }
             ) {
-                status_bar_dirty = true;
+                toast_host_dirty = true;
                 conversation_header_dirty = true;
                 overlay_host_dirty = true;
                 root_dirty = true;
@@ -1300,7 +1296,7 @@ impl NativeShell {
                             composer_pane_dirty,
                             inspector_pane_dirty,
                             inspector_telemetry_dirty,
-                            status_bar_dirty,
+                            toast_host_dirty,
                             conversation_header_dirty,
                             overlay_host_dirty,
                             root_dirty,
@@ -1365,8 +1361,9 @@ impl NativeShell {
                         .submitted()
                         .is_some_and(|submitted| submitted.command_id != *command_id)
                     {
-                        self.preference_notice =
-                            Some("Prompt start did not match the submitted command.".into());
+                        self.set_preference_notice(
+                            "Prompt start did not match the submitted command.".into(),
+                        );
                     }
                 }
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
@@ -1404,8 +1401,10 @@ impl NativeShell {
                     },
                 ) =>
                 {
-                    self.preference_notice =
-                        Some(format!("Abort accepted for {}.", receipt.operation_id));
+                    self.set_preference_notice(format!(
+                        "Abort accepted for {}.",
+                        receipt.operation_id
+                    ));
                 }
                 desktop::runtime::DesktopRuntimeUpdate::ControlAccepted {
                     command_id,
@@ -1427,7 +1426,7 @@ impl NativeShell {
                         && self.composer.accepted(*command_id).is_ok()
                     {
                         self.composer_needs_sync = true;
-                        self.preference_notice = Some(format!(
+                        self.set_preference_notice(format!(
                             "{command:?} accepted for {}.",
                             receipt.operation_id
                         ));
@@ -1446,8 +1445,9 @@ impl NativeShell {
                         ToolAuthorizationDecision::AllowForOperation => "allow for operation",
                         ToolAuthorizationDecision::Deny { .. } => "deny",
                     };
-                    self.preference_notice =
-                        Some(format!("Authorization decision accepted: {decision}."));
+                    self.set_preference_notice(format!(
+                        "Authorization decision accepted: {decision}."
+                    ));
                 }
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
                     command_id,
@@ -1462,7 +1462,7 @@ impl NativeShell {
                     )
                     .is_some() =>
                 {
-                    self.preference_notice = Some(safe_runtime_rejection_notice(
+                    self.set_preference_notice(safe_runtime_rejection_notice(
                         desktop::runtime::DesktopRuntimeCommandKind::Abort,
                         code,
                     ));
@@ -1480,7 +1480,7 @@ impl NativeShell {
                     )
                     .is_some() =>
                 {
-                    self.preference_notice = Some(format!(
+                    self.set_preference_notice(format!(
                         "Reload failed ({}); previous context retained.",
                         truncate_label(code, 28)
                     ));
@@ -1497,7 +1497,7 @@ impl NativeShell {
                     .complete_rejection(*command_id, *command)
                     .is_some() =>
                 {
-                    self.preference_notice = Some(format!(
+                    self.set_preference_notice(format!(
                         "{command:?} failed ({}); previous selection retained.",
                         truncate_label(code, 28)
                     ));
@@ -1517,7 +1517,7 @@ impl NativeShell {
                         .is_some()
                         && self.composer.rejected(*command_id, notice.clone()).is_ok()
                     {
-                        self.preference_notice = Some(notice);
+                        self.set_preference_notice(notice);
                     }
                 }
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
@@ -1533,7 +1533,7 @@ impl NativeShell {
                     )
                     .is_some() =>
                 {
-                    self.preference_notice = Some(safe_runtime_rejection_notice(
+                    self.set_preference_notice(safe_runtime_rejection_notice(
                         desktop::runtime::DesktopRuntimeCommandKind::DecideToolAuthorization,
                         code,
                     ));
@@ -1550,7 +1550,7 @@ impl NativeShell {
                     .complete_rejection(*command_id, *command)
                     .is_some() =>
                 {
-                    self.preference_notice = Some(safe_runtime_rejection_notice(*command, code));
+                    self.set_preference_notice(safe_runtime_rejection_notice(*command, code));
                     inspector_pane_dirty = true;
                 }
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
@@ -1568,7 +1568,7 @@ impl NativeShell {
                     .complete_rejection(*command_id, *command)
                     .is_some() =>
                 {
-                    self.preference_notice = Some(safe_runtime_rejection_notice(*command, code));
+                    self.set_preference_notice(safe_runtime_rejection_notice(*command, code));
                     sessions_pane_dirty = true;
                 }
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
@@ -1587,7 +1587,7 @@ impl NativeShell {
                             request,
                             code: code.clone(),
                         });
-                        self.preference_notice = Some(format!(
+                        self.set_preference_notice(format!(
                             "File review unavailable ({}).",
                             truncate_label(code, 32)
                         ));
@@ -1607,7 +1607,7 @@ impl NativeShell {
                     )
                     .is_some() =>
                 {
-                    self.preference_notice = Some(format!(
+                    self.set_preference_notice(format!(
                         "External editor unavailable ({}).",
                         truncate_label(code, 32)
                     ));
@@ -1640,7 +1640,7 @@ impl NativeShell {
                         )
                     });
                     if let Some(error) = error {
-                        self.preference_notice = Some(format!(
+                        self.set_preference_notice(format!(
                             "Prompt finished with runtime error ({}).",
                             truncate_label(&error.code, 28)
                         ));
@@ -1688,7 +1688,7 @@ impl NativeShell {
                     match DesktopProjection::new(hydrated.clone()) {
                         Ok(projection) => self.projection = Some(projection),
                         Err(issue) => {
-                            self.preference_notice = Some(format!(
+                            self.set_preference_notice(format!(
                                 "Session response failed projection validation ({}).",
                                 truncate_label(&issue.code, 28)
                             ));
@@ -1720,7 +1720,7 @@ impl NativeShell {
                         composer_pane_dirty,
                         inspector_pane_dirty,
                         inspector_telemetry_dirty,
-                        status_bar_dirty,
+                        toast_host_dirty,
                         conversation_header_dirty,
                         overlay_host_dirty,
                         root_dirty,
@@ -1759,9 +1759,6 @@ impl NativeShell {
                 inspector_pane_dirty = true;
             } else if dirty.inspector_telemetry {
                 inspector_telemetry_dirty = true;
-            }
-            if dirty.status {
-                status_bar_dirty = true;
             }
             if dirty.conversation_header {
                 conversation_header_dirty = true;
@@ -1838,7 +1835,7 @@ impl NativeShell {
             if composer_pane_state_before != self.composer_pane_state() {
                 composer_pane_dirty = true;
                 inspector_pane_dirty = true;
-                status_bar_dirty = true;
+                toast_host_dirty = true;
                 conversation_header_dirty = true;
                 overlay_host_dirty = true;
             }
@@ -1849,7 +1846,7 @@ impl NativeShell {
                     composer_pane_dirty,
                     inspector_pane_dirty,
                     inspector_telemetry_dirty,
-                    status_bar_dirty,
+                    toast_host_dirty,
                     conversation_header_dirty,
                     overlay_host_dirty,
                     root_dirty,
@@ -1860,8 +1857,8 @@ impl NativeShell {
         if let Some(writer) = &self.preference_writer
             && let Some(error) = writer.take_error()
         {
-            self.preference_notice = Some(error);
-            status_bar_dirty = true;
+            self.set_preference_notice(error);
+            toast_host_dirty = true;
         }
         let conversation_needs_refresh = self.conversation_controller.needs_row_refresh();
         if conversation_needs_refresh && !self.refresh_conversation_rows_at_current_width(cx) {
@@ -1873,7 +1870,7 @@ impl NativeShell {
             || composer_pane_dirty
             || inspector_pane_dirty
             || inspector_telemetry_dirty
-            || status_bar_dirty
+            || toast_host_dirty
             || conversation_header_dirty
             || overlay_host_dirty
         {
@@ -1894,8 +1891,8 @@ impl NativeShell {
         } else if inspector_telemetry_dirty {
             self.schedule_inspector_telemetry_refresh(cx);
         }
-        if status_bar_dirty {
-            self.notify_status_bar(cx);
+        if toast_host_dirty {
+            self.notify_toast_host(cx);
         }
         if conversation_header_dirty {
             self.notify_conversation_header(cx);
@@ -1916,7 +1913,7 @@ impl NativeShell {
             pane.set_view_model(view_model);
             cx.notify();
         });
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
         self.notify_overlay_host(cx);
     }
 
@@ -1956,7 +1953,7 @@ impl NativeShell {
         self.inspector_telemetry_last_refresh = Some(Instant::now());
         self.inspector_telemetry_refresh_deadline = None;
         self.push_inspector_pane_view_model(cx);
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
     }
 
     fn push_inspector_pane_view_model(&self, cx: &mut Context<Self>) {
@@ -1998,11 +1995,14 @@ impl NativeShell {
         .detach();
     }
 
-    fn notify_status_bar(&self, cx: &mut Context<Self>) {
-        let view_model = self.status_bar_view_model();
-        self.status_bar.update(cx, |status_bar, cx| {
-            status_bar.set_view_model(view_model);
-            cx.notify();
+    fn notify_toast_host(&self, cx: &mut Context<Self>) {
+        let notice = self.preference_notice.as_ref().map(|message| ToastNotice {
+            session_id: Arc::from(self.active_workspace.session_id()),
+            revision: self.active_workspace.preference_notice_revision,
+            message: Arc::from(message.as_str()),
+        });
+        self.toast_host.update(cx, |host, cx| {
+            host.observe_notice(notice, cx);
         });
     }
 
@@ -2163,14 +2163,14 @@ impl NativeShell {
         );
         if let Err(message) = admission {
             self.command_ledger.complete(command_id, &intent);
-            self.preference_notice = Some(message);
+            self.set_preference_notice(message);
         }
     }
 
     fn submit_composer(&mut self, cx: &mut Context<Self>) {
         let intent = DesktopCommandIntent::Prompt;
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2181,9 +2181,9 @@ impl NativeShell {
             Ok(payload) => payload.to_owned(),
             Err(error) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(error.to_string());
+                self.set_preference_notice(error.to_string());
                 self.notify_composer_pane(cx);
-                self.notify_status_bar(cx);
+                self.notify_toast_host(cx);
                 cx.notify();
                 return;
             }
@@ -2246,9 +2246,10 @@ impl NativeShell {
 
     fn submit_active_control(&mut self, kind: ComposerSubmissionKind, cx: &mut Context<Self>) {
         if kind == ComposerSubmissionKind::Prompt {
-            self.preference_notice =
-                Some("Prompt submissions must use the idle composer action.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice(
+                "Prompt submissions must use the idle composer action.".into(),
+            );
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         }
@@ -2260,7 +2261,7 @@ impl NativeShell {
             }
         };
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2268,9 +2269,9 @@ impl NativeShell {
             Ok(payload) => payload.to_owned(),
             Err(error) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(error.to_string());
+                self.set_preference_notice(error.to_string());
                 self.notify_composer_pane(cx);
-                self.notify_status_bar(cx);
+                self.notify_toast_host(cx);
                 cx.notify();
                 return;
             }
@@ -2321,8 +2322,8 @@ impl NativeShell {
             .as_ref()
             .and_then(|projection| projection.snapshot().active_operation.clone())
         else {
-            self.preference_notice = Some("No active operation is available to abort.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("No active operation is available to abort.".into());
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2336,7 +2337,7 @@ impl NativeShell {
             .clone();
         let intent = DesktopCommandIntent::Abort { operation_id };
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2350,14 +2351,14 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.preference_notice = Some("Abort requested…".into());
+                self.set_preference_notice("Abort requested…".into());
             }
             Err(message) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
+                self.set_preference_notice(message);
             }
         }
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
         self.notify_conversation_header(cx);
         cx.notify();
     }
@@ -2373,14 +2374,15 @@ impl NativeShell {
             .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self.composer.submitted().is_some()
         {
-            self.preference_notice =
-                Some("Reload is available only while the runtime is idle.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice(
+                "Reload is available only while the runtime is idle.".into(),
+            );
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         }
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2394,14 +2396,14 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.preference_notice = Some("Reloading local resources…".into());
+                self.set_preference_notice("Reloading local resources…".into());
             }
             Err(message) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
+                self.set_preference_notice(message);
             }
         }
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
         self.notify_conversation_header(cx);
         cx.notify();
     }
@@ -2424,9 +2426,10 @@ impl NativeShell {
             .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self.composer.submitted().is_some()
         {
-            self.preference_notice =
-                Some("Recovery actions are available only while the runtime is idle.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice(
+                "Recovery actions are available only while the runtime is idle.".into(),
+            );
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         }
@@ -2461,14 +2464,14 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.preference_notice = Some(format!(
+                self.set_preference_notice(format!(
                     "Submitting recovery {}…",
                     recovery_action_label(action)
                 ));
             }
             Err(message) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
+                self.set_preference_notice(message);
             }
         }
         self.notify_inspector_pane(cx);
@@ -2533,15 +2536,16 @@ impl NativeShell {
             .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self.composer.submitted().is_some()
         {
-            self.preference_notice =
-                Some("Model and profile selection is available only while idle.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice(
+                "Model and profile selection is available only while idle.".into(),
+            );
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         }
         let intent = DesktopCommandIntent::Selection(selection);
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2559,22 +2563,22 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.preference_notice = Some("Applying selection…".into());
+                self.set_preference_notice("Applying selection…".into());
             }
             Err(message) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
+                self.set_preference_notice(message);
             }
         }
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
         self.notify_conversation_header(cx);
         cx.notify();
     }
 
     fn select_next_model(&mut self, cx: &mut Context<Self>) {
         let Some(model_id) = self.next_model_id() else {
-            self.preference_notice = Some("No other configured text model is available.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("No other configured text model is available.".into());
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2583,8 +2587,8 @@ impl NativeShell {
 
     fn select_next_session_profile(&mut self, cx: &mut Context<Self>) {
         let Some(profile_id) = self.next_session_profile_id() else {
-            self.preference_notice = Some("No other session profile is available.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("No other session profile is available.".into());
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2596,9 +2600,9 @@ impl NativeShell {
         let label = self
             .thinking_selection
             .label(self.project.settings.default_thinking_level.as_deref());
-        self.preference_notice = Some(format!("Future prompts will use thinking {label}."));
+        self.set_preference_notice(format!("Future prompts will use thinking {label}."));
         self.notify_composer_pane(cx);
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
         self.notify_conversation_header(cx);
         cx.notify();
     }
@@ -2620,7 +2624,7 @@ impl NativeShell {
             operation_id: identity.operation_id.clone(),
         };
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2634,14 +2638,14 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.preference_notice = Some("Authorization decision pending…".into());
+                self.set_preference_notice("Authorization decision pending…".into());
             }
             Err(message) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
+                self.set_preference_notice(message);
             }
         }
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
         self.notify_overlay_host(cx);
         cx.notify();
     }
@@ -2654,9 +2658,10 @@ impl NativeShell {
             .conversation_controller
             .copy_selected(projection.conversation())
         else {
-            self.preference_notice =
-                Some("Select a committed conversation block before copying.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice(
+                "Select a committed conversation block before copying.".into(),
+            );
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2718,8 +2723,8 @@ impl NativeShell {
 
     fn copy_conversation_row(&mut self, block_id: &str, cx: &mut Context<Self>) {
         let Some(message) = self.conversation_full_message_view(block_id) else {
-            self.preference_notice = Some("Message is no longer available to copy.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("Message is no longer available to copy.".into());
+            self.notify_toast_host(cx);
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(message.text.to_string()));
@@ -2775,8 +2780,8 @@ impl NativeShell {
 
     fn copy_tool_command(&mut self, block_id: &str, cx: &mut Context<Self>) {
         let Some(command) = self.tool_command(block_id) else {
-            self.preference_notice = Some("This tool does not expose a structured command.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("This tool does not expose a structured command.".into());
+            self.notify_toast_host(cx);
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(command));
@@ -2785,8 +2790,8 @@ impl NativeShell {
 
     fn copy_tool_output(&mut self, block_id: &str, cx: &mut Context<Self>) {
         let Some((_, output, _)) = self.tool_output(block_id) else {
-            self.preference_notice = Some("Tool output is no longer available to copy.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("Tool output is no longer available to copy.".into());
+            self.notify_toast_host(cx);
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(conversation_copy_text(
@@ -2826,8 +2831,8 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         let Some((title, text, source_truncated)) = self.tool_output(block_id) else {
-            self.preference_notice = Some("Tool output is no longer available to open.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("Tool output is no longer available to open.".into());
+            self.notify_toast_host(cx);
             return;
         };
         tracing::trace!(
@@ -2853,8 +2858,8 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         let Some(message) = self.conversation_full_message_view(block_id) else {
-            self.preference_notice = Some("Message is no longer available to open.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("Message is no longer available to open.".into());
+            self.notify_toast_host(cx);
             return;
         };
         tracing::trace!(
@@ -2886,8 +2891,8 @@ impl NativeShell {
         };
         let row_count = workspace.conversation_controller.row_count();
         if row_count == 0 {
-            self.preference_notice = Some("The conversation is empty.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("The conversation is empty.".into());
+            self.notify_toast_host(cx);
             return;
         }
         let current_index = workspace
@@ -2924,8 +2929,8 @@ impl NativeShell {
             .selected_block_id()
             .map(str::to_owned)
         else {
-            self.preference_notice = Some("Select a conversation message before copying.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("Select a conversation message before copying.".into());
+            self.notify_toast_host(cx);
             return;
         };
         self.copy_conversation_row(&block_id, cx);
@@ -2960,13 +2965,13 @@ impl NativeShell {
             .command_ledger
             .contains_where(|pending| matches!(pending, DesktopCommandIntent::FileReview { .. }))
         {
-            self.preference_notice = Some("Another file review is already pending.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("Another file review is already pending.".into());
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         }
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -2982,11 +2987,11 @@ impl NativeShell {
         match admission {
             Ok(()) => {
                 self.file_review = Arc::new(DesktopFileReviewState::Loading(request));
-                self.preference_notice = Some("Loading changed-file review…".into());
+                self.set_preference_notice("Loading changed-file review…".into());
             }
             Err(message) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
+                self.set_preference_notice(message);
             }
         }
         self.notify_inspector_pane(cx);
@@ -2995,59 +3000,60 @@ impl NativeShell {
 
     fn copy_review_path(&mut self, cx: &mut Context<Self>) {
         let DesktopFileReviewState::Ready(document) = self.file_review.as_ref() else {
-            self.preference_notice =
-                Some("Load a changed-file review before copying its path.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice(
+                "Load a changed-file review before copying its path.".into(),
+            );
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
         let export = document.path_clipboard_export();
         cx.write_to_clipboard(ClipboardItem::new_string(export.text));
-        self.preference_notice = Some(if export.truncated {
+        self.set_preference_notice(if export.truncated {
             "Bounded changed-file path copied (truncated).".into()
         } else {
             "Changed-file path copied.".into()
         });
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
         cx.notify();
     }
 
     fn copy_file_review(&mut self, cx: &mut Context<Self>) {
         let DesktopFileReviewState::Ready(document) = self.file_review.as_ref() else {
-            self.preference_notice = Some("Load a changed-file review before copying it.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("Load a changed-file review before copying it.".into());
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
         let export = document.clipboard_export();
         cx.write_to_clipboard(ClipboardItem::new_string(export.text));
-        self.preference_notice = Some(if export.truncated {
+        self.set_preference_notice(if export.truncated {
             "Bounded file review copied (truncated at the clipboard limit).".into()
         } else {
             "File review copied.".into()
         });
-        self.notify_status_bar(cx);
+        self.notify_toast_host(cx);
         cx.notify();
     }
 
     fn open_review_in_external_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.preferences.external_editor.clone() else {
-            self.preference_notice = Some(
+            self.set_preference_notice(
                 "Configure desktop.external_editor with a program and literal argv first.".into(),
             );
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
         let DesktopFileReviewState::Ready(document) = self.file_review.as_ref() else {
-            self.preference_notice = Some("Load a changed-file review before opening it.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("Load a changed-file review before opening it.".into());
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
         let Some(target) = document.external_editor_target.clone() else {
-            self.preference_notice = Some("This review has no external-editor target.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("This review has no external-editor target.".into());
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -3056,7 +3062,7 @@ impl NativeShell {
             project_relative_path: project_relative_path.clone(),
         };
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -3071,14 +3077,14 @@ impl NativeShell {
             });
         match admission {
             Ok(()) => {
-                self.preference_notice = Some(format!(
+                self.set_preference_notice(format!(
                     "Validating {} before editor launch…",
                     truncate_label(&project_relative_path, 48)
                 ));
             }
             Err(message) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
+                self.set_preference_notice(message);
             }
         }
         self.notify_inspector_pane(cx);
@@ -3163,7 +3169,7 @@ impl NativeShell {
             return;
         }
         if !self.focus.request(target, layout) {
-            self.preference_notice = Some(format!(
+            self.set_preference_notice(format!(
                 "{} is unavailable at the current window width.",
                 focus_target_label(target)
             ));
@@ -3192,7 +3198,7 @@ impl NativeShell {
         let Some(overlay) = self.active_overlay else {
             return false;
         };
-        self.preference_notice = Some(
+        self.set_preference_notice(
             match overlay {
                 DesktopOverlayKind::Authorization => {
                     "Resolve the authorization dialog before using workspace shortcuts."
@@ -3233,13 +3239,13 @@ impl NativeShell {
 
     fn review_next_file(&mut self, cx: &mut Context<Self>) {
         let Some(projection) = self.projection.as_ref() else {
-            self.preference_notice = Some("No session is open for file review.".into());
+            self.set_preference_notice("No session is open for file review.".into());
             cx.notify();
             return;
         };
         let changes = &projection.snapshot().context.changes;
         if changes.is_empty() {
-            self.preference_notice = Some("No changed file is available for review.".into());
+            self.set_preference_notice("No changed file is available for review.".into());
             cx.notify();
             return;
         }
@@ -3272,8 +3278,8 @@ impl NativeShell {
             })
             .and_then(|recovery| recovery.identity.clone());
         let Some(identity) = identity else {
-            self.preference_notice = Some("No authoritative pending recovery is available.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("No authoritative pending recovery is available.".into());
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -3343,12 +3349,13 @@ impl NativeShell {
             DesktopPaletteCommand::ToggleReducedMotion => {
                 self.preferences.reduced_motion = !self.preferences.reduced_motion;
                 self.schedule_preferences();
-                self.preference_notice = Some(if self.preferences.reduced_motion {
+                let notice = if self.preferences.reduced_motion {
                     "Reduced motion enabled; desktop transitions remain static.".into()
                 } else {
                     "Reduced motion disabled; idle presentation remains static.".into()
-                });
-                self.notify_status_bar(cx);
+                };
+                self.set_preference_notice(notice);
+                self.notify_toast_host(cx);
                 cx.notify();
             }
         }
@@ -3365,9 +3372,9 @@ impl NativeShell {
             .as_ref()
             .is_some_and(|projection| !projection.snapshot().pending_authorizations.is_empty())
         {
-            self.preference_notice = Some("Resolve authorization before opening commands.".into());
+            self.set_preference_notice("Resolve authorization before opening commands.".into());
             self.authorization_focus.focus(window, cx);
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         }
@@ -3443,8 +3450,9 @@ impl NativeShell {
     ) {
         match self.active_overlay {
             Some(DesktopOverlayKind::Authorization) => {
-                self.preference_notice =
-                    Some("Authorization requires Deny, Allow once, or Allow for operation.".into());
+                self.set_preference_notice(
+                    "Authorization requires Deny, Allow once, or Allow for operation.".into(),
+                );
                 self.authorization_focus.focus(window, cx);
                 cx.notify();
             }
@@ -3465,7 +3473,7 @@ impl NativeShell {
             }
             None if !matches!(self.file_review.as_ref(), DesktopFileReviewState::Empty) => {
                 self.file_review = Arc::new(DesktopFileReviewState::Empty);
-                self.preference_notice = Some("Closed the changed-file review.".into());
+                self.set_preference_notice("Closed the changed-file review.".into());
                 cx.notify();
             }
             None => self.focus_target(FocusTarget::Composer, window, cx),
@@ -3722,7 +3730,6 @@ impl NativeShell {
             FocusTarget::Conversation => self.conversation_focus.focus(window, cx),
             FocusTarget::Composer => self.focus_composer_input(window, cx),
             FocusTarget::Context => self.context_focus.focus(window, cx),
-            FocusTarget::Status => self.status_focus.focus(window, cx),
             FocusTarget::Overlay => match self.active_overlay {
                 Some(DesktopOverlayKind::Authorization) => {
                     self.authorization_focus.focus(window, cx)
@@ -3777,7 +3784,6 @@ impl NativeShell {
                 .command_ledger
                 .contains(&DesktopCommandIntent::ListSessions),
             active_status: self.semantic_status(),
-            notice: self.preference_notice.as_deref().map(Arc::from),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             context_is_overlay: self.narrow_sessions_open,
         }
@@ -3833,7 +3839,6 @@ impl NativeShell {
             catalog_pending: self
                 .command_ledger
                 .contains(&DesktopCommandIntent::ListSessions),
-            notice: self.preference_notice.as_deref().map(Arc::from),
         }
     }
 
@@ -4053,19 +4058,6 @@ impl NativeShell {
             narrow_sessions_open: self.narrow_sessions_open,
             authorization,
             full_message: self.conversation_full_message.clone(),
-        }
-    }
-
-    fn status_bar_view_model(&self) -> StatusBarViewModel {
-        StatusBarViewModel {
-            status: self.semantic_status(),
-            changed_file_count: self
-                .projection
-                .as_ref()
-                .map(|projection| projection.snapshot().context.changes.len())
-                .unwrap_or_default(),
-            notice: self.preference_notice.as_deref().map(Arc::from),
-            keyboard_focus_visible: self.keyboard_focus_visible(),
         }
     }
 
@@ -4314,9 +4306,8 @@ impl Render for NativeShell {
                 )
         };
 
-        let status_bar = self.status_bar.clone();
-
         let overlay_host = self.overlay_host.clone();
+        let toast_host = self.toast_host.clone();
         let conversation_announcement = self
             .conversation_announcement
             .as_ref()
@@ -4370,8 +4361,8 @@ impl Render for NativeShell {
                     .child(workspace)
                     .children(context_panel),
             )
-            .child(status_bar)
             .child(overlay_host)
+            .child(toast_host)
             .when_some(conversation_announcement, |app, message| {
                 app.child(
                     div()
@@ -4401,7 +4392,6 @@ fn focus_target_label(target: FocusTarget) -> &'static str {
         FocusTarget::Conversation => "Conversation",
         FocusTarget::Composer => "Composer",
         FocusTarget::Context => "Inspector",
-        FocusTarget::Status => "Status",
         FocusTarget::Overlay => "Overlay",
     }
 }
@@ -4753,7 +4743,7 @@ mod tests {
     ) {
         initialize_visual_test(cx);
         let (shell, cx) = add_idle_visual_shell(cx);
-        shell.update(cx, |shell, _| {
+        shell.update(cx, |shell, cx| {
             assert!(shell.projection.is_none());
             assert!(
                 shell
@@ -4766,7 +4756,7 @@ mod tests {
             assert_eq!(inspector.active_operation, "—");
             assert_eq!(inspector.stream_id, "—");
             assert!(shell.overlay_view_model().authorization.is_none());
-            assert_eq!(shell.status_bar_view_model().changed_file_count, 0);
+            assert!(shell.toast_host.read(cx).messages().len() <= 3);
             assert_eq!(shell.conversation_pane_view_model().visible_count, 0);
             assert_eq!(
                 shell.conversation_header_view_model().profile.as_ref(),
@@ -4788,6 +4778,43 @@ mod tests {
             assert!(cx.debug_bounds("desktop-inspector-panel").is_none());
             assert!(cx.debug_bounds("desktop-composer-panel").is_some());
         }
+    }
+
+    #[gpui::test]
+    fn preference_notices_preserve_repeated_messages_and_bound_the_toast_stack(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, cx| {
+            shell.set_preference_notice("Repeated notice".into());
+            shell.notify_toast_host(cx);
+            shell.set_preference_notice("Repeated notice".into());
+            shell.notify_toast_host(cx);
+
+            let repeated = shell.toast_host.read(cx).messages();
+            assert_eq!(
+                repeated
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .map(AsRef::as_ref)
+                    .collect::<Vec<_>>(),
+                ["Repeated notice", "Repeated notice"]
+            );
+
+            shell.set_preference_notice("Third notice".into());
+            shell.notify_toast_host(cx);
+            shell.set_preference_notice("Fourth notice".into());
+            shell.notify_toast_host(cx);
+
+            let bounded = shell.toast_host.read(cx).messages();
+            assert_eq!(bounded.len(), 3);
+            assert_eq!(
+                bounded.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+                ["Repeated notice", "Third notice", "Fourth notice"]
+            );
+        });
     }
 
     #[gpui::test]
@@ -5042,13 +5069,12 @@ mod tests {
 
     fn desktop_region_bounds(
         cx: &mut gpui::VisualTestContext,
-    ) -> [Option<gpui::Bounds<gpui::Pixels>>; 5] {
+    ) -> [Option<gpui::Bounds<gpui::Pixels>>; 4] {
         [
             cx.debug_bounds("desktop-sessions-panel"),
             cx.debug_bounds("desktop-conversation-panel"),
             cx.debug_bounds("desktop-composer-panel"),
             cx.debug_bounds("desktop-inspector-panel"),
-            cx.debug_bounds("desktop-status-panel"),
         ]
     }
 
@@ -5092,21 +5118,20 @@ mod tests {
         assert!(medium[0].is_some());
         assert!(medium[1].is_some());
         assert!(medium[2].is_some());
-        assert!(medium[4].is_some());
+        assert!(medium[3].is_none());
         assert_eq!(f32::from(medium[0].unwrap().size.width), 240.);
         assert_eq!(f32::from(medium[1].unwrap().size.width), 760.);
         assert_eq!(f32::from(medium[2].unwrap().size.width), 760.);
-        assert_eq!(f32::from(medium[4].unwrap().size.width), 1_000.);
 
         cx.simulate_resize(size(px(700.), px(900.)));
         cx.run_until_parked();
         let narrow = desktop_region_bounds(cx);
+        assert!(narrow[0].is_none());
         assert!(narrow[1].is_some());
         assert!(narrow[2].is_some());
-        assert!(narrow[4].is_some());
+        assert!(narrow[3].is_none());
         assert_eq!(f32::from(narrow[1].unwrap().size.width), 700.);
         assert_eq!(f32::from(narrow[2].unwrap().size.width), 700.);
-        assert_eq!(f32::from(narrow[4].unwrap().size.width), 700.);
 
         for (window_width, expected_workspace_width) in
             [(1_080., 520.), (1_079., 839.), (760., 520.), (759., 759.)]
@@ -5128,7 +5153,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn shell_header_and_status_fold_without_overlap_at_all_viewports(cx: &mut TestAppContext) {
+    fn shell_header_and_toast_host_stay_bounded_at_all_viewports(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let (_, cx) = add_visual_shell(
             cx,
@@ -5160,26 +5185,20 @@ mod tests {
             assert!(runtime.left() >= actions.left() && runtime.right() <= actions.right());
             assert!(actions.right() <= header.right());
 
-            let status = cx
-                .debug_bounds("desktop-status-panel")
-                .expect("status bar remains visible");
-            let primary = cx
-                .debug_bounds("desktop-status-primary")
-                .expect("connection and change status remain visible");
-            let secondary = cx
-                .debug_bounds("desktop-status-secondary")
-                .expect("command palette hint remains visible");
-            assert!(primary.right() <= secondary.left());
-            assert!(primary.left() >= status.left() && secondary.right() <= status.right());
+            assert!(cx.debug_bounds("desktop-status-panel").is_none());
+            assert!(cx.debug_bounds("desktop-status-primary").is_none());
+            assert!(cx.debug_bounds("desktop-status-secondary").is_none());
 
-            assert!(
-                cx.debug_bounds("desktop-status-configuration").is_none(),
-                "model and profile belong only to the header selector"
-            );
-            assert!(
-                cx.debug_bounds("desktop-status-thinking").is_none(),
-                "thinking configuration no longer belongs to passive status chrome"
-            );
+            let composer = cx
+                .debug_bounds("desktop-composer-panel")
+                .expect("Composer remains visible");
+            assert_eq!(composer.bottom(), px(900.));
+            let toast_host = cx
+                .debug_bounds("desktop-toast-host")
+                .expect("the transient notice host remains mounted");
+            assert!(toast_host.left() >= px(0.));
+            assert!(toast_host.right() <= px(width));
+            assert!(toast_host.bottom() <= px(900.));
             assert!(
                 cx.debug_bounds("desktop-composer-thinking").is_some(),
                 "the thinking selector remains available beside Composer actions"
@@ -7145,7 +7164,7 @@ mod tests {
         let conversation = include_str!("native_shell/conversation_pane.rs");
         let composer = include_str!("native_shell/composer_pane.rs");
         let inspector = include_str!("native_shell/inspector_pane.rs");
-        let status = include_str!("native_shell/status_bar.rs");
+        let toast_host = include_str!("native_shell/toast_host.rs");
         let overlays = include_str!("native_shell/overlay_host.rs");
 
         assert!(shell.contains(".role(Role::Application)"));
@@ -7165,7 +7184,7 @@ mod tests {
         assert!(inspector.contains(".role(Role::Complementary)"));
         assert!(inspector.contains(".role(Role::TabList)"));
         assert!(inspector.contains(".role(Role::TabPanel)"));
-        assert!(status.contains(".role(Role::Status)"));
+        assert!(toast_host.contains(".role(Role::Status)"));
         assert!(overlays.contains(".role(Role::Dialog)"));
         assert!(overlays.contains(".role(Role::AlertDialog)"));
 
@@ -7229,11 +7248,10 @@ mod tests {
         let conversation = include_str!("native_shell/conversation_pane.rs");
         let sessions = include_str!("native_shell/sessions_pane.rs");
         let inspector = include_str!("native_shell/inspector_pane.rs");
-        let status = include_str!("native_shell/status_bar.rs");
         let overlays = include_str!("native_shell/overlay_host.rs");
 
         assert!(shell.contains(".font_family(UI_FONT_FAMILY)"));
-        for local_data_surface in [conversation, inspector, status, overlays] {
+        for local_data_surface in [conversation, inspector, overlays] {
             assert!(local_data_surface.contains("MONOSPACE_FONT_FAMILY"));
         }
         assert!(sessions.contains("DesktopActionRow::new("));
@@ -7251,7 +7269,7 @@ mod tests {
             include_str!("native_shell/composer_pane.rs"),
             include_str!("native_shell/sessions_pane.rs"),
             include_str!("native_shell/inspector_pane.rs"),
-            include_str!("native_shell/status_bar.rs"),
+            include_str!("native_shell/toast_host.rs"),
             include_str!("native_shell/overlay_host.rs"),
         ];
         let legacy_utility_tokens = [
@@ -7683,7 +7701,6 @@ mod tests {
         };
         assert!(inspector_projection_dirty(&usage));
         assert!(!inspector_projection_immediate_dirty(&usage));
-        assert!(!status_projection_dirty(&usage));
 
         let start = Instant::now();
         assert_eq!(
@@ -7760,51 +7777,34 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_rendering_is_owned_by_a_non_streaming_child_entity() {
+    fn transient_notices_are_owned_by_a_bounded_toast_host() {
         let shell = include_str!("native_shell.rs");
-        let bar = include_str!("native_shell/status_bar.rs");
-        let status_panel_id = [".id(\"status-", "panel\")"].concat();
-        let status_thinking_event = ["StatusBarEvent", "::CycleThinking"].concat();
+        let host = include_str!("native_shell/toast_host.rs");
+        let commands = include_str!("native_shell/commands.rs");
+        let sessions = include_str!("native_shell/session_controller.rs");
+        let exact_assignment = ["self.preference_notice", " = Some(message);"].concat();
+        let any_direct_assignment = [".preference_notice", " = Some("].concat();
 
-        assert!(!shell.contains(&status_panel_id));
-        assert!(bar.contains(&status_panel_id));
-        assert!(shell.contains("status_bar: gpui::Entity<StatusBar>"));
-        assert!(!bar.contains("StatusBarEvent"));
-        assert!(!shell.contains(&status_thinking_event));
-        assert!(bar.contains("StatusBarViewModel"));
-        assert!(shell.contains("status_bar_view_model"));
-        assert!(!bar.contains("WeakEntity"));
-        assert!(!bar.contains("NativeShell"));
-        assert!(!bar.contains("owner.read(cx)"));
-        assert!(!bar.contains("DesktopProjection"));
-        assert!(!bar.contains("seq {}"));
-        assert!(!bar.contains("motion static"));
-        assert!(!bar.contains("messages ↑/↓"));
-        assert!(!bar.contains("truncate_label(&notice, 28)"));
-        assert!(bar.contains("status-details"));
-        assert!(bar.contains("Commands Ctrl/Cmd+K"));
-        assert!(!bar.contains("desktop-status-thinking"));
-        assert!(!bar.contains("thinking: Arc<str>"));
-        assert!(!bar.contains("desktop-status-configuration"));
-        assert!(!bar.contains("cycle-model"));
-        assert!(!bar.contains("cycle-session-profile"));
-        assert!(!bar.contains("model: Arc<str>"));
-        assert!(!bar.contains("profile: Arc<str>"));
-        assert!(!bar.contains("conversation_controller.render_dirty_sequences"));
-    }
-
-    #[test]
-    fn streaming_only_projection_delta_does_not_dirty_status_bar() {
-        let mut streaming = desktop::projection::DesktopProjectionDelta {
-            cursor: true,
-            conversation: true,
-            tools: true,
-            ..Default::default()
-        };
-        assert!(!status_projection_dirty(&streaming));
-
-        streaming.authorizations = true;
-        assert!(status_projection_dirty(&streaming));
+        assert!(shell.contains("toast_host: gpui::Entity<ToastHost>"));
+        assert!(shell.contains(".child(toast_host)"));
+        assert!(shell.contains("fn notify_toast_host"));
+        assert!(shell.contains("preference_notice_revision"));
+        assert_eq!(shell.matches(&exact_assignment).count(), 1);
+        assert_eq!(shell.matches(&any_direct_assignment).count(), 1);
+        for notice_owner in [commands, sessions] {
+            assert!(notice_owner.contains("set_preference_notice("));
+            assert!(!notice_owner.contains(&any_direct_assignment));
+        }
+        assert!(host.contains("MAX_VISIBLE_TOASTS: usize = 3"));
+        assert!(host.contains("Duration::from_secs(6)"));
+        assert!(host.contains(".on_hover("));
+        assert!(host.contains("on_focus_in"));
+        assert!(host.contains("on_focus_out"));
+        assert!(host.contains("Dismiss notification"));
+        assert!(host.contains(".role(Role::Status)"));
+        assert!(!host.contains("WeakEntity"));
+        assert!(!host.contains("NativeShell"));
+        assert!(!host.contains("DesktopProjection"));
     }
 
     #[test]
@@ -7911,8 +7911,8 @@ mod inspector_pane;
 mod overlay_host;
 mod session_controller;
 mod sessions_pane;
-mod status_bar;
 mod streaming_text;
+mod toast_host;
 mod update;
 
 use commands::{DirectCommandUpdate, ProjectionCommandCompletions};
@@ -7942,11 +7942,10 @@ use inspector_pane::{
 use overlay_host::{OverlayAuthorizationView, OverlayHost, OverlayHostEvent, OverlayViewModel};
 use session_controller::SessionController;
 use sessions_pane::{SessionRuntimeState, SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
-use status_bar::{StatusBar, StatusBarViewModel};
+use toast_host::{ToastHost, ToastNotice};
 use update::ProjectionDirtyRouting;
 #[cfg(test)]
 use update::{
     conversation_header_projection_dirty, inspector_projection_dirty,
     inspector_projection_immediate_dirty, overlay_host_projection_dirty, root_projection_dirty,
-    status_projection_dirty,
 };

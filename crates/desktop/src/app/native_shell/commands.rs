@@ -25,7 +25,7 @@ pub(super) fn reconcile_direct_update(
             let sessions_dirty = shell.complete_workspace_command(&session_id, command_id, &intent);
             if sessions_dirty {
                 shell.remove_closed_workspace(&session_id);
-                shell.preference_notice = Some("Session closed.".into());
+                shell.set_preference_notice("Session closed.".into());
                 shell.request_session_catalog(cx);
             }
             DirectCommandUpdate::Consumed {
@@ -45,7 +45,7 @@ pub(super) fn reconcile_direct_update(
                 shell.file_review = Arc::new(DesktopFileReviewState::Ready(
                     DesktopFileReviewDocument::from_product(review),
                 ));
-                shell.preference_notice = Some("Changed-file review loaded.".into());
+                shell.set_preference_notice("Changed-file review loaded.".into());
             }
             DirectCommandUpdate::Consumed {
                 sessions_dirty: false,
@@ -63,7 +63,7 @@ pub(super) fn reconcile_direct_update(
                 },
             );
             if inspector_dirty {
-                shell.preference_notice = Some(format!(
+                shell.set_preference_notice(format!(
                     "Opened {} in the configured editor.",
                     truncate_label(&project_relative_path, 48)
                 ));
@@ -89,17 +89,16 @@ pub(super) fn reconcile_direct_update(
                 });
             if sessions_dirty {
                 shell.session_controller.replace_catalog(sessions, omitted);
-                shell.preference_notice = Some(if omitted == 0 {
-                    format!(
-                        "Loaded {} session(s).",
-                        shell.session_controller.catalog().len()
-                    )
+                let session_count = shell.session_controller.catalog().len();
+                let notice = if omitted == 0 {
+                    format!("Loaded {} session(s).", session_count)
                 } else {
                     format!(
                         "Loaded {} session(s); {omitted} older session(s) omitted.",
-                        shell.session_controller.catalog().len()
+                        session_count
                     )
-                });
+                };
+                shell.set_preference_notice(notice);
                 shell.schedule_session_catalog_refresh(cx);
             }
             DirectCommandUpdate::Consumed {
@@ -221,7 +220,7 @@ impl ProjectionCommandCompletions {
                 .command_ledger
                 .complete(command_id, &DesktopCommandIntent::Resync)
         {
-            shell.preference_notice = Some(if projection_replaced {
+            shell.set_preference_notice(if projection_replaced {
                 "Runtime state resynchronized.".into()
             } else {
                 "Resync response failed projection validation.".into()
@@ -234,7 +233,7 @@ impl ProjectionCommandCompletions {
             && shell.complete_workspace_command(&owner_session_id, command_id, &intent)
         {
             sessions_dirty = true;
-            shell.preference_notice = Some(if projection_replaced {
+            shell.set_preference_notice(if projection_replaced {
                 match intent {
                     DesktopCommandIntent::CreateSession => "Created a new session.".into(),
                     DesktopCommandIntent::OpenSession { .. } => {
@@ -254,7 +253,7 @@ impl ProjectionCommandCompletions {
                 .command_ledger
                 .complete(command_id, &DesktopCommandIntent::Reload)
         {
-            shell.preference_notice = Some(if projection_replaced {
+            shell.set_preference_notice(if projection_replaced {
                 format!(
                     "Reloaded {skill_count} skills, {prompt_count} prompts, and \
                      {profile_count} profiles."
@@ -268,7 +267,7 @@ impl ProjectionCommandCompletions {
                 .command_ledger
                 .complete(command_id, &DesktopCommandIntent::Selection(selection))
         {
-            shell.preference_notice = Some(if projection_replaced {
+            let notice = if projection_replaced {
                 match selection {
                     DesktopRuntimeSelectionKind::Model => format!(
                         "Future prompts will use model {}.",
@@ -294,7 +293,8 @@ impl ProjectionCommandCompletions {
                 }
             } else {
                 "Selection response failed projection validation; resync is required.".into()
-            });
+            };
+            shell.set_preference_notice(notice);
         }
         if let Some((command_id, action, recovery_id)) = self.recovery
             && shell.command_ledger.complete(
@@ -305,7 +305,7 @@ impl ProjectionCommandCompletions {
                 },
             )
         {
-            shell.preference_notice = Some(if projection_replaced {
+            shell.set_preference_notice(if projection_replaced {
                 format!(
                     "Recovery {} accepted for {}.",
                     recovery_action_label(action),
@@ -327,7 +327,7 @@ pub(super) fn reserve_command(
 ) -> Option<u64> {
     let command_id = shell.next_command_id;
     let Some(next_command_id) = command_id.checked_add(1) else {
-        shell.preference_notice = Some("desktop command IDs are exhausted".into());
+        shell.set_preference_notice("desktop command IDs are exhausted".into());
         return None;
     };
     match shell
@@ -340,7 +340,7 @@ pub(super) fn reserve_command(
             Some(command_id)
         }
         Err(error) => {
-            shell.preference_notice = Some(error.to_string());
+            shell.set_preference_notice(error.to_string());
             None
         }
     }

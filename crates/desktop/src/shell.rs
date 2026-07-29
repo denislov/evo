@@ -14,7 +14,6 @@ pub const CONTEXT_PANEL_MAX_WIDTH: u32 = 520;
 pub const MIN_CONVERSATION_WIDTH: u32 = 520;
 pub const COMPOSER_MIN_HEIGHT: u32 = 88;
 pub const COMPOSER_MAX_HEIGHT: u32 = 236;
-pub const STATUS_HEIGHT: u32 = 30;
 pub const USER_MESSAGE_MAX_WIDTH: u32 = 920;
 pub const ASSISTANT_MESSAGE_MAX_WIDTH: u32 = 960;
 pub const USER_MESSAGE_WIDTH_PERCENT: u32 = 70;
@@ -124,7 +123,6 @@ pub struct ShellLayout {
     /// split inside this rectangle because the composer auto-grows.
     pub workspace: Rect,
     pub context: Option<Rect>,
-    pub status: Rect,
 }
 
 impl ShellLayout {
@@ -148,7 +146,7 @@ impl ShellLayout {
     ) -> Self {
         let sessions_width = sessions_width.clamp(SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_MAX_WIDTH);
         let context_width = context_width.clamp(CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_MAX_WIDTH);
-        let body_height = height.saturating_sub(STATUS_HEIGHT);
+        let body_height = height;
 
         let sessions_visible =
             requested.sessions && width >= sessions_width + MIN_CONVERSATION_WIDTH;
@@ -176,19 +174,16 @@ impl ShellLayout {
                     body_height,
                 )
             }),
-            status: Rect::new(0, body_height, width, height.saturating_sub(body_height)),
         }
     }
 
     pub fn resolve_idle(width: u32, height: u32) -> Self {
-        let body_height = height.saturating_sub(STATUS_HEIGHT);
         Self {
             idle: true,
             viewport: Rect::new(0, 0, width, height),
             sessions: None,
-            workspace: Rect::new(0, 0, width, body_height),
+            workspace: Rect::new(0, 0, width, height),
             context: None,
-            status: Rect::new(0, body_height, width, height.saturating_sub(body_height)),
         }
     }
 
@@ -197,13 +192,13 @@ impl ShellLayout {
             FocusTarget::Sessions => self.sessions.is_some(),
             FocusTarget::Context => self.context.is_some(),
             FocusTarget::Conversation => !self.idle,
-            FocusTarget::Composer | FocusTarget::Status => true,
+            FocusTarget::Composer => true,
             FocusTarget::Overlay => false,
         }
     }
 
     pub fn focus_order(self) -> Vec<FocusTarget> {
-        let mut order = Vec::with_capacity(5);
+        let mut order = Vec::with_capacity(4);
         if self.sessions.is_some() {
             order.push(FocusTarget::Sessions);
         }
@@ -214,7 +209,6 @@ impl ShellLayout {
         if self.context.is_some() {
             order.push(FocusTarget::Context);
         }
-        order.push(FocusTarget::Status);
         order
     }
 }
@@ -225,7 +219,6 @@ pub enum FocusTarget {
     Conversation,
     Composer,
     Context,
-    Status,
     Overlay,
 }
 
@@ -529,11 +522,9 @@ mod tests {
     }
 
     #[test]
-    fn workspace_and_status_geometry_are_disjoint_for_tiny_windows() {
+    fn workspace_uses_the_full_height_without_a_status_strip() {
         let layout = ShellLayout::resolve(320, 100, PanelVisibility::default());
-        assert_eq!(layout.workspace, Rect::new(0, 0, 320, 70));
-        assert_eq!(layout.status.height, 30);
-        assert_eq!(layout.status.y, 70);
+        assert_eq!(layout.workspace, Rect::new(0, 0, 320, 100));
     }
 
     #[test]
@@ -608,11 +599,7 @@ mod tests {
         let layout = ShellLayout::resolve(700, 900, PanelVisibility::default());
         assert_eq!(
             layout.focus_order(),
-            vec![
-                FocusTarget::Conversation,
-                FocusTarget::Composer,
-                FocusTarget::Status
-            ]
+            vec![FocusTarget::Conversation, FocusTarget::Composer]
         );
     }
 
@@ -623,14 +610,8 @@ mod tests {
             assert!(layout.idle);
             assert!(layout.sessions.is_none());
             assert!(layout.context.is_none());
-            assert_eq!(
-                layout.workspace,
-                Rect::new(0, 0, width, height - STATUS_HEIGHT)
-            );
-            assert_eq!(
-                layout.focus_order(),
-                vec![FocusTarget::Composer, FocusTarget::Status]
-            );
+            assert_eq!(layout.workspace, Rect::new(0, 0, width, height));
+            assert_eq!(layout.focus_order(), vec![FocusTarget::Composer]);
         }
     }
 

@@ -33,7 +33,6 @@ pub(super) struct HomePaneViewModel {
     pub(super) global_skills: Arc<[CodingAgentResourceCommand]>,
     pub(super) session_pending: bool,
     pub(super) catalog_pending: bool,
-    pub(super) notice: Option<Arc<str>>,
 }
 
 pub(super) struct HomePane {
@@ -150,16 +149,7 @@ impl Render for HomePane {
                                     .mt_2()
                                     .text_color(rgb(theme.muted_text.value()))
                                     .child("Describe a task below. Evo creates a session only when you submit."),
-                            )
-                            .when_some(view_model.notice.clone(), |header, notice| {
-                                header.child(
-                                    div()
-                                        .mt_2()
-                                        .text_token(DesignText::Metadata)
-                                        .text_color(rgb(theme.warning.value()))
-                                        .child(notice.to_string()),
-                                )
-                            }),
+                            ),
                     )
                     .child(
                         div()

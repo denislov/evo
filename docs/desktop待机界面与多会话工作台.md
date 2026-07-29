@@ -1,6 +1,6 @@
 # Desktop 待机界面、多会话工作台与面板重排计划
 
-> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513 实现完成）
+> 状态：执行中（VUI-301 自动验收完成；CAG-101、CAG-102、CAG-103、CAG-104、CAG-105、CAG-106、DSK-501、DSK-502、DSK-503、DSK-504、DSK-511、DSK-512、DSK-513、VUI-302 实现完成）
 > 基线：`main`（`32fdb25 docs(desktop): record composer visual lane completion`）
 > 更新日期：2026-07-29
 > 前置文档：[`desktop架构.md`](./desktop架构.md)（`DSK-*` / `VUI-*` 已完成批次）
@@ -1182,6 +1182,28 @@ feat(desktop): surface per-session run state and the workspace limit
 - 键盘焦点环测试更新且通过；
 - 三档 golden 更新并附 review note，说明反馈通道迁移。
 
+**实施记录（2026-07-29）**
+
+- 新增独立 `ToastHost` entity，并在删除底栏前将原 `preference_notice` 通道完整迁入。策略集中定义为
+  最多堆叠 3 条、6 秒自动隐藏、支持逐条手动关闭；鼠标悬停或键盘焦点进入 host 时暂停倒计时，离开后
+  按实际暂停时长顺延。每条使用 `Role::Status`、完整文案 accessible label 与独立的
+  `Dismiss notification` 控件；host 只持有 bounded toast/来源队列，不读取 projection 或 shell。
+- `SessionWorkspace` 以单一 `set_preference_notice` 入口维护单调 revision；所有原成员写入点保持原文案和
+  原条件，仅机械迁移到该入口。ToastHost 按 session id + revision 去重，因此切回工作台不会重播旧通知，
+  同一文案的两次真实触发仍会产生两条 toast；后台 workspace 的既有静默更新/切回恢复语义不变。
+- 删除 `status_bar.rs` 及其 changed-file 计数、命令面板提示和常驻 notice 呈现；Home、Sessions 与 shell
+  不再复制该反馈。`ShellLayout` 删除 30 px status rectangle，正常态与待机态 workspace 均占满窗口高度；
+  `FocusTarget::Status` 从 enum、可见性、焦点顺序和 shell focus owner 中移除，其余区域相对顺序保持不变。
+- 新增行为测试覆盖重复文案、三条上限与先进先出淘汰，源码边界测试确保原 notice owner 全部经过集中
+  setter/ToastHost，响应式 GPUI 测试验证旧 status selector 消失、Composer 延伸到底部、ToastHost 在
+  wide / medium / narrow 内有界。三档 standard golden 显式呈现堆叠 toast；全部 10 个 fixture 已人工
+  审图、附 review note，安装后复播 RMSE 均为 `0`。
+- 最终验证为 Desktop `212 passed / 5 ignored`、dependency boundary `16/16`、all-target check、严格
+  Clippy、fmt 与 `git diff --check`。native 性能门：GPU/present frame p95 `6004µs`、input p95
+  `8368µs`、steady RSS growth `163840B`、production Markdown p95 `117µs`；headless 门：10k blocks
+  hydration `3261µs`、frame p95 `4450µs`、input roundtrip p95 `6382µs`，200 events/s streaming p95
+  `5µs`。
+
 **建议提交**
 
 ```text
@@ -1575,7 +1597,8 @@ accessibility 影响。
    影响 DSK-503、VUI-310。
 2. **附件超出 `MAX_INPUT_IMAGES` 或字节上限时，拒绝还是自动压缩？**
    `auto_resize_images` 设置已存在。影响 VUI-305。
-3. **toast 的停留时长与是否堆叠？** 影响 VUI-302。
+3. **已决策：toast 最多堆叠 3 条并停留 6 秒。** 支持手动关闭；鼠标悬停或键盘焦点位于 toast 内时
+   暂停自动隐藏。VUI-302 已按此策略实现与验收。
 4. **自动命名失败是否重试？** 还是一次失败即保持「未命名」，由用户手动改名。
    影响 CAG-106、VUI-306。
 5. **已决策：上限 4 不包含待机态工作区。** 待机 Home 不持有 session projection，也不占运行会话

@@ -66,7 +66,7 @@ impl SessionController {
 impl NativeShell {
     pub(super) fn create_session(&mut self, cx: &mut Context<Self>) {
         if self.open_workspace_count() >= MAX_SESSION_WORKSPACES {
-            self.preference_notice = Some(format!(
+            self.set_preference_notice(format!(
                 "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
             ));
             self.notify_sessions_pane(cx);
@@ -88,7 +88,7 @@ impl NativeShell {
         }
         let intent = DesktopCommandIntent::CreateSession;
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -101,10 +101,10 @@ impl NativeShell {
             },
         );
         match admission {
-            Ok(()) => self.preference_notice = Some("Creating a new session…".into()),
+            Ok(()) => self.set_preference_notice("Creating a new session…".into()),
             Err(message) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
+                self.set_preference_notice(message);
             }
         }
         self.notify_sessions_pane(cx);
@@ -120,7 +120,7 @@ impl NativeShell {
         }
         let intent = DesktopCommandIntent::ListSessions;
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_status_bar(cx);
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         };
@@ -134,7 +134,7 @@ impl NativeShell {
         );
         if let Err(message) = admission {
             self.command_ledger.complete(command_id, &intent);
-            self.preference_notice = Some(message);
+            self.set_preference_notice(message);
             self.schedule_session_catalog_refresh(cx);
         }
         self.notify_sessions_pane(cx);
@@ -169,7 +169,7 @@ impl NativeShell {
         let already_open = self.active_workspace.session_id() == session_id
             || self.workspaces.contains_key(&session_id);
         if !already_open && self.open_workspace_count() >= MAX_SESSION_WORKSPACES {
-            self.preference_notice = Some(format!(
+            self.set_preference_notice(format!(
                 "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
             ));
             self.notify_sessions_pane(cx);
@@ -187,8 +187,9 @@ impl NativeShell {
                 )
             })
         {
-            self.preference_notice =
-                Some("Session switching is available only while the runtime is idle.".into());
+            self.set_preference_notice(
+                "Session switching is available only while the runtime is idle.".into(),
+            );
             cx.notify();
             return;
         }
@@ -197,7 +198,7 @@ impl NativeShell {
             .as_ref()
             .is_some_and(|projection| session_id == projection.snapshot().session.session_id)
         {
-            self.preference_notice = Some("The requested session is already active.".into());
+            self.set_preference_notice("The requested session is already active.".into());
             cx.notify();
             return;
         }
@@ -218,14 +219,14 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.preference_notice = Some(format!(
+                self.set_preference_notice(format!(
                     "Opening session {}…",
                     truncate_label(&session_id, 32)
                 ));
             }
             Err(message) => {
                 self.command_ledger.complete(command_id, &intent);
-                self.preference_notice = Some(message);
+                self.set_preference_notice(message);
             }
         }
         self.notify_sessions_pane(cx);
@@ -239,13 +240,13 @@ impl NativeShell {
             .map(|projection| projection.snapshot().session.session_id.as_str())
             .unwrap_or(HOME_COMPOSER_SESSION_KEY);
         let Some(session_id) = self.session_controller.next_session_id(active) else {
-            self.preference_notice = Some("Loading the session catalog…".into());
+            self.set_preference_notice("Loading the session catalog…".into());
             self.request_session_catalog(cx);
             return;
         };
         if session_id == active {
-            self.preference_notice = Some("No other project session is available.".into());
-            self.notify_status_bar(cx);
+            self.set_preference_notice("No other project session is available.".into());
+            self.notify_toast_host(cx);
             cx.notify();
             return;
         }

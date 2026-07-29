@@ -7,7 +7,6 @@ pub(super) struct ProjectionDirtyRouting {
     pub(super) composer: bool,
     pub(super) inspector_immediate: bool,
     pub(super) inspector_telemetry: bool,
-    pub(super) status: bool,
     pub(super) conversation_header: bool,
     pub(super) overlay: bool,
     pub(super) sessions: bool,
@@ -27,7 +26,6 @@ impl ProjectionDirtyRouting {
             composer: replaced || authorizations,
             inspector_immediate: replaced || inspector_immediate,
             inspector_telemetry,
-            status: replaced || delta.is_some_and(status_projection_dirty),
             conversation_header: replaced
                 || delta.is_some_and(conversation_header_projection_dirty),
             overlay: replaced || delta.is_some_and(overlay_host_projection_dirty),
@@ -56,17 +54,6 @@ pub(super) fn inspector_projection_immediate_dirty(delta: &DesktopProjectionDelt
         || delta.context.contains(ContextDirtyFlags::DELEGATIONS)
         || delta.context.contains(ContextDirtyFlags::CHANGES)
         || delta.diagnostics
-        || delta.recoveries
-        || delta.session
-        || delta.profiles
-        || delta.capabilities
-        || delta.lifecycle
-}
-
-pub(super) fn status_projection_dirty(delta: &DesktopProjectionDelta) -> bool {
-    delta.context.contains(ContextDirtyFlags::OPERATIONS)
-        || delta.authorizations
-        || delta.terminal
         || delta.recoveries
         || delta.session
         || delta.profiles

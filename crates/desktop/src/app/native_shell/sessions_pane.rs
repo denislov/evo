@@ -48,7 +48,6 @@ pub(super) struct SessionsPaneViewModel {
     pub(super) session_pending: bool,
     pub(super) session_catalog_pending: bool,
     pub(super) active_status: desktop::shell::SemanticStatus,
-    pub(super) notice: Option<Arc<str>>,
     pub(super) keyboard_focus_visible: bool,
     pub(super) context_is_overlay: bool,
 }
@@ -291,9 +290,6 @@ impl Render for SessionsPane {
             .id("sessions-panel")
             .role(Role::Navigation)
             .aria_label("Sessions")
-            .when_some(view_model.notice.clone(), |panel, notice| {
-                panel.aria_description(notice)
-            })
             .debug_selector(|| "desktop-sessions-panel".into())
             .track_focus(&self.focus)
             .when(context_is_overlay, |panel| panel.w_full())

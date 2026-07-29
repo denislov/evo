@@ -345,6 +345,13 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             ..
         })
     );
+    let toast_replay = matches!(
+        request,
+        NativeReplayRequest::Visual(VisualReplaySpec {
+            state: VisualReplayState::Standard,
+            ..
+        })
+    );
     let project = projection.project().clone();
     let projection = (!idle_replay).then_some(projection);
     let global_skills: Arc<[CodingAgentResourceCommand]> = Arc::from(if idle_replay {
@@ -373,7 +380,9 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
                     global_skills,
                     preferences,
                     preference_writer: None,
-                    preference_notice: None,
+                    preference_notice: toast_replay.then(|| {
+                        "Desktop notification paths now appear as transient toasts.".into()
+                    }),
                     initial_session_id: None,
                 },
                 window,
