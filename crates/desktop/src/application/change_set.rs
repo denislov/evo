@@ -12,6 +12,7 @@ pub(crate) enum UiRegion {
     Composer,
     Sessions,
     Inspector,
+    InspectorTelemetry,
     Modal,
     Toast,
 }

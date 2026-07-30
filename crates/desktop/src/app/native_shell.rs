@@ -49,10 +49,15 @@ use crate::actions::{
     PalettePrevious, SelectNextConversation, SelectPreviousConversation, SubmitComposer,
     ToggleInspectorPanel, ToggleSelectedConversationDetails, TrapOverlayFocus,
 };
+#[cfg(test)]
+use crate::application::reducer::safe_runtime_rejection_notice;
 use crate::application::{
     change_set::UiRegion,
     commands::{CommandCompletionError, CommandTracker, DesktopCommandIntent},
-    reducer::{DesktopController, DesktopEvent, Transition, UiIntent},
+    reducer::{
+        DesktopController, DesktopEvent, ProjectionUpdateResult, RuntimeUpdatePort, Transition,
+        UiIntent, runtime_update_hydrated_snapshot,
+    },
     state::DesktopState,
     workspace::{SessionId, WorkspaceKey, WorkspaceStore},
 };
@@ -449,55 +454,9 @@ fn hydrated_session_id(snapshot: &desktop::runtime::DesktopRuntimeHydratedSnapsh
     &snapshot.session.session.session_id
 }
 
-fn runtime_update_hydrated_snapshot(
-    update: &desktop::runtime::DesktopRuntimeUpdate,
-) -> Option<&desktop::runtime::DesktopRuntimeHydratedSnapshot> {
-    match update {
-        desktop::runtime::DesktopRuntimeUpdate::SessionChanged { snapshot, .. }
-        | desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession { snapshot, .. }
-        | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession { snapshot, .. }
-        | desktop::runtime::DesktopRuntimeUpdate::PromptFinished { snapshot, .. } => Some(snapshot),
-        desktop::runtime::DesktopRuntimeUpdate::Resynced {
-            replacement: desktop::runtime::DesktopRuntimeResyncSnapshot::Hydrated(snapshot),
-            ..
-        } => Some(snapshot),
-        _ => None,
-    }
-}
-
-fn runtime_update_command_id(update: &desktop::runtime::DesktopRuntimeUpdate) -> Option<u64> {
-    use desktop::runtime::DesktopRuntimeUpdate;
-    match update {
-        DesktopRuntimeUpdate::Reloaded { command_id, .. }
-        | DesktopRuntimeUpdate::Resynced { command_id, .. }
-        | DesktopRuntimeUpdate::SessionChanged { command_id, .. }
-        | DesktopRuntimeUpdate::SessionClosed { command_id, .. }
-        | DesktopRuntimeUpdate::SessionsListed { command_id, .. }
-        | DesktopRuntimeUpdate::SessionRenamed { command_id, .. }
-        | DesktopRuntimeUpdate::SelectionChanged { command_id, .. }
-        | DesktopRuntimeUpdate::PromptAccepted { command_id }
-        | DesktopRuntimeUpdate::PromptAcceptedWithSession { command_id, .. }
-        | DesktopRuntimeUpdate::PromptRejectedWithSession { command_id, .. }
-        | DesktopRuntimeUpdate::PromptStarted { command_id, .. }
-        | DesktopRuntimeUpdate::ControlAccepted { command_id, .. }
-        | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { command_id, .. }
-        | DesktopRuntimeUpdate::RecoveryChanged { command_id, .. }
-        | DesktopRuntimeUpdate::FileReviewed { command_id, .. }
-        | DesktopRuntimeUpdate::ExternalEditorOpened { command_id, .. }
-        | DesktopRuntimeUpdate::PromptFinished { command_id, .. }
-        | DesktopRuntimeUpdate::CommandRejected { command_id, .. } => Some(*command_id),
-        DesktopRuntimeUpdate::ProductEvent { .. }
-        | DesktopRuntimeUpdate::SessionNameObserved { .. }
-        | DesktopRuntimeUpdate::ResyncRequired { .. }
-        | DesktopRuntimeUpdate::RuntimeFailed { .. }
-        | DesktopRuntimeUpdate::Stopped => None,
-    }
-}
-
 pub(super) struct NativeShell {
     runtime_client: Option<RuntimeCommandClient>,
     runtime_updates: VecDeque<desktop::runtime::DesktopRuntimeUpdate>,
-    runtime_update_target: Option<WorkspaceKey>,
     controller: DesktopController,
     app: DesktopState<SessionWorkspace, ProjectCatalogController>,
     home_project: CodingAgentEmbeddingSnapshot,
@@ -537,6 +496,11 @@ pub(super) struct NativeShell {
     #[cfg(test)]
     runtime_ui_notification_count: usize,
     _subscriptions: Vec<Subscription>,
+}
+
+struct RuntimePoll {
+    transition: Transition,
+    running: bool,
 }
 
 pub(super) struct NativeShellInit {
@@ -857,7 +821,8 @@ impl NativeShell {
                 };
                 this.update(cx, |this, cx| {
                     this.runtime_updates.extend(updates);
-                    this.poll_runtime(cx)
+                    let poll = this.poll_runtime();
+                    this.apply_runtime_poll(poll, cx)
                 });
             }
             let _ = runtime_shutdown.shutdown(&mut runtime_events).await;
@@ -914,7 +879,6 @@ impl NativeShell {
         let shell = Self {
             runtime_client: Some(runtime_client),
             runtime_updates: VecDeque::new(),
-            runtime_update_target: None,
             controller: DesktopController::new(),
             app,
             home_project,
@@ -993,30 +957,6 @@ impl NativeShell {
                 center_drawer_host.set_view_model(center_drawer_view_model);
             });
         shell
-    }
-
-    pub(super) fn update_workspace(&self) -> &SessionWorkspace {
-        self.runtime_update_target
-            .as_ref()
-            .and_then(|key| self.app.workspaces.get(key))
-            .unwrap_or_else(|| self.app.workspaces.active())
-    }
-
-    pub(super) fn update_workspace_mut(&mut self) -> &mut SessionWorkspace {
-        let key = self
-            .runtime_update_target
-            .clone()
-            .unwrap_or_else(|| self.app.workspaces.active_key().clone());
-        self.app
-            .workspaces
-            .get_mut(&key)
-            .expect("runtime update target must reference a workspace entry")
-    }
-
-    pub(super) fn update_workspace_key(&self) -> WorkspaceKey {
-        self.runtime_update_target
-            .clone()
-            .unwrap_or_else(|| self.app.workspaces.active_key().clone())
     }
 
     fn active_command_contains(&self, intent: &DesktopCommandIntent) -> bool {
@@ -1132,93 +1072,6 @@ impl NativeShell {
                 "Runtime response targeted another session; resync is required.".into(),
             );
         }
-    }
-
-    fn runtime_update_observed_workspace_key(
-        update: &desktop::runtime::DesktopRuntimeUpdate,
-    ) -> Option<WorkspaceKey> {
-        use desktop::runtime::{DesktopRuntimeResyncSnapshot, DesktopRuntimeUpdate};
-        let session_id = match update {
-            DesktopRuntimeUpdate::ProductEvent { session_id, .. } => Some(session_id.clone()),
-            update if runtime_update_hydrated_snapshot(update).is_some() => {
-                runtime_update_hydrated_snapshot(update)
-                    .map(|snapshot| hydrated_session_id(snapshot).to_owned())
-            }
-            DesktopRuntimeUpdate::Reloaded { metadata, .. }
-            | DesktopRuntimeUpdate::SelectionChanged { metadata, .. }
-            | DesktopRuntimeUpdate::PromptStarted { metadata, .. } => metadata
-                .session
-                .as_ref()
-                .map(|snapshot| snapshot.session.session_id.clone()),
-            DesktopRuntimeUpdate::Resynced {
-                replacement: DesktopRuntimeResyncSnapshot::Metadata(metadata),
-                ..
-            } => metadata
-                .session
-                .as_ref()
-                .map(|snapshot| snapshot.session.session_id.clone()),
-            DesktopRuntimeUpdate::RecoveryChanged { recovery, .. } => {
-                Some(recovery.session.session.session_id.clone())
-            }
-            DesktopRuntimeUpdate::ResyncRequired { snapshot, .. } => {
-                Some(snapshot.session.session_id.clone())
-            }
-            DesktopRuntimeUpdate::SessionRenamed { session_id, .. }
-            | DesktopRuntimeUpdate::SessionClosed { session_id, .. } => Some(session_id.clone()),
-            _ => None,
-        };
-        session_id.map(WorkspaceKey::session)
-    }
-
-    fn validate_runtime_update_command_owner(
-        &mut self,
-        update: &desktop::runtime::DesktopRuntimeUpdate,
-    ) -> bool {
-        let Some(command_id) = runtime_update_command_id(update) else {
-            return true;
-        };
-        let Some(pending_owner) = self.app.commands.owner(command_id).cloned() else {
-            return true;
-        };
-        let Some(observed_owner) = Self::runtime_update_observed_workspace_key(update) else {
-            return true;
-        };
-        if pending_owner == observed_owner {
-            return true;
-        }
-        self.require_command_owner_resync(&pending_owner, &observed_owner);
-        false
-    }
-
-    pub(super) fn runtime_update_completion_owner(
-        &self,
-        update: &desktop::runtime::DesktopRuntimeUpdate,
-    ) -> WorkspaceKey {
-        Self::runtime_update_observed_workspace_key(update)
-            .or_else(|| {
-                runtime_update_command_id(update)
-                    .and_then(|command_id| self.app.commands.owner(command_id).cloned())
-            })
-            .unwrap_or_else(|| self.update_workspace_key())
-    }
-
-    fn runtime_update_workspace_key(
-        &self,
-        update: &desktop::runtime::DesktopRuntimeUpdate,
-    ) -> Option<WorkspaceKey> {
-        use desktop::runtime::DesktopRuntimeUpdate;
-        if matches!(
-            update,
-            DesktopRuntimeUpdate::SessionRenamed { .. }
-                | DesktopRuntimeUpdate::SessionNameObserved { .. }
-                | DesktopRuntimeUpdate::SessionClosed { .. }
-        ) {
-            return None;
-        }
-        Self::runtime_update_observed_workspace_key(update).or_else(|| {
-            runtime_update_command_id(update)
-                .and_then(|command_id| self.app.commands.owner(command_id).cloned())
-        })
     }
 
     fn navigate_center(
@@ -1732,712 +1585,145 @@ impl NativeShell {
         cx.notify();
     }
 
-    fn poll_runtime(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.runtime_client.is_none() {
-            return false;
-        }
-        let mut applied = 0;
-        let mut sessions_pane_dirty = false;
-        let mut composer_pane_dirty = false;
-        let mut inspector_pane_dirty = false;
-        let mut inspector_telemetry_dirty = false;
-        let mut toast_host_dirty = false;
-        let mut conversation_header_dirty = false;
-        let mut root_modal_host_dirty = false;
-        let mut root_dirty = false;
-        while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
-            let Some(update) = self.runtime_updates.pop_front() else {
-                break;
-            };
-            let foreground_key = self.app.workspaces.active_key().clone();
-            self.runtime_update_target = None;
-            let dirty_before = (
-                sessions_pane_dirty,
-                composer_pane_dirty,
-                inspector_pane_dirty,
-                inspector_telemetry_dirty,
-                toast_host_dirty,
-                conversation_header_dirty,
-                root_modal_host_dirty,
-                root_dirty,
-            );
-            let is_session_change = matches!(
-                &update,
-                desktop::runtime::DesktopRuntimeUpdate::SessionChanged { .. }
-            );
-            let inherit_home_thinking = match &update {
-                desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession { .. }
-                | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession { .. } => true,
-                desktop::runtime::DesktopRuntimeUpdate::SessionChanged { command_id, .. } => {
-                    self.app.commands.matches(
-                        *command_id,
-                        &foreground_key,
-                        &DesktopCommandIntent::CreateSession,
-                    )
-                }
-                _ => false,
-            };
-            if inherit_home_thinking
-                && let desktop::runtime::DesktopRuntimeUpdate::SessionChanged {
-                    command_id,
-                    snapshot,
-                } = &update
-            {
-                let _ = self.app.commands.transfer_command(
-                    *command_id,
-                    WorkspaceKey::session(hydrated_session_id(snapshot)),
-                );
-            }
-            let creates_session_from_prompt = match &update {
-                desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
-                    command_id,
-                    ..
-                }
-                | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
-                    command_id,
-                    ..
-                } => self.app.commands.matches(
-                    *command_id,
-                    &foreground_key,
-                    &DesktopCommandIntent::Prompt,
-                ),
-                _ => false,
-            };
-            if creates_session_from_prompt
-                && let Some(snapshot) = runtime_update_hydrated_snapshot(&update)
-            {
-                let _ = self.install_hydrated_workspace(snapshot, inherit_home_thinking, true);
-            }
-            if !self.validate_runtime_update_command_owner(&update) {
-                self.runtime_update_target = runtime_update_command_id(&update)
-                    .and_then(|command_id| self.app.commands.owner(command_id).cloned())
-                    .filter(|owner| self.app.workspaces.contains(owner));
-                self.request_resync_if_needed();
-                self.runtime_update_target = None;
-                applied += 1;
-                continue;
-            }
-            let mut background_update = false;
-            if !is_session_change
-                && !creates_session_from_prompt
-                && let Some(target_key) = self.runtime_update_workspace_key(&update)
-                && target_key != foreground_key
-            {
-                if self.app.workspaces.contains(&target_key) {
-                    self.runtime_update_target = Some(target_key);
-                    background_update = true;
-                } else if let Some(snapshot) = runtime_update_hydrated_snapshot(&update)
-                    && self.install_hydrated_workspace(snapshot, inherit_home_thinking, false)
-                {
-                    self.runtime_update_target = Some(target_key);
-                    background_update = true;
-                }
-            }
-            if !matches!(
-                &update,
-                desktop::runtime::DesktopRuntimeUpdate::ProductEvent { .. }
-            ) {
-                toast_host_dirty = true;
-                conversation_header_dirty = true;
-                root_modal_host_dirty = true;
-                root_dirty = true;
-            }
-            let update = match commands::reconcile_direct_update(self, update, cx) {
-                DirectCommandUpdate::Continue(update) => *update,
-                DirectCommandUpdate::Consumed {
-                    sessions_dirty,
-                    inspector_dirty,
-                } => {
-                    sessions_pane_dirty |= sessions_dirty;
-                    inspector_pane_dirty |= inspector_dirty;
-                    if background_update {
-                        self.runtime_update_target = None;
-                        (
-                            sessions_pane_dirty,
-                            composer_pane_dirty,
-                            inspector_pane_dirty,
-                            inspector_telemetry_dirty,
-                            toast_host_dirty,
-                            conversation_header_dirty,
-                            root_modal_host_dirty,
-                            root_dirty,
-                        ) = dirty_before;
-                    }
-                    applied += 1;
-                    continue;
-                }
-            };
-            let composer_pane_state_before = self.composer_pane_state();
-            let projection_completions = ProjectionCommandCompletions::capture(self, &update);
-            if let desktop::runtime::DesktopRuntimeUpdate::SessionChanged { snapshot, .. } = &update
-                && self.app.workspaces.active_key()
-                    != &WorkspaceKey::session(hydrated_session_id(snapshot))
-                && !self.install_hydrated_workspace(snapshot, inherit_home_thinking, true)
-            {
-                let _ = projection_completions.reconcile(self, false, cx);
-                self.runtime_update_target = None;
-                applied += 1;
-                continue;
-            }
-            let update_owner = self.runtime_update_completion_owner(&update);
-            match &update {
-                desktop::runtime::DesktopRuntimeUpdate::PromptAccepted { command_id }
-                | desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
-                    command_id,
-                    ..
-                } => {
-                    if self.complete_command(
-                        *command_id,
-                        &update_owner,
-                        &DesktopCommandIntent::Prompt,
-                    ) && self
-                        .update_workspace_mut()
-                        .composer
-                        .accepted(*command_id)
-                        .is_ok()
-                    {
-                        self.update_workspace_mut().composer_attachments.clear();
-                        self.update_workspace_mut().composer_needs_sync = true;
-                        self.update_workspace_mut()
-                            .conversation_controller
-                            .mark_live_dirty();
-                        sessions_pane_dirty = true;
-                    }
-                }
-                desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
-                    command_id,
-                    error,
-                    ..
-                } => {
-                    if self
-                        .reject_command(
-                            *command_id,
-                            &update_owner,
-                            desktop::runtime::DesktopRuntimeCommandKind::SubmitPrompt,
-                        )
-                        .is_some()
-                    {
-                        let _ = self.update_workspace_mut().composer.rejected(
-                            *command_id,
-                            safe_runtime_rejection_notice(
-                                desktop::runtime::DesktopRuntimeCommandKind::SubmitPrompt,
-                                &error.code,
-                            ),
-                        );
-                        sessions_pane_dirty = true;
-                    }
-                }
-                desktop::runtime::DesktopRuntimeUpdate::PromptStarted { command_id, .. } => {
-                    if self
-                        .update_workspace_mut()
-                        .composer
-                        .submitted()
-                        .is_some_and(|submitted| submitted.command_id != *command_id)
-                    {
-                        self.update_workspace_mut().set_preference_notice(
-                            "Prompt start did not match the submitted command.".into(),
-                        );
-                    }
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command: desktop::runtime::DesktopRuntimeCommandKind::SubmitPrompt,
-                    code,
-                    ..
-                } => {
-                    if self
-                        .reject_command(
-                            *command_id,
-                            &update_owner,
-                            desktop::runtime::DesktopRuntimeCommandKind::SubmitPrompt,
-                        )
-                        .is_some()
-                    {
-                        let _ = self.update_workspace_mut().composer.rejected(
-                            *command_id,
-                            safe_runtime_rejection_notice(
-                                desktop::runtime::DesktopRuntimeCommandKind::SubmitPrompt,
-                                code,
-                            ),
-                        );
-                        sessions_pane_dirty = true;
-                    }
-                }
-                desktop::runtime::DesktopRuntimeUpdate::ControlAccepted {
-                    command_id,
-                    command: desktop::runtime::DesktopRuntimeCommandKind::Abort,
-                    receipt,
-                } if self.complete_command(
-                    *command_id,
-                    &update_owner,
-                    &DesktopCommandIntent::Abort {
-                        operation_id: receipt.operation_id.clone(),
-                    },
-                ) =>
-                {
-                    self.update_workspace_mut().set_preference_notice(format!(
-                        "Abort accepted for {}.",
-                        receipt.operation_id
-                    ));
-                }
-                desktop::runtime::DesktopRuntimeUpdate::ControlAccepted {
-                    command_id,
-                    command:
-                        command @ (desktop::runtime::DesktopRuntimeCommandKind::Steer
-                        | desktop::runtime::DesktopRuntimeCommandKind::FollowUp),
-                    receipt,
-                } => {
-                    let intent = match command {
-                        desktop::runtime::DesktopRuntimeCommandKind::Steer => {
-                            DesktopCommandIntent::Steer
-                        }
-                        desktop::runtime::DesktopRuntimeCommandKind::FollowUp => {
-                            DesktopCommandIntent::FollowUp
-                        }
-                        _ => unreachable!("match pattern admits only active controls"),
-                    };
-                    if self.complete_command(*command_id, &update_owner, &intent)
-                        && self
-                            .update_workspace_mut()
-                            .composer
-                            .accepted(*command_id)
-                            .is_ok()
-                    {
-                        self.update_workspace_mut().composer_needs_sync = true;
-                        self.update_workspace_mut().set_preference_notice(format!(
-                            "{command:?} accepted for {}.",
-                            receipt.operation_id
-                        ));
-                    }
-                }
-                desktop::runtime::DesktopRuntimeUpdate::AuthorizationDecisionAccepted {
-                    command_id,
-                    authorization_id,
-                    decision,
-                } if self
-                    .app
-                    .commands
-                    .intent(*command_id)
-                    .filter(|intent| {
-                        matches!(
-                            intent,
-                            DesktopCommandIntent::Authorization {
-                                authorization_id: pending_authorization_id,
-                                ..
-                            } if pending_authorization_id == authorization_id
-                        )
-                    })
-                    .cloned()
-                    .is_some_and(|intent| {
-                        self.complete_command(*command_id, &update_owner, &intent)
-                    }) =>
-                {
-                    let decision = match decision {
-                        ToolAuthorizationDecision::AllowOnce => "allow once",
-                        ToolAuthorizationDecision::AllowForOperation => "allow for operation",
-                        ToolAuthorizationDecision::Deny { .. } => "deny",
-                    };
-                    self.update_workspace_mut().set_preference_notice(format!(
-                        "Authorization decision accepted: {decision}."
-                    ));
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command: desktop::runtime::DesktopRuntimeCommandKind::Abort,
-                    code,
-                    ..
-                } if self
-                    .reject_command(
-                        *command_id,
-                        &update_owner,
-                        desktop::runtime::DesktopRuntimeCommandKind::Abort,
-                    )
-                    .is_some() =>
-                {
-                    self.update_workspace_mut().set_preference_notice(
-                        safe_runtime_rejection_notice(
-                            desktop::runtime::DesktopRuntimeCommandKind::Abort,
-                            code,
-                        ),
-                    );
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command: desktop::runtime::DesktopRuntimeCommandKind::Reload,
-                    code,
-                    ..
-                } if self
-                    .reject_command(
-                        *command_id,
-                        &update_owner,
-                        desktop::runtime::DesktopRuntimeCommandKind::Reload,
-                    )
-                    .is_some() =>
-                {
-                    self.update_workspace_mut().set_preference_notice(format!(
-                        "Reload failed ({}); previous context retained.",
-                        truncate_label(code, 28)
-                    ));
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command:
-                        command @ (desktop::runtime::DesktopRuntimeCommandKind::SelectModel
-                        | desktop::runtime::DesktopRuntimeCommandKind::SelectSessionProfile),
-                    code,
-                    ..
-                } if self
-                    .reject_command(*command_id, &update_owner, *command)
-                    .is_some() =>
-                {
-                    self.update_workspace_mut().set_preference_notice(format!(
-                        "{command:?} failed ({}); previous selection retained.",
-                        truncate_label(code, 28)
-                    ));
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command:
-                        command @ (desktop::runtime::DesktopRuntimeCommandKind::Steer
-                        | desktop::runtime::DesktopRuntimeCommandKind::FollowUp),
-                    code,
-                    ..
-                } => {
-                    let notice = safe_runtime_rejection_notice(*command, code);
-                    if self
-                        .reject_command(*command_id, &update_owner, *command)
-                        .is_some()
-                        && self
-                            .update_workspace_mut()
-                            .composer
-                            .rejected(*command_id, notice.clone())
-                            .is_ok()
-                    {
-                        self.update_workspace_mut().set_preference_notice(notice);
-                    }
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command: desktop::runtime::DesktopRuntimeCommandKind::DecideToolAuthorization,
-                    code,
-                    ..
-                } if self
-                    .reject_command(
-                        *command_id,
-                        &update_owner,
-                        desktop::runtime::DesktopRuntimeCommandKind::DecideToolAuthorization,
-                    )
-                    .is_some() =>
-                {
-                    self.update_workspace_mut().set_preference_notice(
-                        safe_runtime_rejection_notice(
-                            desktop::runtime::DesktopRuntimeCommandKind::DecideToolAuthorization,
-                            code,
-                        ),
-                    );
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command:
-                        command @ (desktop::runtime::DesktopRuntimeCommandKind::RetryRecovery
-                        | desktop::runtime::DesktopRuntimeCommandKind::ResolveRecovery),
-                    code,
-                    ..
-                } if self
-                    .reject_command(*command_id, &update_owner, *command)
-                    .is_some() =>
-                {
-                    self.update_workspace_mut()
-                        .set_preference_notice(safe_runtime_rejection_notice(*command, code));
-                    inspector_pane_dirty = true;
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command:
-                        command @ (desktop::runtime::DesktopRuntimeCommandKind::Resync
-                        | desktop::runtime::DesktopRuntimeCommandKind::CreateSession
-                        | desktop::runtime::DesktopRuntimeCommandKind::OpenSession
-                        | desktop::runtime::DesktopRuntimeCommandKind::CloseSession),
-                    code,
-                    ..
-                } if self
-                    .reject_command(*command_id, &update_owner, *command)
-                    .is_some() =>
-                {
-                    self.update_workspace_mut()
-                        .set_preference_notice(safe_runtime_rejection_notice(*command, code));
-                    sessions_pane_dirty = true;
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command: desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
-                    code,
-                    ..
-                } if self
-                    .reject_command(
-                        *command_id,
-                        &update_owner,
-                        desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
-                    )
-                    .is_some() =>
-                {
-                    let notice = safe_runtime_rejection_notice(
-                        desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
-                        code,
-                    );
-                    self.app.catalog.fail_refresh(notice.clone());
-                    self.update_workspace_mut().set_preference_notice(notice);
-                    sessions_pane_dirty = true;
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command: desktop::runtime::DesktopRuntimeCommandKind::ReviewChangedFile,
-                    code,
-                    ..
-                } => {
-                    if let Some(DesktopCommandIntent::FileReview { request }) = self.reject_command(
-                        *command_id,
-                        &update_owner,
-                        desktop::runtime::DesktopRuntimeCommandKind::ReviewChangedFile,
-                    ) {
-                        self.update_workspace_mut().file_review =
-                            Arc::new(DesktopFileReviewState::Failed {
-                                request,
-                                code: code.clone(),
-                            });
-                        self.update_workspace_mut().set_preference_notice(format!(
-                            "File review unavailable ({}).",
-                            truncate_label(code, 32)
-                        ));
-                        inspector_pane_dirty = true;
-                    }
-                }
-                desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
-                    command_id,
-                    command: desktop::runtime::DesktopRuntimeCommandKind::OpenExternalEditor,
-                    code,
-                    ..
-                } if self
-                    .reject_command(
-                        *command_id,
-                        &update_owner,
-                        desktop::runtime::DesktopRuntimeCommandKind::OpenExternalEditor,
-                    )
-                    .is_some() =>
-                {
-                    self.update_workspace_mut().set_preference_notice(format!(
-                        "External editor unavailable ({}).",
-                        truncate_label(code, 32)
-                    ));
-                    inspector_pane_dirty = true;
-                }
-                desktop::runtime::DesktopRuntimeUpdate::PromptFinished {
-                    command_id,
-                    operation_id,
-                    error,
-                    ..
-                } => {
-                    sessions_pane_dirty = true;
-                    let _ = self.complete_command(
-                        *command_id,
-                        &update_owner,
-                        &DesktopCommandIntent::Prompt,
-                    );
-                    self.complete_matching_command(&update_owner, |intent| {
-                        matches!(
-                            intent,
-                            DesktopCommandIntent::Abort {
-                                operation_id: pending_operation_id,
-                            } if pending_operation_id == operation_id
-                        )
-                    });
-                    self.complete_matching_command(&update_owner, |intent| {
-                        matches!(
-                            intent,
-                            DesktopCommandIntent::Authorization {
-                                operation_id: pending_operation_id,
-                                ..
-                            } if pending_operation_id == operation_id
-                        )
-                    });
-                    if let Some(error) = error {
-                        self.update_workspace_mut().set_preference_notice(format!(
-                            "Prompt finished with runtime error ({}).",
-                            truncate_label(&error.code, 28)
-                        ));
-                    }
-                }
-                desktop::runtime::DesktopRuntimeUpdate::RuntimeFailed { error } => {
-                    sessions_pane_dirty = true;
-                    if self.app.catalog.state().is_loading() {
-                        self.app.catalog.fail_refresh(format!(
-                            "desktop runtime failed ({})",
-                            truncate_label(&error.code, 28)
-                        ));
-                    }
-                    self.app.commands.cancel_all();
-                    self.reject_pending_composer(format!(
-                        "desktop runtime failed ({})",
-                        truncate_label(&error.code, 28)
-                    ));
-                }
-                desktop::runtime::DesktopRuntimeUpdate::Stopped => {
-                    sessions_pane_dirty = true;
-                    if self.app.catalog.state().is_loading() {
-                        self.app.catalog.fail_refresh("desktop runtime stopped");
-                    }
-                    self.app.commands.cancel_all();
-                    self.reject_pending_composer("desktop runtime stopped".into());
-                }
-                _ => {}
-            }
-            let projection_was_none = self.update_workspace_mut().projection.is_none();
-            if projection_was_none {
-                let hydrated = match &update {
-                    desktop::runtime::DesktopRuntimeUpdate::SessionChanged { snapshot, .. }
-                    | desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
-                        snapshot,
-                        ..
-                    }
-                    | desktop::runtime::DesktopRuntimeUpdate::PromptFinished { snapshot, .. } => {
-                        Some(snapshot)
-                    }
-                    desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
-                        snapshot,
-                        ..
-                    } => Some(snapshot),
-                    desktop::runtime::DesktopRuntimeUpdate::Resynced {
-                        replacement:
-                            desktop::runtime::DesktopRuntimeResyncSnapshot::Hydrated(snapshot),
-                        ..
-                    } => Some(snapshot),
-                    _ => None,
-                };
-                if let Some(hydrated) = hydrated {
-                    self.update_workspace_mut().project = hydrated.project.clone();
-                    self.reconcile_thinking_selection_with_project();
+    fn apply_projection_update_for(
+        &mut self,
+        owner: &WorkspaceKey,
+        update: desktop::runtime::DesktopRuntimeUpdate,
+        creates_session_from_prompt: bool,
+    ) -> ProjectionUpdateResult {
+        let composer_state_before = self.composer_pane_state_for(owner);
+        let projection_was_none = self
+            .app
+            .workspaces
+            .get(owner)
+            .is_none_or(|workspace| workspace.projection.is_none());
+        if projection_was_none {
+            let hydrated = runtime_update_hydrated_snapshot(&update);
+            if let Some(hydrated) = hydrated {
+                if let Some(workspace) = self.app.workspaces.get_mut(owner) {
+                    workspace.project = hydrated.project.clone();
                     match DesktopProjection::new(hydrated.clone()) {
-                        Ok(projection) => self.update_workspace_mut().projection = Some(projection),
-                        Err(issue) => {
-                            self.update_workspace_mut().set_preference_notice(format!(
-                                "Session response failed projection validation ({}).",
-                                truncate_label(&issue.code, 28)
-                            ));
-                        }
+                        Ok(projection) => workspace.projection = Some(projection),
+                        Err(issue) => workspace.set_preference_notice(format!(
+                            "Session response failed projection validation ({}).",
+                            truncate_label(&issue.code, 28)
+                        )),
                     }
-                } else if let Some(metadata) = match &update {
-                    desktop::runtime::DesktopRuntimeUpdate::Reloaded { metadata, .. }
-                    | desktop::runtime::DesktopRuntimeUpdate::SelectionChanged {
-                        metadata, ..
-                    }
-                    | desktop::runtime::DesktopRuntimeUpdate::PromptStarted { metadata, .. } => {
-                        Some(metadata)
-                    }
-                    _ => None,
-                } {
-                    self.update_workspace_mut().project = metadata.project.clone();
-                    if !background_update {
-                        self.home_project = metadata.project.clone();
-                    }
-                    self.reconcile_thinking_selection_with_project();
                 }
-            }
-            if creates_session_from_prompt && self.update_workspace_mut().projection.is_some() {
-                sessions_pane_dirty |= self.insert_active_session_into_catalog();
-            }
-            if self.update_workspace_mut().projection.is_none() {
-                let _ = projection_completions.reconcile(self, true, cx);
-                if background_update {
-                    self.runtime_update_target = None;
-                    (
-                        sessions_pane_dirty,
-                        composer_pane_dirty,
-                        inspector_pane_dirty,
-                        inspector_telemetry_dirty,
-                        toast_host_dirty,
-                        conversation_header_dirty,
-                        root_modal_host_dirty,
-                        root_dirty,
-                    ) = dirty_before;
+                self.reconcile_thinking_selection_for(owner);
+            } else if let Some(metadata) = match &update {
+                desktop::runtime::DesktopRuntimeUpdate::Reloaded { metadata, .. }
+                | desktop::runtime::DesktopRuntimeUpdate::SelectionChanged { metadata, .. }
+                | desktop::runtime::DesktopRuntimeUpdate::PromptStarted { metadata, .. } => {
+                    Some(metadata)
                 }
-                applied += 1;
-                continue;
-            }
-            let completes_submitted_prompt = matches!(
-                &update,
-                desktop::runtime::DesktopRuntimeUpdate::PromptFinished { command_id, .. }
-                    if self
-                        .update_workspace_mut().composer
-                        .submitted()
-                        .is_some_and(|submitted| submitted.command_id == *command_id)
-            );
-            // The idle branch above already consumed this update, so the
-            // remainder of the iteration owns a session projection. Every fact
-            // it needs is read here so the borrow ends before the `&mut self`
-            // reconciliation calls below.
-            let Some(projection) = self.update_workspace_mut().projection.as_mut() else {
-                if background_update {
-                    self.runtime_update_target = None;
-                    (
-                        sessions_pane_dirty,
-                        composer_pane_dirty,
-                        inspector_pane_dirty,
-                        inspector_telemetry_dirty,
-                        toast_host_dirty,
-                        conversation_header_dirty,
-                        root_modal_host_dirty,
-                        root_dirty,
-                    ) = dirty_before;
+                _ => None,
+            } {
+                if let Some(workspace) = self.app.workspaces.get_mut(owner) {
+                    workspace.project = metadata.project.clone();
                 }
-                applied += 1;
-                continue;
-            };
+                if self.app.workspaces.active_key() == owner {
+                    self.home_project = metadata.project.clone();
+                }
+                self.reconcile_thinking_selection_for(owner);
+            }
+        }
+
+        if creates_session_from_prompt
+            && self
+                .app
+                .workspaces
+                .get(owner)
+                .is_some_and(|workspace| workspace.projection.is_some())
+            && self.app.workspaces.active_key() == owner
+        {
+            let _ = self.insert_active_session_into_catalog();
+        }
+
+        let Some(workspace) = self.app.workspaces.get(owner) else {
+            return ProjectionUpdateResult::new(false, Default::default());
+        };
+        if workspace.projection.is_none() {
+            // Metadata-only updates are valid application updates even when
+            // the Home workspace has no session projection.
+            return ProjectionUpdateResult::new(true, Default::default());
+        }
+
+        let completes_submitted_prompt = matches!(
+            &update,
+            desktop::runtime::DesktopRuntimeUpdate::PromptFinished { command_id, .. }
+                if self
+                    .app
+                    .workspaces
+                    .get(owner)
+                    .and_then(|workspace| workspace.composer.submitted())
+                    .is_some_and(|submitted| submitted.command_id == *command_id)
+        );
+        let (had_active_operation, outcome, project_after, active_operation_after, sequence_after) = {
+            let workspace = self
+                .app
+                .workspaces
+                .get_mut(owner)
+                .expect("runtime reducer target must exist");
+            let projection = workspace
+                .projection
+                .as_mut()
+                .expect("projection availability was checked");
             let had_active_operation = projection.snapshot().active_operation.is_some();
             let outcome = projection.apply(update);
             let project_after = projection.project().clone();
             let active_operation_after = projection.snapshot().active_operation.is_some();
-            let event_sequence_after = projection.cursor().last_event_sequence;
-            self.update_workspace_mut().project = project_after;
-            self.reconcile_thinking_selection_with_project();
-            let dirty =
-                ProjectionDirtyRouting::for_projection(outcome.is_replaced(), outcome.delta());
-            if dirty.root {
-                root_dirty = true;
-            }
-            if dirty.composer {
-                composer_pane_dirty = true;
-            }
-            if had_active_operation != active_operation_after {
-                sessions_pane_dirty = true;
-            }
-            let conversation_dirty = dirty.conversation;
-            if dirty.inspector_immediate {
-                inspector_pane_dirty = true;
-            } else if dirty.inspector_telemetry {
-                inspector_telemetry_dirty = true;
-            }
-            if dirty.conversation_header {
-                conversation_header_dirty = true;
-            }
-            if dirty.root_modal {
-                root_modal_host_dirty = true;
-            }
+            let sequence_after = projection.cursor().last_event_sequence;
+            (
+                had_active_operation,
+                outcome,
+                project_after,
+                active_operation_after,
+                sequence_after,
+            )
+        };
+        self.app
+            .workspaces
+            .get_mut(owner)
+            .expect("runtime reducer target must exist")
+            .project = project_after;
+        self.reconcile_thinking_selection_for(owner);
+
+        let dirty = ProjectionDirtyRouting::for_projection(outcome.is_replaced(), outcome.delta());
+        let mut changes = crate::application::change_set::UiChangeSet::default();
+        if dirty.root {
+            changes.insert(UiRegion::Root);
+        }
+        if dirty.conversation {
+            changes.insert(UiRegion::Conversation);
+        }
+        if dirty.composer {
+            changes.insert(UiRegion::Composer);
+        }
+        if dirty.inspector_immediate {
+            changes.insert(UiRegion::Inspector);
+        } else if dirty.inspector_telemetry {
+            changes.insert(UiRegion::InspectorTelemetry);
+        }
+        if dirty.conversation_header {
+            changes.insert(UiRegion::ConversationHeader);
+        }
+        if dirty.root_modal {
+            changes.insert(UiRegion::Modal);
+        }
+        if dirty.sessions || had_active_operation != active_operation_after {
+            changes.insert(UiRegion::Sessions);
+        }
+
+        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
             if dirty.sessions {
-                sessions_pane_dirty = true;
-                self.update_workspace_mut()
+                workspace.conversation_controller.apply_delta(true, 0);
+            } else if dirty.conversation {
+                workspace
                     .conversation_controller
-                    .apply_delta(true, 0);
-            } else if conversation_dirty {
-                self.update_workspace_mut()
-                    .conversation_controller
-                    .apply_delta(false, event_sequence_after);
-            }
-            let file_changes_dirty = dirty.file_changes;
-            if projection_completions.reconcile(self, outcome.is_replaced(), cx) {
-                sessions_pane_dirty = true;
+                    .apply_delta(false, sequence_after);
             }
             if outcome.is_replaced() {
-                let workspace = &mut self.update_workspace_mut();
                 if completes_submitted_prompt
                     && !active_operation_after
                     && workspace.composer.submitted().is_some()
@@ -2458,139 +1744,64 @@ impl NativeShell {
                         ConversationSource::new(projection, workspace.composer.submitted());
                     workspace
                         .conversation_controller
-                        .reconcile_hydration(&source, event_sequence_after);
+                        .reconcile_hydration(&source, sequence_after);
                 }
-            } else if conversation_dirty
-                && let workspace = &mut self.update_workspace_mut()
+            } else if dirty.conversation
                 && let Some(projection) = workspace.projection.as_ref()
             {
                 let source = ConversationSource::new(projection, workspace.composer.submitted());
                 workspace
                     .conversation_controller
-                    .reconcile_content(&source, event_sequence_after);
+                    .reconcile_content(&source, sequence_after);
             }
-            let update_owner = self.update_workspace_key();
-            if let Some((command_id, authorization_id, operation_id)) =
-                self.app.commands.authorization(&update_owner).map(
-                    |(command_id, authorization_id, operation_id)| {
-                        (
-                            command_id,
-                            authorization_id.to_owned(),
-                            operation_id.to_owned(),
-                        )
-                    },
-                )
-                && !self
-                    .update_workspace_mut()
-                    .projection
-                    .as_ref()
-                    .is_some_and(|projection| {
-                        projection
-                            .snapshot()
-                            .pending_authorizations
-                            .iter()
-                            .any(|request| request.authorization_id == authorization_id)
-                    })
-            {
-                let intent = DesktopCommandIntent::Authorization {
-                    authorization_id,
-                    operation_id,
-                };
-                let _ = self.complete_command(command_id, &update_owner, &intent);
-            }
-            if outcome.is_replaced() || file_changes_dirty {
-                self.reconcile_file_review();
-            }
-            self.request_resync_if_needed();
-            if composer_pane_state_before != self.composer_pane_state() {
-                composer_pane_dirty = true;
-                inspector_pane_dirty = true;
-                toast_host_dirty = true;
-                conversation_header_dirty = true;
-                root_modal_host_dirty = true;
-            }
-            if background_update {
-                self.runtime_update_target = None;
+        }
+
+        let authorization = self.app.commands.authorization(owner).map(
+            |(command_id, authorization_id, operation_id)| {
                 (
-                    sessions_pane_dirty,
-                    composer_pane_dirty,
-                    inspector_pane_dirty,
-                    inspector_telemetry_dirty,
-                    toast_host_dirty,
-                    conversation_header_dirty,
-                    root_modal_host_dirty,
-                    root_dirty,
-                ) = dirty_before;
-            }
-            applied += 1;
-        }
-        if let Some(writer) = &self.preference_writer
-            && let Some(error) = writer.take_error()
+                    command_id,
+                    authorization_id.to_owned(),
+                    operation_id.to_owned(),
+                )
+            },
+        );
+        if let Some((command_id, authorization_id, operation_id)) = authorization
+            && !self
+                .app
+                .workspaces
+                .get(owner)
+                .and_then(|workspace| workspace.projection.as_ref())
+                .is_some_and(|projection| {
+                    projection
+                        .snapshot()
+                        .pending_authorizations
+                        .iter()
+                        .any(|request| request.authorization_id == authorization_id)
+                })
         {
-            self.update_workspace_mut().set_preference_notice(error);
-            toast_host_dirty = true;
+            let intent = DesktopCommandIntent::Authorization {
+                authorization_id,
+                operation_id,
+            };
+            let _ = self.complete_command(command_id, owner, &intent);
         }
-        let conversation_needs_refresh = self
-            .update_workspace_mut()
-            .conversation_controller
-            .needs_row_refresh();
-        if conversation_needs_refresh && !self.refresh_conversation_rows_at_current_width(cx) {
-            root_dirty = true;
+        if outcome.is_replaced() || dirty.file_changes {
+            self.reconcile_file_review_for(owner);
         }
-        #[cfg(test)]
-        if root_dirty
-            || sessions_pane_dirty
-            || composer_pane_dirty
-            || inspector_pane_dirty
-            || inspector_telemetry_dirty
-            || toast_host_dirty
-            || conversation_header_dirty
-            || root_modal_host_dirty
-        {
-            self.runtime_ui_notification_count += 1;
+        if composer_state_before != self.composer_pane_state_for(owner) {
+            changes.insert(UiRegion::Composer);
+            changes.insert(UiRegion::Inspector);
+            changes.insert(UiRegion::Toast);
+            changes.insert(UiRegion::ConversationHeader);
+            changes.insert(UiRegion::Modal);
         }
-        if root_dirty {
-            cx.notify();
-        }
-        if sessions_pane_dirty {
-            self.notify_sessions_pane(cx);
-        }
-        if composer_pane_dirty {
-            self.notify_composer_pane(cx);
-        }
-        if inspector_pane_dirty {
-            self.notify_inspector_pane(cx);
-        } else if inspector_telemetry_dirty {
-            self.schedule_inspector_telemetry_refresh(cx);
-        }
-        if toast_host_dirty {
-            self.notify_toast_host(cx);
-        }
-        if conversation_header_dirty {
-            self.notify_conversation_header(cx);
-        }
-        if root_modal_host_dirty {
-            self.notify_root_modal_host(cx);
-        }
-        !self
-            .update_workspace_mut()
-            .projection
-            .as_ref()
-            .is_some_and(|projection| projection.lifecycle() == DesktopProjectionLifecycle::Stopped)
+        ProjectionUpdateResult::new(outcome.is_replaced(), changes)
     }
 
-    fn notify_sessions_pane(&self, cx: &mut Context<Self>) {
-        let view_model = self.sessions_pane_view_model();
-        self.sessions_pane.update(cx, |pane, cx| {
-            pane.set_view_model(view_model);
-            cx.notify();
-        });
-        self.notify_toast_host(cx);
-        self.notify_root_modal_host(cx);
-    }
-
-    fn composer_pane_state(&self) -> (bool, bool, bool, bool) {
-        let workspace = self.update_workspace();
+    fn composer_pane_state_for(&self, owner: &WorkspaceKey) -> (bool, bool, bool, bool) {
+        let Some(workspace) = self.app.workspaces.get(owner) else {
+            return (false, false, false, false);
+        };
         (
             matches!(
                 workspace.composer.admission(),
@@ -2603,6 +1814,198 @@ impl NativeShell {
             workspace.composer.submitted().is_some(),
             workspace.composer.rejection().is_some(),
         )
+    }
+
+    fn reconcile_thinking_selection_for(&mut self, owner: &WorkspaceKey) {
+        let Some(workspace) = self.app.workspaces.get_mut(owner) else {
+            return;
+        };
+        let (selection, fallback) =
+            admitted_desktop_thinking_selection(&workspace.project, workspace.thinking_selection);
+        if !fallback {
+            return;
+        }
+        workspace.thinking_selection = selection;
+        workspace.thinking_hint = Some(Arc::from("Thinking reset to Auto for the selected model."));
+        let session_id = workspace
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.clone());
+        if let Some(session_id) = session_id.as_deref() {
+            self.remember_thinking_selection(session_id, selection);
+        }
+    }
+
+    fn reconcile_file_review_for(&mut self, owner: &WorkspaceKey) {
+        let Some(workspace) = self.app.workspaces.get(owner) else {
+            return;
+        };
+        let request = match workspace.file_review.as_ref() {
+            DesktopFileReviewState::Empty => return,
+            DesktopFileReviewState::Loading(request)
+            | DesktopFileReviewState::Failed { request, .. } => request.clone(),
+            DesktopFileReviewState::Ready(document) => document.request.clone(),
+        };
+        let remains_current = workspace.projection.as_ref().is_some_and(|projection| {
+            projection.snapshot().context.changes.iter().any(|change| {
+                change.operation_id == request.change.operation_id
+                    && change.tool_call_id == request.change.tool_call_id
+                    && change.path == request.change.path
+                    && change.updated_sequence == request.revision.value()
+            })
+        });
+        if remains_current {
+            return;
+        }
+        self.complete_matching_command(owner, |intent| {
+            matches!(
+                intent,
+                DesktopCommandIntent::FileReview {
+                    request: pending,
+                } if pending == &request
+            )
+        });
+        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
+            workspace.file_review = Arc::new(DesktopFileReviewState::Empty);
+        }
+    }
+
+    fn request_resync_for(&mut self, owner: &WorkspaceKey) {
+        if !self
+            .app
+            .workspaces
+            .get(owner)
+            .and_then(|workspace| workspace.projection.as_ref())
+            .is_some_and(|projection| {
+                projection.lifecycle() == DesktopProjectionLifecycle::NeedsResync
+            })
+            || self
+                .app
+                .commands
+                .contains(owner, &DesktopCommandIntent::Resync)
+        {
+            return;
+        }
+        let intent = DesktopCommandIntent::Resync;
+        let command_id = match self.app.commands.reserve(owner.clone(), intent.clone()) {
+            Ok(command_id) => command_id,
+            Err(error) => {
+                RuntimeUpdatePort::set_notice(self, owner, error.to_string());
+                return;
+            }
+        };
+        let admission = self.runtime_client.as_ref().map_or_else(
+            || Err("desktop runtime is stopped".to_owned()),
+            |runtime| {
+                runtime
+                    .try_resync(command_id)
+                    .map_err(|error| error.to_string())
+            },
+        );
+        if let Err(message) = admission {
+            let _ = self.complete_command(command_id, owner, &intent);
+            RuntimeUpdatePort::set_notice(self, owner, message);
+        }
+    }
+
+    fn poll_runtime(&mut self) -> RuntimePoll {
+        if self.runtime_client.is_none() {
+            return RuntimePoll {
+                transition: Transition::default(),
+                running: false,
+            };
+        }
+        let mut transition = Transition::default();
+        let mut applied = 0;
+        while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
+            let Some(update) = self.runtime_updates.pop_front() else {
+                break;
+            };
+            transition.merge(DesktopController::reduce_runtime(self, update));
+            applied += 1;
+        }
+        debug_assert!(
+            transition.effects().is_empty(),
+            "DSK-731 runtime updates do not emit platform effects"
+        );
+        RuntimePoll {
+            transition,
+            running: RuntimeUpdatePort::active_runtime_is_running(self),
+        }
+    }
+
+    fn apply_runtime_poll(&mut self, mut poll: RuntimePoll, cx: &mut Context<Self>) -> bool {
+        if let Some(writer) = &self.preference_writer
+            && let Some(error) = writer.take_error()
+        {
+            let owner = self.app.workspaces.active_key().clone();
+            RuntimeUpdatePort::set_notice(self, &owner, error);
+            poll.transition.merge(Transition::changed(UiRegion::Toast));
+        }
+        let conversation_needs_refresh = self
+            .app
+            .workspaces
+            .active_mut()
+            .conversation_controller
+            .needs_row_refresh();
+        if conversation_needs_refresh && !self.refresh_conversation_rows_at_current_width(cx) {
+            poll.transition.merge(Transition::changed(UiRegion::Root));
+        }
+        self.refresh_runtime_changes(poll.transition.changes(), cx);
+        poll.running
+    }
+
+    #[cfg(test)]
+    fn poll_runtime_for_test(&mut self, cx: &mut Context<Self>) -> bool {
+        let poll = self.poll_runtime();
+        self.apply_runtime_poll(poll, cx)
+    }
+
+    fn refresh_runtime_changes(
+        &mut self,
+        changes: crate::application::change_set::UiChangeSet,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(test)]
+        if !changes.is_empty() {
+            self.runtime_ui_notification_count += 1;
+        }
+        if changes.contains(UiRegion::Root) {
+            cx.notify();
+        }
+        if changes.contains(UiRegion::Sessions) {
+            self.notify_sessions_pane(cx);
+        }
+        if changes.contains(UiRegion::Composer) {
+            self.notify_composer_pane(cx);
+        }
+        if changes.contains(UiRegion::Conversation) {
+            self.notify_conversation_pane(cx);
+        }
+        if changes.contains(UiRegion::Inspector) {
+            self.notify_inspector_pane(cx);
+        } else if changes.contains(UiRegion::InspectorTelemetry) {
+            self.schedule_inspector_telemetry_refresh(cx);
+        }
+        if changes.contains(UiRegion::Toast) {
+            self.notify_toast_host(cx);
+        }
+        if changes.contains(UiRegion::ConversationHeader) {
+            self.notify_conversation_header(cx);
+        }
+        if changes.contains(UiRegion::Modal) {
+            self.notify_root_modal_host(cx);
+        }
+    }
+
+    fn notify_sessions_pane(&self, cx: &mut Context<Self>) {
+        let view_model = self.sessions_pane_view_model();
+        self.sessions_pane.update(cx, |pane, cx| {
+            pane.set_view_model(view_model);
+            cx.notify();
+        });
+        self.notify_toast_host(cx);
+        self.notify_root_modal_host(cx);
     }
 
     fn active_composer_running_mode(&self) -> ComposerRunningMode {
@@ -2737,56 +2140,8 @@ impl NativeShell {
     }
 
     fn reconcile_thinking_selection_with_project(&mut self) {
-        let workspace = self.update_workspace_mut();
-        let (selection, fallback) =
-            admitted_desktop_thinking_selection(&workspace.project, workspace.thinking_selection);
-        if !fallback {
-            return;
-        }
-        self.update_workspace_mut().thinking_selection = selection;
-        self.update_workspace_mut().thinking_hint =
-            Some(Arc::from("Thinking reset to Auto for the selected model."));
-        let session_id = self
-            .update_workspace()
-            .projection
-            .as_ref()
-            .map(|projection| projection.snapshot().session.session_id.clone());
-        if let Some(session_id) = session_id.as_deref() {
-            self.remember_thinking_selection(session_id, selection);
-        }
-    }
-
-    fn reconcile_file_review(&mut self) {
-        let request = match self.update_workspace().file_review.as_ref() {
-            DesktopFileReviewState::Empty => return,
-            DesktopFileReviewState::Loading(request)
-            | DesktopFileReviewState::Failed { request, .. } => request.clone(),
-            DesktopFileReviewState::Ready(document) => document.request.clone(),
-        };
-        let remains_current =
-            self.update_workspace()
-                .projection
-                .as_ref()
-                .is_some_and(|projection| {
-                    projection.snapshot().context.changes.iter().any(|change| {
-                        change.operation_id == request.change.operation_id
-                            && change.tool_call_id == request.change.tool_call_id
-                            && change.path == request.change.path
-                            && change.updated_sequence == request.revision.value()
-                    })
-                });
-        if !remains_current {
-            let owner = self.update_workspace_key();
-            self.complete_matching_command(&owner, |intent| {
-                matches!(
-                    intent,
-                    DesktopCommandIntent::FileReview {
-                        request: pending_request,
-                    } if pending_request == &request
-                )
-            });
-            self.update_workspace_mut().file_review = Arc::new(DesktopFileReviewState::Empty);
-        }
+        let owner = self.app.workspaces.active_key().clone();
+        self.reconcile_thinking_selection_for(&owner);
     }
 
     fn toggle_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2870,40 +2225,6 @@ impl NativeShell {
 
     fn reserve_command(&mut self, intent: DesktopCommandIntent) -> Option<u64> {
         commands::reserve_command(self, intent)
-    }
-
-    fn request_resync_if_needed(&mut self) {
-        if !self
-            .update_workspace()
-            .projection
-            .as_ref()
-            .is_some_and(|projection| {
-                projection.lifecycle() == DesktopProjectionLifecycle::NeedsResync
-            })
-            || self
-                .app
-                .commands
-                .contains(&self.update_workspace_key(), &DesktopCommandIntent::Resync)
-        {
-            return;
-        }
-        let intent = DesktopCommandIntent::Resync;
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            return;
-        };
-        let admission = self.runtime_client.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                runtime
-                    .try_resync(command_id)
-                    .map_err(|error| error.to_string())
-            },
-        );
-        if let Err(message) = admission {
-            let owner = self.update_workspace_key();
-            let _ = self.complete_command(command_id, &owner, &intent);
-            self.update_workspace_mut().set_preference_notice(message);
-        }
     }
 
     fn submit_composer(&mut self, cx: &mut Context<Self>) {
@@ -3225,21 +2546,6 @@ impl NativeShell {
             return Some("Attachments are unavailable while a prompt is starting.");
         }
         None
-    }
-
-    fn reject_pending_composer(&mut self, message: String) {
-        let command_id = match self.update_workspace().composer.admission() {
-            ComposerAdmission::Pending { command_id, .. } => *command_id,
-            ComposerAdmission::Idle => return,
-        };
-        if self
-            .update_workspace_mut()
-            .composer
-            .rejected(command_id, message)
-            .is_ok()
-        {
-            self.update_workspace_mut().composer_needs_sync = true;
-        }
     }
 
     fn submit_active_control(&mut self, kind: ComposerSubmissionKind, cx: &mut Context<Self>) {
@@ -5717,6 +5023,290 @@ fn conversation_header_model_menu(
     (groups, unavailable_current_model)
 }
 
+impl RuntimeUpdatePort for NativeShell {
+    fn active_workspace_key(&self) -> WorkspaceKey {
+        self.app.workspaces.active_key().clone()
+    }
+
+    fn workspace_exists(&self, owner: &WorkspaceKey) -> bool {
+        self.app.workspaces.contains(owner)
+    }
+
+    fn command_owner(&self, command_id: u64) -> Option<WorkspaceKey> {
+        self.app.commands.owner(command_id).cloned()
+    }
+
+    fn command_intent(&self, command_id: u64) -> Option<DesktopCommandIntent> {
+        self.app.commands.intent(command_id).cloned()
+    }
+
+    fn command_matches(
+        &self,
+        command_id: u64,
+        owner: &WorkspaceKey,
+        intent: &DesktopCommandIntent,
+    ) -> bool {
+        self.app.commands.matches(command_id, owner, intent)
+    }
+
+    fn transfer_command(&mut self, command_id: u64, owner: WorkspaceKey) -> bool {
+        self.app
+            .commands
+            .transfer_command(command_id, owner)
+            .is_ok()
+    }
+
+    fn require_command_owner_resync(
+        &mut self,
+        pending_owner: &WorkspaceKey,
+        observed_owner: &WorkspaceKey,
+    ) {
+        self.require_command_owner_resync(pending_owner, observed_owner);
+    }
+
+    fn complete_command(
+        &mut self,
+        command_id: u64,
+        owner: &WorkspaceKey,
+        intent: &DesktopCommandIntent,
+    ) -> bool {
+        self.complete_command(command_id, owner, intent)
+    }
+
+    fn reject_command(
+        &mut self,
+        command_id: u64,
+        owner: &WorkspaceKey,
+        command: desktop::runtime::DesktopRuntimeCommandKind,
+    ) -> Option<DesktopCommandIntent> {
+        self.reject_command(command_id, owner, command)
+    }
+
+    fn complete_operation_commands(&mut self, owner: &WorkspaceKey, operation_id: &str) {
+        self.complete_matching_command(owner, |intent| {
+            matches!(
+                intent,
+                DesktopCommandIntent::Abort {
+                    operation_id: pending,
+                } if pending == operation_id
+            )
+        });
+        self.complete_matching_command(owner, |intent| {
+            matches!(
+                intent,
+                DesktopCommandIntent::Authorization {
+                    operation_id: pending,
+                    ..
+                } if pending == operation_id
+            )
+        });
+    }
+
+    fn install_hydrated_workspace(
+        &mut self,
+        snapshot: &desktop::runtime::DesktopRuntimeHydratedSnapshot,
+        inherit_home_thinking: bool,
+        activate: bool,
+    ) -> bool {
+        self.install_hydrated_workspace(snapshot, inherit_home_thinking, activate)
+    }
+
+    fn remove_closed_workspace(&mut self, session_id: &str) -> usize {
+        self.remove_closed_workspace(session_id)
+    }
+
+    fn remove_catalog_session(&mut self, session_id: &str) {
+        self.app.catalog.remove_session(session_id);
+    }
+
+    fn replace_catalog(
+        &mut self,
+        sessions: Vec<desktop::runtime::DesktopSessionCatalogEntry>,
+        omitted: usize,
+    ) {
+        self.app.catalog.replace_catalog(sessions, omitted);
+    }
+
+    fn rename_catalog_session(
+        &mut self,
+        session_id: &str,
+        name: Option<String>,
+        updated_at: String,
+    ) -> bool {
+        self.app
+            .catalog
+            .rename_session(session_id, name, updated_at)
+    }
+
+    fn insert_session_into_catalog(&mut self, owner: &WorkspaceKey) -> bool {
+        debug_assert_eq!(owner, self.app.workspaces.active_key());
+        self.insert_active_session_into_catalog()
+    }
+
+    fn catalog_is_loading(&self) -> bool {
+        self.app.catalog.state().is_loading()
+    }
+
+    fn fail_catalog(&mut self, message: String) {
+        self.app.catalog.fail_refresh(message);
+    }
+
+    fn cancel_all_commands(&mut self) {
+        self.app.commands.cancel_all();
+    }
+
+    fn set_notice(&mut self, owner: &WorkspaceKey, notice: String) {
+        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
+            workspace.set_preference_notice(notice);
+        }
+    }
+
+    fn accept_composer(&mut self, owner: &WorkspaceKey, command_id: u64) -> bool {
+        let Some(workspace) = self.app.workspaces.get_mut(owner) else {
+            return false;
+        };
+        if workspace.composer.accepted(command_id).is_err() {
+            return false;
+        }
+        workspace.composer_attachments.clear();
+        workspace.composer_needs_sync = true;
+        workspace.conversation_controller.mark_live_dirty();
+        true
+    }
+
+    fn reject_composer(&mut self, owner: &WorkspaceKey, command_id: u64, notice: String) -> bool {
+        let Some(workspace) = self.app.workspaces.get_mut(owner) else {
+            return false;
+        };
+        workspace.composer.rejected(command_id, notice).is_ok()
+    }
+
+    fn submitted_composer_command(&self, owner: &WorkspaceKey) -> Option<u64> {
+        self.app
+            .workspaces
+            .get(owner)
+            .and_then(|workspace| workspace.composer.submitted())
+            .map(|submitted| submitted.command_id)
+    }
+
+    fn reject_pending_composer(&mut self, owner: &WorkspaceKey, message: String) {
+        let command_id = self.app.workspaces.get(owner).and_then(|workspace| {
+            match workspace.composer.admission() {
+                ComposerAdmission::Pending { command_id, .. } => Some(*command_id),
+                ComposerAdmission::Idle => None,
+            }
+        });
+        if let Some(command_id) = command_id
+            && RuntimeUpdatePort::reject_composer(self, owner, command_id, message)
+            && let Some(workspace) = self.app.workspaces.get_mut(owner)
+        {
+            workspace.composer_needs_sync = true;
+        }
+    }
+
+    fn set_file_review_ready(
+        &mut self,
+        owner: &WorkspaceKey,
+        review: coding_agent::api::review::CodingAgentFileReview,
+    ) {
+        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
+            workspace.file_review = Arc::new(DesktopFileReviewState::Ready(
+                DesktopFileReviewDocument::from_product(review),
+            ));
+        }
+    }
+
+    fn set_file_review_failed(
+        &mut self,
+        owner: &WorkspaceKey,
+        request: CodingAgentFileReviewRequest,
+        code: String,
+    ) {
+        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
+            workspace.file_review = Arc::new(DesktopFileReviewState::Failed { request, code });
+        }
+    }
+
+    fn apply_model_thinking_selection(
+        &mut self,
+        owner: &WorkspaceKey,
+        thinking_level: Option<CodingAgentThinkingLevel>,
+        thinking_fallback: bool,
+    ) {
+        let selection = DesktopThinkingLevel::from_explicit(thinking_level);
+        let session_id = self.app.workspaces.get_mut(owner).and_then(|workspace| {
+            workspace.thinking_selection = selection;
+            workspace.thinking_hint = thinking_fallback
+                .then(|| Arc::from("Thinking reset to Auto for the selected model."));
+            workspace
+                .projection
+                .as_ref()
+                .map(|projection| projection.snapshot().session.session_id.clone())
+        });
+        if let Some(session_id) = session_id.as_deref() {
+            self.remember_thinking_selection(session_id, selection);
+        }
+    }
+
+    fn selected_model_label(&self, owner: &WorkspaceKey) -> String {
+        self.app
+            .workspaces
+            .get(owner)
+            .map(|workspace| workspace.project.selected_model_id.clone())
+            .unwrap_or_default()
+    }
+
+    fn selected_profile_label(&self, owner: &WorkspaceKey) -> String {
+        self.app
+            .workspaces
+            .get(owner)
+            .map(|workspace| {
+                workspace
+                    .projection
+                    .as_ref()
+                    .map(|projection| {
+                        projection
+                            .snapshot()
+                            .session
+                            .default_agent_profile_id
+                            .as_str()
+                            .to_owned()
+                    })
+                    .unwrap_or_else(|| {
+                        workspace
+                            .project
+                            .default_agent_profile_id
+                            .as_str()
+                            .to_owned()
+                    })
+            })
+            .unwrap_or_default()
+    }
+
+    fn apply_projection_update(
+        &mut self,
+        owner: &WorkspaceKey,
+        update: desktop::runtime::DesktopRuntimeUpdate,
+        creates_session_from_prompt: bool,
+    ) -> ProjectionUpdateResult {
+        self.apply_projection_update_for(owner, update, creates_session_from_prompt)
+    }
+
+    fn request_resync_if_needed(&mut self, owner: &WorkspaceKey) {
+        self.request_resync_for(owner);
+    }
+
+    fn active_runtime_is_running(&self) -> bool {
+        !self
+            .app
+            .workspaces
+            .active()
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.lifecycle() == DesktopProjectionLifecycle::Stopped)
+    }
+}
+
 impl Render for NativeShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _span = tracing::trace_span!("desktop.render").entered();
@@ -6055,13 +5645,6 @@ fn usage_cost_label(cost: Option<f64>) -> String {
     cost.filter(|cost| cost.is_finite() && *cost >= 0.0)
         .map(|cost| format!("${cost:.4}"))
         .unwrap_or_else(|| "—".into())
-}
-
-fn safe_runtime_rejection_notice(
-    command: desktop::runtime::DesktopRuntimeCommandKind,
-    code: &str,
-) -> String {
-    format!("{command:?} rejected ({})", truncate_label(code, 28))
 }
 
 #[cfg(test)]
@@ -6639,7 +6222,7 @@ mod tests {
                     omitted: 0,
                 },
             );
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             assert_eq!(
                 shell.app.catalog.catalog()[0].session_id,
                 "explicit-refresh-session"
@@ -6683,7 +6266,7 @@ mod tests {
                 },
             );
 
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             let session = &shell.app.catalog.catalog()[0];
             assert_eq!(session.name.as_deref(), Some("询问助手名字"));
             assert_eq!(session.updated_at, "2026-07-30T02:24:11Z");
@@ -6764,7 +6347,7 @@ mod tests {
                     message: "private runtime detail must not become catalog state".into(),
                 },
             );
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             assert_eq!(
                 shell.app.catalog.state(),
                 &project_catalog_controller::ProjectCatalogState::Error {
@@ -7338,7 +6921,7 @@ mod tests {
                 },
             );
 
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             assert_eq!(active_session_id(shell), Some("session-first"));
             assert_eq!(shell.app.workspaces.active().composer.draft(), "home draft");
             assert!(shell.app.commands.pending(command_id).is_none());
@@ -7381,7 +6964,7 @@ mod tests {
                     },
                 });
 
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             assert!(
                 shell
                     .app
@@ -7430,7 +7013,7 @@ mod tests {
                     snapshot: visual_test_snapshot_for("session-created-locally"),
                 },
             );
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             assert_eq!(
                 shell.app.catalog.catalog()[0].session_id,
                 "session-created-locally"
@@ -7447,7 +7030,7 @@ mod tests {
                         visual_test_snapshot_for("session-created-locally"),
                     ),
                 });
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
         });
         assert_eq!(
             runtime_harness.drain_command_kinds(),
@@ -7513,7 +7096,7 @@ mod tests {
                 },
             );
 
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             assert_eq!(active_session_id(shell), Some("session-created"));
             assert!(session_workspace(shell, "session-background").is_some());
             assert!(shell.app.workspaces.get(&WorkspaceKey::Home).is_some());
@@ -7626,7 +7209,7 @@ mod tests {
                     error: None,
                 },
             );
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
 
             assert_eq!(active_session_id(shell), Some("session-a"));
             assert_eq!(shell.runtime_ui_notification_count, 0);
@@ -7757,7 +7340,7 @@ mod tests {
                     session_id: "close-session-b".into(),
                 },
             );
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             assert_eq!(active_session_id(shell), Some("close-session-a"));
             assert!(session_workspace(shell, "close-session-b").is_none());
             assert!(shell.app.commands.pending(abandoned_command_id).is_none());
@@ -7809,7 +7392,7 @@ mod tests {
                 },
             );
 
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             assert_eq!(shell.app.workspaces.active_key(), &WorkspaceKey::Home);
             assert_eq!(
                 shell.app.workspaces.active().composer.draft(),
@@ -10740,7 +10323,7 @@ mod tests {
                     },
                 },
             );
-            shell.poll_runtime(cx);
+            shell.poll_runtime_for_test(cx);
 
             assert_eq!(
                 shell.app.workspaces.active().thinking_selection,
@@ -11159,7 +10742,7 @@ mod tests {
                     snapshot,
                 },
             );
-            assert!(shell.poll_runtime(cx));
+            assert!(shell.poll_runtime_for_test(cx));
             assert!(shell.app.workspaces.active().composer.draft().is_empty());
             assert_eq!(
                 shell
@@ -12460,7 +12043,6 @@ use center_drawer_host::{
     CenterDrawerHost, CenterDrawerHostEvent, CenterDrawerKind, CenterDrawerViewModel,
 };
 use center_navigation::{CenterNavigationTarget, CenterSurface};
-use commands::{DirectCommandUpdate, ProjectionCommandCompletions};
 #[cfg(test)]
 use composer_pane::InputRenderLatencyProbe;
 use composer_pane::{ComposerPane, ComposerPaneEvent, ComposerPaneViewModel};
