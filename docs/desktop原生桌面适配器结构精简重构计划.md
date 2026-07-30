@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（Phase 3 进行中，DSK-732 已完成，下一项 DSK-733）
+> 状态：执行中（Phase 3 已完成，下一项 DSK-740）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1016,11 +1016,11 @@ Gate：Gate A + Gate B。
 
 | 债务 ID | 引入任务 | 临时内容 | 路径 | 删除任务 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| DSK-D730-01 | DSK-730 | 尚未接入的 root event/transition 分支使用模块级 `dead_code` allow | `application/reducer.rs` | DSK-733 | 待清理；runtime branch 在 DSK-731 接入，platform/timer/effect branch 在 DSK-733 接入后删除 allow |
-| DSK-D730-02 | DSK-730 | typed platform effect/result contract 尚未由 executor 消费，使用模块级 `dead_code` allow | `application/effect.rs` | DSK-733 | 待清理；picker/timer/editor/writer 迁移后删除 allow |
+| DSK-D730-01 | DSK-730 | 尚未接入的 root event/transition 分支使用模块级 `dead_code` allow | `application/reducer.rs` | DSK-733 | 已清理（`582d3ae`）；runtime、platform 与 timer 分支均由生产 root reducer 消费，模块级 allow 已删除 |
+| DSK-D730-02 | DSK-730 | typed platform effect/result contract 尚未由 executor 消费，使用模块级 `dead_code` allow | `application/effect.rs` | DSK-733 | 已清理（`582d3ae`）；picker、clipboard、preferences、resync 与四类 timer 均通过 typed executor/result，模块级 allow 已删除 |
 | DSK-D730-03 | DSK-730 | `UiChangeSet` 预定义 region 尚未全部进入 refresh routing，使用模块级 `dead_code` allow | `application/change_set.rs` | DSK-743 | 待清理；统一 selective refresh 后删除 allow |
 | DSK-D731-01 | DSK-731 | `DesktopProjection` 仍直接接收宽 `DesktopRuntimeUpdate`，projection apply、conversation/file-review post-reconcile 与 delta dirty 转换暂由 adapter 的单一 port method 承接 | `app/native_shell.rs::apply_projection_update_for`、`application/reducer.rs::RuntimeUpdatePort::apply_projection_update` | DSK-732 | 已清理（`93a0586`）；projection 只接收窄 `ProjectionEvent`，application reducer 负责提取事件和 `DesktopProjectionDelta -> UiChangeSet`，旧 broad method 与 `native_shell/update.rs` 已删除 |
-| DSK-D731-02 | DSK-731 | projection 触发的 resync command admission 暂由 reducer 决策后通过 port 同步发送，尚未形成 typed runtime effect/executor 边界 | `app/native_shell.rs::request_resync_for`、`application/reducer.rs::RuntimeUpdatePort::request_resync_if_needed` | DSK-733 | 待清理；异步 effect/result 全部回流 reducer 时删除 direct send port |
+| DSK-D731-02 | DSK-731 | projection 触发的 resync command admission 暂由 reducer 决策后通过 port 同步发送，尚未形成 typed runtime effect/executor 边界 | `app/native_shell.rs::request_resync_for`、`application/reducer.rs::RuntimeUpdatePort::request_resync_if_needed` | DSK-733 | 已清理（`582d3ae`）；旧 direct-send port 已删除，resync command reservation、`RequestResync` effect、admission result 与失败 completion 全部回流 reducer |
 | DSK-D731-03 | DSK-731 | `SessionWorkspace`/catalog concrete type 仍位于 GPUI adapter，application reducer 通过窄 `RuntimeUpdatePort` 执行显式 owner 的原子 mutation | `application/reducer.rs::RuntimeUpdatePort`、`app/native_shell.rs` | DSK-740 | 待清理；聚合 Shell UI state 时把纯 runtime workspace/catalog state 收归 application，删除 concrete-state bridge |
 
 ## 十二、风险与处置
@@ -1268,6 +1268,37 @@ Gate 与性能记录：
   424 µs、window RSS growth 24,555,520 bytes。本任务只改变 projection 输入与 invalidation routing，未改
   render/layout/ViewModel 或像素语义，因此未运行、未更新 visual golden。
 
+### DSK-733 实际结果
+
+- `DesktopController` 现在持有 bounded pending effect registry；每个 effect 使用
+  `EffectRequestId + WorkspaceKey` identity。相同 owner/kind 的 picker、resync 和 timer 以及全局最新
+  preferences write 会 supersede 旧请求；callback 只 dispatch `PlatformResult` 或 `DesktopTimer`，reducer
+  严格匹配 request ID、owner 与 kind 后才允许 mutation。background owner result 会更新原 workspace，但
+  不生成 foreground `UiChangeSet`。
+- project-directory picker 与 attachment picker 已统一为 `PickPaths` effect。删除
+  `ProjectDirectoryPickerOutcome` 和 callback 内对 `active_mut()` 的直接修改；路径数量、editable 状态和
+  attachment bound 均在 application reducer/窄 state port 路径校验。clipboard write 与 copy feedback 也统一
+  为 typed effect/result，conversation announcement expiry 使用带 identity 的 application timer。
+- `PreferenceWriter::schedule` 现在为每个 snapshot 返回 `Written/Superseded/Failed` oneshot completion，
+  不再通过 `take_error` 轮询隐藏状态通道；writer failure 以原 request owner 回流 reducer 形成 typed notice。
+  coalescing 保持不阻塞调用线程，superseded completion 不会覆盖更新的 UI 状态。
+- conversation announcement、telemetry refresh、conversation height refresh、conversation width commit
+  四类 Root timer 全部通过
+  `ScheduleTimer` effect；stale timer identity 被 reducer fail-closed 拒绝。ToastHost 的 feature-local expiry
+  callback 也只投递 typed `ToastExpiryTimer` 给本地 reducer，不再在 await callback 中展开 mutation。
+- projection 触发的 resync 由 reducer reserve command 后发出 `RequestResync` effect，executor 只负责
+  admission，成功/失败再以 `ResyncRequested` 回流；删除 `request_resync_for` 和
+  `request_resync_if_needed` direct-send port，DSK-D731-02 清零。external editor completion 原本已经是
+  `DesktopRuntimeUpdate::ExternalEditorOpened`，继续只走 root runtime reducer，没有新增第二条 platform
+  completion 通道。
+- NativeShell release subscription 现在显式持有 runtime shutdown signal 并先触发正常 shutdown；
+  `DesktopRuntimeShutdownGuard::Drop` 仅保留 reaper fallback。新增 runtime test 确认显式 signal 发布
+  `Stopped` 并可 join。
+- 新增 picker race、switch-during-picker、writer error、superseded timer、toast stale timer 与 explicit
+  shutdown 定向测试。Gate A 通过：desktop lib `309 passed / 5 ignored / 0 failed`，dependency boundary
+  `10 passed`，all-target check、严格 clippy、format 与 diff check 全部通过。任务没有改变 render/layout/
+  ViewModel 或像素语义，因此未运行、未更新 visual golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1281,7 +1312,7 @@ Gate 与性能记录：
 | DSK-730 | 已完成 | `333bffe` | typed application event/effect/transition/change-set contract；`DesktopState` 成为 workspace/command/catalog/preferences 唯一 owner；首个 catalog disclosure reducer delegation 接入；Gate A 与 3 项纯 contract 测试通过 |
 | DSK-731 | 已完成 | `c4c0eef` | 单一 root runtime reducer 穷尽 23 variants；删除 direct/projection completion 双权威与隐式 update target；Gate A/B、coverage table、runtime/projection unit、headless perf 全通过；未更新 golden |
 | DSK-732 | 已完成 | `93a0586` | 9 类窄 `ProjectionEvent` 与 application-owned dirty routing；删除纯 protocol arms 和旧 update module；Gate A、projection gap/duplicate/resync/replacement 及 headless perf 全通过；未更新 golden |
-| DSK-733 | 待执行 | — | — |
+| DSK-733 | 已完成 | `582d3ae` | 所有 picker/writer/clipboard/resync/Root timer completion 回流 reducer，显式 shutdown signal；清理 DSK-D730-01/02 与 DSK-D731-02；Gate A 和 race/stale/error 定向测试通过；未更新 golden |
 | DSK-740 | 待执行 | — | — |
 | DSK-741 | 待执行 | — | — |
 | DSK-742 | 待执行 | — | — |
