@@ -1,6 +1,6 @@
 # Desktop 多项目工作区、启动界面与运行时上下文重构计划
 
-> 状态：实施中（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410、VUI-411、VUI-412、VUI-420、VUI-421 已完成）
+> 状态：已完成（DSK-600、CAG-201、CAG-202、CAG-203、CAG-204、DSK-610、DSK-611、DSK-612、DSK-613、DSK-630、DSK-631、DSK-640、DSK-641、DSK-642、VUI-401、DSK-650、VUI-410、VUI-411、VUI-412、VUI-420、VUI-421、VUI-422、DSK-690 与最终验收均已完成）
 > 决策日期：2026-07-29
 > 最近更新：2026-07-30
 > 前置计划：[`desktop待机界面与多会话工作台.md`](./desktop待机界面与多会话工作台.md)
@@ -1213,8 +1213,8 @@ CenterDrawerHost
 > Gate：Desktop 294 个 library tests 通过、5 个既有 release 性能用例保持 ignored，20 个 dependency
 > boundary tests 与严格 all-target Clippy 通过；格式、diff、native/headless performance gate 均通过。现有
 > 10 张 native golden 的 review/compare normalized RMSE 全部为 `0`（预算 `0.015`），review note 已更新且
-> 未重写图片。专门持久化“打开的 Provider popup”仍作为 9.5 完整 visual matrix 的执行债务保留；本项已由
-> 真实 GPUI PopupMenu interaction 覆盖，计划最终收敛前需补入统一 visual fixture 集。
+> 未重写图片。任务当时记录的“打开的 Provider popup”扩展债务已在最终 9.5 visual matrix 中由
+> `wide-model-menu` production PopupMenu fixture 收敛。
 
 工作：
 
@@ -1250,8 +1250,8 @@ CenterDrawerHost
 > dependency boundary tests 与严格 all-target Clippy 通过；格式、diff、native/headless performance gate 均
 > 通过。10 张 native golden 已逐张 review 并安装，随后 compare normalized RMSE 全部为 `0`（预算
 > `0.015`）；wide/medium/narrow 与 no-color 的差异仅限 `Default` 改为 `Auto` 后的 Header 文本和预期空间重排。
-> 9.5 完整 visual matrix 仍需把持久化的 non-reasoning/局部 fallback 状态与 VUI-420 已记录的打开 Provider
-> popup 一并纳入统一 fixture；本项交互与 hit-test 已覆盖，计划最终收敛前不得遗漏该执行债务。
+> 任务当时记录的 non-reasoning/局部 fallback 扩展债务已在最终 9.5 visual matrix 中由
+> `wide-thinking-non-reasoning` fixture 收敛，并与 `wide-thinking-menu` 共同覆盖 capability-driven 两类状态。
 
 工作：
 
@@ -1286,8 +1286,8 @@ CenterDrawerHost
 > 10 张 deterministic native fixture 已复核，normalized RMSE 全部为 `0`，因此没有替换 golden；native gate
 > 的 GPU frame P95 为 `5.073 ms`、input dispatch-to-post-render P95 为 `8.354 ms`、steady RSS growth 为
 > `172032 B`，headless gate 的 10k-row CPU frame P95 为 `2.290 ms`、input roundtrip P95 为 `4.945 ms`、
-> change-to-render P95 为 `340 us`。9.5 完整 visual matrix 仍需加入持久化的 medium/narrow Inspector-open
-> fixture；本项已完成交互/hit-test，计划最终收敛前不得遗漏该执行债务。
+> change-to-render P95 为 `340 us`。任务当时记录的 medium/narrow Inspector-open 扩展债务已在最终 9.5
+> visual matrix 中由 `medium-inspector`、`narrow-inspector` 两个 fixture 收敛，并保留原有交互/hit-test 证据。
 
 工作：
 
@@ -1324,8 +1324,8 @@ CenterDrawerHost
 > 10 张 deterministic native fixture 已逐张复核且 normalized RMSE 全部为 `0`，没有替换 golden。native gate
 > 的 GPU frame P95 为 `5.393 ms`、input dispatch-to-post-render P95 为 `8.381 ms`、steady RSS growth 为
 > `159744 B`；headless gate 的 10k-row CPU frame P95 为 `2.349 ms`、input roundtrip P95 为 `4.840 ms`、
-> change-to-render P95 为 `366 us`。此前记录的 9.5 扩展 visual matrix 债务仍由后续最终验收统一收敛，不属于
-> 本项 source-path 清理的完成替代品。
+> change-to-render P95 为 `366 us`。此前记录的 9.5 扩展 visual matrix 债务已由本计划最终验收统一收敛；
+> 这里保留任务当时的 source-path 清理测量值，不用最终测量值反写历史任务快照。
 
 工作：
 
@@ -1337,6 +1337,15 @@ CenterDrawerHost
 完成标准：`rg` 不再找到旧 timer、Home Recent/Global sections、NarrowContext root overlay、固定 ALL menu 渲染。
 
 ## 九、测试与验收矩阵
+
+> 最终验收（2026-07-30）：9.1 至 9.4 的产品、runtime、纯状态与真实 GPUI interaction
+> 回归全部通过；9.5 已扩展为 20 张 reviewed native golden，连续两次 deterministic capture 的
+> normalized RMSE 均为 `0`。`coding-agent`、CLI、TUI、Desktop 全量测试，CLI/coding-agent/Desktop
+> 严格 Clippy，Desktop dependency boundary、fmt、diff、删除审计、CodeGraph 与 AST production-surface
+> 复核全部通过。最终 native gate 的 GPU/present P95 为 `6.539 ms`、input-to-post-render P95 为
+> `8.363 ms`、steady RSS growth 为 `4,096 bytes`、production Markdown completion P95 为 `147 us`；
+> headless gate 的 10k-row CPU frame P95 为 `2.337 ms`、input roundtrip P95 为 `4.838 ms`、
+> change-to-render P95 为 `355 us`，未提高任何预算。
 
 ### 9.1 `coding-agent`
 
@@ -1393,7 +1402,7 @@ CenterDrawerHost
 
 ### 9.5 Visual golden
 
-必须 review：
+已完成 review：
 
 - wide/medium/narrow idle；
 - wide/medium/narrow session；
@@ -1407,6 +1416,16 @@ CenterDrawerHost
 - keyboard focus；
 - no-color；
 - reduced-motion。
+
+20 个固定 fixture 为：`wide`、`medium`、`narrow`、`wide-idle`、`medium-idle`、
+`narrow-idle`、`wide-authorization`、`wide-reduced-motion`、`wide-keyboard-focus`、
+`medium-inspector`、`narrow-inspector`、`wide-model-menu`、`wide-thinking-menu`、
+`wide-thinking-non-reasoning`、`wide-home-project`、`wide-home-long-project`、
+`wide-catalog-loading`、`wide-catalog-error`、`wide-catalog-empty` 与 `wide-no-color`。
+默认 wide/medium/narrow、idle 与 project catalog ready/unloaded 状态复用同一生产 surface；
+medium/narrow responsive baseline 覆盖 Sidebar drawer，专用 Inspector fixture 覆盖另一 drawer。
+所有 popup 都由 production GPUI input 打开，不复制菜单实现。`wide-catalog-loading` 使用真实 busy
+状态，并在 reduced-motion fixture 下停止 spinner 动画，保证复拍确定性且不牺牲 disabled/accessibility 语义。
 
 ### 9.6 Gate 命令
 
@@ -1449,7 +1468,9 @@ scripts/desktop-native-perf-gate.sh
 scripts/desktop-perf-gate.sh
 ```
 
-物理输入验收继续遵循现有 click-to-photon 流程，不用 GPUI 内部时间冒充 photon 结果。
+物理输入验收继续遵循前置计划既有的 click-to-photon 流程，不用 GPUI 内部时间冒充 photon 结果。
+本计划记录的 input-to-post-render 仅是自动性能门禁，不声明为物理 photon 测量，也不改变前置计划
+`VUI-104` 对外部传感器样本的独立验收状态。
 
 ## 十、提交策略
 

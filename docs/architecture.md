@@ -491,8 +491,15 @@ outside-click 和 drawer close 统一恢复打开前的可见焦点 owner。
 - Pointer hover 不冒充 keyboard focus；键盘输入触发可见 focus ring，hover-only 工具仍
   保持在 tab order 中。关键状态同时使用文字、形状或长度，不以颜色作为唯一信息载体。
 - Modal 抢占并封闭焦点；drawer 保留 Center Header selector 可点击，关闭时恢复原焦点。
-- `wide-keyboard-focus`、`wide-no-color`、authorization 与三档 responsive fixture 是
-  visual review 的固定组成，GPUI interaction tests 负责真实 hit-test 与 focus restore。
+- 20 张 native fixture 固定覆盖三档 responsive/idle/session、Sidebar 与 Inspector drawer、
+  production Model/Thinking popup、non-reasoning fallback、Project/long path、catalog
+  unloaded/loading/ready/error/empty、authorization、keyboard focus、no-color 与 reduced-motion；
+  GPUI interaction tests 负责真实 hit-test 与 focus restore，golden 不替代行为断言。
+
+多项目工作区最终验收保持 runtime 与 presentation 的单向边界：visual replay 只安装 typed
+catalog/drawer/home-path/model-capability fixture，并通过生产 GPUI event 打开 popup；它不持有
+credential、command dispatch 或新的 session owner。reduced-motion 会停止 busy icon 动画，
+同时保留 disabled、accessible label 与局部 loading 文本语义。
 
 ---
 
