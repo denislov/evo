@@ -48,6 +48,16 @@ golden_names=(
     wide-authorization
     wide-reduced-motion
     wide-keyboard-focus
+    medium-inspector
+    narrow-inspector
+    wide-model-menu
+    wide-thinking-menu
+    wide-thinking-non-reasoning
+    wide-home-project
+    wide-home-long-project
+    wide-catalog-loading
+    wide-catalog-error
+    wide-catalog-empty
     wide-no-color
 )
 mkdir -p "${artifact_dir}"
@@ -399,6 +409,16 @@ capture_layout narrow-idle
 capture_layout wide-authorization
 capture_layout wide-reduced-motion
 capture_layout wide-keyboard-focus
+capture_layout medium-inspector
+capture_layout narrow-inspector
+capture_layout wide-model-menu
+capture_layout wide-thinking-menu
+capture_layout wide-thinking-non-reasoning
+capture_layout wide-home-project
+capture_layout wide-home-long-project
+capture_layout wide-catalog-loading
+capture_layout wide-catalog-error
+capture_layout wide-catalog-empty
 
 # The gray derivative is the explicit no-color-state screenshot. Its golden
 # ensures labels, markers, borders, and hierarchy remain legible without hue.

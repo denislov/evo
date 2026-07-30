@@ -22,12 +22,16 @@ use coding_agent::api::view::{
     CodingAgentTranscriptSnapshot, ProfileId, ProfileKind, ProfileSource,
 };
 use gpui::{
-    App, Bounds, Context, FocusHandle, KeyDownEvent, Keystroke, Render, Window, WindowBounds,
-    WindowOptions, div, point, prelude::*, px, rgb, size,
+    App, Bounds, Context, FocusHandle, KeyDownEvent, Keystroke, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, PlatformInput, Render, Window, WindowBounds, WindowOptions, div,
+    point, prelude::*, px, rgb, size,
 };
 use gpui_component::Root;
 
-use super::native_shell::{EvoBrandFixture, EvoBrandMode, NativeShell, NativeShellInit};
+use super::native_shell::{
+    EvoBrandFixture, EvoBrandMode, NativeShell, NativeShellInit, NativeVisualCatalogFixture,
+    NativeVisualDrawerFixture,
+};
 use crate::preferences::DesktopPreferences;
 use crate::projection::DesktopProjection;
 use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot, DesktopRuntimeUpdate};
@@ -63,6 +67,15 @@ pub(super) enum VisualReplayState {
     Authorization,
     ReducedMotion,
     KeyboardFocus,
+    InspectorDrawer,
+    ModelMenu,
+    ThinkingMenu,
+    ThinkingNonReasoning,
+    HomeProject,
+    HomeLongProject,
+    CatalogLoading,
+    CatalogError,
+    CatalogEmpty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +94,24 @@ impl VisualReplaySpec {
             (layout, VisualReplayState::ReducedMotion)
         } else if let Some(layout) = value.strip_suffix("-keyboard-focus") {
             (layout, VisualReplayState::KeyboardFocus)
+        } else if let Some(layout) = value.strip_suffix("-inspector") {
+            (layout, VisualReplayState::InspectorDrawer)
+        } else if let Some(layout) = value.strip_suffix("-model-menu") {
+            (layout, VisualReplayState::ModelMenu)
+        } else if let Some(layout) = value.strip_suffix("-thinking-menu") {
+            (layout, VisualReplayState::ThinkingMenu)
+        } else if let Some(layout) = value.strip_suffix("-thinking-non-reasoning") {
+            (layout, VisualReplayState::ThinkingNonReasoning)
+        } else if let Some(layout) = value.strip_suffix("-home-project") {
+            (layout, VisualReplayState::HomeProject)
+        } else if let Some(layout) = value.strip_suffix("-home-long-project") {
+            (layout, VisualReplayState::HomeLongProject)
+        } else if let Some(layout) = value.strip_suffix("-catalog-loading") {
+            (layout, VisualReplayState::CatalogLoading)
+        } else if let Some(layout) = value.strip_suffix("-catalog-error") {
+            (layout, VisualReplayState::CatalogError)
+        } else if let Some(layout) = value.strip_suffix("-catalog-empty") {
+            (layout, VisualReplayState::CatalogEmpty)
         } else {
             (value, VisualReplayState::Standard)
         };
@@ -97,8 +128,34 @@ impl VisualReplaySpec {
             VisualReplayState::Authorization => "authorization",
             VisualReplayState::ReducedMotion => "reduced-motion",
             VisualReplayState::KeyboardFocus => "keyboard-focus",
+            VisualReplayState::InspectorDrawer => "inspector",
+            VisualReplayState::ModelMenu => "model-menu",
+            VisualReplayState::ThinkingMenu => "thinking-menu",
+            VisualReplayState::ThinkingNonReasoning => "thinking-non-reasoning",
+            VisualReplayState::HomeProject => "home-project",
+            VisualReplayState::HomeLongProject => "home-long-project",
+            VisualReplayState::CatalogLoading => "catalog-loading",
+            VisualReplayState::CatalogError => "catalog-error",
+            VisualReplayState::CatalogEmpty => "catalog-empty",
         };
         format!("{}-{state}", self.layout.key())
+    }
+}
+
+impl VisualReplayState {
+    const fn uses_home(self) -> bool {
+        matches!(
+            self,
+            Self::Idle
+                | Self::ModelMenu
+                | Self::ThinkingMenu
+                | Self::ThinkingNonReasoning
+                | Self::HomeProject
+                | Self::HomeLongProject
+                | Self::CatalogLoading
+                | Self::CatalogError
+                | Self::CatalogEmpty
+        )
     }
 }
 
@@ -356,17 +413,17 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
     let reduced_motion_replay = matches!(
         request,
         NativeReplayRequest::Visual(VisualReplaySpec {
-            state: VisualReplayState::ReducedMotion,
+            state: VisualReplayState::ReducedMotion | VisualReplayState::CatalogLoading,
             ..
         })
     );
-    let idle_replay = matches!(
-        request,
-        NativeReplayRequest::Visual(VisualReplaySpec {
-            state: VisualReplayState::Idle,
-            ..
-        })
-    );
+    let visual_state = match request {
+        NativeReplayRequest::Visual(spec) => Some(spec.state),
+        NativeReplayRequest::Performance
+        | NativeReplayRequest::Brand(_)
+        | NativeReplayRequest::ClickToPhoton => None,
+    };
+    let idle_replay = visual_state.is_some_and(VisualReplayState::uses_home);
     let toast_replay = matches!(
         request,
         NativeReplayRequest::Visual(VisualReplaySpec {
@@ -420,8 +477,82 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
                 window,
                 cx,
             );
-            if matches!(request, NativeReplayRequest::Visual(_)) && !idle_replay {
-                shell.install_native_visual_session_fixture(cx);
+            if let Some(state) = visual_state {
+                match state {
+                    VisualReplayState::Standard
+                    | VisualReplayState::Authorization
+                    | VisualReplayState::ReducedMotion
+                    | VisualReplayState::KeyboardFocus
+                    | VisualReplayState::InspectorDrawer => {
+                        shell.install_native_visual_catalog_fixture(
+                            NativeVisualCatalogFixture::Ready,
+                            cx,
+                        );
+                        shell.install_native_visual_drawer_fixture(
+                            if state == VisualReplayState::InspectorDrawer {
+                                NativeVisualDrawerFixture::Inspector
+                            } else {
+                                NativeVisualDrawerFixture::Sessions
+                            },
+                            cx,
+                        );
+                    }
+                    VisualReplayState::Idle
+                    | VisualReplayState::ModelMenu
+                    | VisualReplayState::ThinkingMenu => {
+                        shell.install_native_visual_catalog_fixture(
+                            NativeVisualCatalogFixture::NotLoaded,
+                            cx,
+                        );
+                    }
+                    VisualReplayState::ThinkingNonReasoning => {
+                        shell.install_native_visual_catalog_fixture(
+                            NativeVisualCatalogFixture::NotLoaded,
+                            cx,
+                        );
+                        shell.install_native_visual_non_reasoning_fixture(cx);
+                    }
+                    VisualReplayState::HomeProject => {
+                        shell.install_native_visual_catalog_fixture(
+                            NativeVisualCatalogFixture::NotLoaded,
+                            cx,
+                        );
+                        shell.install_native_visual_home_project_fixture(
+                            std::path::PathBuf::from("/workspace/evo"),
+                            cx,
+                        );
+                    }
+                    VisualReplayState::HomeLongProject => {
+                        shell.install_native_visual_catalog_fixture(
+                            NativeVisualCatalogFixture::NotLoaded,
+                            cx,
+                        );
+                        shell.install_native_visual_home_project_fixture(
+                            std::path::PathBuf::from(
+                                "/workspace/clients/acme/platform/apps/desktop/a-very-long-multi-project-workspace-name",
+                            ),
+                            cx,
+                        );
+                    }
+                    VisualReplayState::CatalogLoading => {
+                        shell.install_native_visual_catalog_fixture(
+                            NativeVisualCatalogFixture::Loading,
+                            cx,
+                        );
+                    }
+                    VisualReplayState::CatalogError => {
+                        shell.install_native_visual_catalog_fixture(
+                            NativeVisualCatalogFixture::Error,
+                            cx,
+                        );
+                    }
+                    VisualReplayState::CatalogEmpty => {
+                        shell.install_native_visual_catalog_fixture(
+                            NativeVisualCatalogFixture::Empty,
+                            cx,
+                        );
+                    }
+                }
             }
             shell
         });
@@ -448,6 +579,34 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
                 if !window.dispatch_keystroke(keystroke, cx) {
                     eprintln!("desktop visual replay could not dispatch keyboard focus input");
                 }
+                window.refresh();
+            });
+        }
+        if let Some(position) = match visual_state {
+            Some(VisualReplayState::ModelMenu) => Some(point(px(730.), px(18.))),
+            Some(VisualReplayState::ThinkingMenu) => Some(point(px(945.), px(18.))),
+            _ => None,
+        } {
+            window.on_next_frame(move |window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                    }),
+                    cx,
+                );
                 window.refresh();
             });
         }
@@ -976,6 +1135,33 @@ mod tests {
                 state: VisualReplayState::Idle,
             })))
         );
+        for (fixture, state) in [
+            ("medium-inspector", VisualReplayState::InspectorDrawer),
+            ("wide-model-menu", VisualReplayState::ModelMenu),
+            ("wide-thinking-menu", VisualReplayState::ThinkingMenu),
+            (
+                "wide-thinking-non-reasoning",
+                VisualReplayState::ThinkingNonReasoning,
+            ),
+            ("wide-home-project", VisualReplayState::HomeProject),
+            ("wide-home-long-project", VisualReplayState::HomeLongProject),
+            ("wide-catalog-loading", VisualReplayState::CatalogLoading),
+            ("wide-catalog-error", VisualReplayState::CatalogError),
+            ("wide-catalog-empty", VisualReplayState::CatalogEmpty),
+        ] {
+            assert_eq!(
+                request_from_values(false, false, Some(fixture), None),
+                Ok(Some(NativeReplayRequest::Visual(VisualReplaySpec {
+                    layout: if fixture.starts_with("medium") {
+                        VisualReplayLayout::Medium
+                    } else {
+                        VisualReplayLayout::Wide
+                    },
+                    state,
+                }))),
+                "fixture {fixture} must remain a typed replay state",
+            );
+        }
     }
 
     #[test]

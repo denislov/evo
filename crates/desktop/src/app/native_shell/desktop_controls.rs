@@ -345,6 +345,7 @@ pub(super) struct DesktopIconButton {
     selected: bool,
     disabled: bool,
     busy: bool,
+    reduced_motion: bool,
 }
 
 impl DesktopIconButton {
@@ -362,6 +363,7 @@ impl DesktopIconButton {
             selected: false,
             disabled: false,
             busy: false,
+            reduced_motion: false,
         }
     }
 
@@ -391,6 +393,12 @@ impl DesktopIconButton {
         self
     }
 
+    /// Preserve the busy glyph and disabled semantics without rotating it.
+    pub(super) const fn reduced_motion(mut self, reduced_motion: bool) -> Self {
+        self.reduced_motion = reduced_motion;
+        self
+    }
+
     pub(super) fn build(self) -> Button {
         let side = px(self.size.pixels());
         let icon = if self.busy {
@@ -403,7 +411,7 @@ impl DesktopIconButton {
             .tooltip(self.accessible_label.clone())
             .selected(self.selected)
             .disabled(self.disabled || self.busy)
-            .loading(self.busy)
+            .loading(self.busy && !self.reduced_motion)
             .w(side)
             .h(side)
             .flex_none();
@@ -720,12 +728,20 @@ mod tests {
         let busy = DesktopIconButton::new("probe", DesktopIcon::Submit, "Send message")
             .size(DesktopControlSize::Standard)
             .busy(true);
+        let reduced_motion_busy =
+            DesktopIconButton::new("probe", DesktopIcon::Submit, "Send message")
+                .size(DesktopControlSize::Standard)
+                .busy(true)
+                .reduced_motion(true);
         assert_eq!(resting.size.pixels(), busy.size.pixels());
+        assert_eq!(busy.size.pixels(), reduced_motion_busy.size.pixels());
         assert_eq!(resting.icon, busy.icon);
         // A busy control shows the spinner inside the same box and stops
         // accepting clicks, so submission cannot be issued twice.
         assert!(busy.busy);
         assert!(!resting.busy);
+        assert!(reduced_motion_busy.busy);
+        assert!(reduced_motion_busy.reduced_motion);
     }
 
     #[test]

@@ -56,6 +56,7 @@ pub(super) struct SessionsPaneViewModel {
     pub(super) active_status: desktop::shell::SemanticStatus,
     pub(super) keyboard_focus_visible: bool,
     pub(super) presented_as_drawer: bool,
+    pub(super) reduced_motion: bool,
 }
 
 pub(super) struct SessionsPane {
@@ -962,6 +963,7 @@ impl Render for SessionsPane {
                                         )
                                         .size(DesktopControlSize::Compact)
                                         .busy(session_catalog_pending)
+                                        .reduced_motion(view_model.reduced_motion)
                                         .disabled(session_catalog_pending || composer_running)
                                         .build()
                                         .debug_selector(|| {

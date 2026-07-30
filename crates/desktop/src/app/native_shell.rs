@@ -149,6 +149,27 @@ pub(super) enum InspectorSection {
     Runtime,
 }
 
+/// Typed states installed by the deterministic native visual replay.
+///
+/// These are presentation fixtures, not a second catalog implementation: each
+/// variant drives the same [`ProjectCatalogController`] transitions used by
+/// runtime updates, so reviewed images exercise production state rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NativeVisualCatalogFixture {
+    NotLoaded,
+    Loading,
+    Ready,
+    Error,
+    Empty,
+}
+
+/// Responsive drawer selected by a deterministic native visual replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NativeVisualDrawerFixture {
+    Sessions,
+    Inspector,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResizablePanel {
     Sessions,
@@ -1239,34 +1260,92 @@ impl NativeShell {
         }
     }
 
-    pub(super) fn install_native_visual_session_fixture(&mut self, cx: &mut Context<Self>) {
-        let Some(projection) = self.projection.as_ref() else {
-            return;
-        };
-        let session_id = projection.snapshot().session.session_id.clone();
-        let mut entry = desktop::runtime::DesktopSessionCatalogEntry {
-            session_id,
-            name: Some("Current desktop task".into()),
-            // A future timestamp is clamped to zero elapsed time by the
-            // presentation helper, keeping the replay's `now` label
-            // deterministic across calendar dates.
-            created_at: "9999-12-31T23:59:59Z".into(),
-            updated_at: "9999-12-31T23:59:59Z".into(),
-            ..Default::default()
-        };
-        if let Some(workspace) = self.project.workspace.as_ref() {
-            entry.workspace = workspace.overview.clone();
-            entry.workspace_migration = coding_agent::api::view::CodingAgentWorkspaceMigration {
-                outcome: coding_agent::api::view::CodingAgentWorkspaceMigrationOutcome::NotRequired,
-                diagnostic: None,
-            };
+    pub(super) fn install_native_visual_catalog_fixture(
+        &mut self,
+        fixture: NativeVisualCatalogFixture,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_catalog = ProjectCatalogController::default();
+        match fixture {
+            NativeVisualCatalogFixture::NotLoaded => {}
+            NativeVisualCatalogFixture::Loading => self.project_catalog.begin_refresh(),
+            NativeVisualCatalogFixture::Ready => {
+                let Some(projection) = self.projection.as_ref() else {
+                    return;
+                };
+                let session_id = projection.snapshot().session.session_id.clone();
+                let mut entry = desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id,
+                    name: Some("Current desktop task".into()),
+                    // A future timestamp is clamped to zero elapsed time by the
+                    // presentation helper, keeping the replay's `now` label
+                    // deterministic across calendar dates.
+                    created_at: "9999-12-31T23:59:59Z".into(),
+                    updated_at: "9999-12-31T23:59:59Z".into(),
+                    ..Default::default()
+                };
+                if let Some(workspace) = self.project.workspace.as_ref() {
+                    entry.workspace = workspace.overview.clone();
+                    entry.workspace_migration =
+                        coding_agent::api::view::CodingAgentWorkspaceMigration {
+                            outcome: coding_agent::api::view::CodingAgentWorkspaceMigrationOutcome::NotRequired,
+                            diagnostic: None,
+                        };
+                }
+                self.project_catalog.replace_catalog(vec![entry], 0);
+            }
+            NativeVisualCatalogFixture::Error => self
+                .project_catalog
+                .fail_refresh("The project catalog could not be loaded."),
+            NativeVisualCatalogFixture::Empty => {
+                self.project_catalog.replace_catalog(Vec::new(), 0);
+            }
         }
-        self.project_catalog.replace_catalog(vec![entry], 0);
-        self.active_drawer = Some(CenterDrawerKind::Sessions);
+        self.notify_sessions_pane(cx);
+        cx.notify();
+    }
+
+    pub(super) fn install_native_visual_drawer_fixture(
+        &mut self,
+        fixture: NativeVisualDrawerFixture,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_drawer = Some(match fixture {
+            NativeVisualDrawerFixture::Sessions => CenterDrawerKind::Sessions,
+            NativeVisualDrawerFixture::Inspector => CenterDrawerKind::Inspector,
+        });
         self.drawer_restore_focus = Some(self.focus.active());
         self.notify_sessions_pane(cx);
+        self.notify_inspector_pane(cx);
         self.notify_conversation_header(cx);
         self.notify_center_drawer_host(cx);
+        cx.notify();
+    }
+
+    pub(super) fn install_native_visual_home_project_fixture(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        debug_assert!(self.projection.is_none());
+        self.active_workspace.draft_workspace_selection =
+            CodingAgentWorkspaceSelection::project(path);
+        self.notify_composer_pane(cx);
+        cx.notify();
+    }
+
+    pub(super) fn install_native_visual_non_reasoning_fixture(&mut self, cx: &mut Context<Self>) {
+        debug_assert!(self.projection.is_none());
+        self.project.selected_model_id = "review-fixture".into();
+        let selected_model_id = self.project.selected_model_id.clone();
+        for model in &mut self.project.models {
+            model.selected = model.id == selected_model_id;
+        }
+        self.thinking_selection = DesktopThinkingLevel::High;
+        self.reconcile_thinking_selection_with_project();
+        self.notify_conversation_header(cx);
+        self.notify_composer_pane(cx);
+        cx.notify();
     }
 
     fn visibility(&self) -> PanelVisibility {
@@ -4341,6 +4420,7 @@ impl NativeShell {
             active_status: self.semantic_status(),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Sessions),
+            reduced_motion: self.preferences.reduced_motion,
         }
     }
 
