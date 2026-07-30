@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（Phase 1 已完成，下一项 DSK-720）
+> 状态：执行中（Phase 2 进行中，DSK-720 已完成，下一项 DSK-721）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1133,6 +1133,32 @@ Gate 与性能记录：
   `10 passed`，all-targets、严格 clippy、format 与 diff check 全部通过。
 - `scripts/desktop-visual-golden.sh` 全部 20 个 fixture 均 `RMSE=0`，未更新 golden。
 
+### DSK-720 实际结果
+
+- 新增 application-layer `CommandTracker`：全局唯一保存 `next_id`、bounded
+  `HashMap<command_id, PendingCommand>` 与 capacity；`PendingCommand` 同时持有 typed
+  `WorkspaceKey` owner 和 `DesktopCommandIntent`。ID exhaustion、capacity full、stale ID、intent
+  mismatch 与 owner mismatch 均 typed fail closed，校验失败不会删除其他 pending command。
+- 删除 `command_ledger.rs`、`SessionWorkspace.command_ledger`、`NativeShell.next_command_id`、
+  `reserve_with_id`、`complete_workspace_command` 与遍历 workspaces 反查 owner 的路径。生产源码中
+  `command_ledger`、`DesktopCommandLedger`、`next_command_id`、`reserve_with_id`、
+  `command_owner_key`、`complete_workspace_command` 均为零结果；command ID 与 pending intent
+  各只剩一个存储位置。
+- create/prompt 在 runtime 返回新 session identity 后迁移对应 owner；已知目标的 open/rename/close
+  在 reserve 时直接绑定 typed session owner。runtime update 携带的 session identity 与 tracker owner
+  不一致时，update 会在进入 projection 前被拒绝，记录 `command_owner_mismatch` issue 并进入
+  `NeedsResync`，不会把异 session snapshot 静默应用到当前 workspace。
+- admission failure、typed rejection、authorization、recovery、selection、file review、external editor、
+  prompt/control completion 全部通过同一 tracker completion/rejection API 收敛。关闭 workspace 时显式
+  `cancel_owner`，清除残余 pending commands，并以 bounded notice 报告取消数量，不再接受幽灵 completion。
+- 新增 8 项 tracker 纯测试，覆盖全局 capacity、ID exhaustion、stale ID、intent/owner mismatch、typed
+  rejection、owner cancellation、Home owner transfer 与单 command transfer；新增 runtime owner mismatch
+  测试，并强化 background close 测试验证残余 pending cancellation 与 notice。
+- Gate A 与 command queue/admission/rejection/resync 定向验证通过：desktop lib
+  `296 passed / 5 ignored / 0 failed`，dependency boundary `10 passed`，严格 clippy、all-target check、
+  format 与 diff check 全部通过。
+- 额外运行 `scripts/desktop-visual-golden.sh`，全部 20 个 fixture 均 `RMSE=0`，未更新 golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1141,7 +1167,7 @@ Gate 与性能记录：
 | DSK-701 | 已完成 | `e0aabab` | 删除 exact child inventory；10 项 boundary tests 通过；临时 `runtime/protocol.rs -> gpui` 变异被精确拒绝并已撤销 |
 | DSK-710 | 已完成 | `3c689e0` | 删除 `NativeShell` 的 `Deref/DerefMut`，workspace 字段显式归属 `active_workspace`；Gate A、5 项 workspace/session 定向测试与 8 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-711 | 已完成 | `7953d88` | typed `WorkspaceKey/WorkspaceStore` 替代 Home sentinel 与 swap；Gate A/B、owner/lifecycle 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
-| DSK-720 | 待执行 | — | — |
+| DSK-720 | 已完成 | `9c9cbc4` | global `CommandTracker` 成为唯一 ID/owner/intent authority；Gate A、8 项纯 tracker 测试、owner mismatch/queue/rejection/resync 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-721 | 待执行 | — | — |
 | DSK-730 | 待执行 | — | — |
 | DSK-731 | 待执行 | — | — |
