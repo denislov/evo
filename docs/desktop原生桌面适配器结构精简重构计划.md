@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-741 已完成，下一项 DSK-742）
+> 状态：执行中（DSK-742 已完成，下一项 DSK-743）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1353,6 +1353,28 @@ Gate 与性能记录：
   check、严格 clippy、format 与 diff check 全部通过。`scripts/desktop-visual-golden.sh` 的 20 个 fixture 全部
   `RMSE=0`，未更新 golden。
 
+### DSK-742 实际结果
+
+- 新增 `app/native_shell/intent.rs`，定义单一 typed `UiIntent`，覆盖 sessions、header、composer、
+  conversation、inspector、root modal 与 center drawer 的全部 child event。每个 feature event 通过穷尽
+  `From<&Event>` mapping 保留 typed payload；select/copy/toggle/recovery/review/submit/rename/model/profile/
+  thinking 等动作不再从 subscription closure 直接调用 root 业务方法。
+- `NativeShell::new` 的 7 个 `subscribe_in` closure 全部收敛为
+  `dispatch_ui_intent(event.into(), window, cx)`；closure 不再展开 mutation、command admission、focus 或
+  platform effect。统一 handler 才消费原始 `Window/Context`，处理 focus、modal/drawer、defer、clipboard 与
+  command dispatch。sessions/inspector/drawer 的 dismiss 被归一为同一个 intent，conversation measurement、
+  composer focus 等 GPUI payload 也先经过 typed normalization。
+- shell `UiIntent` mapping 与 handler 都是 exhaustive match，新增 child event 或 intent variant 会分别在
+  mapping/dispatch 两端 fail closed。原 application-only disclosure enum 改名为 `CatalogIntent`，避免出现两个
+  同名 `UiIntent` 或字符串 action bridge；catalog disclosure 仍通过原 typed application reducer delegation，
+  没有退回 callback direct mutation。
+- 新增 typed payload preservation 与 overlay normalization tests。另行通过 4 项 root keyboard/action contract、
+  6 项 native shell modal/authorization/inspector/copy/focus smoke，以及 navigation、thinking、conversation
+  copy-selection、project-directory pane interaction 定向测试。
+- Gate A 通过：desktop lib `313 passed / 5 ignored / 0 failed`，dependency boundary `10 passed`，all-target
+  check、严格 clippy、format 与 diff check 全部通过。任务不改变 render/layout/ViewModel 或像素语义，未运行、
+  未更新 visual golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1369,7 +1391,7 @@ Gate 与性能记录：
 | DSK-733 | 已完成 | `582d3ae` | 所有 picker/writer/clipboard/resync/Root timer completion 回流 reducer，显式 shutdown signal；清理 DSK-D730-01/02 与 DSK-D731-02；Gate A 和 race/stale/error 定向测试通过；未更新 golden |
 | DSK-740 | 已完成 | `9ac1a57` | `ShellViews/ShellUiState/ShellConnection/ShellRuntimeExecutor` 聚合，Shell 41→7 fields；typed Home/Session init；Gate A 与 focus/modal/drawer 定向测试通过；DSK-D731-03 调整到 DSK-741 与 presenter 输入切分一起清理 |
 | DSK-741 | 已完成 | `c3a9f2f` | feature presenters 下放；application-owned workspace/catalog/runtime mutation；删除 `RuntimeUpdatePort` 与 DSK-D731-03；Gate A、ViewModel equality 及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
-| DSK-742 | 待执行 | — | — |
+| DSK-742 | 已完成 | `6ad465c` | 7 类 child event 穷尽映射为单一 typed `UiIntent`；subscriptions 仅 normalize+dispatch；Gate A 与 keyboard/action/pane interaction tests 全通过；未更新 golden |
 | DSK-743 | 待执行 | — | — |
 | DSK-750 | 待执行 | — | — |
 | DSK-751 | 待执行 | — | — |
