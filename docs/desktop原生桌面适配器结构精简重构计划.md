@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（Phase 3 进行中，DSK-730 已完成，下一项 DSK-731）
+> 状态：执行中（Phase 3 进行中，DSK-731 已完成，下一项 DSK-732）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1019,6 +1019,9 @@ Gate：Gate A + Gate B。
 | DSK-D730-01 | DSK-730 | 尚未接入的 root event/transition 分支使用模块级 `dead_code` allow | `application/reducer.rs` | DSK-733 | 待清理；runtime branch 在 DSK-731 接入，platform/timer/effect branch 在 DSK-733 接入后删除 allow |
 | DSK-D730-02 | DSK-730 | typed platform effect/result contract 尚未由 executor 消费，使用模块级 `dead_code` allow | `application/effect.rs` | DSK-733 | 待清理；picker/timer/editor/writer 迁移后删除 allow |
 | DSK-D730-03 | DSK-730 | `UiChangeSet` 预定义 region 尚未全部进入 refresh routing，使用模块级 `dead_code` allow | `application/change_set.rs` | DSK-743 | 待清理；统一 selective refresh 后删除 allow |
+| DSK-D731-01 | DSK-731 | `DesktopProjection` 仍直接接收宽 `DesktopRuntimeUpdate`，projection apply、conversation/file-review post-reconcile 与 delta dirty 转换暂由 adapter 的单一 port method 承接 | `app/native_shell.rs::apply_projection_update_for`、`application/reducer.rs::RuntimeUpdatePort::apply_projection_update` | DSK-732 | 待清理；DSK-732 以窄 `ProjectionEvent` 和 application-owned dirty routing 替换该 broad method |
+| DSK-D731-02 | DSK-731 | projection 触发的 resync command admission 暂由 reducer 决策后通过 port 同步发送，尚未形成 typed runtime effect/executor 边界 | `app/native_shell.rs::request_resync_for`、`application/reducer.rs::RuntimeUpdatePort::request_resync_if_needed` | DSK-733 | 待清理；异步 effect/result 全部回流 reducer 时删除 direct send port |
+| DSK-D731-03 | DSK-731 | `SessionWorkspace`/catalog concrete type 仍位于 GPUI adapter，application reducer 通过窄 `RuntimeUpdatePort` 执行显式 owner 的原子 mutation | `application/reducer.rs::RuntimeUpdatePort`、`app/native_shell.rs` | DSK-740 | 待清理；聚合 Shell UI state 时把纯 runtime workspace/catalog state 收归 application，删除 concrete-state bridge |
 
 ## 十二、风险与处置
 
@@ -1210,6 +1213,37 @@ Gate 与性能记录：
 - contract 中尚未由后续 reducer/effect executor 消费的分支以三条精确执行债务登记，分别由
   DSK-731/733/743 接入并删除模块级 `dead_code` allow；没有把迁移债务移出本计划。
 
+### DSK-731 实际结果
+
+- `DesktopController::reduce_runtime` 成为 23 种 `DesktopRuntimeUpdate` 的唯一解释入口。application
+  reducer 在一个穷尽流程中完成 observed/pending owner 校验、Home command transfer、显式
+  `WorkspaceKey` 路由、command completion/rejection、composer/catalog/review/notice mutation、projection
+  completion 与 `UiChangeSet` 合并；background update 仍写入目标 workspace，但只在最终 transition 边界
+  抑制非 foreground UI refresh，不再切换或读取隐式 active update target。
+- 新增 `RuntimeUpdateKind::ALL` 的 23 项 coverage table，并以对 `DesktopRuntimeUpdate` 的无 wildcard
+  exhaustive match 将协议扩展变为 fail-closed：新增 variant 未登记时 production compile 或 table test
+  必须失败。`runtime_update_command_id`、hydrated snapshot 与 observed workspace identity 的唯一实现均位于
+  `application/reducer.rs`。
+- 删除 `NativeShell.runtime_update_target`、`update_workspace{,_mut,_key}`、Shell 内 runtime owner/session
+  helper、`DirectCommandUpdate`、`reconcile_direct_update` 与 `ProjectionCommandCompletions::{capture,reconcile}`。
+  `native_shell/commands.rs` 从 446 行缩为仅保留 UI command reservation 的 18 行，不再访问整个 Shell 做
+  runtime reconciliation。
+- `poll_runtime` 从约 800 行收窄为 bounded queue read（每 frame 最多 64 项）、逐项
+  `reduce_runtime`、`Transition::merge` 与 running 状态返回。preference writer error、conversation row
+  measurement 和 GPUI entity refresh 位于独立 `apply_runtime_poll` adapter；原 8 个 scattered dirty bool
+  改为 typed `UiChangeSet`，并新增 `InspectorTelemetry` region 保留 usage-only 250 ms throttle。
+- DSK-732 仍需把 `apply_projection_update_for` 中 broad `DesktopRuntimeUpdate -> DesktopProjection`、conversation/
+  file-review post-reconcile 与 delta dirty conversion 移出 GPUI adapter；DSK-733 需把 reducer 决定的 resync
+  direct send 收敛为 typed effect；DSK-740 在纯 runtime workspace/catalog state 收归 application 后删除
+  concrete-state `RuntimeUpdatePort` bridge。三项均已登记精确路径和删除任务，没有兼容 façade、dual write
+  或未登记债务。
+- Gate A 与 Gate B 通过：desktop lib `301 passed / 5 ignored / 0 failed`，dependency boundary
+  `10 passed`，all-target check/test、严格 clippy、format 与 diff check 全部通过；runtime/projection 全套 unit
+  tests 包含在 lib/all-targets 结果中。附加 `scripts/desktop-perf-gate.sh` 通过：10 MiB fixture hydration
+  14,892 µs、scroll render P95 202 µs、input P95 1 µs；10k block headless CPU frame P95 2,926 µs、input
+  roundtrip P95 5,558 µs、input-change-to-render P95 350 µs、window RSS growth 24,162,304 bytes。本任务未改
+  render/layout/ViewModel 或像素语义，因此未运行、未更新 visual golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1221,7 +1255,7 @@ Gate 与性能记录：
 | DSK-720 | 已完成 | `9c9cbc4` | global `CommandTracker` 成为唯一 ID/owner/intent authority；Gate A、8 项纯 tracker 测试、owner mismatch/queue/rejection/resync 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-721 | 已完成 | `4ddde38` | 单一 cloneable `RuntimeCommandClient` 成为 validation/admission/send authority；Bridge 仅负责 bootstrap 与 owner split；Gate A、queue closed/full、redaction、shutdown/join 定向测试通过；未更新 golden |
 | DSK-730 | 已完成 | `333bffe` | typed application event/effect/transition/change-set contract；`DesktopState` 成为 workspace/command/catalog/preferences 唯一 owner；首个 catalog disclosure reducer delegation 接入；Gate A 与 3 项纯 contract 测试通过 |
-| DSK-731 | 待执行 | — | — |
+| DSK-731 | 已完成 | `c4c0eef` | 单一 root runtime reducer 穷尽 23 variants；删除 direct/projection completion 双权威与隐式 update target；Gate A/B、coverage table、runtime/projection unit、headless perf 全通过；未更新 golden |
 | DSK-732 | 待执行 | — | — |
 | DSK-733 | 待执行 | — | — |
 | DSK-740 | 待执行 | — | — |
