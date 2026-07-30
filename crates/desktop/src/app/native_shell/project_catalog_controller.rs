@@ -277,23 +277,28 @@ pub(super) fn session_matches_query(
 impl NativeShell {
     pub(super) fn create_session(&mut self, cx: &mut Context<Self>) {
         if self.open_workspace_count() >= MAX_SESSION_WORKSPACES {
-            self.set_preference_notice(format!(
+            self.active_workspace.set_preference_notice(format!(
                 "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
             ));
             self.notify_sessions_pane(cx);
             return;
         }
         if self
+            .active_workspace
             .projection
             .as_ref()
             .is_some_and(|projection| projection.snapshot().active_operation.is_some())
-            || self.composer.submitted().is_some()
-            || self.command_ledger.contains_where(|intent| {
-                matches!(
-                    intent,
-                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
-                )
-            })
+            || self.active_workspace.composer.submitted().is_some()
+            || self
+                .active_workspace
+                .command_ledger
+                .contains_where(|intent| {
+                    matches!(
+                        intent,
+                        DesktopCommandIntent::CreateSession
+                            | DesktopCommandIntent::OpenSession { .. }
+                    )
+                })
         {
             return;
         }
@@ -312,10 +317,14 @@ impl NativeShell {
             },
         );
         match admission {
-            Ok(()) => self.set_preference_notice("Creating a new session…".into()),
+            Ok(()) => self
+                .active_workspace
+                .set_preference_notice("Creating a new session…".into()),
             Err(message) => {
-                self.command_ledger.complete(command_id, &intent);
-                self.set_preference_notice(message);
+                self.active_workspace
+                    .command_ledger
+                    .complete(command_id, &intent);
+                self.active_workspace.set_preference_notice(message);
             }
         }
         self.notify_sessions_pane(cx);
@@ -324,6 +333,7 @@ impl NativeShell {
 
     pub(in crate::app) fn request_session_catalog(&mut self, cx: &mut Context<Self>) {
         if self
+            .active_workspace
             .command_ledger
             .contains(&DesktopCommandIntent::ListSessions)
         {
@@ -345,9 +355,11 @@ impl NativeShell {
             },
         );
         if let Err(message) = admission {
-            self.command_ledger.complete(command_id, &intent);
+            self.active_workspace
+                .command_ledger
+                .complete(command_id, &intent);
             self.project_catalog.fail_refresh(message.clone());
-            self.set_preference_notice(message);
+            self.active_workspace.set_preference_notice(message);
             self.notify_toast_host(cx);
         }
         self.notify_sessions_pane(cx);
@@ -376,8 +388,10 @@ impl NativeShell {
             },
         );
         if let Err(message) = admission {
-            self.command_ledger.complete(command_id, &intent);
-            self.set_preference_notice(message);
+            self.active_workspace
+                .command_ledger
+                .complete(command_id, &intent);
+            self.active_workspace.set_preference_notice(message);
             self.notify_toast_host(cx);
         }
         self.notify_sessions_pane(cx);
@@ -385,25 +399,30 @@ impl NativeShell {
     }
 
     pub(super) fn insert_active_session_into_catalog(&mut self) -> bool {
-        let Some(projection) = self.projection.as_ref() else {
+        let Some(projection) = self.active_workspace.projection.as_ref() else {
             return false;
         };
         let session_id = projection.snapshot().session.session_id.clone();
-        let (workspace, workspace_migration) = self.project.workspace.as_ref().map_or_else(
-            || {
-                let fallback = DesktopSessionCatalogEntry::default();
-                (fallback.workspace, fallback.workspace_migration)
-            },
-            |workspace| {
-                (
-                    workspace.overview.clone(),
-                    CodingAgentWorkspaceMigration {
-                        outcome: CodingAgentWorkspaceMigrationOutcome::NotRequired,
-                        diagnostic: None,
-                    },
-                )
-            },
-        );
+        let (workspace, workspace_migration) = self
+            .active_workspace
+            .project
+            .workspace
+            .as_ref()
+            .map_or_else(
+                || {
+                    let fallback = DesktopSessionCatalogEntry::default();
+                    (fallback.workspace, fallback.workspace_migration)
+                },
+                |workspace| {
+                    (
+                        workspace.overview.clone(),
+                        CodingAgentWorkspaceMigration {
+                            outcome: CodingAgentWorkspaceMigrationOutcome::NotRequired,
+                            diagnostic: None,
+                        },
+                    )
+                },
+            );
         let observed_at = OffsetDateTime::now_utc()
             .format(&Rfc3339)
             .unwrap_or_default();
@@ -424,36 +443,43 @@ impl NativeShell {
         let already_open = self.active_workspace.session_id() == session_id
             || self.workspaces.contains_key(&session_id);
         if !already_open && self.open_workspace_count() >= MAX_SESSION_WORKSPACES {
-            self.set_preference_notice(format!(
+            self.active_workspace.set_preference_notice(format!(
                 "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
             ));
             self.notify_sessions_pane(cx);
             return;
         }
         if self
+            .active_workspace
             .projection
             .as_ref()
             .is_some_and(|projection| projection.snapshot().active_operation.is_some())
-            || self.composer.submitted().is_some()
-            || self.command_ledger.contains_where(|intent| {
-                matches!(
-                    intent,
-                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
-                )
-            })
+            || self.active_workspace.composer.submitted().is_some()
+            || self
+                .active_workspace
+                .command_ledger
+                .contains_where(|intent| {
+                    matches!(
+                        intent,
+                        DesktopCommandIntent::CreateSession
+                            | DesktopCommandIntent::OpenSession { .. }
+                    )
+                })
         {
-            self.set_preference_notice(
+            self.active_workspace.set_preference_notice(
                 "Session switching is available only while the runtime is idle.".into(),
             );
             cx.notify();
             return;
         }
         if self
+            .active_workspace
             .projection
             .as_ref()
             .is_some_and(|projection| session_id == projection.snapshot().session.session_id)
         {
-            self.set_preference_notice("The requested session is already active.".into());
+            self.active_workspace
+                .set_preference_notice("The requested session is already active.".into());
             cx.notify();
             return;
         }
@@ -474,14 +500,16 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.set_preference_notice(format!(
+                self.active_workspace.set_preference_notice(format!(
                     "Opening session {}…",
                     truncate_label(&session_id, 32)
                 ));
             }
             Err(message) => {
-                self.command_ledger.complete(command_id, &intent);
-                self.set_preference_notice(message);
+                self.active_workspace
+                    .command_ledger
+                    .complete(command_id, &intent);
+                self.active_workspace.set_preference_notice(message);
             }
         }
         self.notify_sessions_pane(cx);
@@ -490,12 +518,13 @@ impl NativeShell {
 
     pub(super) fn switch_next_session(&mut self, cx: &mut Context<Self>) {
         let active = self
+            .active_workspace
             .projection
             .as_ref()
             .map(|projection| projection.snapshot().session.session_id.as_str())
             .unwrap_or(HOME_COMPOSER_SESSION_KEY);
         let Some(session_id) = self.project_catalog.next_session_id(active) else {
-            self.set_preference_notice(
+            self.active_workspace.set_preference_notice(
                 "Refresh the session catalog before switching sessions.".into(),
             );
             self.notify_toast_host(cx);
@@ -503,7 +532,8 @@ impl NativeShell {
             return;
         };
         if session_id == active {
-            self.set_preference_notice("No other project session is available.".into());
+            self.active_workspace
+                .set_preference_notice("No other project session is available.".into());
             self.notify_toast_host(cx);
             cx.notify();
             return;

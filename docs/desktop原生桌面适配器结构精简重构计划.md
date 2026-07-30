@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（Phase 0 已完成，下一项 DSK-710）
+> 状态：执行中（Phase 1 进行中，DSK-710 已完成，下一项 DSK-711）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1100,13 +1100,26 @@ Gate 与性能记录：
 | focus / modal / responsive | `modal_traps_focus_and_restores_visible_owner`、`native_shell_authorization_smoke_traps_focus_and_submits_a_typed_decision`、`responsive_drawers_preserve_conversation_geometry_scroll_and_owner_focus` |
 | review / external editor | `unified_diff_is_bounded_and_marks_collapsed_unchanged_ranges`、`editor_configuration_rejects_shells_nuls_and_argument_pressure`、`native_shell_inspector_smoke_submits_recovery_and_file_review_commands` |
 
+### DSK-710 实际结果
+
+- 删除 `NativeShell -> SessionWorkspace` 的 `Deref/DerefMut` 与对应 `std::ops` import；生产代码中的
+  workspace 字段访问全部显式经过 `active_workspace`，`SessionWorkspace` 自身实现内保留正常的
+  `self.<field>`。本项没有改变现有 map、Home sentinel 或 swap storage 语义。
+- `preference_notice` 的所有 producer 已完成 owner 审计：当前 notice 明确是 workspace-local transient
+  state，Shell 没有平行的 global notice slot；未来如需全局 notice，必须使用不同字段，避免再次混淆 owner。
+- workspace/session 定向测试通过：后台 workspace 静默推进与切换恢复、关闭后台 workspace owner 隔离、
+  typed navigation、临时打开 session 保留 Home draft、切换 workspace 恢复 thinking level，共 5 项。
+- Gate A 通过：`cargo check -p desktop --all-targets`、严格 clippy、10 项 dependency boundary tests、
+  desktop lib `289 passed / 5 ignored / 0 failed`、format 与 diff check 全部通过。
+- `scripts/desktop-visual-golden.sh` 的 8 个当前 fixture 全部 `RMSE=0`，未更新 golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
 | --- | --- | --- | --- |
 | DSK-700 | 已完成 | `87c941a` | Gate B、clippy、headless/native perf、reviewed visual compare 全通过；同步 stale conversation goldens |
-| DSK-701 | 已完成 | 待提交 | 删除 exact child inventory；10 项 boundary tests 通过；临时 `runtime/protocol.rs -> gpui` 变异被精确拒绝并已撤销 |
-| DSK-710 | 待执行 | — | — |
+| DSK-701 | 已完成 | `e0aabab` | 删除 exact child inventory；10 项 boundary tests 通过；临时 `runtime/protocol.rs -> gpui` 变异被精确拒绝并已撤销 |
+| DSK-710 | 已完成 | 待提交 | 删除 `NativeShell` 的 `Deref/DerefMut`，workspace 字段显式归属 `active_workspace`；Gate A、5 项 workspace/session 定向测试与 8 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-711 | 待执行 | — | — |
 | DSK-720 | 待执行 | — | — |
 | DSK-721 | 待执行 | — | — |
