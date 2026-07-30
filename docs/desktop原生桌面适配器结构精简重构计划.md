@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（Phase 3 已完成，下一项 DSK-740）
+> 状态：执行中（DSK-740 已完成，下一项 DSK-741）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1021,7 +1021,7 @@ Gate：Gate A + Gate B。
 | DSK-D730-03 | DSK-730 | `UiChangeSet` 预定义 region 尚未全部进入 refresh routing，使用模块级 `dead_code` allow | `application/change_set.rs` | DSK-743 | 待清理；统一 selective refresh 后删除 allow |
 | DSK-D731-01 | DSK-731 | `DesktopProjection` 仍直接接收宽 `DesktopRuntimeUpdate`，projection apply、conversation/file-review post-reconcile 与 delta dirty 转换暂由 adapter 的单一 port method 承接 | `app/native_shell.rs::apply_projection_update_for`、`application/reducer.rs::RuntimeUpdatePort::apply_projection_update` | DSK-732 | 已清理（`93a0586`）；projection 只接收窄 `ProjectionEvent`，application reducer 负责提取事件和 `DesktopProjectionDelta -> UiChangeSet`，旧 broad method 与 `native_shell/update.rs` 已删除 |
 | DSK-D731-02 | DSK-731 | projection 触发的 resync command admission 暂由 reducer 决策后通过 port 同步发送，尚未形成 typed runtime effect/executor 边界 | `app/native_shell.rs::request_resync_for`、`application/reducer.rs::RuntimeUpdatePort::request_resync_if_needed` | DSK-733 | 已清理（`582d3ae`）；旧 direct-send port 已删除，resync command reservation、`RequestResync` effect、admission result 与失败 completion 全部回流 reducer |
-| DSK-D731-03 | DSK-731 | `SessionWorkspace`/catalog concrete type 仍位于 GPUI adapter，application reducer 通过窄 `RuntimeUpdatePort` 执行显式 owner 的原子 mutation | `application/reducer.rs::RuntimeUpdatePort`、`app/native_shell.rs` | DSK-740 | 待清理；聚合 Shell UI state 时把纯 runtime workspace/catalog state 收归 application，删除 concrete-state bridge |
+| DSK-D731-03 | DSK-731 | `SessionWorkspace`/catalog concrete type 仍位于 GPUI adapter，application reducer 通过窄 `RuntimeUpdatePort` 执行显式 owner 的原子 mutation | `application/reducer.rs::RuntimeUpdatePort`、`app/native_shell.rs` | DSK-741 | 待清理；DSK-740 已先建立 `ShellUiState` 的 presentation owner，但 concrete workspace 拆分会同时改变 feature presenter 输入，改在 DSK-741 一次完成 application state 下沉、presenter input 收窄和 bridge 删除；未增加 alias、dual write 或 compatibility façade |
 
 ## 十二、风险与处置
 
@@ -1299,6 +1299,32 @@ Gate 与性能记录：
   `10 passed`，all-target check、严格 clippy、format 与 diff check 全部通过。任务没有改变 render/layout/
   ViewModel 或像素语义，因此未运行、未更新 visual golden。
 
+### DSK-740 实际结果
+
+- 新增 `ui/shell/{mod,state}.rs`。`ShellViews` 统一持有 conversation/header/sessions/composer/home/
+  skills/inspector/toast/modal/drawer 十个 child `Entity<T>` 及其 subscription lifetime，并在 composition
+  root 断言 subscription 集合非空；child entity 不再散落在 `NativeShell` 顶层。
+- `ShellUiState` 统一持有 `FocusState`、七个 `FocusHandle`、command palette、modal/drawer/center surface、
+  drawer focus restore、full-message、conversation announcement、panel resize、input modality 与 inspector
+  telemetry deadline。announcement sequence 的递增和 owner-bound clear 由聚合 helper 维护，不再由 Shell
+  手工同步两个字段。
+- `ShellConnection::connect` 一次拆分 `DesktopRuntimeBridge`：Shell 侧聚合唯一 command client、runtime update
+  queue、`DesktopController`、queued effects 与 preference writer；`ShellRuntimeExecutor` 独占 event stream 和
+  shutdown guard 并被转交 GPUI executor。root release subscription 只持有 typed shutdown signal，连接、事件与
+  shutdown owner 的生命周期在类型上可见。
+- `NativeShellInit` 使用互斥的 `NativeShellWorkspaceInit::{Home, Session}`，删除可构造
+  `project + mismatched projection` 的重复字段和所有调用点恒为 `None` 的 `initial_session_id`，同时删除该
+  不可达 admission 分支。`NativeShell` 顶层字段从 41 个收敛为 7 个：connection、application state、三项
+  composition data、views 与 ui state；三个聚合都持有多个真实职责并提供构造不变量或 lifecycle helper，
+  没有单字段 wrapper。
+- focus/responsive bounds、command-palette modal focus restore、authorization modal 抢占 drawer 并恢复 root
+  focus owner 三项 GPUI interaction tests 通过。Gate A 通过：desktop lib `309 passed / 5 ignored / 0 failed`，
+  dependency boundary `10 passed`，all-target check、严格 clippy、format 与 diff check 全部通过。任务没有改变
+  render/layout/ViewModel 或像素语义，因此未运行、未更新 visual golden。
+- DSK-D731-03 未用改名或扩大 port 假清理：把 pure runtime workspace/catalog 下沉 application 会同步改变
+  DSK-741 的 feature presenter 输入，因此删除任务调整到 DSK-741，在一次切分中删除 concrete-state
+  `RuntimeUpdatePort`；本次没有新增兼容层、dual write 或第二份 state。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1313,7 +1339,7 @@ Gate 与性能记录：
 | DSK-731 | 已完成 | `c4c0eef` | 单一 root runtime reducer 穷尽 23 variants；删除 direct/projection completion 双权威与隐式 update target；Gate A/B、coverage table、runtime/projection unit、headless perf 全通过；未更新 golden |
 | DSK-732 | 已完成 | `93a0586` | 9 类窄 `ProjectionEvent` 与 application-owned dirty routing；删除纯 protocol arms 和旧 update module；Gate A、projection gap/duplicate/resync/replacement 及 headless perf 全通过；未更新 golden |
 | DSK-733 | 已完成 | `582d3ae` | 所有 picker/writer/clipboard/resync/Root timer completion 回流 reducer，显式 shutdown signal；清理 DSK-D730-01/02 与 DSK-D731-02；Gate A 和 race/stale/error 定向测试通过；未更新 golden |
-| DSK-740 | 待执行 | — | — |
+| DSK-740 | 已完成 | `9ac1a57` | `ShellViews/ShellUiState/ShellConnection/ShellRuntimeExecutor` 聚合，Shell 41→7 fields；typed Home/Session init；Gate A 与 focus/modal/drawer 定向测试通过；DSK-D731-03 调整到 DSK-741 与 presenter 输入切分一起清理 |
 | DSK-741 | 待执行 | — | — |
 | DSK-742 | 待执行 | — | — |
 | DSK-743 | 待执行 | — | — |
