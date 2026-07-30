@@ -5,9 +5,9 @@ use futures::StreamExt;
 use crate::app::bootstrap::PromptInvocation;
 use crate::operations::prompt::context::{PromptTurnOptions, RuntimeSnapshot};
 use crate::runtime::capability::{ModelCapability, OperationCapabilitySnapshot};
+use crate::runtime::scheduler::OperationScheduler;
 use crate::services::event::EventService;
 use crate::services::runtime::stream_model_for_scoped_runtime;
-use crate::session::id::{IdGenerator, SystemIdGenerator};
 use crate::session::service::SessionAutoNameWriter;
 
 const MAX_NAMING_INPUT_CHARS: usize = 4_000;
@@ -57,8 +57,7 @@ impl SessionNamingSeed {
         if !writer.is_unnamed() {
             return;
         }
-        let mut ids = SystemIdGenerator;
-        let operation_id = ids.next_root_operation_id();
+        let operation_id = OperationScheduler::allocate_child_operation_id();
         let runtime = match naming_runtime(self.runtime) {
             Ok(runtime) => runtime,
             Err(message) => {

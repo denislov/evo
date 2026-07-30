@@ -986,6 +986,7 @@ fn final_receiver_aware_compatibility_absence_and_retained_api_guard() {
             "open_or_create_internal",
             "non_persistent_internal",
             "list_internal",
+            "list_overviews_internal",
             "export_session_html_internal",
             "transcript_snapshot_internal",
             "shutdown_internal",
@@ -2060,7 +2061,7 @@ fn session_mutating_operation_owners_require_frozen_write_capability() {
         ("src/operations/branch_summary/mod.rs", 1),
         ("src/operations/self_healing_edit/mod.rs", 1),
         ("src/operations/delegation/execution.rs", 1),
-        ("src/runtime/dispatch.rs", 5),
+        ("src/runtime/dispatch.rs", 6),
     ];
 
     for (relative, expected) in owners {
