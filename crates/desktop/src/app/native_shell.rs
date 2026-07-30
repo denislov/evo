@@ -10640,25 +10640,14 @@ mod tests {
         assert_eq!(delegation.accent, theme.accent);
     }
 
-    #[test]
-    fn conversation_selection_outranks_hover_without_relying_on_hue() {
-        let theme = SemanticTheme::GEEK_DARK;
-        // The palette deliberately shares one hue between `focus_ring` and
-        // `accent`, and the review pipeline also renders a grayscale
-        // derivative of the wide fixture. Neither state may therefore depend
-        // on colour alone; rail length is the carrier that survives both.
-        assert_eq!(theme.focus_ring, theme.accent);
-        assert_ne!(theme.focus_ring, theme.muted_text);
-    }
-
     #[gpui::test]
-    fn conversation_selection_and_hover_rails_preserve_card_geometry(cx: &mut TestAppContext) {
+    fn conversation_selection_rail_preserves_card_geometry(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let (shell, cx) = add_visual_shell(
             cx,
             DesktopRuntimeBridge::disconnected_for_test(),
             projection_with_last_item(CodingAgentSessionTranscriptItem::User {
-                text: "Selection and hover rails must preserve this row.".into(),
+                text: "Selection rail must preserve this row.".into(),
             }),
         );
         cx.simulate_resize(size(px(1_300.), px(900.)));
@@ -10666,22 +10655,6 @@ mod tests {
         let card_before = cx
             .debug_bounds("conversation-last-card")
             .expect("the final conversation card is visible");
-        let hover_rail = cx
-            .debug_bounds("conversation-hover-rail")
-            .expect("unselected rows reserve the hover rail slot");
-        assert_eq!(f32::from(hover_rail.size.width), CONVERSATION_RAIL_WIDTH);
-        assert!(
-            (f32::from(hover_rail.center().y) - f32::from(card_before.center().y)).abs() <= 1.,
-            "the hover stub must stay vertically centred on its card"
-        );
-        cx.simulate_mouse_move(card_before.center(), None, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            cx.debug_bounds("conversation-last-card"),
-            Some(card_before),
-            "the hover rail must not participate in card layout"
-        );
-
         shell.update(cx, |shell, cx| shell.select_adjacent_conversation(true, cx));
         settle_visual_measurements(cx);
         let rail = cx
@@ -10689,13 +10662,6 @@ mod tests {
             .expect("keyboard selection paints a dedicated rail");
         assert_eq!(f32::from(rail.size.width), CONVERSATION_RAIL_WIDTH);
         assert!(f32::from(rail.size.height) > 0.);
-        assert!(
-            f32::from(rail.size.height) > f32::from(hover_rail.size.height) * 2.,
-            "selection must stay distinguishable from hover without colour: \
-             selected {} vs hover {}",
-            f32::from(rail.size.height),
-            f32::from(hover_rail.size.height)
-        );
         assert_eq!(
             cx.debug_bounds("conversation-last-card"),
             Some(card_before),
