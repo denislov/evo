@@ -4488,7 +4488,6 @@ impl NativeShell {
                 && self.composer_attachments.len() < MAX_PROMPT_ATTACHMENTS,
             attachment_disabled_reason: attachment_disabled_reason.map(Arc::from),
             rejection: self.composer.rejection().map(Arc::from),
-            keyboard_focus_visible: self.keyboard_focus_visible(),
         }
     }
 

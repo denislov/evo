@@ -50,7 +50,6 @@ pub(super) struct ComposerPaneViewModel {
     pub(super) attachments_enabled: bool,
     pub(super) attachment_disabled_reason: Option<Arc<str>>,
     pub(super) rejection: Option<Arc<str>>,
-    pub(super) keyboard_focus_visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +207,7 @@ impl ComposerPane {
 impl EventEmitter<ComposerPaneEvent> for ComposerPane {}
 
 impl Render for ComposerPane {
-    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let Some(view_model) = self.view_model.clone() else {
             return div()
                 .min_h(px(COMPOSER_MIN_HEIGHT as f32))
@@ -226,9 +225,7 @@ impl Render for ComposerPane {
         let attachments_enabled = view_model.attachments_enabled;
         let attachment_disabled_reason = view_model.attachment_disabled_reason;
         let rejection = view_model.rejection;
-        let keyboard_focus_visible = view_model.keyboard_focus_visible;
         let composer_disabled = composer_pending || awaiting_prompt_start;
-        let composer_focused = input.focus_handle(cx).is_focused(window) && keyboard_focus_visible;
         let theme = SemanticTheme::GEEK_DARK;
         let running_action_label = match running_mode {
             ComposerRunningMode::SteerNow => "Steer now",
@@ -271,11 +268,7 @@ impl Render for ComposerPane {
             .px_token(DesignSpace::Lg)
             .py_token(DesignSpace::Md)
             .border_t_1()
-            .border_color(rgb(if composer_focused {
-                theme.focus_ring.value()
-            } else {
-                theme.divider.value()
-            }))
+            .border_color(rgb(theme.divider.value()))
             .bg(rgb(theme.canvas.value()))
             .flex()
             .flex_col()
@@ -287,11 +280,7 @@ impl Render for ComposerPane {
                     .flex_col()
                     .rounded_token(DesignRadius::Lg)
                     .border_1()
-                    .border_color(rgb(if composer_focused {
-                        theme.focus_ring.value()
-                    } else {
-                        theme.border.value()
-                    }))
+                    .border_color(rgb(theme.border.value()))
                     .bg(rgb(theme.elevated.value()))
                     .p_token(DesignSpace::Sm)
                     .gap_token(DesignSpace::Xs)
