@@ -1,6 +1,6 @@
 # coding-agent 产品层结构精简重构计划
 
-> 状态：实施中（CAG-300 已完成，Phase 1 待开始）
+> 状态：已完成（CAG-300、Phase 1、Phase 2、Phase 3、Phase 4 全部通过 Gate）
 > 决策日期：2026-07-30
 > 最近更新：2026-07-30
 > 基线 commit：`54c9349`（工作区干净）
@@ -29,9 +29,9 @@ event sourcing 作为状态权威 —— 这三条**不动**。它们是这个�
 
 ```text
 旧：CodingAgentOperation ──into_internal──▶ Operation
-                                            ├─ run_sync_operation      （14 arm，13 个 unsupported）
-                                            ├─ run_sync_mut_operation  （14 arm， 8 个 unsupported）
-                                            ├─ run_operation           （14 arm， 6 个 unsupported）
+                                            ├─ run_sync_operation      （15 arm，13 个 unsupported）
+                                            ├─ run_sync_mut_operation  （15 arm， 8 个 unsupported）
+                                            ├─ run_operation           （15 arm， 6 个 unsupported）
                                             └─ submit_internal         （运行时 if 三重否定）
       每条管线各自重复 6 步 envelope
 
@@ -119,7 +119,7 @@ resolve_operation_admission_with_id      （runtime/admission.rs:54）
 ### 4.2 descriptor 表已声明 dispatch mode，代码却不查表
 
 `OperationDescriptor`（`runtime/outcome.rs:241`）已包含 `dispatch_mode` 字段，
-`descriptor_for_internal_operation`（`runtime/outcome.rs:623`）为 14 个变体各返回一份契约。
+`descriptor_for_internal_operation`（`runtime/outcome.rs:623`）为 15 个变体各返回一份契约。
 
 决定性证据在 `runtime/intent.rs:157`：
 
@@ -145,7 +145,7 @@ pub(crate) fn unsupported_dispatch(admission: &OperationExecution) -> CodingSess
 
 ### 4.3 `CodingAgentOperation` 与 `Operation` 是手写 1:1 镜像
 
-两个 14 变体枚举，payload 类型**完全相同**（`PromptTurnOptions`、`SelfHealingEditRequest`、
+两个 15 变体枚举，payload 类型**完全相同**（`PromptTurnOptions`、`SelfHealingEditRequest`、
 `AgentInvocationOptions`、`AgentTeamOptions` 均已是公开类型）。
 `into_internal`（`runtime/outcome.rs:905-955`）是 50 行纯搬运。
 
@@ -202,7 +202,7 @@ OperationFinalizer;                  // ZST + Copy，freeze() 本应是 Finaliza
 - `runtime/client/projection.rs`(1706) 的内容是 connection / submission / control；`runtime/client/product_projection.rs`(1521) 才是 projection。名字与内容相反。
 - 201 个 `CodingAgent*` 前缀标识符。`api` 已分 10 个子模块，前缀冗余：`api::client::CodingAgentClientProjectionLifecycle` 四段重复。
 - 空目录且未在 `lib.rs` 声明：`src/protocol/`、`src/adapters/json/`、`src/adapters/rpc/`、`src/plugins/contributions/`。
-- API 边界编译期守卫（trybuild）只有 `tui` 有（`crates/tui/tests/api_contract.rs`）。API 面最大的 `coding-agent` 没有。
+- crate root 的 API 边界源码守卫只有 `tui` 有（`crates/tui/tests/api_contract.rs`）。API 面最大的 `coding-agent` 没有。
 - `docs/architecture.md` 已与代码不符：称 coding-agent 有 `api.rs`（实为 lib.rs 内联）、`tools/shell/` 目录（实为 `shell.rs`）、`limits/` 目录（实为 `limits.rs`）、集成测试在 `tests/agent/` 与 `tests/execution/`（已删除）。
 
 ## 五、目标结构
@@ -211,11 +211,11 @@ OperationFinalizer;                  // ZST + Copy，freeze() 本应是 Finaliza
 
 ```rust
 // api::operation 的公开枚举保持唯一权威
-pub enum CodingAgentOperation { /* 14 变体，不变 */ }
+pub enum CodingAgentOperation { /* 15 变体，不变 */ }
 
 impl CodingAgentOperation {
-    /// 唯一的内部归一化：只处理 Export 的 view/html 分歧
-    pub(crate) fn normalize(self) -> NormalizedOperation;
+    /// 唯一需要的内部归一化：只处理 Export 的 view/html 分歧
+    pub(crate) fn export_options(&self) -> Option<ExportOptions>;
     pub(crate) fn descriptor(&self) -> OperationDescriptor;
 }
 ```
@@ -226,12 +226,11 @@ impl CodingAgentOperation {
 
 ```rust
 impl CodingAgentSession {
-    fn with_envelope<T>(
+    async fn execute_operation_envelope(
         &mut self,
-        operation: NormalizedOperation,
+        operation: CodingAgentOperation,
         submission: Option<SubmissionCommitGuard>,
-        body: impl FnOnce(&mut Self, NormalizedOperation, &OperationPermit) -> Result<OperationOutcome, _>,
-    ) -> Result<OperationOutcome, CodingSessionError>;
+    ) -> Result<CodingAgentOperationOutcome, CodingSessionError>;
 }
 ```
 
@@ -242,7 +241,7 @@ impl CodingAgentSession {
 
 ```text
 runtime/operation/
-├── mod.rs        # NormalizedOperation、OperationExecution、dispatch mode 路由
+├── mod.rs        # OperationExecution、outcome 与 lifecycle 公共类型
 ├── contract.rs   # OperationDescriptor、OperationContract 表（原 outcome.rs 的契约部分）
 ├── admission.rs  # resolve_admission（原 admission.rs + scheduler.rs）
 ├── permit.rs     # OperationPermit（从 intent.rs 迁入）
@@ -267,14 +266,15 @@ runtime/operation/
 > 状态：已完成。`coding-agent` 从 0 个可执行测试变为 8 个，覆盖 15 个 operation 变体的完整
 > descriptor 契约与三个 dispatch family 的真实路由。两次变异测试确认安全网可捕获回归。
 >
-> **孤立测试的处置改为「保留待挖掘」，不删除。** 原计划判定其为旧 API 快照应删除；实测归因后
+> **孤立测试的最终处置为「保留作历史参考，不恢复编译」。** 原计划判定其为旧 API 快照应删除；实测归因后
 > 改变结论：`runtime/facade/tests.rs` 的 129 个用例中包含本轮重构恰好需要的不变量
 > （`canonical_run_uses_each_metadata_dispatch_family`、
 > `resolve_operation_admission_returns_structured_static_contract`、
 > 7 个 `run_operation_*_uses_guard_and_preserves_*_error`、
 > 6 个 `submitted_*_finishes_*_not_*`、3 个 `export_current_html_*`）。它是资产而非垃圾。
-> 文件仍未参与编译（`runtime/facade.rs` 不声明该模块），因此不构成维护负担，也不冒充覆盖。
-> 其最终去向在 Phase 1 结束、确认哪些不变量已被重新覆盖后再决定。
+> 文件仍未参与编译（`runtime/facade.rs` 不声明该模块），因此不冒充覆盖。Phase 1 已把本轮需要的
+> descriptor、dispatch 与 Export 归一化不变量提升为 8 个可执行测试；剩余旧用例依赖已删除的
+> test-only 后门，不在本计划恢复。档案中的 operation 名称已同步到本轮最终结构。
 >
 > Gate：`cargo fmt --check` 干净；新增文件 0 个 clippy 警告（剩余警告为 `app/bootstrap.rs`
 > 与 `app/embedding.rs` 的既有项）；`coding-agent` 8 个测试通过；`cli` 106、`tui` 140、
@@ -300,6 +300,8 @@ run_internal}`、`FauxProvider::{with_call_queue, text_call}`、`crate::test_sup
   - `priority_cancellation_and_child_policy_follow_kind_and_dispatch`：断言三项由 kind 与 dispatch mode 派生
   - `every_operation_variant_is_covered`：新增变体未登记表则失败
   - `internal_mirror_resolves_the_same_contract_as_the_public_enum`：捕获 `CodingAgentOperation::contract()` 与 `descriptor_for_internal_operation()` 两份独立映射之间的漂移（CAG-310 删除镜像后此测试随之删除）
+  - CAG-310 删除上一项镜像漂移测试后，以 `export_variants_normalize_to_their_runner_modes`
+    替换：锁定 `ExportCurrent` / `ExportCurrentHtml` 到 runner options 的两个归一化分支；测试总数仍为 8
 - `runtime/dispatch_tests.rs` —— 真实 session + FauxProvider：
   - `run_internal_routes_every_dispatch_family_to_its_runner`：Prompt(Async) / ExportCurrent(SyncReadOnly) / SetSessionName(SyncMutable) 三族各自到达 runner 并产出对应 outcome
   - `sync_mutable_runner_errors_are_not_masked_as_unsupported_dispatch`：断言确切错误 `UnsupportedCapability("session names require a persistent Rust-native session")`
@@ -338,17 +340,31 @@ run_internal}`、`FauxProvider::{with_call_queue, text_call}`、`crate::test_sup
 
 #### CAG-310：删除 `Operation` 内部镜像枚举
 
+> 状态：已完成。`Operation` 与 `into_internal` 已删除；admission、dispatch、submission 全部直接
+> 使用唯一的 `CodingAgentOperation`。实现阶段进一步发现原有 `OperationContract` 也是 15 变体的
+> 1:1 enum 镜像，已改为无变体的静态契约记录 `struct`，公开 operation 的一次穷举 match 是唯一
+> 变体权威。原计划拟引入的 `NormalizedOperation` 没有创建：实测只有 Export 需要形态归一化，使用
+> `export_options()` 足够；BranchSummary 的 `reuse` 可在 runner 分支直接判定。创建一个 15 变体的
+> `NormalizedOperation` 反而会重建本任务要删除的镜像。
+
 主要文件：`runtime/operation.rs`、`runtime/outcome.rs`、`runtime/dispatch.rs`、`runtime/admission.rs`、`runtime/execution.rs`
 
 工作：
 
-- 引入 `NormalizedOperation`，只承担 Export 归一化与 `reuse` 降级；其余变体直接复用公开枚举的 payload。
+- 直接复用公开枚举；Export 通过 `export_options()` 归一化，BranchSummary 在 runner 分支判定 reuse。
 - 删除 `Operation` 与 `into_internal`。
 - `descriptor_for_internal_operation` 改为 `CodingAgentOperation::descriptor()`。
 
 完成标准：`grep -c 'Operation::' ` 的穷举 match 处从 4 处降为 1 处（契约表）；CAG-300 的 contract 测试逐项不变。
 
 #### CAG-311：让 descriptor 驱动 dispatch
+
+> 状态：已完成。`run_internal` 只进入 `execute_operation_envelope`，由
+> `descriptor.dispatch_mode` 选择三个 handler；27 个填充 arm 与
+> `IntentRouter::unsupported_dispatch` 已删除。handler 各自只列本 mode 的有效变体，末尾的
+> `unreachable!` 是契约表与枚举形态漂移时的内部 invariant，不再把路由错误伪装成产品层
+> `UnsupportedCapability`。`submit_internal` 的三重否定也已改为只接收 `InvokeAgent` /
+> `InvokeTeam` 的窄类型，原有 runtime-owned dispatch `unreachable!` 已删除。
 
 主要文件：`runtime/dispatch.rs`、`runtime/execution.rs`、`runtime/intent.rs`
 
@@ -363,11 +379,23 @@ run_internal}`、`FauxProvider::{with_call_queue, text_call}`、`crate::test_sup
 
 #### CAG-312：抽出统一 envelope
 
+> 状态：已完成。三条 session dispatch 管线现共享唯一的 `execute_operation_envelope`：admission、
+> scheduler permit、submission commit、handler、freeze、session finalization、recovery pending、
+> terminal outbox、submission finish 与 session naming hook 均只编排一次。`OperationPermit` 的所有权
+> 保持到 finalization 完成；只有 `ForkSession` 延续旧语义显式提前 release。
+>
+> 原计划的 `dispatch.rs ~350 行` 估算经实现验证不成立：三个真实 handler 本身约 500 行，另有
+> terminal outbox 约 110 行；删除重复 envelope 与 27 个死分支后文件由 808 行降到 742 行。
+> 行数不是重复度的有效代理，完成 Gate 改以「session finalization 尾部一份、路由 fallback 零份」
+> 为准。handler 与 outbox 会在 CAG-330 按生命周期目录拆文件，不在本任务制造临时模块。
+> `submit_internal` 是 detached runtime-owned root，走 `resolve_non_session` 与 deferred terminal
+> draft，不是 session envelope 的第四份副本，因此保留独立的 non-session finalization 路径。
+
 主要文件：`runtime/dispatch.rs`
 
 工作：
 
-- 抽出 `with_envelope`，尾部五步只存在一份。
+- 抽出 `execute_operation_envelope`，尾部五步只存在一份。
 - `run_operation` 的 session naming 作为 envelope 的可选 hook，不复制整段尾部。
 
 完成标准：`dispatch.rs` 从 808 行降至 ~350 行；finalize 尾部单份实现。
@@ -377,6 +405,17 @@ run_internal}`、`FauxProvider::{with_call_queue, text_call}`、`crate::test_sup
 ### Phase 2：组合根与 services 层
 
 #### CAG-320：展平空壳、收敛 services
+
+> 状态：已完成。`RuntimeHost` 直接持有 `events: EventService`；`CapabilityService` 已删除并由
+> `CodingAgentCapabilities::from_runtime_state` 直接投影；`OperationFinalizer` 已删除，freeze 与
+> non-session resolve 归入 `FinalizationDecision`；client owner 字段由含混的 `coordinator` 改为
+> `snapshots`。`services/` 现只含 `event` / `authorization` / `runtime`：redaction 移到根级
+> `redaction.rs`（与 `bounded_io.rs` 相邻），session cwd 辅助归入 `session/service.rs`，replay owner
+> 派生归入 `runtime/session_coordinator.rs`，空转的 finalized-write 转发函数已在 operation 中直接
+> 调用 outcome 方法。
+>
+> Gate：`cargo fmt --check` 干净；clippy 仍仅有 `app/bootstrap.rs` 与 `app/embedding.rs` 两个
+> 既有 warning；coding-agent 8、CLI 106、TUI 268、Desktop 286（5 ignored）全绿。
 
 工作：
 
@@ -393,6 +432,16 @@ run_internal}`、`FauxProvider::{with_call_queue, text_call}`、`crate::test_sup
 
 #### CAG-330：合并 operation 生命周期模块
 
+> 状态：已完成。`runtime/` 顶层模块文件由 20 个收敛到 12 个；operation 的 contract、
+> admission、permit、control、dispatch、execution、submission、finalize 与相关测试全部集中到
+> `runtime/operation/`。原 `scheduler.rs` 的 admission policy 已合并进 `admission.rs`，
+> `OperationPermit` 从 `intent.rs` 移至 `operation/permit.rs`，`intent.rs` 只保留 query intent。
+> 迁移为模块归属与 import 调整，没有改变 operation 行为。
+>
+> Gate：`cargo fmt --check` 干净；clippy 仍仅有 `app/bootstrap.rs` 与 `app/embedding.rs` 两个
+> 既有 warning；coding-agent 8、CLI 106、TUI 268、Desktop 286（5 ignored）全绿；
+> `git diff --check` 干净。
+
 按 5.3 的目标结构搬迁。纯移动 + 改 `use`，不改逻辑。
 
 完成标准：`runtime/` 顶层模块数从 20 降至约 12；一次 operation 的生命周期在单目录内可读完。
@@ -403,11 +452,22 @@ run_internal}`、`FauxProvider::{with_call_queue, text_call}`、`crate::test_sup
 
 #### CAG-340：命名、空目录、API 守卫、文档
 
+> 状态：已完成。client 内部文件已按职责改名为 `connection.rs` 与 `projection.rs`；4 个遗留叶目录
+> 及其 2 个空父目录已删除。`coding-agent/tests/api_contract.rs` 现守卫 crate root 只有 `api`
+> 可以公开。实现时核对发现 TUI 并未使用 trybuild，而是同类独立源码边界测试，因此本任务按
+> 实际权威模式对齐，没有引入无依据的 trybuild 依赖。`docs/architecture.md` 已同步内联 API、
+> operation 生命周期目录、services、`shell.rs`、`limits.rs` 与真实测试路径。
+> `CodingAgent*` 前缀按计划仅评估，不在本轮改名。
+>
+> Gate：`cargo fmt --check` 与 `git diff --check` 干净；clippy 仍仅有两个既有 warning；
+> coding-agent 8 个 unit、1 个 API contract、7 个 doc-test，CLI 106、TUI 268、Desktop 286
+>（5 ignored）全绿。
+
 工作：
 
 - `runtime/client/projection.rs` → `connection.rs`；`product_projection.rs` → `projection.rs`。
 - 删除 4 个空目录。
-- 为 `coding-agent` 增加 trybuild API 边界守卫，对齐 `tui`。
+- 为 `coding-agent` 增加 crate-root API 边界守卫，对齐 `tui` 的独立源码契约测试。
 - 同步 `docs/architecture.md`（含第 4.7 节列出的全部不符项）。
 - `CodingAgent*` 前缀精简：**单列评估，不在本计划内执行**。它会改动 `cli`/`desktop` 的全部调用点，且与结构问题无关，应作为独立一轮机械改名。
 
@@ -418,7 +478,7 @@ run_internal}`、`FauxProvider::{with_call_queue, text_call}`、`crate::test_sup
 | 风险 | 处置 |
 | --- | --- |
 | 产品层零测试，重构无行为判据 | CAG-300 先建表驱动安全网；未完成不进入 Phase 1 |
-| 孤立测试文件被误当作覆盖 | CAG-300 内明确删除，结论写回本文档 |
+| 孤立测试文件被误当作覆盖 | CAG-300 明确保留为不参与编译的历史参考；所有 Gate 只统计真实执行测试 |
 | Export 归一化语义在删除镜像枚举时漂移 | contract 测试覆盖 `ExportCurrent` / `ExportCurrentHtml` 两个变体的 descriptor 与 `writes_html()` 分支 |
 | envelope 抽取吞掉 `run_operation` 的 session naming | 作为显式 hook 参数，contract 测试断言 Prompt 变体仍触发 |
 | Phase 3 纯搬迁引入 `use` 循环 | 搬迁与逻辑改动分离在不同 commit，便于二分 |

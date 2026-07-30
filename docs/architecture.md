@@ -21,7 +21,8 @@
 ### 部分关键设计约束
 
 - **版本锁定**：所有 6 个 crate 通过 `workspace.package.version` 共享同一版本号，确保版本一致性
-- **稳定性承诺**：每个 crate 通过 `api.rs` 模块暴露分类的稳定公共 API，实现细节完全私有
+- **稳定性承诺**：每个 crate 通过 `api` 命名空间暴露分类的稳定公共 API；多数 crate 使用
+  `api.rs`，`coding-agent` 在 `lib.rs` 内联定义该门面，实现细节完全私有
 - **零循环依赖**：依赖方向严格单向：`ai` ← `agent-core` ← `coding-agent` ← `cli`/`desktop`；`tui` 作为独立通用组件库被 `cli` 依赖
 
 ---
@@ -213,8 +214,7 @@ Start
 
 ```
 crates/coding-agent/src/
-├── lib.rs              # 私有模块 + 分类的公共 API（8 个子领域）
-├── api.rs              # API 定义（见下文）
+├── lib.rs              # 私有模块 + 内联的分类公共 API（10 个子领域）
 ├── app/                # 应用层：启动、引导、嵌入
 │   ├── auth.rs         # 认证控制器
 │   ├── bootstrap.rs    # 启动选项、提示调用
@@ -225,7 +225,7 @@ crates/coding-agent/src/
 │   ├── session.rs      # 会话查询与编目
 │   ├── settings.rs     # 设置控制器
 │   └── theme.rs        # 主题控制器
-├── authorization/      # 工具授权系统
+├── authorization.rs    # 工具授权系统
 ├── events/             # 18 个产品事件类型
 │   ├── agent.rs, session.rs, tool.rs, workflow.rs ...
 │   └── mod.rs          # ProductEvent trait 和通用序列化
@@ -241,31 +241,35 @@ crates/coding-agent/src/
 │   └── team_invocation/    # 团队调用
 ├── runtime/            # 运行时核心
 │   ├── facade/         # CodingAgentSession（中央会话类型）
-│   ├── client/         # 客户端连接投映
-│   ├── execution.rs    # 操作任务执行
+│   ├── client/         # 客户端连接与产品投映
+│   │   ├── connection.rs # 连接、提交、控制与公开 snapshot DTO
+│   │   └── projection.rs # 产品事件到客户端状态的 reducer
+│   ├── operation/      # operation 完整生命周期
+│   │   ├── contract.rs # 唯一 operation 枚举与 descriptor 契约
+│   │   ├── admission.rs # admission 解析与调度 policy
+│   │   ├── permit.rs   # admission permit / guard 生命周期
+│   │   ├── dispatch.rs # descriptor-driven 路由与统一 envelope
+│   │   └── finalize.rs # finalization decision
 │   ├── capability.rs   # 文件系统/Shell 能力
-│   ├── operation.rs    # 操作枚举
-│   ├── snapshot.rs     # 快照
-│   └── submission.rs   # 提交
-├── services/           # 6 个服务层
+│   ├── snapshot.rs     # 快照 coordinator
+│   └── session_coordinator.rs # session owner / writer 协调
+├── services/           # 有状态服务层
 │   ├── authorization.rs  # 授权服务
-│   ├── capability.rs     # 能力服务
 │   ├── event.rs          # 事件服务（存储/分发）
-│   ├── redaction.rs      # 脱敏服务
-│   ├── runtime.rs        # 运行时服务
-│   └── session.rs        # 会话服务（持久化/清单/重放/事务）
+│   └── runtime.rs        # 运行时服务
+├── redaction.rs        # 无状态脱敏函数
 ├── profiles/           # 代理/团队配置文件
 ├── session/            # 会话仓库、清单、重放、事务、事件存储
 ├── tools/              # 7 个内置 AgentTool 定义
 │   ├── filesystem/     # read/write/edit/find/ls
-│   └── shell/          # bash
+│   └── shell.rs        # bash
 ├── config/             # 配置管理
 │   ├── settings.rs     # 全局设置 (TOML)
 │   ├── auth.rs         # 认证配置 (auth.toml)
 │   ├── paths.rs        # 路径解析 (~/.evo/ 或 $EVO_DIR)
 │   └── storage.rs      # 配置存储
 ├── theme/              # 主题系统
-└── limits/             # 全局限制
+└── limits.rs           # 全局限制
 ```
 
 **核心设计：事件溯源架构**
@@ -291,7 +295,7 @@ crates/coding-agent/src/
 - `diagnostic`：诊断/错误
 - `capability`：能力变更（文件系统/Shell 权限）
 
-**公共 API 分类**（8 个子领域）：
+**公共 API 分类**（10 个子领域）：
 
 | 类别 | 说明 |
 |---|---|
@@ -573,7 +577,8 @@ ProductEvent (coding-agent)
 
 ### 5.1 外观模式（Facade）
 
-每个 crate 通过 `api.rs` 模块暴露稳定、分类的公共 API，实现模块标记为 `pub(crate)` 或保持私有：
+每个 crate 通过 `api` 命名空间暴露稳定、分类的公共 API，实现模块标记为 `pub(crate)` 或保持私有。
+多数 crate 将门面放在 `api.rs`；`coding-agent` 的门面内联在 `lib.rs`：
 
 ```
 crate::api::<category>    ←  公共消费者
@@ -705,11 +710,11 @@ version = "0.7.2"
 | 层次 | 说明 | 文件示例 |
 |---|---|---|
 | **单元测试** | 每个 crate 的内部测试 | `#[cfg(test)] mod tests` |
-| **API 契约测试** | 通过/失败编译时守卫（trybuild） | `tests/fixtures/api_boundary/pass/`、`fail/` |
-| **集成测试** | 跨模块行为验证 | `tests/agent/`、`tests/execution/` |
-| **快照测试** | 事件序列化合同 | `tests/event_snapshot/` |
-| **RPC 协议测试** | JSONL stdio 协议 | `cli/tests/rpc_stdio.rs` |
-| **组件测试** | UI 组件行为 | `tui/tests/components/` |
+| **API 契约测试** | 独立集成测试读取 crate root，守卫只有 `api` 可公开 | `coding-agent/tests/api_contract.rs`、`tui/tests/api_contract.rs` |
+| **跨模块集成测试** | 依赖、模块与 adapter 边界验证 | `desktop/tests/dependency_boundary.rs` |
+| **共享 fixture** | 跨 adapter 的产品投映事件样本 | `coding-agent/tests/fixtures/client_projection/` |
+| **RPC 协议测试** | JSONL 与 typed event 协议 | `cli/src/protocol/*_tests.rs` |
+| **组件测试** | UI 组件行为 | `tui/tests/components.rs` 及其子模块 |
 | **依赖/模块边界测试** | 解析 manifest 与 Rust AST，验证公开面、child module graph 和 authority 方向；不搜索实现字符串 | `desktop/tests/dependency_boundary.rs` |
 
 ### 8.2 Test-Support 机制
