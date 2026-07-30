@@ -37,7 +37,7 @@ use crate::operations::self_healing_edit::runner::{
 };
 use crate::runtime::capability::InstalledCapabilityGeneration;
 use crate::runtime::facade::{CodingSessionError, ProfileId, ProfileKind};
-use crate::runtime::finalization::{FinalizationCommitResult, FinalizationDecision};
+use crate::runtime::operation::finalize::{FinalizationCommitResult, FinalizationDecision};
 use crate::runtime::snapshot::{ClientHandle, ClientRegistryError, SnapshotCoordinator};
 use crate::session::service::FinalizedSessionWrite;
 
@@ -57,7 +57,7 @@ pub(crate) struct EventService {
 #[derive(Debug, Clone, Default)]
 struct ProductEventEmissionContext {
     capability_generation: Option<crate::runtime::capability::CapabilityGeneration>,
-    operation_kind: Option<crate::runtime::control::OperationKind>,
+    operation_kind: Option<crate::runtime::operation::control::OperationKind>,
     root_operation_id: Option<String>,
 }
 
@@ -397,7 +397,9 @@ impl EventService {
             move |operation_kind, terminal_status| {
                 terminal_status.and_then(|status| {
                     operation_kind.and_then(|kind| {
-                        crate::runtime::outcome::product_terminal_operation(kind, evidence, status)
+                        crate::runtime::operation::contract::product_terminal_operation(
+                            kind, evidence, status,
+                        )
                     })
                 })
             },
@@ -413,7 +415,7 @@ impl EventService {
                 terminal_status.and_then(|status| {
                     operation_kind.and_then(|kind| {
                         evidence.and_then(|evidence| {
-                            crate::runtime::outcome::product_terminal_operation(
+                            crate::runtime::operation::contract::product_terminal_operation(
                                 kind, evidence, status,
                             )
                         })
@@ -430,7 +432,8 @@ impl EventService {
         explicit: ProductEventEmissionContext,
     ) -> ProductEvent {
         self.publish(event.into_product_draft(), explicit, |operation_kind, _| {
-            operation_kind.and_then(crate::runtime::outcome::recovered_product_terminal_operation)
+            operation_kind
+                .and_then(crate::runtime::operation::contract::recovered_product_terminal_operation)
         })
     }
 
@@ -445,7 +448,7 @@ impl EventService {
                         evidence_source
                             .root_terminal_evidence(kind)
                             .and_then(|evidence| {
-                                crate::runtime::outcome::product_terminal_operation(
+                                crate::runtime::operation::contract::product_terminal_operation(
                                     kind, evidence, status,
                                 )
                             })
@@ -464,7 +467,7 @@ impl EventService {
                 terminal_status.and_then(|status| {
                     operation_kind.and_then(|kind| {
                         evidence.and_then(|evidence| {
-                            crate::runtime::outcome::product_terminal_operation(
+                            crate::runtime::operation::contract::product_terminal_operation(
                                 kind, evidence, status,
                             )
                         })
@@ -483,7 +486,7 @@ impl EventService {
                 terminal_status.and_then(|status| {
                     operation_kind.and_then(|kind| {
                         evidence.and_then(|evidence| {
-                            crate::runtime::outcome::product_terminal_operation(
+                            crate::runtime::operation::contract::product_terminal_operation(
                                 kind, evidence, status,
                             )
                         })
@@ -502,7 +505,7 @@ impl EventService {
         draft: ProductEventDraft,
         explicit: ProductEventEmissionContext,
         resolve_terminal: impl FnOnce(
-            Option<crate::runtime::control::OperationKind>,
+            Option<crate::runtime::operation::control::OperationKind>,
             Option<crate::events::CodingAgentProductEventTerminalStatus>,
         )
             -> Option<crate::events::CodingAgentProductEventTerminalOperation>,
@@ -607,7 +610,7 @@ impl EventService {
                     record
                         .operation_kind
                         .as_deref()
-                        .and_then(crate::runtime::control::OperationKind::from_str),
+                        .and_then(crate::runtime::operation::control::OperationKind::from_str),
                 ),
             crate::events::outbox::DurableOutboxRecordKind::Recovery => {
                 self.publish_durable_recovery_pending_draft(record.draft.clone())
@@ -668,7 +671,7 @@ impl EventService {
     fn publish_durable_terminal_draft(
         &self,
         draft: ProductEventDraft,
-        operation_kind_hint: Option<crate::runtime::control::OperationKind>,
+        operation_kind_hint: Option<crate::runtime::operation::control::OperationKind>,
     ) -> ProductEvent {
         let recovery_resolution_generation = match &draft.event {
             CodingAgentProductEventKind::Workflow(
@@ -688,55 +691,55 @@ impl EventService {
         let evidence = match &draft.event {
             CodingAgentProductEventKind::Workflow(
                 crate::events::CodingAgentWorkflowProductEvent::PromptCompleted { .. },
-            ) => Some(crate::runtime::outcome::OperationRootTerminalEvidence::PromptCompleted),
+            ) => Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::PromptCompleted),
             CodingAgentProductEventKind::Workflow(
                 crate::events::CodingAgentWorkflowProductEvent::PromptFailed { .. },
-            ) => Some(crate::runtime::outcome::OperationRootTerminalEvidence::PromptFailed),
+            ) => Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::PromptFailed),
             CodingAgentProductEventKind::Workflow(
                 crate::events::CodingAgentWorkflowProductEvent::PromptAborted { .. },
-            ) => Some(crate::runtime::outcome::OperationRootTerminalEvidence::PromptAborted),
+            ) => Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::PromptAborted),
             CodingAgentProductEventKind::Session(
                 crate::events::CodingAgentSessionProductEvent::CompactionCompleted { .. },
-            ) => Some(crate::runtime::outcome::OperationRootTerminalEvidence::CompactionCompleted),
+            ) => Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::CompactionCompleted),
             CodingAgentProductEventKind::Workflow(
                 crate::events::CodingAgentWorkflowProductEvent::SelfHealingEditCompleted { .. },
             ) => Some(
-                crate::runtime::outcome::OperationRootTerminalEvidence::SelfHealingEditCompleted,
+                crate::runtime::operation::contract::OperationRootTerminalEvidence::SelfHealingEditCompleted,
             ),
             CodingAgentProductEventKind::Workflow(
                 crate::events::CodingAgentWorkflowProductEvent::SelfHealingEditFailed { .. },
             ) => {
-                Some(crate::runtime::outcome::OperationRootTerminalEvidence::SelfHealingEditFailed)
+                Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::SelfHealingEditFailed)
             }
             CodingAgentProductEventKind::Workflow(
                 crate::events::CodingAgentWorkflowProductEvent::SelfHealingEditAborted { .. },
             ) => {
-                Some(crate::runtime::outcome::OperationRootTerminalEvidence::SelfHealingEditAborted)
+                Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::SelfHealingEditAborted)
             }
             CodingAgentProductEventKind::Agent(
                 crate::events::CodingAgentAgentProductEvent::InvocationCompleted { .. },
             ) => Some(
-                crate::runtime::outcome::OperationRootTerminalEvidence::AgentInvocationCompleted,
+                crate::runtime::operation::contract::OperationRootTerminalEvidence::AgentInvocationCompleted,
             ),
             CodingAgentProductEventKind::Agent(
                 crate::events::CodingAgentAgentProductEvent::InvocationFailed { .. },
             ) => {
-                Some(crate::runtime::outcome::OperationRootTerminalEvidence::AgentInvocationFailed)
+                Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::AgentInvocationFailed)
             }
             CodingAgentProductEventKind::Agent(
                 crate::events::CodingAgentAgentProductEvent::InvocationAborted { .. },
             ) => {
-                Some(crate::runtime::outcome::OperationRootTerminalEvidence::AgentInvocationAborted)
+                Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::AgentInvocationAborted)
             }
             CodingAgentProductEventKind::Team(
                 crate::events::CodingAgentTeamProductEvent::Completed { .. },
-            ) => Some(crate::runtime::outcome::OperationRootTerminalEvidence::AgentTeamCompleted),
+            ) => Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::AgentTeamCompleted),
             CodingAgentProductEventKind::Team(
                 crate::events::CodingAgentTeamProductEvent::Failed { .. },
-            ) => Some(crate::runtime::outcome::OperationRootTerminalEvidence::AgentTeamFailed),
+            ) => Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::AgentTeamFailed),
             CodingAgentProductEventKind::Team(
                 crate::events::CodingAgentTeamProductEvent::Aborted { .. },
-            ) => Some(crate::runtime::outcome::OperationRootTerminalEvidence::AgentTeamAborted),
+            ) => Some(crate::runtime::operation::contract::OperationRootTerminalEvidence::AgentTeamAborted),
             _ => None,
         };
         self.publish(
@@ -751,29 +754,29 @@ impl EventService {
                 terminal_status.and_then(|status| {
                     if is_recovery_resolution {
                         return operation_kind.and_then(|kind| {
-                            crate::runtime::outcome::recovery_resolution_terminal_operation(
+                            crate::runtime::operation::contract::recovery_resolution_terminal_operation(
                                 kind, status,
                             )
                         });
                     }
                     let kind = operation_kind.or_else(|| {
                         evidence.map(|evidence| match evidence {
-                            crate::runtime::outcome::OperationRootTerminalEvidence::CompactionCompleted => {
-                                crate::runtime::control::OperationKind::Compact
+                            crate::runtime::operation::contract::OperationRootTerminalEvidence::CompactionCompleted => {
+                                crate::runtime::operation::control::OperationKind::Compact
                             }
-                            _ => crate::runtime::control::OperationKind::Prompt,
+                            _ => crate::runtime::operation::control::OperationKind::Prompt,
                         })
                     });
                     kind.and_then(|kind| {
                         evidence.and_then(|evidence| {
                             let evidence = match (kind, evidence) {
                                 (
-                                    crate::runtime::control::OperationKind::Compact,
-                                    crate::runtime::outcome::OperationRootTerminalEvidence::PromptFailed,
-                                ) => crate::runtime::outcome::OperationRootTerminalEvidence::CompactPromptFailed,
+                                    crate::runtime::operation::control::OperationKind::Compact,
+                                    crate::runtime::operation::contract::OperationRootTerminalEvidence::PromptFailed,
+                                ) => crate::runtime::operation::contract::OperationRootTerminalEvidence::CompactPromptFailed,
                                 _ => evidence,
                             };
-                            crate::runtime::outcome::product_terminal_operation(
+                            crate::runtime::operation::contract::product_terminal_operation(
                                 kind, evidence, status,
                             )
                         })
@@ -786,7 +789,7 @@ impl EventService {
     pub(crate) fn emit_committed_terminal_draft(
         &self,
         draft: ProductEventDraft,
-        operation_kind: crate::runtime::control::OperationKind,
+        operation_kind: crate::runtime::operation::control::OperationKind,
     ) -> ProductEvent {
         self.publish_durable_terminal_draft(draft, Some(operation_kind))
     }
@@ -1474,7 +1477,7 @@ impl EventService {
         recovery_id: impl Into<String>,
         reason: impl Into<String>,
         session_id: impl Into<String>,
-        operation_kind: Option<crate::runtime::control::OperationKind>,
+        operation_kind: Option<crate::runtime::operation::control::OperationKind>,
         capability_generation: Option<u64>,
     ) -> ProductEvent {
         let operation_id = operation_id.into();
@@ -1504,7 +1507,7 @@ impl EventService {
         recovery_id: impl Into<String>,
         reason: impl Into<String>,
         session_id: impl Into<String>,
-        operation_kind: Option<crate::runtime::control::OperationKind>,
+        operation_kind: Option<crate::runtime::operation::control::OperationKind>,
         capability_generation: Option<u64>,
         attempt_count: u32,
         last_attempt_at: Option<String>,
@@ -1518,7 +1521,8 @@ impl EventService {
                 reason: reason.into(),
                 session_id: session_id.into(),
                 record_version: crate::events::recovery::RECOVERY_RECORD_VERSION,
-                descriptor_revision: crate::runtime::outcome::OPERATION_DESCRIPTOR_REVISION,
+                descriptor_revision:
+                    crate::runtime::operation::contract::OPERATION_DESCRIPTOR_REVISION,
                 capability_generation,
                 attempt_count,
                 last_attempt_at,
@@ -1566,7 +1570,7 @@ impl EventService {
     pub(crate) fn emit_committed_recovery_pending_draft(
         &self,
         draft: ProductEventDraft,
-        operation_kind: Option<crate::runtime::control::OperationKind>,
+        operation_kind: Option<crate::runtime::operation::control::OperationKind>,
         capability_generation: Option<u64>,
     ) -> ProductEvent {
         self.publish(

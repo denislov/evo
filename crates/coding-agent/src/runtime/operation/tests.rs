@@ -8,20 +8,20 @@
 //! CAG-310 through CAG-312.
 use std::path::PathBuf;
 
-use super::operation::{OperationClass, OperationDispatchMode};
-use super::outcome::{
+use super::contract::{
     BranchSummaryReusePolicy, CodingAgentOperation, OPERATION_DESCRIPTOR_REVISION,
     OperationCancellation, OperationCapacity, OperationChildPolicy, OperationLineage,
     OperationOutcomeFamily, OperationPriority, OperationRuntimeAccess, OperationSessionAccess,
     OperationTerminalPolicy,
 };
+use super::{OperationClass, OperationDispatchMode};
 use crate::app::bootstrap::PromptInvocation;
 use crate::operations::agent_invocation::runner::AgentInvocationOptions;
 use crate::operations::prompt::context::PromptTurnOptions;
 use crate::operations::self_healing_edit::runner::SelfHealingEditRequest;
 use crate::operations::team_invocation::runner::AgentTeamOptions;
 use crate::profiles::ProfileId;
-use crate::runtime::control::OperationKind;
+use crate::runtime::operation::control::OperationKind;
 
 fn prompt_options() -> PromptTurnOptions {
     PromptTurnOptions::new(PromptInvocation::Text("contract probe".into()))
@@ -424,19 +424,21 @@ fn every_operation_variant_is_covered() {
     assert_eq!(names.len(), unique, "contract table has duplicate rows");
 }
 
-/// The internal mirror enum must resolve the same contract as the public one.
-/// CAG-310 deletes the mirror; until then this catches drift between
-/// `CodingAgentOperation::contract` and `descriptor_for_internal_operation`,
-/// which are two independent 14-arm mappings over the same domain.
+/// Export is the only public operation whose submitted shape differs from the
+/// runner input. Keep both normalization branches explicit while the duplicate
+/// internal operation enum is gone.
 #[test]
-fn internal_mirror_resolves_the_same_contract_as_the_public_enum() {
-    for (name, operation, _) in contract_table() {
-        let public_descriptor = operation.descriptor();
-        let internal_descriptor = operation.into_internal().descriptor();
+fn export_variants_normalize_to_their_runner_modes() {
+    let view = CodingAgentOperation::ExportCurrent
+        .export_options()
+        .expect("view export normalizes");
+    assert!(!view.writes_html(), "view export must not write HTML");
 
-        assert_eq!(
-            public_descriptor, internal_descriptor,
-            "{name}: public and internal contract mappings disagree"
-        );
-    }
+    let html = CodingAgentOperation::ExportCurrentHtml(PathBuf::from("/tmp/export.html"))
+        .export_options()
+        .expect("HTML export normalizes");
+    assert!(
+        html.writes_html(),
+        "HTML export must retain its output mode"
+    );
 }

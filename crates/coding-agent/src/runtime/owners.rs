@@ -2,14 +2,12 @@ use std::sync::Arc;
 
 use super::capability::CapabilitySnapshotService;
 use super::client::service::ClientService;
-use super::control::OperationControl;
-use super::finalization::OperationFinalizer;
+use super::operation::control::OperationControl;
+use super::operation::submission::PendingSubmissionLease;
 use super::session_coordinator::SessionCoordinator;
 use super::snapshot::SnapshotCoordinator;
-use super::submission::PendingSubmissionLease;
 use crate::profiles::ProfileRegistry;
 use crate::services::authorization::AuthorizationService;
-use crate::services::capability::CapabilityService;
 use crate::services::event::EventService;
 use crate::services::runtime::RuntimeService;
 use std::path::PathBuf;
@@ -40,10 +38,9 @@ impl std::fmt::Debug for ProjectRoot {
 pub(super) struct RuntimeHost {
     pub(super) operation_supervisor: OperationSupervisor,
     pub(super) session_coordinator: SessionCoordinator,
-    pub(super) event_hub: EventHub,
+    pub(super) events: EventService,
     pub(super) client_projection: ClientProjectionCoordinator,
     pub(super) runtime_service: RuntimeService,
-    pub(super) capability_service: CapabilityService,
     pub(super) profile_registry: ProfileRegistry,
     pub(super) authorization_service: AuthorizationService,
     pub(super) project_root: ProjectRoot,
@@ -54,19 +51,12 @@ pub(super) struct RuntimeHost {
 pub(super) struct OperationSupervisor {
     pub(super) control: OperationControl,
     pub(super) capabilities: CapabilitySnapshotService,
-    pub(super) finalizer: OperationFinalizer,
-}
-
-/// Bounded product-event sequencing and fan-out owner.
-#[derive(Debug)]
-pub(super) struct EventHub {
-    pub(super) service: EventService,
 }
 
 /// Client registry, snapshot projection, controls, and reconnect overlay owner.
 #[derive(Debug)]
 pub(super) struct ClientProjectionCoordinator {
-    pub(super) coordinator: Arc<SnapshotCoordinator>,
+    pub(super) snapshots: Arc<SnapshotCoordinator>,
     pub(super) clients: ClientService,
     pub(super) pending_submission: Option<PendingSubmissionLease>,
 }

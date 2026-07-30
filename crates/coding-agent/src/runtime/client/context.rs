@@ -1,7 +1,7 @@
 use crate::events::CodingAgentProductEvent;
+use crate::runtime::client::connection::{CodingAgentContextSnapshot, CodingAgentOperationStatus};
 use crate::runtime::client::context_fold::{ProductContextPendingState, fold_product_context};
-use crate::runtime::client::projection::{CodingAgentContextSnapshot, CodingAgentOperationStatus};
-use crate::runtime::control::OperationKind;
+use crate::runtime::operation::control::OperationKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UiOperationStatus {

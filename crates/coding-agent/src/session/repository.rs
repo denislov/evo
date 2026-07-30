@@ -842,7 +842,8 @@ impl SessionLogStore {
                 || record.source_event_ids.is_empty()
                 || record.operation_kind.as_deref().is_some_and(|kind| {
                     kind.trim().is_empty()
-                        || crate::runtime::control::OperationKind::from_str(kind).is_none()
+                        || crate::runtime::operation::control::OperationKind::from_str(kind)
+                            .is_none()
                 })
                 || record
                     .source_event_ids

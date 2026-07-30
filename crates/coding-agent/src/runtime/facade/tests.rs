@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod cases {
     use crate::events as public_event;
-    use crate::runtime::control as operation_control;
+    use crate::runtime::operation::control as operation_control;
     use std::{
         fs,
         sync::{Arc, Mutex},
@@ -23,13 +23,13 @@ mod cases {
     use crate::app::prompt_runtime::PromptRuntimeOptions;
     use crate::operations::delegation::delegation_runtime_seed_from_prompt_options;
     use crate::operations::prompt::context::{DelegationRequest, InternalPromptTurnOutcome};
-    use crate::runtime::control::PromptControlCommand;
-    use crate::runtime::finalization::OperationFinalizer;
+    use crate::runtime::operation::control::PromptControlCommand;
+    use crate::runtime::operation::finalize::FinalizationDecision;
     use crate::runtime::operation::{
         Operation, OperationExecution, OperationOrigin, OperationOutcome,
     };
-    use crate::runtime::outcome as public_operation;
-    use crate::runtime::submission::SubmissionCommitGuard;
+    use crate::runtime::operation::contract as public_operation;
+    use crate::runtime::operation::submission::SubmissionCommitGuard;
     use crate::session::event::{PersistedContentBlock, SessionEventData, SessionEventEnvelope};
     use crate::session::id::{Clock, SystemClock};
     use crate::session::replay::{MessageStatus, TranscriptItem};
@@ -98,7 +98,7 @@ mod cases {
                 .runtime_host
                 .session_coordinator
                 .pending_delegation_confirmations,
-            &session.runtime_host.event_hub.service,
+            &session.runtime_host.events,
             pending,
             true,
         )
@@ -295,8 +295,7 @@ mod cases {
             snapshot.cursor.last_event_sequence,
             session
                 .runtime_host
-                .event_hub
-                .service
+                .events
                 .current_product_sequence()
         );
         assert_eq!(
@@ -508,8 +507,7 @@ mod cases {
         assert!(reopened.recovery_pending_internal().unwrap().is_empty());
         let restarted_events = reopened
             .runtime_host
-            .event_hub
-            .service
+            .events
             .product_events_after(crate::events::ProductEventSequence::default())
             .unwrap();
         let redelivered_terminal = restarted_events
@@ -633,8 +631,7 @@ mod cases {
         assert_eq!(
             session
                 .runtime_host
-                .event_hub
-                .service
+                .events
                 .product_events_after(crate::events::ProductEventSequence::default())
                 .unwrap()
                 .iter()
@@ -718,8 +715,7 @@ mod cases {
         assert!(
             reopened
                 .runtime_host
-                .event_hub
-                .service
+                .events
                 .product_events_after(crate::events::ProductEventSequence::default())
                 .unwrap()
                 .iter()
@@ -752,8 +748,7 @@ mod cases {
         let mut receiver = session.subscribe_product_events_public();
         session
             .runtime_host
-            .event_hub
-            .service
+            .events
             .emit_diagnostic(None::<String>, "public event");
 
         let event = receiver.recv().await.unwrap();
@@ -777,8 +772,7 @@ mod cases {
 
         session
             .runtime_host
-            .event_hub
-            .service
+            .events
             .emit_diagnostic(None::<String>, "public event");
         let event = receiver
             .try_recv()
@@ -1260,11 +1254,11 @@ mod cases {
         let handle = session.prompt_control_handle().unwrap();
 
         let connection = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "submitted-abort-client",
             ))
             .unwrap();
-        let draft_id = public_projection::CodingAgentDraftId("submitted-abort-draft".into());
+        let draft_id = public_connection::CodingAgentDraftId("submitted-abort-draft".into());
         connection
             .set_prompt_draft(draft_id.clone(), "hello")
             .unwrap();
@@ -1313,7 +1307,7 @@ mod cases {
             .expect("aborted submitted terminal state");
         assert!(matches!(
             submitted.status,
-            public_projection::CodingAgentSubmittedOperationStatus::Terminal {
+            public_connection::CodingAgentSubmittedOperationStatus::Terminal {
                 status: public_event::CodingAgentProductEventTerminalStatus::Aborted,
                 ..
             }
@@ -1324,7 +1318,7 @@ mod cases {
     fn submitted_cancelled_error_finishes_aborted_exactly_once() {
         let result = Err(CodingSessionError::Cancelled);
         assert_eq!(
-            OperationFinalizer::terminal_status(&result),
+            FinalizationDecision::terminal_status(&result),
             public_event::ProductEventTerminalStatus::Aborted
         );
     }
@@ -1342,7 +1336,7 @@ mod cases {
             Some("session-finalization".into()),
             crate::runtime::capability::OperationCapabilitySnapshot::permissive("op-finalization"),
         );
-        let decision = OperationFinalizer.freeze(&execution, &Err(CodingSessionError::Cancelled));
+        let decision = FinalizationDecision.freeze(&execution, &Err(CodingSessionError::Cancelled));
 
         assert_eq!(decision.operation_id, "op-finalization");
         assert_eq!(decision.root_operation_id, "op-finalization");
@@ -1365,7 +1359,7 @@ mod cases {
         );
         assert_eq!(
             decision.payload,
-            crate::runtime::finalization::FinalizationPayload::Aborted {
+            crate::runtime::operation::finalize::FinalizationPayload::Aborted {
                 reason: "cancelled".into()
             }
         );
@@ -1385,7 +1379,7 @@ mod cases {
         ));
 
         assert_eq!(
-            OperationFinalizer::terminal_status(&result),
+            FinalizationDecision::terminal_status(&result),
             public_event::ProductEventTerminalStatus::Failed
         );
     }
@@ -1404,7 +1398,7 @@ mod cases {
             },
         ));
         assert_eq!(
-            OperationFinalizer::terminal_status(&result),
+            FinalizationDecision::terminal_status(&result),
             public_event::ProductEventTerminalStatus::Completed
         );
     }
@@ -1415,7 +1409,7 @@ mod cases {
             message: "invalid compact options".into(),
         });
         assert_eq!(
-            OperationFinalizer::terminal_status(&result),
+            FinalizationDecision::terminal_status(&result),
             public_event::ProductEventTerminalStatus::Failed
         );
     }
@@ -1426,7 +1420,7 @@ mod cases {
             capability: "persistent session required".into(),
         });
         assert_eq!(
-            OperationFinalizer::terminal_status(&result),
+            FinalizationDecision::terminal_status(&result),
             public_event::ProductEventTerminalStatus::Failed
         );
     }
@@ -1437,7 +1431,7 @@ mod cases {
             message: "sync mutable persistence failure".into(),
         });
         assert_eq!(
-            OperationFinalizer::terminal_status(&result),
+            FinalizationDecision::terminal_status(&result),
             public_event::ProductEventTerminalStatus::Failed
         );
     }
@@ -1464,13 +1458,11 @@ mod cases {
 
         session
             .runtime_host
-            .event_hub
-            .service
+            .events
             .emit_diagnostic(None::<String>, "one");
         session
             .runtime_host
-            .event_hub
-            .service
+            .events
             .emit_diagnostic(None::<String>, "two");
 
         let Some(CodingAgentReconnectDelivery::FreshSnapshotRequired(recovery)) =
@@ -1511,8 +1503,7 @@ mod cases {
         let (sender, mut receiver) = operation_control::prompt_control_channel();
         session
             .runtime_host
-            .client_projection
-            .coordinator
+            .client_projection.snapshots
             .bind_prompt_control(
                 connection.handle(),
                 "op-receipts".into(),
@@ -1663,12 +1654,12 @@ mod cases {
         .await
         .unwrap();
         let connection = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "prepared-prompt-exact-client",
             ))
             .unwrap();
 
-        let exact_id = public_projection::CodingAgentDraftId("exact-draft".into());
+        let exact_id = public_connection::CodingAgentDraftId("exact-draft".into());
         connection
             .set_prompt_draft(exact_id.clone(), "exact prompt")
             .unwrap();
@@ -1688,11 +1679,11 @@ mod cases {
         drop(exact_lease);
 
         let replacement_connection = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "prepared-prompt-replacement-client",
             ))
             .unwrap();
-        let original_id = public_projection::CodingAgentDraftId("original-draft".into());
+        let original_id = public_connection::CodingAgentDraftId("original-draft".into());
         replacement_connection
             .set_prompt_draft(original_id.clone(), "original prompt")
             .unwrap();
@@ -1703,7 +1694,7 @@ mod cases {
             .unwrap();
         replacement_connection
             .set_prompt_draft(
-                public_projection::CodingAgentDraftId("replacement-draft".into()),
+                public_connection::CodingAgentDraftId("replacement-draft".into()),
                 "replacement prompt",
             )
             .unwrap();
@@ -1734,11 +1725,11 @@ mod cases {
                 .await
                 .unwrap();
         let connection = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "prepared-prompt-replacement-regression",
             ))
             .unwrap();
-        let original_id = public_projection::CodingAgentDraftId("draft-a".into());
+        let original_id = public_connection::CodingAgentDraftId("draft-a".into());
         connection
             .set_prompt_draft(original_id.clone(), "prompt A")
             .unwrap();
@@ -1747,7 +1738,7 @@ mod cases {
         let lease_a = connection
             .prepare_submission(&mut session, original_id, &operation_a)
             .unwrap();
-        let replacement_id = public_projection::CodingAgentDraftId("draft-b".into());
+        let replacement_id = public_connection::CodingAgentDraftId("draft-b".into());
         connection
             .set_prompt_draft(replacement_id.clone(), "prompt B")
             .unwrap();
@@ -1784,11 +1775,11 @@ mod cases {
                 .await
                 .unwrap();
         let connection = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "prepared-prompt-identity-regression",
             ))
             .unwrap();
-        let original_id = public_projection::CodingAgentDraftId("identity-a".into());
+        let original_id = public_connection::CodingAgentDraftId("identity-a".into());
         connection
             .set_prompt_draft(original_id.clone(), "same prompt")
             .unwrap();
@@ -1797,7 +1788,7 @@ mod cases {
         let lease = connection
             .prepare_submission(&mut session, original_id, &operation)
             .unwrap();
-        let replacement_id = public_projection::CodingAgentDraftId("identity-b".into());
+        let replacement_id = public_connection::CodingAgentDraftId("identity-b".into());
         connection
             .set_prompt_draft(replacement_id.clone(), "same prompt")
             .unwrap();
@@ -2071,18 +2062,18 @@ mod cases {
     }
 
     fn assert_public_drop_terminal(
-        submitted: &public_projection::CodingAgentSubmittedOperation,
+        submitted: &public_connection::CodingAgentSubmittedOperation,
         operation_id: &str,
     ) {
         assert_eq!(submitted.operation_id, operation_id);
         assert_eq!(submitted.kind, OperationKind::Prompt.as_str());
         assert_eq!(
             submitted.status,
-            public_projection::CodingAgentSubmittedOperationStatus::Terminal {
+            public_connection::CodingAgentSubmittedOperationStatus::Terminal {
                 status: public_event::CodingAgentProductEventTerminalStatus::Aborted,
-                anchor: public_projection::CodingAgentSubmittedTerminalAnchor::TerminalUncertain {
+                anchor: public_connection::CodingAgentSubmittedTerminalAnchor::TerminalUncertain {
                     operation_id: operation_id.into(),
-                    recovery: public_projection::CodingAgentTerminalUncertainty::RecoveryRequired,
+                    recovery: public_connection::CodingAgentTerminalUncertainty::RecoveryRequired,
                 },
             }
         );
@@ -2105,9 +2096,9 @@ mod cases {
         )
         .await
         .unwrap();
-        let client_id = public_projection::CodingAgentClientId::new("public-prompt-drop-client");
+        let client_id = public_connection::CodingAgentClientId::new("public-prompt-drop-client");
         let connection = session.connect(client_id.clone()).unwrap();
-        let draft_id = public_projection::CodingAgentDraftId("public-prompt-drop-draft".into());
+        let draft_id = public_connection::CodingAgentDraftId("public-prompt-drop-draft".into());
         connection
             .set_prompt_draft(draft_id.clone(), "pending")
             .unwrap();
@@ -2115,7 +2106,7 @@ mod cases {
         let lease = connection
             .prepare_submission(&mut session, draft_id, &operation)
             .unwrap();
-        let coordinator = session.runtime_host.client_projection.coordinator.clone();
+        let coordinator = session.runtime_host.client_projection.snapshots.clone();
         let mut run = Box::pin(session.run(operation));
 
         tokio::select! {
@@ -2129,7 +2120,7 @@ mod cases {
             .expect("provider gate must observe Running");
         assert!(matches!(
             running.status,
-            public_projection::CodingAgentSubmittedOperationStatus::Running
+            public_connection::CodingAgentSubmittedOperationStatus::Running
         ));
         let operation_id = running.operation_id;
         drop(run);
@@ -2194,17 +2185,17 @@ mod cases {
         .await
         .unwrap();
         let connection_a = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "public-prompt-a-client",
             ))
             .unwrap();
         let connection_b = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "public-prompt-b-client",
             ))
             .unwrap();
 
-        let draft_a = public_projection::CodingAgentDraftId("public-prompt-a-draft".into());
+        let draft_a = public_connection::CodingAgentDraftId("public-prompt-a-draft".into());
         connection_a
             .set_prompt_draft(draft_a.clone(), "prompt A")
             .unwrap();
@@ -2231,7 +2222,7 @@ mod cases {
             .expect("Prompt A drop must retain terminal submitted state");
         assert_public_drop_terminal(&terminal_a, &operation_a_id);
 
-        let draft_b = public_projection::CodingAgentDraftId("public-prompt-b-draft".into());
+        let draft_b = public_connection::CodingAgentDraftId("public-prompt-b-draft".into());
         connection_b
             .set_prompt_draft(draft_b.clone(), "prompt B")
             .unwrap();
@@ -2254,24 +2245,24 @@ mod cases {
         let control_a_for_b = connection_a.prompt_control(operation_b_id.clone());
         let rejection = control_a_for_b
             .follow_up(
-                public_projection::CodingAgentControlId("prompt-a-cross-client".into()),
+                public_connection::CodingAgentControlId("prompt-a-cross-client".into()),
                 "must not cross client ownership",
             )
             .expect_err("Prompt A identity must not control Prompt B");
         assert_eq!(
             rejection.reason,
-            public_projection::CodingAgentControlRejectionReason::NotOwner
+            public_connection::CodingAgentControlRejectionReason::NotOwner
         );
 
         let control_b = connection_b.prompt_control(operation_b_id.clone());
         match control_b.follow_up(
-            public_projection::CodingAgentControlId("prompt-b-follow-up".into()),
+            public_connection::CodingAgentControlId("prompt-b-follow-up".into()),
             "continue Prompt B",
         ) {
             Ok(receipt) => assert_eq!(receipt.operation_id, operation_b_id),
             Err(rejection)
                 if rejection.reason
-                    == public_projection::CodingAgentControlRejectionReason::ControlChannelClosed =>
+                    == public_connection::CodingAgentControlRejectionReason::ControlChannelClosed =>
             {
                 panic!(
                     "PROMPT_B_CONTROL_REUSED_STALE_PROMPT_A_CHANNEL: client B control hit stale Prompt A closed channel"
@@ -2324,11 +2315,11 @@ mod cases {
         .await
         .unwrap();
         let connection = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "public-prompt-completed-client",
             ))
             .unwrap();
-        let draft_id = public_projection::CodingAgentDraftId("completed-draft".into());
+        let draft_id = public_connection::CodingAgentDraftId("completed-draft".into());
         connection
             .set_prompt_draft(draft_id.clone(), "complete")
             .unwrap();
@@ -2352,16 +2343,15 @@ mod cases {
         assert_eq!(submitted.operation_id, operation_id);
         assert!(matches!(
             submitted.status,
-            public_projection::CodingAgentSubmittedOperationStatus::Terminal {
+            public_connection::CodingAgentSubmittedOperationStatus::Terminal {
                 status: public_event::CodingAgentProductEventTerminalStatus::Completed,
-                anchor: public_projection::CodingAgentSubmittedTerminalAnchor::ProductEvent { .. },
+                anchor: public_connection::CodingAgentSubmittedTerminalAnchor::ProductEvent { .. },
             }
         ));
         assert!(matches!(
             session
                 .runtime_host
-                .client_projection
-                .coordinator
+                .client_projection.snapshots
                 .state
                 .lock()
                 .unwrap()
@@ -2390,9 +2380,9 @@ mod cases {
         )
         .await
         .unwrap();
-        let client_id = public_projection::CodingAgentClientId::new("public-prompt-detach-client");
+        let client_id = public_connection::CodingAgentClientId::new("public-prompt-detach-client");
         let connection = session.connect(client_id.clone()).unwrap();
-        let draft_id = public_projection::CodingAgentDraftId("detach-drop-draft".into());
+        let draft_id = public_connection::CodingAgentDraftId("detach-drop-draft".into());
         connection
             .set_prompt_draft(draft_id.clone(), "pending")
             .unwrap();
@@ -2400,7 +2390,7 @@ mod cases {
         let lease = connection
             .prepare_submission(&mut session, draft_id, &operation)
             .unwrap();
-        let coordinator = session.runtime_host.client_projection.coordinator.clone();
+        let coordinator = session.runtime_host.client_projection.snapshots.clone();
         let mut run = Box::pin(session.run(operation));
 
         tokio::select! {
@@ -2415,7 +2405,7 @@ mod cases {
             .operation_id;
         assert_eq!(
             connection.detach().unwrap(),
-            public_projection::CodingAgentDetachOutcome::Detached
+            public_connection::CodingAgentDetachOutcome::Detached
         );
         assert!(matches!(
             coordinator
@@ -2851,7 +2841,7 @@ mod cases {
         .await
         .unwrap();
         let connection = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "runtime-owned-client",
             ))
             .unwrap();
@@ -2864,7 +2854,7 @@ mod cases {
         let lease = connection
             .prepare_submission(
                 &mut session,
-                public_projection::CodingAgentDraftId("unused-for-non-prompt".into()),
+                public_connection::CodingAgentDraftId("unused-for-non-prompt".into()),
                 &operation,
             )
             .unwrap();
@@ -2879,7 +2869,7 @@ mod cases {
         assert_eq!(running.operation_id, operation_id);
         assert!(matches!(
             running.status,
-            public_projection::CodingAgentSubmittedOperationStatus::Running
+            public_connection::CodingAgentSubmittedOperationStatus::Running
         ));
 
         let outcome = task.join().await.unwrap();
@@ -2913,7 +2903,7 @@ mod cases {
         assert_eq!(terminal.operation_id, operation_id);
         assert!(matches!(
             terminal.status,
-            public_projection::CodingAgentSubmittedOperationStatus::Terminal {
+            public_connection::CodingAgentSubmittedOperationStatus::Terminal {
                 status: public_event::CodingAgentProductEventTerminalStatus::Completed,
                 ..
             }
@@ -2939,7 +2929,7 @@ mod cases {
         .await
         .unwrap();
         let connection = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "runtime-owned-cancellation-client",
             ))
             .unwrap();
@@ -2951,7 +2941,7 @@ mod cases {
         let lease = connection
             .prepare_submission(
                 &mut session,
-                public_projection::CodingAgentDraftId("unused-for-cancel".into()),
+                public_connection::CodingAgentDraftId("unused-for-cancel".into()),
                 &operation,
             )
             .unwrap();
@@ -2962,7 +2952,7 @@ mod cases {
         connection
             .operation_control(operation_id.clone())
             .abort(
-                public_projection::CodingAgentControlId("abort-runtime-owned".into()),
+                public_connection::CodingAgentControlId("abort-runtime-owned".into()),
                 "stop detached invocation",
             )
             .unwrap();
@@ -2980,7 +2970,7 @@ mod cases {
         assert_eq!(terminal.operation_id, operation_id);
         assert!(matches!(
             terminal.status,
-            public_projection::CodingAgentSubmittedOperationStatus::Terminal {
+            public_connection::CodingAgentSubmittedOperationStatus::Terminal {
                 status: public_event::CodingAgentProductEventTerminalStatus::Aborted,
                 ..
             }
@@ -3097,9 +3087,8 @@ mod cases {
         .await
         .unwrap();
 
-        let async_descriptor = CodingAgentOperation::Prompt(prompt_options(api, "async prompt"))
-            .into_internal()
-            .descriptor();
+        let async_descriptor =
+            CodingAgentOperation::Prompt(prompt_options(api, "async prompt")).descriptor();
         assert_eq!(
             async_descriptor.dispatch_mode,
             crate::runtime::operation::OperationDispatchMode::Async
@@ -3116,9 +3105,7 @@ mod cases {
             CodingAgentOperationOutcome::Prompt(PromptTurnOutcome::Success { .. })
         ));
 
-        let read_only_descriptor = CodingAgentOperation::ExportCurrent
-            .into_internal()
-            .descriptor();
+        let read_only_descriptor = CodingAgentOperation::ExportCurrent.descriptor();
         assert_eq!(
             read_only_descriptor.dispatch_mode,
             crate::runtime::operation::OperationDispatchMode::SyncReadOnly
@@ -3132,7 +3119,6 @@ mod cases {
         let sync_mut_descriptor = CodingAgentOperation::SetDefaultAgentProfile {
             profile_id: ProfileId::from("reviewer"),
         }
-        .into_internal()
         .descriptor();
         assert_eq!(
             sync_mut_descriptor.dispatch_mode,
@@ -3910,11 +3896,11 @@ mod cases {
         .await
         .unwrap();
         let connection = reopened
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "self-healing-replay",
             ))
             .unwrap();
-        let public_projection::CodingAgentReconnect::Replayed { events, .. } =
+        let public_connection::CodingAgentReconnect::Replayed { events, .. } =
             connection.reconnect(0).unwrap()
         else {
             panic!("self-healing terminals must be retained for restart redelivery")
@@ -4357,11 +4343,11 @@ mod cases {
         .await
         .unwrap();
         let connection = reopened
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "terminal-replay",
             ))
             .unwrap();
-        let public_projection::CodingAgentReconnect::Replayed { events, .. } =
+        let public_connection::CodingAgentReconnect::Replayed { events, .. } =
             connection.reconnect(0).unwrap()
         else {
             panic!("terminal outbox must be retained for restart redelivery")
@@ -5905,11 +5891,11 @@ mod cases {
         .await
         .unwrap();
         let connection = reopened
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "compact-replay",
             ))
             .unwrap();
-        let public_projection::CodingAgentReconnect::Replayed { events, .. } =
+        let public_connection::CodingAgentReconnect::Replayed { events, .. } =
             connection.reconnect(0).unwrap()
         else {
             panic!("compact terminal outbox must be retained for restart redelivery")
@@ -5955,12 +5941,12 @@ mod cases {
                 .unwrap(),
         );
         let prompt_connection = prompt_session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "store-failure-prompt-client",
             ))
             .unwrap();
         let prompt_draft =
-            public_projection::CodingAgentDraftId("store-failure-prompt-draft".into());
+            public_connection::CodingAgentDraftId("store-failure-prompt-draft".into());
         prompt_connection
             .set_prompt_draft(prompt_draft.clone(), "fail after durable append")
             .unwrap();
@@ -5997,14 +5983,14 @@ mod cases {
             .expect("failed Prompt uncertain submitted state");
         assert_eq!(prompt_submitted.operation_id, prompt_operation_id);
         let prompt_recovery_id = match prompt_submitted.status {
-            public_projection::CodingAgentSubmittedOperationStatus::RecoveryPending {
+            public_connection::CodingAgentSubmittedOperationStatus::RecoveryPending {
                 recovery_id,
             } => recovery_id,
             other => panic!("unexpected failed Prompt recovery state: {other:?}"),
         };
         assert!(prompt_recovery_id.contains(&prompt_operation_id));
         assert!(prompt_recovery_id.ends_with("/session_write_committed"));
-        let public_projection::CodingAgentReconnect::Replayed {
+        let public_connection::CodingAgentReconnect::Replayed {
             events: prompt_events,
             ..
         } = prompt_connection.reconnect(0).unwrap()
@@ -6066,7 +6052,7 @@ mod cases {
                 .unwrap(),
         );
         let compact_connection = compact_session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "store-failure-compact-client",
             ))
             .unwrap();
@@ -6074,7 +6060,7 @@ mod cases {
         let compact_lease = compact_connection
             .prepare_submission(
                 &mut compact_session,
-                public_projection::CodingAgentDraftId("unused".into()),
+                public_connection::CodingAgentDraftId("unused".into()),
                 &compact_operation,
             )
             .unwrap();
@@ -6098,12 +6084,12 @@ mod cases {
         assert_eq!(compact_submitted.operation_id, compact_operation_id);
         assert!(matches!(
             compact_submitted.status,
-            public_projection::CodingAgentSubmittedOperationStatus::RecoveryPending {
+            public_connection::CodingAgentSubmittedOperationStatus::RecoveryPending {
                 recovery_id: ref pending_id,
             } if pending_id.contains(&compact_operation_id)
                 && pending_id.ends_with("/session_write_committed")
         ));
-        let public_projection::CodingAgentReconnect::Replayed {
+        let public_connection::CodingAgentReconnect::Replayed {
             events: compact_events,
             ..
         } = compact_connection.reconnect(0).unwrap()
@@ -6165,7 +6151,7 @@ mod cases {
             )),
         );
         let connection = session
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "compact-cancellation-client",
             ))
             .unwrap();
@@ -6173,7 +6159,7 @@ mod cases {
         let lease = connection
             .prepare_submission(
                 &mut session,
-                public_projection::CodingAgentDraftId("unused".into()),
+                public_connection::CodingAgentDraftId("unused".into()),
                 &operation,
             )
             .unwrap();
@@ -6190,23 +6176,23 @@ mod cases {
             .expect("running Compact submission");
         assert!(matches!(
             submitted.status,
-            public_projection::CodingAgentSubmittedOperationStatus::Running
+            public_connection::CodingAgentSubmittedOperationStatus::Running
         ));
         let stale = connection
             .operation_control("stale-operation")
             .abort(
-                public_projection::CodingAgentControlId("abort-stale".into()),
+                public_connection::CodingAgentControlId("abort-stale".into()),
                 "stop stale compact",
             )
             .unwrap_err();
         assert_eq!(
             stale.reason,
-            public_projection::CodingAgentControlRejectionReason::TargetMismatch
+            public_connection::CodingAgentControlRejectionReason::TargetMismatch
         );
         connection
             .operation_control(submitted.operation_id.clone())
             .abort(
-                public_projection::CodingAgentControlId("abort-compact".into()),
+                public_connection::CodingAgentControlId("abort-compact".into()),
                 "stop compact",
             )
             .unwrap();
@@ -6231,21 +6217,21 @@ mod cases {
         assert_eq!(terminal.operation_id, submitted.operation_id);
         assert!(matches!(
             terminal.status,
-            public_projection::CodingAgentSubmittedOperationStatus::Terminal {
+            public_connection::CodingAgentSubmittedOperationStatus::Terminal {
                 status: public_event::CodingAgentProductEventTerminalStatus::Failed,
-                anchor: public_projection::CodingAgentSubmittedTerminalAnchor::ProductEvent { .. },
+                anchor: public_connection::CodingAgentSubmittedTerminalAnchor::ProductEvent { .. },
             }
         ));
         let completed = connection
             .operation_control(submitted.operation_id)
             .abort(
-                public_projection::CodingAgentControlId("abort-completed".into()),
+                public_connection::CodingAgentControlId("abort-completed".into()),
                 "too late",
             )
             .unwrap_err();
         assert_eq!(
             completed.reason,
-            public_projection::CodingAgentControlRejectionReason::TargetNotRunning
+            public_connection::CodingAgentControlRejectionReason::TargetNotRunning
         );
     }
 
@@ -6354,11 +6340,11 @@ mod cases {
         .await
         .unwrap();
         let connection = reopened
-            .connect(public_projection::CodingAgentClientId::new(
+            .connect(public_connection::CodingAgentClientId::new(
                 "compact-failure-replay",
             ))
             .unwrap();
-        let public_projection::CodingAgentReconnect::Replayed { events, .. } =
+        let public_connection::CodingAgentReconnect::Replayed { events, .. } =
             connection.reconnect(0).unwrap()
         else {
             panic!("compact failure terminal must be retained for restart redelivery")

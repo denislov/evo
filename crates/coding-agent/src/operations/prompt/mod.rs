@@ -7,11 +7,10 @@ use crate::operations::delegation::{
 };
 use crate::profiles::{ProfileId, ProfileKind, ProfileRegistry};
 use crate::runtime::capability::{OperationCapabilitySnapshot, SessionWriteCapability};
-use crate::runtime::control::OperationControl;
 use crate::runtime::facade::CodingSessionError;
+use crate::runtime::operation::control::OperationControl;
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
-use crate::services::session::apply_finalized_session_write;
 use crate::session::event::PersistedDelegationStatus;
 use crate::session::id::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
 use crate::session::service::{FinalizedSessionWrite, SessionPersistence, SessionService};
@@ -174,7 +173,10 @@ impl PromptOperation<'_> {
                 }
             }
         };
-        apply_finalized_session_write(&mut outcome, &finalized);
+        outcome.apply_success_session_write_metadata(
+            finalized.session_id.clone(),
+            finalized.leaf_id.clone(),
+        );
 
         if !context.live_events_enabled() {
             self.event_service

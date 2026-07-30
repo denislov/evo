@@ -28,7 +28,7 @@ impl CodingAgentSession {
     ) -> Result<CodingAgentRecoveryResolutionResult, CodingSessionError> {
         self.runtime_host
             .client_projection
-            .coordinator
+            .snapshots
             .ensure_runtime_running()?;
         let SessionPersistence::Persistent(service) =
             &self.runtime_host.session_coordinator.persistence
@@ -45,8 +45,7 @@ impl CodingAgentSession {
                         .into(),
                 })?;
         self.runtime_host
-            .event_hub
-            .service
+            .events
             .emit_committed_terminal_draft(commit.draft, operation_kind);
         Ok(CodingAgentRecoveryResolutionResult {
             operation_id: commit.operation_id,
@@ -71,7 +70,7 @@ impl CodingAgentSession {
     ) -> Result<CodingAgentRecoveryRetryResult, CodingSessionError> {
         self.runtime_host
             .client_projection
-            .coordinator
+            .snapshots
             .ensure_runtime_running()?;
         let SessionPersistence::Persistent(service) =
             &self.runtime_host.session_coordinator.persistence
@@ -84,8 +83,7 @@ impl CodingAgentSession {
         let operation_kind =
             super::connection::persisted_runtime_operation_kind(commit.operation_kind);
         self.runtime_host
-            .event_hub
-            .service
+            .events
             .emit_committed_recovery_pending_draft(
                 commit.draft,
                 operation_kind,

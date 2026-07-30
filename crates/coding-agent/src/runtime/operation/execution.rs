@@ -1,12 +1,17 @@
 use tokio::task::JoinHandle;
 
-use super::client::projection::CodingAgentClientConnection;
+use super::OperationOutcome;
+use super::admission::OperationScheduler;
+use super::contract::{CodingAgentOperation, CodingAgentOperationOutcome};
 use super::control::OperationCancellationHandle;
-use super::facade::{CodingAgentSession, CodingSessionError};
-use super::operation::{Operation, OperationClass, OperationDispatchMode, OperationOutcome};
-use super::outcome::{CodingAgentOperation, CodingAgentOperationOutcome};
-use super::public_error::CodingAgentPublicError;
-use super::scheduler::OperationScheduler;
+use crate::runtime::client::connection::CodingAgentClientConnection;
+use crate::runtime::facade::{CodingAgentSession, CodingSessionError};
+use crate::runtime::public_error::CodingAgentPublicError;
+
+enum RuntimeOwnedOperation {
+    Agent(crate::operations::agent_invocation::runner::AgentInvocationOptions),
+    Team(crate::operations::team_invocation::runner::AgentTeamOptions),
+}
 
 #[derive(Debug)]
 #[must_use = "dropping the handle detaches the runtime-owned operation task"]
@@ -54,11 +59,11 @@ impl CodingAgentSession {
 
     pub(crate) fn submit_internal(
         &mut self,
-        operation: CodingAgentOperation,
+        mut operation: CodingAgentOperation,
     ) -> Result<CodingAgentOperationTask, CodingSessionError> {
         self.runtime_host
             .client_projection
-            .coordinator
+            .snapshots
             .ensure_runtime_running()?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
             CodingSessionError::UnsupportedCapability {
@@ -66,26 +71,21 @@ impl CodingAgentSession {
             }
         })?;
         let fingerprint = operation.submission_fingerprint();
-        let mut operation = operation.into_internal();
         let descriptor = operation.descriptor();
-        if descriptor.admission_class() != OperationClass::NonSessionRoot
-            || descriptor.dispatch_mode != OperationDispatchMode::Async
-            || !matches!(
-                operation,
-                Operation::AgentInvocation(_) | Operation::AgentTeam(_)
-            )
-        {
-            return Err(CodingSessionError::UnsupportedCapability {
-                capability: "runtime-owned execution accepts supported async non-session roots"
-                    .into(),
-            });
-        }
-        if let Some(options) = operation.prompt_options_mut()
-            && let Some(runtime) = options.runtime_mut()
-        {
+        let prompt_options = match &mut operation {
+            CodingAgentOperation::InvokeAgent(options) => options.prompt_options_mut(),
+            CodingAgentOperation::InvokeTeam(options) => options.prompt_options_mut(),
+            _ => {
+                return Err(CodingSessionError::UnsupportedCapability {
+                    capability: "runtime-owned execution accepts supported async non-session roots"
+                        .into(),
+                });
+            }
+        };
+        if let Some(provider_runtime) = prompt_options.runtime_mut() {
             self.runtime_host
                 .runtime_service
-                .install_provider_runtime(runtime);
+                .install_provider_runtime(provider_runtime);
         }
 
         let mut submission = self.consume_submission_lease(descriptor, fingerprint.as_ref());
@@ -98,12 +98,17 @@ impl CodingAgentSession {
         let operation_permit = OperationScheduler::admit(
             &self.runtime_host.operation_supervisor.control,
             &admission,
-            OperationDispatchMode::Async,
+            descriptor.dispatch_mode,
         )
         .map_err(|rejection| rejection.into_error())?;
         if let Some(guard) = submission.as_mut() {
             guard.commit_execution(operation_permit.execution())?;
         }
+        let operation = match operation {
+            CodingAgentOperation::InvokeAgent(options) => RuntimeOwnedOperation::Agent(options),
+            CodingAgentOperation::InvokeTeam(options) => RuntimeOwnedOperation::Team(options),
+            _ => unreachable!("runtime-owned operation was narrowed before admission"),
+        };
 
         let execution = operation_permit.execution().clone();
         let snapshot = execution.capability_snapshot.clone();
@@ -117,14 +122,14 @@ impl CodingAgentSession {
         {
             self.runtime_host
                 .client_projection
-                .coordinator
+                .snapshots
                 .bind_operation_cancellation(
                     submission.handle.clone(),
                     operation_id.clone(),
                     cancellation,
                 );
         }
-        let prompt_control_receiver = if matches!(operation, Operation::AgentInvocation(_)) {
+        let prompt_control_receiver = if matches!(operation, RuntimeOwnedOperation::Agent(_)) {
             let receiver = self
                 .runtime_host
                 .operation_supervisor
@@ -139,13 +144,12 @@ impl CodingAgentSession {
             None
         };
         let profile_registry = self.runtime_host.profile_registry.clone();
-        let event_service = self.runtime_host.event_hub.service.clone();
+        let event_service = self.runtime_host.events.clone();
         let operation_control = self.runtime_host.operation_supervisor.control.clone();
-        let operation_finalizer = self.runtime_host.operation_supervisor.finalizer;
 
         let task = runtime.spawn(async move {
             let result = match operation {
-                Operation::AgentInvocation(options) => {
+                RuntimeOwnedOperation::Agent(options) => {
                     let result = crate::operations::agent_invocation::run(
                         options,
                         snapshot.operation_id.clone(),
@@ -159,7 +163,7 @@ impl CodingAgentSession {
                     .await;
                     result.map(OperationOutcome::AgentInvocation)
                 }
-                Operation::AgentTeam(options) => crate::operations::team_invocation::run(
+                RuntimeOwnedOperation::Team(options) => crate::operations::team_invocation::run(
                     options,
                     snapshot.operation_id.clone(),
                     &profile_registry,
@@ -170,10 +174,9 @@ impl CodingAgentSession {
                 )
                 .await
                 .map(OperationOutcome::AgentTeam),
-                _ => unreachable!("runtime-owned operation class checked before spawn"),
             };
-            let decision = operation_finalizer.freeze(&execution, &result);
-            let commit_result = operation_finalizer.resolve_non_session(&decision)?;
+            let decision = super::finalize::FinalizationDecision::freeze(&execution, &result);
+            let commit_result = decision.resolve_non_session()?;
             if let Some(draft) = event_service.take_deferred_terminal_draft(&decision.operation_id)
             {
                 event_service.emit_committed_terminal_draft(draft, execution.kind);

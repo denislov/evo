@@ -189,23 +189,19 @@ impl CodingAgentSession {
                     capabilities: CapabilitySnapshotService::with_snapshot_coordinator(
                         snapshot_coordinator.clone(),
                     ),
-                    finalizer: Default::default(),
                 },
                 session_coordinator: crate::runtime::session_coordinator::SessionCoordinator {
                     persistence: SessionPersistence::Persistent(session_service),
                     pending_delegation_confirmations: replay_state.pending_delegation_confirmations,
                     startup_recovery_markers: Mutex::new(replay_state.startup_recovery_markers),
                 },
-                event_hub: crate::runtime::owners::EventHub {
-                    service: event_service,
-                },
+                events: event_service,
                 client_projection: crate::runtime::owners::ClientProjectionCoordinator {
-                    coordinator: snapshot_coordinator,
+                    snapshots: snapshot_coordinator,
                     clients: client_service,
                     pending_submission: None,
                 },
                 runtime_service,
-                capability_service: CapabilityService::new(),
                 profile_registry,
                 authorization_service,
                 project_root: crate::runtime::owners::ProjectRoot::new(project_root),
@@ -214,14 +210,12 @@ impl CodingAgentSession {
         session.refresh_snapshot_projection();
         session
             .runtime_host
-            .event_hub
-            .service
+            .events
             .emit_session_opened(session.view().session_id);
         for record in startup_outbox_records {
             session
                 .runtime_host
-                .event_hub
-                .service
+                .events
                 .emit_durable_outbox_record(&record);
         }
         Ok(session)
@@ -251,23 +245,19 @@ impl CodingAgentSession {
                     capabilities: CapabilitySnapshotService::with_snapshot_coordinator(
                         snapshot_coordinator.clone(),
                     ),
-                    finalizer: Default::default(),
                 },
                 session_coordinator: crate::runtime::session_coordinator::SessionCoordinator {
                     persistence: SessionPersistence::NonPersistent(state),
                     pending_delegation_confirmations: PendingDelegationConfirmationQueue::default(),
                     startup_recovery_markers: Mutex::new(Vec::new()),
                 },
-                event_hub: crate::runtime::owners::EventHub {
-                    service: event_service,
-                },
+                events: event_service,
                 client_projection: crate::runtime::owners::ClientProjectionCoordinator {
-                    coordinator: snapshot_coordinator,
+                    snapshots: snapshot_coordinator,
                     clients: client_service,
                     pending_submission: None,
                 },
                 runtime_service,
-                capability_service: CapabilityService::new(),
                 profile_registry,
                 authorization_service,
                 project_root: crate::runtime::owners::ProjectRoot::new(project_root),

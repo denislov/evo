@@ -1,14 +1,14 @@
-use super::client::projection as public_projection;
-use super::client::service::ClientService;
-use super::facade::{CodingAgentSession, CodingSessionError};
-use super::finalization::{FinalizationCommitResult, FinalizationDecision};
-use super::operation::{OperationDispatchMode, OperationExecution};
-use super::outcome as public_operation;
-use super::outcome::{CodingAgentOperation, CodingAgentOperationOutcome};
-use super::public_error::CodingAgentPublicError;
-use super::snapshot as snapshot_coordinator;
-use super::snapshot::SnapshotCoordinator;
+use super::OperationExecution;
+use super::contract as public_operation;
+use super::contract::{CodingAgentOperation, CodingAgentOperationOutcome};
+use super::finalize::{FinalizationCommitResult, FinalizationDecision};
 use crate::events as event;
+use crate::runtime::client::connection as public_connection;
+use crate::runtime::client::service::ClientService;
+use crate::runtime::facade::{CodingAgentSession, CodingSessionError};
+use crate::runtime::public_error::CodingAgentPublicError;
+use crate::runtime::snapshot as snapshot_coordinator;
+use crate::runtime::snapshot::SnapshotCoordinator;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub(crate) enum SubmissionLeaseLifecycle {
 }
 
 #[derive(Debug)]
-pub(super) struct PendingSubmissionLease {
+pub(crate) struct PendingSubmissionLease {
     handle: snapshot_coordinator::ClientHandle,
     operation_id: String,
     descriptor: public_operation::OperationDescriptor,
@@ -97,10 +97,10 @@ impl SubmissionCommitGuard {
         let execution = OperationExecution::root(
             self.descriptor.submitted_kind,
             self.descriptor,
-            super::operation::OperationOrigin::ClientRoot,
+            super::OperationOrigin::ClientRoot,
             None,
             None,
-            super::capability::OperationCapabilitySnapshot::permissive(operation_id),
+            crate::runtime::capability::OperationCapabilitySnapshot::permissive(operation_id),
         );
         self.commit_execution(&execution)
     }
@@ -153,7 +153,7 @@ impl SubmissionCommitGuard {
                 FinalizationCommitResult::DefinitelyFailed { code, message } => match &decision
                     .payload
                 {
-                    super::finalization::FinalizationPayload::Failed {
+                    super::finalize::FinalizationPayload::Failed {
                         code: decision_code,
                         message: decision_message,
                     } if decision_code == code && decision_message == message => {
@@ -184,7 +184,7 @@ impl SubmissionCommitGuard {
                 public_operation::OperationTerminalPolicy::OutcomeAcknowledgement => {
                     let anchor = snapshot_coordinator::SubmittedTerminalAnchor::OutcomeOnly {
                         acknowledgement:
-                            public_projection::CodingAgentOutcomeAcknowledgementId::new(format!(
+                            public_connection::CodingAgentOutcomeAcknowledgementId::new(format!(
                                 "outcome:{}",
                                 execution.operation_id
                             )),
@@ -250,22 +250,14 @@ impl CodingAgentSession {
         .flatten();
         self.runtime_host
             .client_projection
-            .coordinator
+            .snapshots
             .ensure_runtime_running()?;
         let descriptor = operation.descriptor();
         let fingerprint = operation.submission_fingerprint();
         let submission = self.consume_submission_lease(descriptor, fingerprint.as_ref());
-        let operation = operation.into_internal();
-        let dispatch_mode = operation.descriptor().dispatch_mode;
-        let outcome = match dispatch_mode {
-            OperationDispatchMode::Async => self.run_operation(operation, submission).await?,
-            OperationDispatchMode::SyncReadOnly => {
-                self.run_sync_operation(operation, submission)?
-            }
-            OperationDispatchMode::SyncMutable => {
-                self.run_sync_mut_operation(operation, submission)?
-            }
-        };
+        let outcome = self
+            .execute_operation_envelope(operation, submission)
+            .await?;
         Ok(CodingAgentOperationOutcome::from_internal(outcome))
     }
 
@@ -282,7 +274,7 @@ impl CodingAgentSession {
                 && self
                     .runtime_host
                     .client_projection
-                    .coordinator
+                    .snapshots
                     .is_current(&pending.handle)
             {
                 return Err(CodingSessionError::SubmissionPreparationBusy);
@@ -320,10 +312,7 @@ impl CodingAgentSession {
         &self,
         coordinator: &Arc<SnapshotCoordinator>,
     ) -> bool {
-        Arc::ptr_eq(
-            &self.runtime_host.client_projection.coordinator,
-            coordinator,
-        )
+        Arc::ptr_eq(&self.runtime_host.client_projection.snapshots, coordinator)
     }
 
     pub(super) fn consume_submission_lease(
@@ -352,7 +341,7 @@ impl CodingAgentSession {
         *pending.lifecycle.lock().unwrap() = SubmissionLeaseLifecycle::Consuming;
         Some(SubmissionCommitGuard {
             client_service: self.runtime_host.client_projection.clients.clone(),
-            coordinator: self.runtime_host.client_projection.coordinator.clone(),
+            coordinator: self.runtime_host.client_projection.snapshots.clone(),
             handle: pending.handle,
             operation_id: pending.operation_id,
             lifecycle: pending.lifecycle,

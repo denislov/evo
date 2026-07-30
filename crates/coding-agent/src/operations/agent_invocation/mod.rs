@@ -2,8 +2,8 @@ pub(crate) mod runner;
 
 use crate::profiles::ProfileRegistry;
 use crate::runtime::capability::OperationCapabilitySnapshot;
-use crate::runtime::control::{OperationControl, PromptControlReceiver};
 use crate::runtime::facade::CodingSessionError;
+use crate::runtime::operation::control::{OperationControl, PromptControlReceiver};
 use crate::services::event::EventService;
 use runner::{
     AgentInvocationContext, AgentInvocationOptions, AgentInvocationOutcome, AgentInvocationRunner,

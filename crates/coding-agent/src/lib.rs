@@ -7,6 +7,7 @@ mod events;
 mod limits;
 mod operations;
 mod profiles;
+mod redaction;
 mod runtime;
 mod services;
 

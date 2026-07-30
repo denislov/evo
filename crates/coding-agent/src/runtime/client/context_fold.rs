@@ -9,7 +9,7 @@ use crate::events::{
     CodingAgentProductEventTerminalStatus, CodingAgentTeamProductEvent,
     CodingAgentToolProductEvent, CodingAgentWorkflowProductEvent,
 };
-use crate::runtime::client::projection::{
+use crate::runtime::client::connection::{
     CodingAgentContextSnapshot, CodingAgentDelegationSnapshot, CodingAgentFileChangeSnapshot,
     CodingAgentOperationSnapshot, CodingAgentOperationStatus, CodingAgentTurnUsageSnapshot,
 };

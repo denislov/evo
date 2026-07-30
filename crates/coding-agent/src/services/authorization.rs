@@ -943,7 +943,7 @@ fn canonical_json(value: &Value) -> String {
 }
 
 fn redact_command(command: &str) -> String {
-    crate::services::redaction::redact_sensitive_text(command)
+    crate::redaction::redact_sensitive_text(command)
 }
 
 fn mutation_content_preview(context: &BeforeToolCallContext) -> Option<String> {
@@ -970,5 +970,5 @@ fn mutation_content_preview(context: &BeforeToolCallContext) -> Option<String> {
     };
     let bounded = raw.lines().take(12).collect::<Vec<_>>().join("\n");
     let bounded = bounded.chars().take(1_200).collect::<String>();
-    (!bounded.is_empty()).then(|| crate::services::redaction::redact_sensitive_text(&bounded))
+    (!bounded.is_empty()).then(|| crate::redaction::redact_sensitive_text(&bounded))
 }

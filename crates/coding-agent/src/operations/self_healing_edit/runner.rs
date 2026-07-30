@@ -17,8 +17,8 @@ use crate::tools::filesystem::edit::{
 
 use crate::operations::prompt::context::{PromptTurnOptions, RuntimeSnapshot};
 use crate::runtime::capability::{FilesystemCapability, FilesystemTarget, ModelCapability};
-use crate::runtime::control::OperationCancellationHandle;
 use crate::runtime::facade::CodingSessionError;
+use crate::runtime::operation::control::OperationCancellationHandle;
 use crate::services::runtime::stream_model_for_scoped_runtime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

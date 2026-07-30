@@ -1,110 +1,129 @@
-use super::capability::CapabilityRevocationPolicy;
+use super::admission::OperationScheduler;
+use super::contract::{BranchSummaryReusePolicy, CodingAgentOperation};
 use super::control::PromptControlRegistration;
-use super::facade::{CodingAgentSession, CodingSessionError, PromptControlCleanupGuard};
-use super::intent::IntentRouter;
-use super::operation::{Operation, OperationDispatchMode, OperationOutcome};
-use super::scheduler::OperationScheduler;
+use super::permit::OperationPermit;
 use super::submission::SubmissionCommitGuard;
+use super::{OperationDispatchMode, OperationExecution, OperationOutcome};
 use crate::operations::compaction::runner::ManualCompactionOptions;
+use crate::runtime::capability::CapabilityRevocationPolicy;
 use crate::runtime::capability::SessionWriteCapability;
+use crate::runtime::facade::{CodingAgentSession, CodingSessionError, PromptControlCleanupGuard};
 use crate::session::id::{Clock, SystemClock};
 use crate::session::service::SessionPersistence;
 
 impl CodingAgentSession {
-    pub(super) fn run_sync_operation(
-        &self,
-        operation: Operation,
+    pub(super) async fn execute_operation_envelope(
+        &mut self,
+        mut operation: CodingAgentOperation,
         mut submission: Option<SubmissionCommitGuard>,
     ) -> Result<OperationOutcome, CodingSessionError> {
+        let dispatch_mode = operation.descriptor().dispatch_mode;
+        if dispatch_mode == OperationDispatchMode::Async {
+            self.prepare_operation_for_admission(&mut operation)?;
+            if let Some(options) = operation.prompt_options_mut()
+                && let Some(runtime) = options.runtime_mut()
+            {
+                self.runtime_host
+                    .runtime_service
+                    .install_provider_runtime(runtime);
+            }
+        }
+
         let admission = self.resolve_operation_admission_with_id(
             &operation,
             submission
                 .as_ref()
                 .map(|submission| submission.operation_id.as_str()),
         )?;
-        let operation_permit = OperationScheduler::admit(
+        if dispatch_mode != OperationDispatchMode::SyncReadOnly {
+            self.runtime_host
+                .session_coordinator
+                .ensure_write_admission(admission.descriptor.admission_class())?;
+        }
+        let mut operation_permit = OperationScheduler::admit(
             &self.runtime_host.operation_supervisor.control,
             &admission,
-            OperationDispatchMode::SyncReadOnly,
+            dispatch_mode,
         )
         .map_err(|rejection| rejection.into_error())?;
         if let Some(guard) = submission.as_mut() {
             guard.commit_execution(operation_permit.execution())?;
         }
-        let execution = operation_permit.execution().clone();
 
-        let result = match operation {
-            Operation::Export(options) => crate::operations::export::run(
-                options,
-                operation_permit.capability_snapshot(),
-                &self.runtime_host.session_coordinator.persistence,
-            )
-            .map(OperationOutcome::Export),
-            Operation::RejectDelegationConfirmation { .. } => {
-                Err(IntentRouter::unsupported_dispatch(&admission))
+        let execution = operation_permit.execution().clone();
+        let session_naming_seed = match &operation {
+            CodingAgentOperation::Prompt(options) => {
+                crate::operations::session_naming::SessionNamingSeed::from_prompt(
+                    options,
+                    &execution.capability_snapshot,
+                )
             }
-            Operation::Prompt(_)
-            | Operation::ManualCompaction(_)
-            | Operation::ApproveDelegationConfirmation { .. }
-            | Operation::BranchSummary { .. }
-            | Operation::SelfHealingEdit(_)
-            | Operation::AgentInvocation(_)
-            | Operation::AgentTeam(_)
-            | Operation::ForkSession { .. }
-            | Operation::SwitchActiveLeaf { .. }
-            | Operation::SetSessionTreeLabel { .. }
-            | Operation::SetSessionName { .. }
-            | Operation::SetDefaultAgentProfile { .. } => {
-                Err(IntentRouter::unsupported_dispatch(&admission))
+            _ => None,
+        };
+        let result = match dispatch_mode {
+            OperationDispatchMode::SyncReadOnly => {
+                self.dispatch_sync_read_only(operation, &operation_permit)
+            }
+            OperationDispatchMode::SyncMutable => {
+                self.dispatch_sync_mutable(operation, &mut operation_permit)
+            }
+            OperationDispatchMode::Async => {
+                self.dispatch_async(
+                    operation,
+                    &admission,
+                    &operation_permit,
+                    submission.as_ref(),
+                )
+                .await
             }
         };
-        let decision = self
-            .runtime_host
-            .operation_supervisor
-            .finalizer
-            .freeze(&execution, &result);
+
+        let decision = super::finalize::FinalizationDecision::freeze(&execution, &result);
         let commit_result = self
             .runtime_host
             .session_coordinator
             .resolve_finalization(&decision)?;
         self.runtime_host
-            .event_hub
-            .service
+            .events
             .emit_recovery_pending(&decision, &commit_result);
         self.persist_operation_terminal_outbox(&decision, &result, &commit_result)?;
         if let Some(guard) = submission.as_mut() {
             guard.finish(&decision, &commit_result)?;
         }
+        self.schedule_session_naming_after_prompt(session_naming_seed, &result);
         result
     }
 
-    pub(super) fn run_sync_mut_operation(
-        &mut self,
-        operation: Operation,
-        mut submission: Option<SubmissionCommitGuard>,
+    fn dispatch_sync_read_only(
+        &self,
+        operation: CodingAgentOperation,
+        operation_permit: &OperationPermit,
     ) -> Result<OperationOutcome, CodingSessionError> {
-        let admission = self.resolve_operation_admission_with_id(
-            &operation,
-            submission
-                .as_ref()
-                .map(|submission| submission.operation_id.as_str()),
-        )?;
-        self.runtime_host
-            .session_coordinator
-            .ensure_write_admission(admission.descriptor.admission_class())?;
-        let operation_permit = OperationScheduler::admit(
-            &self.runtime_host.operation_supervisor.control,
-            &admission,
-            OperationDispatchMode::SyncMutable,
-        )
-        .map_err(|rejection| rejection.into_error())?;
-        if let Some(guard) = submission.as_mut() {
-            guard.commit_execution(operation_permit.execution())?;
+        match operation {
+            CodingAgentOperation::ExportCurrent | CodingAgentOperation::ExportCurrentHtml(_) => {
+                let options = operation
+                    .export_options()
+                    .expect("export variants always normalize to export options");
+                crate::operations::export::run(
+                    options,
+                    operation_permit.capability_snapshot(),
+                    &self.runtime_host.session_coordinator.persistence,
+                )
+                .map(OperationOutcome::Export)
+            }
+            _ => {
+                unreachable!("descriptor routed a non-read-only operation to the read-only handler")
+            }
         }
-        let execution = operation_permit.execution().clone();
+    }
 
-        let result = (|| match operation {
-            Operation::RejectDelegationConfirmation {
+    fn dispatch_sync_mutable(
+        &mut self,
+        operation: CodingAgentOperation,
+        operation_permit: &mut OperationPermit,
+    ) -> Result<OperationOutcome, CodingSessionError> {
+        (|| match operation {
+            CodingAgentOperation::RejectDelegation {
                 operation_id,
                 tool_call_id,
                 reason,
@@ -137,12 +156,11 @@ impl CodingAgentSession {
                     unreachable!("delegation rejection writer command returns its typed reply")
                 };
                 self.runtime_host
-                    .event_hub
-                    .service
+                    .events
                     .emit_delegation_rejected(&request, &reason);
                 Ok(OperationOutcome::DelegationRejection)
             }
-            Operation::ForkSession { target_leaf_id } => {
+            CodingAgentOperation::ForkSession { target_leaf_id } => {
                 SessionWriteCapability::require(
                     operation_permit
                         .capability_snapshot()
@@ -155,7 +173,7 @@ impl CodingAgentSession {
                         operation_permit.execution().capability_generation,
                         target_leaf_id,
                     );
-                drop(operation_permit);
+                operation_permit.release();
                 let reply = self
                     .runtime_host
                     .session_coordinator
@@ -167,13 +185,10 @@ impl CodingAgentSession {
                     unreachable!("fork writer command returns its typed reply")
                 };
                 self.refresh_snapshot_projection();
-                self.runtime_host
-                    .event_hub
-                    .service
-                    .emit_session_opened(session_id);
+                self.runtime_host.events.emit_session_opened(session_id);
                 Ok(OperationOutcome::ForkSession)
             }
-            Operation::SwitchActiveLeaf { target_leaf_id } => {
+            CodingAgentOperation::SwitchActiveLeaf { target_leaf_id } => {
                 SessionWriteCapability::require(
                     operation_permit
                         .capability_snapshot()
@@ -201,7 +216,7 @@ impl CodingAgentSession {
                 self.refresh_snapshot_projection();
                 Ok(OperationOutcome::SwitchActiveLeaf)
             }
-            Operation::SetSessionTreeLabel { entry_id, label } => {
+            CodingAgentOperation::SetSessionTreeLabel { entry_id, label } => {
                 SessionWriteCapability::require(
                     operation_permit
                         .capability_snapshot()
@@ -235,7 +250,7 @@ impl CodingAgentSession {
                     updated_at,
                 })
             }
-            Operation::SetSessionName { name } => {
+            CodingAgentOperation::SetSessionName { name } => {
                 SessionWriteCapability::require(
                     operation_permit
                         .capability_snapshot()
@@ -262,7 +277,7 @@ impl CodingAgentSession {
                 };
                 Ok(OperationOutcome::SessionNameChanged { name, updated_at })
             }
-            Operation::SetDefaultAgentProfile { profile_id } => {
+            CodingAgentOperation::SetDefaultAgentProfile { profile_id } => {
                 SessionWriteCapability::require(
                     operation_permit
                         .capability_snapshot()
@@ -295,8 +310,7 @@ impl CodingAgentSession {
                     }
                 }
                 self.runtime_host
-                    .event_hub
-                    .service
+                    .events
                     .emit_default_agent_profile_changed(profile_id);
                 let installed = self
                     .runtime_host
@@ -304,90 +318,29 @@ impl CodingAgentSession {
                     .capabilities
                     .install_next_generation(CapabilityRevocationPolicy::FutureOnly)?;
                 self.refresh_snapshot_projection();
-                self.runtime_host
-                    .event_hub
-                    .service
-                    .emit_capability_changed(installed);
+                self.runtime_host.events.emit_capability_changed(installed);
                 Ok(OperationOutcome::SetDefaultAgentProfile)
             }
-            Operation::Export(_) => Err(IntentRouter::unsupported_dispatch(&admission)),
-            Operation::Prompt(_)
-            | Operation::ManualCompaction(_)
-            | Operation::ApproveDelegationConfirmation { .. }
-            | Operation::BranchSummary { .. }
-            | Operation::SelfHealingEdit(_)
-            | Operation::AgentInvocation(_)
-            | Operation::AgentTeam(_) => Err(IntentRouter::unsupported_dispatch(&admission)),
-        })();
-        let decision = self
-            .runtime_host
-            .operation_supervisor
-            .finalizer
-            .freeze(&execution, &result);
-        let commit_result = self
-            .runtime_host
-            .session_coordinator
-            .resolve_finalization(&decision)?;
-        self.runtime_host
-            .event_hub
-            .service
-            .emit_recovery_pending(&decision, &commit_result);
-        self.persist_operation_terminal_outbox(&decision, &result, &commit_result)?;
-        if let Some(guard) = submission.as_mut() {
-            guard.finish(&decision, &commit_result)?;
-        }
-        result
+            _ => unreachable!("descriptor routed a non-mutable operation to the mutable handler"),
+        })()
     }
 
-    pub(super) async fn run_operation(
+    async fn dispatch_async(
         &mut self,
-        mut operation: Operation,
-        mut submission: Option<SubmissionCommitGuard>,
+        operation: CodingAgentOperation,
+        admission: &OperationExecution,
+        operation_permit: &OperationPermit,
+        submission: Option<&SubmissionCommitGuard>,
     ) -> Result<OperationOutcome, CodingSessionError> {
-        self.prepare_operation_for_admission(&mut operation)?;
-        if let Some(options) = operation.prompt_options_mut()
-            && let Some(runtime) = options.runtime_mut()
-        {
-            self.runtime_host
-                .runtime_service
-                .install_provider_runtime(runtime);
-        }
-        let admission = self.resolve_operation_admission_with_id(
-            &operation,
-            submission
-                .as_ref()
-                .map(|submission| submission.operation_id.as_str()),
-        )?;
-        self.runtime_host
-            .session_coordinator
-            .ensure_write_admission(admission.descriptor.admission_class())?;
-        let operation_permit = OperationScheduler::admit(
-            &self.runtime_host.operation_supervisor.control,
-            &admission,
-            OperationDispatchMode::Async,
-        )
-        .map_err(|rejection| rejection.into_error())?;
-        if let Some(guard) = submission.as_mut() {
-            guard.commit_execution(operation_permit.execution())?;
-        }
-        let execution = operation_permit.execution().clone();
-        let snapshot = execution.capability_snapshot.clone();
-        let session_naming_seed = match &operation {
-            Operation::Prompt(options) => {
-                crate::operations::session_naming::SessionNamingSeed::from_prompt(
-                    options, &snapshot,
-                )
-            }
-            _ => None,
-        };
+        let snapshot = operation_permit.execution().capability_snapshot.clone();
         let operation_cancellation = operation_permit.cancellation_token();
         let operation_cancellation_handle = operation_permit.cancellation_handle();
         if let (Some(submission), Some(cancellation)) =
-            (submission.as_ref(), operation_cancellation_handle.clone())
+            (submission, operation_cancellation_handle.clone())
         {
             self.runtime_host
                 .client_projection
-                .coordinator
+                .snapshots
                 .bind_operation_cancellation(
                     submission.handle.clone(),
                     snapshot.operation_id.clone(),
@@ -395,10 +348,9 @@ impl CodingAgentSession {
                 );
         }
 
-        let result =
-            Box::pin(async {
+        Box::pin(async {
                 match operation {
-                    Operation::Prompt(options) => {
+                    CodingAgentOperation::Prompt(options) => {
                         let has_existing_prompt_control = self
                             .runtime_host
                             .operation_supervisor
@@ -417,11 +369,10 @@ impl CodingAgentSession {
                             None
                         };
                         if let (Some(submission), Some(prompt_control)) =
-                            (submission.as_ref(), prompt_control.as_ref())
+                            (submission, prompt_control.as_ref())
                         {
                             self.runtime_host
-                                .client_projection
-                                .coordinator
+                                .client_projection.snapshots
                                 .bind_prompt_control(
                                     submission.handle.clone(),
                                     snapshot.operation_id.clone(),
@@ -436,7 +387,7 @@ impl CodingAgentSession {
                                         .operation_supervisor
                                         .control
                                         .prompt_control_cleanup(),
-                                    self.runtime_host.client_projection.coordinator.clone(),
+                                    self.runtime_host.client_projection.snapshots.clone(),
                                     snapshot.operation_id.clone(),
                                     generation,
                                 )
@@ -446,7 +397,7 @@ impl CodingAgentSession {
                             &mut self.runtime_host.session_coordinator.persistence,
                             &mut self.runtime_host.operation_supervisor.control,
                             &self.runtime_host.profile_registry,
-                            &self.runtime_host.event_hub.service,
+                            &self.runtime_host.events,
                             &mut self
                                 .runtime_host
                                 .session_coordinator
@@ -462,7 +413,7 @@ impl CodingAgentSession {
                         }
                         result.map(OperationOutcome::Prompt)
                     }
-                    Operation::ManualCompaction(options) => {
+                    CodingAgentOperation::Compact(options) => {
                         let mut options =
                             ManualCompactionOptions::from_prompt_turn_options(&options)?;
                         if let Some(cancellation) = operation_cancellation.clone() {
@@ -477,7 +428,7 @@ impl CodingAgentSession {
                         };
                         crate::operations::compaction::run(
                             session_service,
-                            &self.runtime_host.event_hub.service,
+                            &self.runtime_host.events,
                             options,
                             &snapshot,
                             operation_cancellation_handle.clone(),
@@ -485,14 +436,14 @@ impl CodingAgentSession {
                         .await
                         .map(OperationOutcome::ManualCompaction)
                     }
-                    Operation::BranchSummary {
+                    CodingAgentOperation::BranchSummary {
                         options,
                         source_leaf_id,
                         target_leaf_id,
                         custom_instructions,
-                        reuse_existing,
+                        reuse,
                     } => {
-                        if reuse_existing
+                        if matches!(reuse, BranchSummaryReusePolicy::ReuseExisting)
                             && let Some(outcome) =
                                 crate::operations::branch_summary::reused_outcome(
                                     &self.runtime_host.session_coordinator.persistence,
@@ -513,7 +464,7 @@ impl CodingAgentSession {
                         };
                         crate::operations::branch_summary::run(
                             session_service,
-                            &self.runtime_host.event_hub.service,
+                            &self.runtime_host.events,
                             options,
                             source_leaf_id,
                             target_leaf_id,
@@ -525,7 +476,7 @@ impl CodingAgentSession {
                         .await
                         .map(OperationOutcome::BranchSummary)
                     }
-                    Operation::SelfHealingEdit(request) => {
+                    CodingAgentOperation::SelfHealingEdit(request) => {
                         let (path, replacements, check_command, repair_attempts, model_repair) =
                             request.into_parts();
                         if !repair_attempts.is_empty() && model_repair.is_some() {
@@ -557,7 +508,7 @@ impl CodingAgentSession {
                         };
                         let outcome = crate::operations::self_healing_edit::run(
                             session_service,
-                            self.runtime_host.event_hub.service.clone(),
+                            self.runtime_host.events.clone(),
                             path,
                             replacements,
                             check_command,
@@ -569,12 +520,11 @@ impl CodingAgentSession {
                         )
                         .await?;
                         self.runtime_host
-                            .event_hub
-                            .service
+                            .events
                             .emit_session_write_events(&outcome.finalized);
                         outcome.result.map(OperationOutcome::SelfHealingEdit)
                     }
-                    Operation::AgentInvocation(options) => {
+                    CodingAgentOperation::InvokeAgent(options) => {
                         let prompt_control_receiver = self
                             .runtime_host
                             .operation_supervisor
@@ -589,7 +539,7 @@ impl CodingAgentSession {
                             snapshot.operation_id.clone(),
                             prompt_control_receiver,
                             &self.runtime_host.profile_registry,
-                            &self.runtime_host.event_hub.service,
+                            &self.runtime_host.events,
                             &self.runtime_host.operation_supervisor.control,
                             snapshot.clone(),
                             operation_cancellation.clone(),
@@ -597,66 +547,40 @@ impl CodingAgentSession {
                         .await;
                         result.map(OperationOutcome::AgentInvocation)
                     }
-                    Operation::AgentTeam(options) => crate::operations::team_invocation::run(
+                    CodingAgentOperation::InvokeTeam(options) => crate::operations::team_invocation::run(
                         options,
                         snapshot.operation_id.clone(),
                         &self.runtime_host.profile_registry,
-                        &self.runtime_host.event_hub.service,
+                        &self.runtime_host.events,
                         &self.runtime_host.operation_supervisor.control,
                         snapshot.clone(),
                         operation_cancellation.clone(),
                     )
                     .await
                     .map(OperationOutcome::AgentTeam),
-                    Operation::Export(_)
-                    | Operation::RejectDelegationConfirmation { .. }
-                    | Operation::ForkSession { .. }
-                    | Operation::SwitchActiveLeaf { .. }
-                    | Operation::SetSessionTreeLabel { .. }
-                    | Operation::SetSessionName { .. }
-                    | Operation::SetDefaultAgentProfile { .. } => {
-                        Err(IntentRouter::unsupported_dispatch(&admission))
-                    }
-                    Operation::ApproveDelegationConfirmation {
+                    CodingAgentOperation::ApproveDelegation {
                         operation_id,
                         tool_call_id,
                     } => crate::operations::delegation::execution::approve(
                         &mut self.runtime_host.session_coordinator,
                         &self.runtime_host.runtime_service,
                         &self.runtime_host.profile_registry,
-                        &self.runtime_host.event_hub.service,
+                        &self.runtime_host.events,
                         &self.runtime_host.operation_supervisor.control,
                         operation_id,
                         tool_call_id,
                         admission
                             .admitted_at
+                            .clone()
                             .expect("delegation approval admission time is resolved"),
                         snapshot.clone(),
                     )
                     .await
                     .map(|_| OperationOutcome::DelegationApproval),
+                    _ => unreachable!("descriptor routed a non-async operation to the async handler"),
                 }
-            })
-            .await;
-        let decision = self
-            .runtime_host
-            .operation_supervisor
-            .finalizer
-            .freeze(&execution, &result);
-        let commit_result = self
-            .runtime_host
-            .session_coordinator
-            .resolve_finalization(&decision)?;
-        self.runtime_host
-            .event_hub
-            .service
-            .emit_recovery_pending(&decision, &commit_result);
-        self.persist_operation_terminal_outbox(&decision, &result, &commit_result)?;
-        if let Some(guard) = submission.as_mut() {
-            guard.finish(&decision, &commit_result)?;
-        }
-        self.schedule_session_naming_after_prompt(session_naming_seed, &result);
-        result
+        })
+        .await
     }
 
     fn schedule_session_naming_after_prompt(
@@ -685,33 +609,33 @@ impl CodingAgentSession {
             seed.spawn_after_first_exchange(
                 writer,
                 final_text.clone(),
-                self.runtime_host.event_hub.service.clone(),
+                self.runtime_host.events.clone(),
             );
         }
     }
 
     fn persist_operation_terminal_outbox(
         &self,
-        decision: &super::finalization::FinalizationDecision,
+        decision: &super::finalize::FinalizationDecision,
         result: &Result<OperationOutcome, CodingSessionError>,
-        commit_result: &super::finalization::FinalizationCommitResult,
+        commit_result: &super::finalize::FinalizationCommitResult,
     ) -> Result<(), CodingSessionError> {
         if !matches!(
             decision.operation_kind,
-            crate::runtime::control::OperationKind::Prompt
-                | crate::runtime::control::OperationKind::Compact
-                | crate::runtime::control::OperationKind::SelfHealingEdit
-                | crate::runtime::control::OperationKind::AgentInvocation
-                | crate::runtime::control::OperationKind::AgentTeam
+            crate::runtime::operation::control::OperationKind::Prompt
+                | crate::runtime::operation::control::OperationKind::Compact
+                | crate::runtime::operation::control::OperationKind::SelfHealingEdit
+                | crate::runtime::operation::control::OperationKind::AgentInvocation
+                | crate::runtime::operation::control::OperationKind::AgentTeam
         ) || !matches!(
             commit_result,
-            super::finalization::FinalizationCommitResult::Committed
-                | super::finalization::FinalizationCommitResult::DefinitelyFailed { .. }
+            super::finalize::FinalizationCommitResult::Committed
+                | super::finalize::FinalizationCommitResult::DefinitelyFailed { .. }
         ) {
             return Ok(());
         }
         let (draft, prompt_outcome) = match decision.operation_kind {
-            crate::runtime::control::OperationKind::Prompt => {
+            crate::runtime::operation::control::OperationKind::Prompt => {
                 let Some(OperationOutcome::Prompt(outcome)) = result.as_ref().ok() else {
                     return Ok(());
                 };
@@ -722,37 +646,34 @@ impl CodingAgentSession {
                 };
                 (draft, Some(outcome))
             }
-            crate::runtime::control::OperationKind::Compact => {
+            crate::runtime::operation::control::OperationKind::Compact => {
                 let Some(OperationOutcome::ManualCompaction(outcome)) = result.as_ref().ok() else {
                     return Ok(());
                 };
                 let Some(draft) = self
                     .runtime_host
-                    .event_hub
-                    .service
+                    .events
                     .take_deferred_terminal_draft(&decision.operation_id)
                 else {
                     return Ok(());
                 };
                 (draft, Some(outcome))
             }
-            crate::runtime::control::OperationKind::SelfHealingEdit => {
+            crate::runtime::operation::control::OperationKind::SelfHealingEdit => {
                 let Some(draft) = self
                     .runtime_host
-                    .event_hub
-                    .service
+                    .events
                     .take_deferred_terminal_draft(&decision.operation_id)
                 else {
                     return Ok(());
                 };
                 (draft, None)
             }
-            crate::runtime::control::OperationKind::AgentInvocation
-            | crate::runtime::control::OperationKind::AgentTeam => {
+            crate::runtime::operation::control::OperationKind::AgentInvocation
+            | crate::runtime::operation::control::OperationKind::AgentTeam => {
                 let Some(draft) = self
                     .runtime_host
-                    .event_hub
-                    .service
+                    .events
                     .take_deferred_terminal_draft(&decision.operation_id)
                 else {
                     return Ok(());
@@ -770,12 +691,11 @@ impl CodingAgentSession {
         let live_draft = draft.clone();
         if matches!(
             decision.operation_kind,
-            crate::runtime::control::OperationKind::AgentInvocation
-                | crate::runtime::control::OperationKind::AgentTeam
+            crate::runtime::operation::control::OperationKind::AgentInvocation
+                | crate::runtime::operation::control::OperationKind::AgentTeam
         ) {
             self.runtime_host
-                .event_hub
-                .service
+                .events
                 .emit_committed_terminal_draft(live_draft, decision.operation_kind);
             return Ok(());
         }
@@ -785,22 +705,19 @@ impl CodingAgentSession {
             .map(|_| {
                 if matches!(
                     decision.operation_kind,
-                    crate::runtime::control::OperationKind::Compact
-                        | crate::runtime::control::OperationKind::SelfHealingEdit
+                    crate::runtime::operation::control::OperationKind::Compact
+                        | crate::runtime::operation::control::OperationKind::SelfHealingEdit
                 ) {
                     self.runtime_host
-                        .event_hub
-                        .service
+                        .events
                         .emit_committed_terminal_draft(live_draft, decision.operation_kind);
                 }
                 if let Some(outcome) = prompt_outcome
-                    && (decision.operation_kind == crate::runtime::control::OperationKind::Prompt
+                    && (decision.operation_kind
+                        == crate::runtime::operation::control::OperationKind::Prompt
                         || compact_terminal_is_session_event)
                 {
-                    self.runtime_host
-                        .event_hub
-                        .service
-                        .emit_prompt_terminal(outcome);
+                    self.runtime_host.events.emit_prompt_terminal(outcome);
                 }
             })
             .map(|_| ())

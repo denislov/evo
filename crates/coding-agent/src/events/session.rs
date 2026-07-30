@@ -23,8 +23,8 @@ impl SessionCompactionEvent {
     #[cfg(test)]
     pub(crate) fn root_terminal_evidence(
         &self,
-    ) -> crate::runtime::outcome::OperationRootTerminalEvidence {
-        crate::runtime::outcome::OperationRootTerminalEvidence::CompactionCompleted
+    ) -> crate::runtime::operation::contract::OperationRootTerminalEvidence {
+        crate::runtime::operation::contract::OperationRootTerminalEvidence::CompactionCompleted
     }
 
     pub(crate) fn into_product_draft(self) -> ProductEventDraft {

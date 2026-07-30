@@ -7,7 +7,7 @@ use crate::operations::self_healing_edit::runner::{
     SelfHealingEditCheckOutput, SelfHealingEditDiagnostic, SelfHealingEditReplacement,
 };
 use crate::runtime::facade::CodingSessionError;
-use crate::runtime::outcome::OperationRootTerminalEvidence;
+use crate::runtime::operation::contract::OperationRootTerminalEvidence;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SelfHealingEditEvent {

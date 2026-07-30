@@ -4,7 +4,7 @@ use futures::StreamExt;
 use super::CodingSessionError;
 use super::context::{CodingDiagnostic, PromptTurnContext, QueuedPromptInput};
 use crate::app::bootstrap::PromptInvocation;
-use crate::runtime::control::PromptControlCommand;
+use crate::runtime::operation::control::PromptControlCommand;
 use crate::services::runtime::RuntimeService;
 
 pub(crate) struct PromptTurnRunner;

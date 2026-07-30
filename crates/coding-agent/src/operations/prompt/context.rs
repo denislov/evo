@@ -25,8 +25,8 @@ use crate::operations::delegation::{
 };
 use crate::profiles::{AgentProfile, DelegationPolicy, ProfileId, ProfileKind, ProfileRegistry};
 use crate::runtime::capability::OperationCapabilitySnapshot;
-use crate::runtime::control::PromptControlReceiver;
 use crate::runtime::facade::CodingSessionError;
+use crate::runtime::operation::control::PromptControlReceiver;
 use crate::services::authorization::{AuthorizationHookContext, AuthorizationService};
 use crate::services::event::{AgentEventMappingContext, EventService, map_agent_event};
 use crate::session::event::{

@@ -3,9 +3,9 @@ use super::{
     CodingAgentProductEventDurability, CodingAgentProductEventError, CodingAgentProductEventKind,
     CodingAgentProductEventTerminalStatus, CodingAgentWorkflowProductEvent,
 };
-use crate::runtime::control::OperationKind;
 use crate::runtime::facade::CodingSessionError;
-use crate::runtime::outcome::OperationRootTerminalEvidence;
+use crate::runtime::operation::contract::OperationRootTerminalEvidence;
+use crate::runtime::operation::control::OperationKind;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PromptEvent {

@@ -6,7 +6,7 @@ use ai::api::client::AiClient;
 
 use crate::authorization::ToolAuthorizationMode;
 use crate::profiles::{ProfileId, ProfileKind};
-use crate::runtime::control::{OperationActivity, OperationKind};
+use crate::runtime::operation::control::{OperationActivity, OperationKind};
 use crate::workspace::{
     CodingAgentResolvedWorkspace, CodingAgentWorkspaceMigration, CodingAgentWorkspaceOverview,
     CodingAgentWorkspaceScope,

@@ -5,7 +5,7 @@ use futures::StreamExt;
 use crate::app::bootstrap::PromptInvocation;
 use crate::operations::prompt::context::{PromptTurnOptions, RuntimeSnapshot};
 use crate::runtime::capability::{ModelCapability, OperationCapabilitySnapshot};
-use crate::runtime::scheduler::OperationScheduler;
+use crate::runtime::operation::admission::OperationScheduler;
 use crate::services::event::EventService;
 use crate::services::runtime::stream_model_for_scoped_runtime;
 use crate::session::service::SessionAutoNameWriter;

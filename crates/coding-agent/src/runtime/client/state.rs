@@ -2,8 +2,8 @@ use crate::authorization::ToolAuthorizationRequest;
 use crate::events::{ProductEvent, ProductEventSequence};
 use crate::runtime::capability::CapabilityGeneration;
 use crate::runtime::client::context::UiContextProjection;
-use crate::runtime::control::OperationKind;
 use crate::runtime::facade::context::{CodingAgentCapabilities, CodingAgentSessionView};
+use crate::runtime::operation::control::OperationKind;
 use crate::runtime::version::ProtocolFamilyVersion;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

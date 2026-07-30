@@ -1,18 +1,51 @@
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use super::capability::CapabilityGeneration;
 use super::facade::CodingSessionError;
-use super::finalization::{FinalizationCommitResult, FinalizationDecision, FinalizationPayload};
+use super::operation::finalize::{
+    FinalizationCommitResult, FinalizationDecision, FinalizationPayload,
+};
 use crate::events::emission::ProductEventDraft;
 use crate::operations::delegation::{
     PendingDelegationConfirmationQueue, PendingDelegationConfirmationState,
+    pending_state_from_replay,
 };
 use crate::operations::prompt::context::DelegationRequest;
 use crate::profiles::ProfileId;
 use crate::runtime::operation::OperationClass;
-use crate::services::session::{ReplayDerivedOwnerState, replay_derived_owner_state};
 use crate::session::event::PersistedDelegationStatus;
-use crate::session::service::{SessionPersistence, StartupRecoveryMarker};
+use crate::session::service::{
+    SessionPersistence, SessionService, StartupRecoveryMarker, default_cwd,
+};
+
+pub(crate) struct ReplayDerivedOwnerState {
+    pub(crate) pending_delegation_confirmations: PendingDelegationConfirmationQueue,
+    pub(crate) startup_recovery_markers: Vec<StartupRecoveryMarker>,
+}
+
+pub(crate) fn replay_derived_owner_state(
+    session_service: &mut SessionService,
+) -> Result<ReplayDerivedOwnerState, CodingSessionError> {
+    let startup_recovery_markers = session_service.take_startup_recovery_markers();
+    let replay = session_service.replay()?;
+    let cwd = replay
+        .cwd
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(default_cwd);
+    let pending_delegation_confirmations = PendingDelegationConfirmationQueue::from_pending(
+        replay
+            .pending_delegation_confirmations
+            .into_iter()
+            .map(|pending| pending_state_from_replay(pending, &cwd))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(ReplayDerivedOwnerState {
+        pending_delegation_confirmations,
+        startup_recovery_markers,
+    })
+}
 
 /// Sole mutable owner of product session state.
 #[derive(Debug)]

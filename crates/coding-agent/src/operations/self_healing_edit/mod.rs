@@ -9,11 +9,10 @@ use crate::operations::prompt::context::PromptTurnOptions;
 use crate::runtime::capability::{
     ModelCapability, OperationCapabilitySnapshot, SessionWriteCapability,
 };
-use crate::runtime::control::OperationCancellationHandle;
 use crate::runtime::facade::CodingSessionError;
+use crate::runtime::operation::control::OperationCancellationHandle;
 use crate::services::event::{EventService, SelfHealingEditEventObserver};
-use crate::services::session::{default_cwd, session_cwd};
-use crate::session::service::{FinalizedSessionWrite, SessionService};
+use crate::session::service::{FinalizedSessionWrite, SessionService, default_cwd, session_cwd};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) mod runner;

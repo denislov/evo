@@ -1,10 +1,10 @@
-use super::capability::CapabilityGeneration;
+use super::contract::{OperationDescriptor, OperationTerminalPolicy};
 use super::control::OperationKind;
-use super::facade::CodingSessionError;
-use super::operation::{OperationExecution, OperationOutcome};
-use super::outcome::{OperationDescriptor, OperationTerminalPolicy};
+use super::{OperationExecution, OperationOutcome};
 use crate::events::ProductEventTerminalStatus;
 use crate::operations::prompt::context::InternalPromptTurnOutcome;
+use crate::runtime::capability::CapabilityGeneration;
+use crate::runtime::facade::CodingSessionError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FinalizationPayload {
@@ -37,15 +37,11 @@ pub(crate) enum FinalizationCommitResult {
     InDoubt { recovery_id: String },
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct OperationFinalizer;
-
-impl OperationFinalizer {
+impl FinalizationDecision {
     pub(crate) fn freeze(
-        &self,
         execution: &OperationExecution,
         result: &Result<OperationOutcome, CodingSessionError>,
-    ) -> FinalizationDecision {
+    ) -> Self {
         let requires_recovery = Self::requires_recovery(result);
         let payload = Self::payload(result);
         let terminal_status = match &payload {
@@ -54,7 +50,7 @@ impl OperationFinalizer {
             FinalizationPayload::Failed { .. } => ProductEventTerminalStatus::Failed,
         };
         let scope = execution.session_identity.as_deref().unwrap_or("runtime");
-        FinalizationDecision {
+        Self {
             operation_id: execution.operation_id.clone(),
             root_operation_id: execution
                 .root_operation_id
@@ -76,19 +72,18 @@ impl OperationFinalizer {
 
     pub(crate) fn resolve_non_session(
         &self,
-        decision: &FinalizationDecision,
     ) -> Result<FinalizationCommitResult, CodingSessionError> {
-        if decision.descriptor.durability.session_if_persistent {
+        if self.descriptor.durability.session_if_persistent {
             return Err(CodingSessionError::Session {
                 message: "session-durable finalization requires SessionCoordinator".into(),
             });
         }
-        if decision.requires_recovery {
+        if self.requires_recovery {
             return Err(CodingSessionError::Session {
                 message: "non-session finalization has no durable recovery owner".into(),
             });
         }
-        match &decision.payload {
+        match &self.payload {
             FinalizationPayload::Failed { code, message } => {
                 Ok(FinalizationCommitResult::DefinitelyFailed {
                     code: code.clone(),

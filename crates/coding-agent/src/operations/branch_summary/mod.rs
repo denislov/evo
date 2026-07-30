@@ -8,10 +8,9 @@ use crate::operations::prompt::context::{
 use crate::runtime::capability::{
     OperationCapabilitySnapshot, SessionReadCapability, SessionWriteCapability,
 };
-use crate::runtime::control::OperationCancellationHandle;
 use crate::runtime::facade::CodingSessionError;
+use crate::runtime::operation::control::OperationCancellationHandle;
 use crate::services::event::EventService;
-use crate::services::session::apply_finalized_session_write;
 use crate::session::id::{IdGenerator, SystemIdGenerator};
 use crate::session::service::{SessionPersistence, SessionService};
 use tokio_util::sync::CancellationToken;
@@ -111,7 +110,10 @@ pub(crate) async fn run(
                     operation_id,
                     reason,
                 )?;
-                apply_finalized_session_write(&mut outcome, &finalized);
+                outcome.apply_success_session_write_metadata(
+                    finalized.session_id.clone(),
+                    finalized.leaf_id.clone(),
+                );
                 event_service.emit_session_write_events(&finalized);
                 return Ok(outcome);
             }
@@ -126,7 +128,10 @@ pub(crate) async fn run(
             );
             let finalized = session_service
                 .commit_branch_summary_transaction(context.take_transaction(), operation_id)?;
-            apply_finalized_session_write(&mut outcome, &finalized);
+            outcome.apply_success_session_write_metadata(
+                finalized.session_id.clone(),
+                finalized.leaf_id.clone(),
+            );
             event_service.emit_session_write_events(&finalized);
             Ok(outcome)
         }
@@ -144,7 +149,10 @@ pub(crate) async fn run(
                     operation_id,
                     reason,
                 )?;
-                apply_finalized_session_write(&mut outcome, &finalized);
+                outcome.apply_success_session_write_metadata(
+                    finalized.session_id.clone(),
+                    finalized.leaf_id.clone(),
+                );
                 event_service.emit_session_write_events(&finalized);
                 return Ok(outcome);
             }
@@ -156,7 +164,10 @@ pub(crate) async fn run(
                 error.code(),
                 error.to_string(),
             )?;
-            apply_finalized_session_write(&mut outcome, &finalized);
+            outcome.apply_success_session_write_metadata(
+                finalized.session_id.clone(),
+                finalized.leaf_id.clone(),
+            );
             event_service.emit_session_write_events(&finalized);
             Ok(outcome)
         }

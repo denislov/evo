@@ -2,8 +2,8 @@ pub(crate) mod runner;
 
 use crate::profiles::ProfileRegistry;
 use crate::runtime::capability::OperationCapabilitySnapshot;
-use crate::runtime::control::OperationControl;
 use crate::runtime::facade::CodingSessionError;
+use crate::runtime::operation::control::OperationControl;
 use crate::services::event::EventService;
 use runner::{AgentTeamContext, AgentTeamOptions, AgentTeamOutcome, AgentTeamRunner};
 use tokio_util::sync::CancellationToken;

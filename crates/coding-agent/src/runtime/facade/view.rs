@@ -69,7 +69,7 @@ impl CodingAgentSession {
             self.runtime_host.session_coordinator.persistence,
             SessionPersistence::Persistent(_)
         );
-        self.runtime_host.capability_service.capabilities(
+        CodingAgentCapabilities::from_runtime_state(
             &self.runtime_host.operation_supervisor.control.activity(),
             persistent,
         )

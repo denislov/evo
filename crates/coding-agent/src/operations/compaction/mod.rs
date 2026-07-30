@@ -7,10 +7,9 @@ use crate::operations::prompt::context::InternalPromptTurnOutcome;
 use crate::runtime::capability::{
     OperationCapabilitySnapshot, SessionReadCapability, SessionWriteCapability,
 };
-use crate::runtime::control::OperationCancellationHandle;
 use crate::runtime::facade::CodingSessionError;
+use crate::runtime::operation::control::OperationCancellationHandle;
 use crate::services::event::EventService;
-use crate::services::session::apply_finalized_session_write;
 use crate::session::service::SessionService;
 
 pub(crate) mod runner;
@@ -44,7 +43,10 @@ pub(crate) async fn run(
                     error.code(),
                     error.to_string(),
                 )?;
-                apply_finalized_session_write(&mut outcome, &finalized);
+                outcome.apply_success_session_write_metadata(
+                    finalized.session_id.clone(),
+                    finalized.leaf_id.clone(),
+                );
                 event_service.emit_session_write_events(&finalized);
                 defer_compact_terminal(event_service, &outcome);
                 return Ok(outcome);
@@ -60,7 +62,10 @@ pub(crate) async fn run(
                 context.take_transaction(),
                 operation_id.clone(),
             )?;
-            apply_finalized_session_write(&mut outcome, &finalized);
+            outcome.apply_success_session_write_metadata(
+                finalized.session_id.clone(),
+                finalized.leaf_id.clone(),
+            );
 
             event_service.emit_session_write_pending(&finalized);
             event_service.defer_terminal_draft(
@@ -86,7 +91,10 @@ pub(crate) async fn run(
                 error.code(),
                 error.to_string(),
             )?;
-            apply_finalized_session_write(&mut outcome, &finalized);
+            outcome.apply_success_session_write_metadata(
+                finalized.session_id.clone(),
+                finalized.leaf_id.clone(),
+            );
             event_service.emit_session_write_events(&finalized);
             defer_compact_terminal(event_service, &outcome);
             Ok(outcome)

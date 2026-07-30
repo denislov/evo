@@ -9,16 +9,17 @@ use crate::events::{
 use crate::operations::agent_invocation::runner::{AgentInvocationOptions, AgentInvocationOutcome};
 use crate::operations::export::CodingAgentSessionExport;
 use crate::operations::export::runner::ExportOptions;
-use crate::operations::prompt::context::{InternalPromptTurnOutcome, PromptTurnOptions};
+use crate::operations::prompt::context::{
+    InternalPromptTurnOutcome, PromptTurnOptions, RuntimeSnapshot,
+};
 use crate::operations::self_healing_edit::runner::{
     SelfHealingEditOutcome, SelfHealingEditRequest,
 };
 use crate::operations::team_invocation::runner::{AgentTeamOptions, AgentTeamOutcome};
 use crate::profiles::ProfileId;
-use crate::runtime::control::OperationKind;
-use crate::runtime::operation::{
-    Operation, OperationClass, OperationDispatchMode, OperationOutcome,
-};
+use crate::runtime::capability::SessionCapabilityAccess;
+use crate::runtime::operation::control::OperationKind;
+use crate::runtime::operation::{OperationClass, OperationDispatchMode, OperationOutcome};
 use crate::runtime::public_error::{
     CodingAgentPublicDiagnostic, CodingAgentPublicError, safe_public_summary,
 };
@@ -597,55 +598,25 @@ fn recovery_terminal_operation_kind(
     })
 }
 
-/// Resolve the internal payload enum through the public operation contract.
+/// Static seed for a submitted operation's lifecycle descriptor.
 ///
-/// The internal enum intentionally owns no scheduling or lifecycle table: it
-/// only maps its payload shape back to the authoritative public descriptor.
+/// This is data, not a second operation enum: the public operation remains the
+/// only authoritative variant set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperationContract {
-    Prompt,
-    Compact,
-    BranchSummary,
-    SelfHealingEdit,
-    InvokeAgent,
-    InvokeTeam,
-    SetDefaultAgentProfile,
-    ApproveDelegation,
-    RejectDelegation,
-    ForkSession,
-    SwitchActiveLeaf,
-    SetSessionTreeLabel,
-    SetSessionName,
-    ExportCurrent,
-    ExportCurrentHtml,
-}
-
-pub(crate) fn descriptor_for_internal_operation(operation: &Operation) -> OperationDescriptor {
-    let contract = match operation {
-        Operation::Prompt(_) => OperationContract::Prompt,
-        Operation::ManualCompaction(_) => OperationContract::Compact,
-        Operation::ApproveDelegationConfirmation { .. } => OperationContract::ApproveDelegation,
-        Operation::RejectDelegationConfirmation { .. } => OperationContract::RejectDelegation,
-        Operation::BranchSummary { .. } => OperationContract::BranchSummary,
-        Operation::SelfHealingEdit(_) => OperationContract::SelfHealingEdit,
-        Operation::AgentInvocation(_) => OperationContract::InvokeAgent,
-        Operation::AgentTeam(_) => OperationContract::InvokeTeam,
-        Operation::ForkSession { .. } => OperationContract::ForkSession,
-        Operation::SwitchActiveLeaf { .. } => OperationContract::SwitchActiveLeaf,
-        Operation::SetSessionTreeLabel { .. } => OperationContract::SetSessionTreeLabel,
-        Operation::SetSessionName { .. } => OperationContract::SetSessionName,
-        Operation::SetDefaultAgentProfile { .. } => OperationContract::SetDefaultAgentProfile,
-        Operation::Export(options) if options.writes_html() => OperationContract::ExportCurrentHtml,
-        Operation::Export(_) => OperationContract::ExportCurrent,
-    };
-    contract.descriptor()
+struct OperationContract {
+    submitted_kind: OperationKind,
+    admission_class: OperationClass,
+    dispatch_mode: OperationDispatchMode,
+    outcome_family: OperationOutcomeFamily,
+    terminal_policy: OperationTerminalPolicy,
+    permitted_root_evidence: &'static [OperationRootTerminalEvidence],
 }
 
 pub(crate) fn descriptor_for_child_kind(kind: OperationKind) -> Option<OperationDescriptor> {
     let contract = match kind {
-        OperationKind::Prompt => OperationContract::Prompt,
-        OperationKind::AgentInvocation => OperationContract::InvokeAgent,
-        OperationKind::AgentTeam => OperationContract::InvokeTeam,
+        OperationKind::Prompt => OperationContract::PROMPT,
+        OperationKind::AgentInvocation => OperationContract::INVOKE_AGENT,
+        OperationKind::AgentTeam => OperationContract::INVOKE_TEAM,
         OperationKind::Compact
         | OperationKind::BranchSummary
         | OperationKind::SelfHealingEdit
@@ -661,136 +632,154 @@ pub(crate) fn descriptor_for_child_kind(kind: OperationKind) -> Option<Operation
 }
 
 impl OperationContract {
-    fn descriptor(self) -> OperationDescriptor {
-        let (
+    const fn new(
+        submitted_kind: OperationKind,
+        admission_class: OperationClass,
+        dispatch_mode: OperationDispatchMode,
+        outcome_family: OperationOutcomeFamily,
+        terminal_policy: OperationTerminalPolicy,
+        permitted_root_evidence: &'static [OperationRootTerminalEvidence],
+    ) -> Self {
+        Self {
             submitted_kind,
             admission_class,
             dispatch_mode,
             outcome_family,
             terminal_policy,
             permitted_root_evidence,
-        ) = match self {
-            Self::Prompt => (
-                OperationKind::Prompt,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::Async,
-                OperationOutcomeFamily::Prompt,
-                OperationTerminalPolicy::ProductEvent,
-                PROMPT_ROOT_EVIDENCE,
-            ),
-            Self::Compact => (
-                OperationKind::Compact,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::Async,
-                OperationOutcomeFamily::Compact,
-                OperationTerminalPolicy::ProductEvent,
-                COMPACT_ROOT_EVIDENCE,
-            ),
-            Self::BranchSummary => (
-                OperationKind::BranchSummary,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::Async,
-                OperationOutcomeFamily::BranchSummary,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-            Self::SelfHealingEdit => (
-                OperationKind::SelfHealingEdit,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::Async,
-                OperationOutcomeFamily::SelfHealingEdit,
-                OperationTerminalPolicy::ProductEvent,
-                SELF_HEALING_EDIT_ROOT_EVIDENCE,
-            ),
-            Self::InvokeAgent => (
-                OperationKind::AgentInvocation,
-                OperationClass::NonSessionRoot,
-                OperationDispatchMode::Async,
-                OperationOutcomeFamily::AgentInvocation,
-                OperationTerminalPolicy::ProductEvent,
-                AGENT_INVOCATION_ROOT_EVIDENCE,
-            ),
-            Self::InvokeTeam => (
-                OperationKind::AgentTeam,
-                OperationClass::NonSessionRoot,
-                OperationDispatchMode::Async,
-                OperationOutcomeFamily::AgentTeam,
-                OperationTerminalPolicy::ProductEvent,
-                AGENT_TEAM_ROOT_EVIDENCE,
-            ),
-            Self::SetDefaultAgentProfile => (
-                OperationKind::SetDefaultAgentProfile,
-                OperationClass::RuntimeWrite,
-                OperationDispatchMode::SyncMutable,
-                OperationOutcomeFamily::DefaultAgentProfileChanged,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-            Self::ApproveDelegation => (
-                OperationKind::DelegationConfirmation,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::Async,
-                OperationOutcomeFamily::DelegationApproved,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-            Self::RejectDelegation => (
-                OperationKind::DelegationConfirmation,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::SyncMutable,
-                OperationOutcomeFamily::DelegationRejected,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-            Self::ForkSession => (
-                OperationKind::ForkSession,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::SyncMutable,
-                OperationOutcomeFamily::SessionForked,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-            Self::SwitchActiveLeaf => (
-                OperationKind::SwitchActiveLeaf,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::SyncMutable,
-                OperationOutcomeFamily::ActiveLeafSwitched,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-            Self::SetSessionTreeLabel => (
-                OperationKind::SetSessionTreeLabel,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::SyncMutable,
-                OperationOutcomeFamily::SessionTreeLabelChanged,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-            Self::SetSessionName => (
-                OperationKind::SetSessionName,
-                OperationClass::SessionWriteRoot,
-                OperationDispatchMode::SyncMutable,
-                OperationOutcomeFamily::SessionNameChanged,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-            Self::ExportCurrent => (
-                OperationKind::Export,
-                OperationClass::ReadOnly,
-                OperationDispatchMode::SyncReadOnly,
-                OperationOutcomeFamily::Export,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-            Self::ExportCurrentHtml => (
-                OperationKind::Export,
-                OperationClass::ReadOnly,
-                OperationDispatchMode::SyncReadOnly,
-                OperationOutcomeFamily::ExportHtml,
-                OperationTerminalPolicy::OutcomeAcknowledgement,
-                &[][..],
-            ),
-        };
+        }
+    }
+
+    const PROMPT: Self = Self::new(
+        OperationKind::Prompt,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::Prompt,
+        OperationTerminalPolicy::ProductEvent,
+        PROMPT_ROOT_EVIDENCE,
+    );
+    const COMPACT: Self = Self::new(
+        OperationKind::Compact,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::Compact,
+        OperationTerminalPolicy::ProductEvent,
+        COMPACT_ROOT_EVIDENCE,
+    );
+    const BRANCH_SUMMARY: Self = Self::new(
+        OperationKind::BranchSummary,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::BranchSummary,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const SELF_HEALING_EDIT: Self = Self::new(
+        OperationKind::SelfHealingEdit,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::SelfHealingEdit,
+        OperationTerminalPolicy::ProductEvent,
+        SELF_HEALING_EDIT_ROOT_EVIDENCE,
+    );
+    const INVOKE_AGENT: Self = Self::new(
+        OperationKind::AgentInvocation,
+        OperationClass::NonSessionRoot,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::AgentInvocation,
+        OperationTerminalPolicy::ProductEvent,
+        AGENT_INVOCATION_ROOT_EVIDENCE,
+    );
+    const INVOKE_TEAM: Self = Self::new(
+        OperationKind::AgentTeam,
+        OperationClass::NonSessionRoot,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::AgentTeam,
+        OperationTerminalPolicy::ProductEvent,
+        AGENT_TEAM_ROOT_EVIDENCE,
+    );
+    const SET_DEFAULT_AGENT_PROFILE: Self = Self::new(
+        OperationKind::SetDefaultAgentProfile,
+        OperationClass::RuntimeWrite,
+        OperationDispatchMode::SyncMutable,
+        OperationOutcomeFamily::DefaultAgentProfileChanged,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const APPROVE_DELEGATION: Self = Self::new(
+        OperationKind::DelegationConfirmation,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::DelegationApproved,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const REJECT_DELEGATION: Self = Self::new(
+        OperationKind::DelegationConfirmation,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::SyncMutable,
+        OperationOutcomeFamily::DelegationRejected,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const FORK_SESSION: Self = Self::new(
+        OperationKind::ForkSession,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::SyncMutable,
+        OperationOutcomeFamily::SessionForked,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const SWITCH_ACTIVE_LEAF: Self = Self::new(
+        OperationKind::SwitchActiveLeaf,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::SyncMutable,
+        OperationOutcomeFamily::ActiveLeafSwitched,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const SET_SESSION_TREE_LABEL: Self = Self::new(
+        OperationKind::SetSessionTreeLabel,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::SyncMutable,
+        OperationOutcomeFamily::SessionTreeLabelChanged,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const SET_SESSION_NAME: Self = Self::new(
+        OperationKind::SetSessionName,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::SyncMutable,
+        OperationOutcomeFamily::SessionNameChanged,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const EXPORT_CURRENT: Self = Self::new(
+        OperationKind::Export,
+        OperationClass::ReadOnly,
+        OperationDispatchMode::SyncReadOnly,
+        OperationOutcomeFamily::Export,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const EXPORT_CURRENT_HTML: Self = Self::new(
+        OperationKind::Export,
+        OperationClass::ReadOnly,
+        OperationDispatchMode::SyncReadOnly,
+        OperationOutcomeFamily::ExportHtml,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+
+    fn descriptor(self) -> OperationDescriptor {
+        let Self {
+            submitted_kind,
+            admission_class,
+            dispatch_mode,
+            outcome_family,
+            terminal_policy,
+            permitted_root_evidence,
+        } = self;
         let (session_access, runtime_access, capacity, durability) = match admission_class {
             OperationClass::SessionWriteRoot => (
                 OperationSessionAccess::Write,
@@ -860,21 +849,21 @@ impl OperationContract {
 impl CodingAgentOperation {
     fn contract(&self) -> OperationContract {
         match self {
-            Self::Prompt(_) => OperationContract::Prompt,
-            Self::Compact(_) => OperationContract::Compact,
-            Self::BranchSummary { .. } => OperationContract::BranchSummary,
-            Self::SelfHealingEdit(_) => OperationContract::SelfHealingEdit,
-            Self::InvokeAgent(_) => OperationContract::InvokeAgent,
-            Self::InvokeTeam(_) => OperationContract::InvokeTeam,
-            Self::SetDefaultAgentProfile { .. } => OperationContract::SetDefaultAgentProfile,
-            Self::ApproveDelegation { .. } => OperationContract::ApproveDelegation,
-            Self::RejectDelegation { .. } => OperationContract::RejectDelegation,
-            Self::ForkSession { .. } => OperationContract::ForkSession,
-            Self::SwitchActiveLeaf { .. } => OperationContract::SwitchActiveLeaf,
-            Self::SetSessionTreeLabel { .. } => OperationContract::SetSessionTreeLabel,
-            Self::SetSessionName { .. } => OperationContract::SetSessionName,
-            Self::ExportCurrent => OperationContract::ExportCurrent,
-            Self::ExportCurrentHtml(_) => OperationContract::ExportCurrentHtml,
+            Self::Prompt(_) => OperationContract::PROMPT,
+            Self::Compact(_) => OperationContract::COMPACT,
+            Self::BranchSummary { .. } => OperationContract::BRANCH_SUMMARY,
+            Self::SelfHealingEdit(_) => OperationContract::SELF_HEALING_EDIT,
+            Self::InvokeAgent(_) => OperationContract::INVOKE_AGENT,
+            Self::InvokeTeam(_) => OperationContract::INVOKE_TEAM,
+            Self::SetDefaultAgentProfile { .. } => OperationContract::SET_DEFAULT_AGENT_PROFILE,
+            Self::ApproveDelegation { .. } => OperationContract::APPROVE_DELEGATION,
+            Self::RejectDelegation { .. } => OperationContract::REJECT_DELEGATION,
+            Self::ForkSession { .. } => OperationContract::FORK_SESSION,
+            Self::SwitchActiveLeaf { .. } => OperationContract::SWITCH_ACTIVE_LEAF,
+            Self::SetSessionTreeLabel { .. } => OperationContract::SET_SESSION_TREE_LABEL,
+            Self::SetSessionName { .. } => OperationContract::SET_SESSION_NAME,
+            Self::ExportCurrent => OperationContract::EXPORT_CURRENT,
+            Self::ExportCurrentHtml(_) => OperationContract::EXPORT_CURRENT_HTML,
         }
     }
 
@@ -902,55 +891,73 @@ impl CodingAgentOperation {
         }
     }
 
-    pub(crate) fn into_internal(self) -> Operation {
+    /// The provider runtime this operation carries, when it drives a model.
+    pub(crate) fn runtime(&self) -> Option<&RuntimeSnapshot> {
         match self {
-            Self::Prompt(options) => Operation::Prompt(options),
-            Self::Compact(options) => Operation::ManualCompaction(options),
-            Self::BranchSummary {
-                options,
-                source_leaf_id,
-                target_leaf_id,
-                custom_instructions,
-                reuse,
-            } => Operation::BranchSummary {
-                options,
-                source_leaf_id,
-                target_leaf_id,
-                custom_instructions,
-                reuse_existing: matches!(reuse, BranchSummaryReusePolicy::ReuseExisting),
-            },
-            Self::SelfHealingEdit(request) => Operation::SelfHealingEdit(request),
-            Self::InvokeAgent(options) => Operation::AgentInvocation(options),
-            Self::InvokeTeam(options) => Operation::AgentTeam(options),
-            Self::SetDefaultAgentProfile { profile_id } => {
-                Operation::SetDefaultAgentProfile { profile_id }
-            }
-            Self::ApproveDelegation {
-                operation_id,
-                tool_call_id,
-            } => Operation::ApproveDelegationConfirmation {
-                operation_id,
-                tool_call_id,
-            },
-            Self::RejectDelegation {
-                operation_id,
-                tool_call_id,
-                reason,
-            } => Operation::RejectDelegationConfirmation {
-                operation_id,
-                tool_call_id,
-                reason,
-            },
-            Self::ForkSession { target_leaf_id } => Operation::ForkSession { target_leaf_id },
-            Self::SwitchActiveLeaf { target_leaf_id } => {
-                Operation::SwitchActiveLeaf { target_leaf_id }
-            }
-            Self::SetSessionTreeLabel { entry_id, label } => {
-                Operation::SetSessionTreeLabel { entry_id, label }
-            }
-            Self::SetSessionName { name } => Operation::SetSessionName { name },
-            Self::ExportCurrent => Operation::Export(ExportOptions::view()),
-            Self::ExportCurrentHtml(path) => Operation::Export(ExportOptions::html(path)),
+            Self::Prompt(options)
+            | Self::Compact(options)
+            | Self::BranchSummary { options, .. } => options.runtime(),
+            Self::InvokeAgent(options) => options.prompt_options().runtime(),
+            Self::InvokeTeam(options) => options.prompt_options().runtime(),
+            Self::SelfHealingEdit(request) => request
+                .model_repair()
+                .and_then(|repair| repair.prompt_options().runtime()),
+            Self::ApproveDelegation { .. }
+            | Self::RejectDelegation { .. }
+            | Self::ForkSession { .. }
+            | Self::SwitchActiveLeaf { .. }
+            | Self::SetSessionTreeLabel { .. }
+            | Self::SetSessionName { .. }
+            | Self::SetDefaultAgentProfile { .. }
+            | Self::ExportCurrent
+            | Self::ExportCurrentHtml(_) => None,
+        }
+    }
+
+    pub(crate) fn session_access(&self) -> SessionCapabilityAccess {
+        match self.descriptor().session_access {
+            OperationSessionAccess::None => SessionCapabilityAccess::None,
+            OperationSessionAccess::Read => SessionCapabilityAccess::Read,
+            OperationSessionAccess::Write => SessionCapabilityAccess::Write,
+        }
+    }
+
+    pub(crate) fn prompt_options_mut(&mut self) -> Option<&mut PromptTurnOptions> {
+        match self {
+            Self::Prompt(options) | Self::Compact(options) => Some(options),
+            Self::BranchSummary { options, .. } => Some(options),
+            Self::SelfHealingEdit(request) => request
+                .model_repair_mut()
+                .map(|repair| repair.prompt_options_mut()),
+            Self::InvokeAgent(options) => Some(options.prompt_options_mut()),
+            Self::InvokeTeam(options) => Some(options.prompt_options_mut()),
+            Self::ApproveDelegation { .. }
+            | Self::RejectDelegation { .. }
+            | Self::ForkSession { .. }
+            | Self::SwitchActiveLeaf { .. }
+            | Self::SetSessionTreeLabel { .. }
+            | Self::SetSessionName { .. }
+            | Self::SetDefaultAgentProfile { .. }
+            | Self::ExportCurrent
+            | Self::ExportCurrentHtml(_) => None,
+        }
+    }
+
+    /// The kind known before admission. Delegation approval resolves its kind
+    /// from the pending request, so it has none until then.
+    pub(crate) fn static_kind(&self) -> Option<OperationKind> {
+        (!matches!(self, Self::ApproveDelegation { .. }))
+            .then_some(self.descriptor().submitted_kind)
+    }
+
+    /// Normalizes the two export variants into the runner's options. This is the
+    /// only shape difference between the submitted operation and what a runner
+    /// consumes.
+    pub(crate) fn export_options(&self) -> Option<ExportOptions> {
+        match self {
+            Self::ExportCurrent => Some(ExportOptions::view()),
+            Self::ExportCurrentHtml(path) => Some(ExportOptions::html(path.clone())),
+            _ => None,
         }
     }
 }

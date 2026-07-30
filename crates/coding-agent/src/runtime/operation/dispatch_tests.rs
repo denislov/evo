@@ -3,9 +3,9 @@
 //! [`CodingAgentSession::run_internal`] selects a dispatcher purely from
 //! `descriptor.dispatch_mode`. These tests drive a real session through all
 //! three dispatch families and assert that each one both reaches its runner and
-//! surfaces the runner's own error rather than masking it as an unsupported
-//! dispatch. CAG-311 removes the defensive `unsupported_dispatch` arms from the
-//! handlers; these tests are what prove the removal changed nothing observable.
+//! surfaces the runner's own error rather than masking it as a routing failure.
+//! CAG-311 removes the defensive error arms from the handlers; these tests are
+//! what prove the removal changed nothing observable.
 use std::sync::Arc;
 
 use agent_core::api::agent::AgentResources;
@@ -13,13 +13,13 @@ use ai::api::conversation::StopReason;
 use ai::api::model::{Model, ModelCost, ModelInput};
 use ai::api::provider::faux::FauxProvider;
 
-use super::facade::{CodingAgentSession, CodingAgentSessionOptions};
-use super::operation::OperationDispatchMode;
-use super::outcome::{CodingAgentOperation, CodingAgentOperationOutcome};
+use super::OperationDispatchMode;
+use super::contract::{CodingAgentOperation, CodingAgentOperationOutcome};
 use crate::app::bootstrap::{PromptInvocation, SessionRunOptions};
 use crate::app::prompt_runtime::PromptRuntimeOptions;
 use crate::operations::prompt::context::PromptTurnOptions;
 use crate::runtime::error::CodingSessionError;
+use crate::runtime::facade::{CodingAgentSession, CodingAgentSessionOptions};
 use crate::test_support::ProviderGuard;
 
 fn model(api: &str) -> Model {
@@ -127,9 +127,9 @@ async fn run_internal_routes_every_dispatch_family_to_its_runner() {
 
 /// A sync-mutable operation that its runner rejects must surface the runner's
 /// own error. The message must stay the session-writer capability message, not
-/// become the `unsupported_dispatch` phrasing built from `dispatcher_label()`.
+/// become a dispatcher-selection error.
 #[tokio::test]
-async fn sync_mutable_runner_errors_are_not_masked_as_unsupported_dispatch() {
+async fn sync_mutable_runner_errors_are_not_masked_as_routing_failures() {
     let mut session = CodingAgentSession::non_persistent_internal(CodingAgentSessionOptions::new())
         .await
         .unwrap();
@@ -154,7 +154,7 @@ async fn sync_mutable_runner_errors_are_not_masked_as_unsupported_dispatch() {
 /// Same guarantee for the async family: a compact request whose invocation the
 /// runner rejects must preserve the runner's typed input error.
 #[tokio::test]
-async fn async_runner_errors_are_not_masked_as_unsupported_dispatch() {
+async fn async_runner_errors_are_not_masked_as_routing_failures() {
     let mut session = CodingAgentSession::non_persistent_internal(CodingAgentSessionOptions::new())
         .await
         .unwrap();
@@ -176,10 +176,8 @@ async fn async_runner_errors_are_not_masked_as_unsupported_dispatch() {
     assert_dispatch_error_is_not_a_routing_fallback(&error, "Compact");
 }
 
-/// `IntentRouter::unsupported_dispatch` builds its message from
-/// `dispatch_mode.dispatcher_label()`, so a routing fallback is recognisable by
-/// the phrase "requires ... dispatcher". Any such error means the router sent an
-/// operation to the wrong handler.
+/// The removed routing fallback used the phrase "requires ... dispatcher".
+/// Any such error means the runner's own error was masked during dispatch.
 fn assert_dispatch_error_is_not_a_routing_fallback(error: &CodingSessionError, name: &str) {
     if let CodingSessionError::UnsupportedCapability { capability } = error {
         assert!(

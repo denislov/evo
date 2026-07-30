@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::capability::CapabilityGeneration;
-use super::snapshot::SnapshotCoordinator;
+use crate::runtime::capability::CapabilityGeneration;
 use crate::runtime::facade::CodingSessionError;
 use crate::runtime::operation::OperationClass;
+use crate::runtime::snapshot::SnapshotCoordinator;
 
 pub(crate) const DEFAULT_RUNTIME_ROOT_LIMIT: usize = 4;
 

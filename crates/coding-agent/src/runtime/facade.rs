@@ -41,15 +41,7 @@ pub use crate::profiles::{
     DelegationConfirmationMode, DelegationPolicy, ProfileId, ProfileKind, ProfileSource,
     SupervisionPolicy, TeamStrategy, TeamSupervisor,
 };
-pub use crate::runtime::client::product_projection::{
-    CodingAgentClientBootstrap, CodingAgentClientDiagnostic, CodingAgentClientMessage,
-    CodingAgentClientMessageStatus, CodingAgentClientProjection, CodingAgentClientProjectionApply,
-    CodingAgentClientProjectionArea, CodingAgentClientProjectionChanges,
-    CodingAgentClientProjectionIssue, CodingAgentClientProjectionLifecycle,
-    CodingAgentClientRecovery, CodingAgentClientRecoveryStatus, CodingAgentClientTool,
-    CodingAgentClientToolStatus, CodingAgentClientTranscript,
-};
-pub use crate::runtime::client::projection::{
+pub use crate::runtime::client::connection::{
     CodingAgentCapabilityControl, CodingAgentCapabilityRevocationOutcome,
     CodingAgentClientConnection, CodingAgentClientId, CodingAgentConnectionGeneration,
     CodingAgentContextSnapshot, CodingAgentControlId, CodingAgentControlKind,
@@ -66,9 +58,16 @@ pub use crate::runtime::client::projection::{
     CodingAgentSubmittedTerminalAnchor, CodingAgentTerminalUncertainty,
     CodingAgentTurnUsageSnapshot, CodingAgentUsageSnapshot,
 };
+pub use crate::runtime::client::projection::{
+    CodingAgentClientBootstrap, CodingAgentClientDiagnostic, CodingAgentClientMessage,
+    CodingAgentClientMessageStatus, CodingAgentClientProjection, CodingAgentClientProjectionApply,
+    CodingAgentClientProjectionArea, CodingAgentClientProjectionChanges,
+    CodingAgentClientProjectionIssue, CodingAgentClientProjectionLifecycle,
+    CodingAgentClientRecovery, CodingAgentClientRecoveryStatus, CodingAgentClientTool,
+    CodingAgentClientToolStatus, CodingAgentClientTranscript,
+};
 pub use crate::runtime::error::CodingAgentLifecycleRejection;
 pub(crate) use crate::runtime::error::CodingSessionError;
-pub use crate::runtime::execution::CodingAgentOperationTask;
 pub use crate::runtime::facade::context::{
     CapabilityStatus, CodingAgentCapabilities, CodingAgentRecoveryPending,
     CodingAgentRecoveryResolutionRequest, CodingAgentRecoveryResolutionResult,
@@ -88,9 +87,10 @@ pub use crate::runtime::file_review::{
     CodingAgentExternalEditorTarget, CodingAgentFileChangeIdentity, CodingAgentFileReview,
     CodingAgentFileReviewRequest, CodingAgentFileRevision,
 };
-pub use crate::runtime::outcome::{
+pub use crate::runtime::operation::contract::{
     BranchSummaryReusePolicy, CodingAgentOperation, CodingAgentOperationOutcome, PromptTurnOutcome,
 };
+pub use crate::runtime::operation::execution::CodingAgentOperationTask;
 pub use crate::runtime::public_error::{
     CodingAgentErrorCategory, CodingAgentErrorContext, CodingAgentPublicDiagnostic,
     CodingAgentPublicDiagnosticOrigin, CodingAgentPublicDiagnosticSeverity, CodingAgentPublicError,
@@ -100,29 +100,31 @@ pub use crate::runtime::version::{
 };
 pub(crate) use crate::services::event::ProductEventReceiver;
 
-use crate::runtime::client::projection as public_projection;
+use crate::runtime::client::connection as public_connection;
 use crate::runtime::snapshot as snapshot_coordinator;
 
 pub(crate) use crate::operations::delegation::{
     PendingDelegationConfirmationQueue, PendingDelegationConfirmationState,
-    pending_state_from_replay,
 };
 use crate::operations::export::runner::ExportOptions;
 use crate::runtime::capability::CapabilitySnapshotService;
 pub use crate::runtime::capability::{FilesystemCapability, ShellCapability};
 use crate::runtime::client::service::ClientService;
-pub(crate) use crate::runtime::control::OperationKind;
-use crate::runtime::control::{OperationControl, PromptControlCleanup, PromptControlGeneration};
 use crate::runtime::intent::{IntentRouter, QueryIntent};
+pub(crate) use crate::runtime::operation::control::OperationKind;
+use crate::runtime::operation::control::{
+    OperationControl, PromptControlCleanup, PromptControlGeneration,
+};
+pub(crate) use crate::runtime::operation::submission::SubmissionLeaseLifecycle;
 use crate::runtime::owners::RuntimeHost;
+use crate::runtime::session_coordinator::replay_derived_owner_state;
 use crate::runtime::snapshot::SnapshotCoordinator;
-pub(crate) use crate::runtime::submission::SubmissionLeaseLifecycle;
 use crate::services::authorization::AuthorizationService;
-use crate::services::capability::CapabilityService;
 use crate::services::event::EventService;
 use crate::services::runtime::RuntimeService;
-use crate::services::session::{default_cwd, replay_derived_owner_state, session_cwd};
-use crate::session::service::{SessionPersistence, SessionService, TransientSessionState};
+use crate::session::service::{
+    SessionPersistence, SessionService, TransientSessionState, default_cwd, session_cwd,
+};
 pub(in crate::runtime) use control::PromptControlCleanupGuard;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

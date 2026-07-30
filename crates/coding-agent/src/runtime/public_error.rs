@@ -5,8 +5,8 @@ use crate::limits::{
 };
 use crate::operations::prompt::context::{CodingDiagnostic, CodingDiagnosticSeverity};
 use crate::profiles::{ProfileDiagnostic, ProfileKind};
+use crate::redaction::redact_and_bound;
 use crate::runtime::error::{CodingAgentLifecycleRejection, CodingSessionError};
-use crate::services::redaction::redact_and_bound;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

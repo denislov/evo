@@ -13,9 +13,9 @@ use crate::operations::team_invocation::runner::{
 };
 use crate::profiles::{DelegationPolicy, ProfileId, ProfileKind, ProfileRegistry};
 use crate::runtime::capability::{OperationCapabilitySnapshot, SessionWriteCapability};
-use crate::runtime::control::{OperationControl, OperationKind};
 use crate::runtime::facade::CodingSessionError;
-use crate::runtime::scheduler::OperationScheduler;
+use crate::runtime::operation::admission::OperationScheduler;
+use crate::runtime::operation::control::{OperationControl, OperationKind};
 use crate::runtime::session_coordinator::{
     SessionCoordinator, SessionWriterCommand, SessionWriterReply,
 };

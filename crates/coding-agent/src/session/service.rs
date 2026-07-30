@@ -29,7 +29,7 @@ use crate::runtime::facade::{
     CodingSessionError, ProfileId, ProfileKind, SelfHealingEditOutcome,
     SelfHealingEditRepairAttempt,
 };
-use crate::runtime::finalization::FinalizationDecision;
+use crate::runtime::operation::finalize::FinalizationDecision;
 use crate::services::event::EventService;
 use crate::session::event::{
     OperationKind, PersistedContentBlock, PersistedDelegationRuntimeSeed,
@@ -60,6 +60,17 @@ use crate::workspace::{
 const RECOVERY_RECORD_VERSION: u64 = crate::events::recovery::RECOVERY_RECORD_VERSION;
 const MAX_RECOVERY_RETRY_ATTEMPTS: u32 = 3;
 const MAX_SESSION_NAME_CHARS: usize = 200;
+
+pub(crate) fn session_cwd(session_service: &SessionService) -> Option<PathBuf> {
+    session_service
+        .replay()
+        .ok()
+        .and_then(|replay| replay.cwd.map(PathBuf::from))
+}
+
+pub(crate) fn default_cwd() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartupRecoveryMarker {
@@ -1586,7 +1597,7 @@ impl SessionService {
                 ) = pending_facts.get(&operation_id).cloned().unwrap_or((
                     self.recovery_id_for_uncertain_operation(&operation_id)?,
                     RECOVERY_RECORD_VERSION,
-                    crate::runtime::outcome::OPERATION_DESCRIPTOR_REVISION,
+                    crate::runtime::operation::contract::OPERATION_DESCRIPTOR_REVISION,
                     operation_capability_generation,
                     0,
                     None,
@@ -1658,7 +1669,7 @@ impl SessionService {
                 message: "recovery resolution reason exceeds 1200 characters".into(),
             });
         }
-        let reason = crate::services::redaction::redact_sensitive_text(reason);
+        let reason = crate::redaction::redact_sensitive_text(reason);
         let operation_kind = self
             .store
             .read_events(&self.handle)?
@@ -2010,7 +2021,8 @@ impl SessionService {
                     operation_kind,
                     capability_generation,
                     record_version: RECOVERY_RECORD_VERSION,
-                    descriptor_revision: crate::runtime::outcome::OPERATION_DESCRIPTOR_REVISION,
+                    descriptor_revision:
+                        crate::runtime::operation::contract::OPERATION_DESCRIPTOR_REVISION,
                     attempt_count: 0,
                     last_attempt_at: None,
                     next_attempt_at: None,

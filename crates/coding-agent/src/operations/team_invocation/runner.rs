@@ -16,10 +16,10 @@ use crate::profiles::{
     AgentProfile, ProfileId, ProfileKind, ProfileRegistry, TeamProfile, TeamSupervisor,
 };
 use crate::runtime::capability::{ActorId, OperationCapabilitySnapshot};
-use crate::runtime::control::{OperationControl, OperationKind};
 use crate::runtime::facade::{CodingSessionError, PendingDelegationConfirmationState};
+use crate::runtime::operation::admission::OperationScheduler;
+use crate::runtime::operation::control::{OperationControl, OperationKind};
 use crate::runtime::public_error::CodingAgentPublicDiagnostic;
-use crate::runtime::scheduler::OperationScheduler;
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
 use crate::session::id::{Clock, IdGenerator, SystemClock, SystemIdGenerator};

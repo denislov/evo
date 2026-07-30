@@ -1,5 +1,5 @@
 use super::capability::CapabilityGeneration;
-use super::control::{OperationCancellationHandle, OperationKind, PromptControlHandle};
+use super::operation::control::{OperationCancellationHandle, OperationKind, PromptControlHandle};
 use crate::events::{ProductEvent, ProductEventSequence, ProductEventTerminalStatus};
 use crate::runtime::client::context::UiContextProjection;
 use crate::runtime::client::state::{
@@ -8,7 +8,7 @@ use crate::runtime::client::state::{
 use crate::runtime::error::CodingAgentLifecycleRejection;
 use crate::runtime::facade::CodingSessionError;
 use crate::runtime::facade::context::{CodingAgentCapabilities, CodingAgentSessionView};
-use crate::runtime::outcome::OperationDescriptor;
+use crate::runtime::operation::contract::OperationDescriptor;
 use crate::runtime::version::UI_SNAPSHOT_PROTOCOL_VERSION;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -40,7 +40,7 @@ pub(crate) enum SubmittedTerminalAnchor {
         durability: SubmittedEventDurability,
     },
     OutcomeOnly {
-        acknowledgement: crate::runtime::client::projection::CodingAgentOutcomeAcknowledgementId,
+        acknowledgement: crate::runtime::client::connection::CodingAgentOutcomeAcknowledgementId,
     },
     TerminalUncertain {
         operation_id: String,
@@ -248,7 +248,7 @@ pub(crate) struct SnapshotCoordinator {
 struct PromptControlBinding {
     owner: ClientHandle,
     operation_id: String,
-    channel_generation: super::control::PromptControlGeneration,
+    channel_generation: super::operation::control::PromptControlGeneration,
     sender: PromptControlHandle,
 }
 
@@ -396,17 +396,17 @@ impl SnapshotCoordinator {
         &self,
         handle: &ClientHandle,
         operation_id: &str,
-        draft_id: crate::runtime::client::projection::CodingAgentDraftId,
-        kind: crate::runtime::client::projection::CodingAgentControlKind,
+        draft_id: crate::runtime::client::connection::CodingAgentDraftId,
+        kind: crate::runtime::client::connection::CodingAgentControlKind,
     ) -> Result<
-        crate::runtime::client::projection::CodingAgentControlReceipt,
-        crate::runtime::client::projection::CodingAgentControlRejection,
+        crate::runtime::client::connection::CodingAgentControlReceipt,
+        crate::runtime::client::connection::CodingAgentControlRejection,
     > {
         let text = {
             let mut state = self.state.lock().unwrap();
             let record = Self::record(&mut state, handle).map_err(|error| {
-                crate::runtime::client::projection::CodingAgentControlRejection {
-                    control_id: crate::runtime::client::projection::CodingAgentControlId(
+                crate::runtime::client::connection::CodingAgentControlRejection {
+                    control_id: crate::runtime::client::connection::CodingAgentControlId(
                         draft_id.0.clone(),
                     ),
                     operation_id: operation_id.into(),
@@ -415,17 +415,17 @@ impl SnapshotCoordinator {
                 }
             })?;
             let queue = match kind {
-                crate::runtime::client::projection::CodingAgentControlKind::Steer => {
+                crate::runtime::client::connection::CodingAgentControlKind::Steer => {
                     &record.steer_drafts
                 }
-                crate::runtime::client::projection::CodingAgentControlKind::FollowUp => {
+                crate::runtime::client::connection::CodingAgentControlKind::FollowUp => {
                     &record.follow_up_drafts
                 }
-                crate::runtime::client::projection::CodingAgentControlKind::Abort => {
-                    return Err(crate::runtime::client::projection::CodingAgentControlRejection {
-                        control_id: crate::runtime::client::projection::CodingAgentControlId(draft_id.0),
+                crate::runtime::client::connection::CodingAgentControlKind::Abort => {
+                    return Err(crate::runtime::client::connection::CodingAgentControlRejection {
+                        control_id: crate::runtime::client::connection::CodingAgentControlId(draft_id.0),
                         operation_id: operation_id.into(), kind,
-                        reason: crate::runtime::client::projection::CodingAgentControlRejectionReason::InvalidInput,
+                        reason: crate::runtime::client::connection::CodingAgentControlRejectionReason::InvalidInput,
                     });
                 }
             };
@@ -433,18 +433,18 @@ impl SnapshotCoordinator {
                 .iter()
                 .find(|draft| draft.id == draft_id.0)
                 .map(|draft| draft.text.clone())
-                .ok_or_else(|| crate::runtime::client::projection::CodingAgentControlRejection {
-                    control_id: crate::runtime::client::projection::CodingAgentControlId(draft_id.0.clone()),
+                .ok_or_else(|| crate::runtime::client::connection::CodingAgentControlRejection {
+                    control_id: crate::runtime::client::connection::CodingAgentControlId(draft_id.0.clone()),
                     operation_id: operation_id.into(),
                     kind,
                     reason:
-                        crate::runtime::client::projection::CodingAgentControlRejectionReason::InvalidInput,
+                        crate::runtime::client::connection::CodingAgentControlRejectionReason::InvalidInput,
                 })?
         };
         self.enqueue_control(
             handle,
             operation_id,
-            crate::runtime::client::projection::CodingAgentControlId(draft_id.0),
+            crate::runtime::client::connection::CodingAgentControlId(draft_id.0),
             kind,
             text,
         )
@@ -454,12 +454,12 @@ impl SnapshotCoordinator {
         &self,
         handle: &ClientHandle,
         operation_id: &str,
-        control_id: crate::runtime::client::projection::CodingAgentControlId,
-        kind: crate::runtime::client::projection::CodingAgentControlKind,
+        control_id: crate::runtime::client::connection::CodingAgentControlId,
+        kind: crate::runtime::client::connection::CodingAgentControlKind,
         text: String,
     ) -> Result<
-        crate::runtime::client::projection::CodingAgentControlReceipt,
-        crate::runtime::client::projection::CodingAgentControlRejection,
+        crate::runtime::client::connection::CodingAgentControlReceipt,
+        crate::runtime::client::connection::CodingAgentControlRejection,
     > {
         self.enqueue_control_payload(
             handle,
@@ -474,12 +474,12 @@ impl SnapshotCoordinator {
         &self,
         handle: &ClientHandle,
         operation_id: &str,
-        control_id: crate::runtime::client::projection::CodingAgentControlId,
-        kind: crate::runtime::client::projection::CodingAgentControlKind,
+        control_id: crate::runtime::client::connection::CodingAgentControlId,
+        kind: crate::runtime::client::connection::CodingAgentControlKind,
         content: Vec<ai::api::conversation::ContentBlock>,
     ) -> Result<
-        crate::runtime::client::projection::CodingAgentControlReceipt,
-        crate::runtime::client::projection::CodingAgentControlRejection,
+        crate::runtime::client::connection::CodingAgentControlReceipt,
+        crate::runtime::client::connection::CodingAgentControlRejection,
     > {
         self.enqueue_control_payload(
             handle,
@@ -494,19 +494,19 @@ impl SnapshotCoordinator {
         &self,
         handle: &ClientHandle,
         operation_id: &str,
-        control_id: crate::runtime::client::projection::CodingAgentControlId,
-        kind: crate::runtime::client::projection::CodingAgentControlKind,
+        control_id: crate::runtime::client::connection::CodingAgentControlId,
+        kind: crate::runtime::client::connection::CodingAgentControlKind,
         payload: PromptControlPayload,
     ) -> Result<
-        crate::runtime::client::projection::CodingAgentControlReceipt,
-        crate::runtime::client::projection::CodingAgentControlRejection,
+        crate::runtime::client::connection::CodingAgentControlReceipt,
+        crate::runtime::client::connection::CodingAgentControlRejection,
     > {
         if control_id.0.trim().is_empty() || payload.is_empty() {
-            return Err(crate::runtime::client::projection::CodingAgentControlRejection {
+            return Err(crate::runtime::client::connection::CodingAgentControlRejection {
                 control_id,
                 operation_id: operation_id.into(),
                 kind,
-                reason: crate::runtime::client::projection::CodingAgentControlRejectionReason::InvalidInput,
+                reason: crate::runtime::client::connection::CodingAgentControlRejectionReason::InvalidInput,
             });
         }
         let mut state = self.state.lock().unwrap();
@@ -514,7 +514,7 @@ impl SnapshotCoordinator {
             Ok(record) => record,
             Err(error @ ClientRegistryError::Lifecycle(_)) => {
                 return Err(
-                    crate::runtime::client::projection::CodingAgentControlRejection {
+                    crate::runtime::client::connection::CodingAgentControlRejection {
                         control_id,
                         operation_id: operation_id.into(),
                         kind,
@@ -523,12 +523,12 @@ impl SnapshotCoordinator {
                 );
             }
             Err(_) => {
-                return Err(crate::runtime::client::projection::CodingAgentControlRejection {
+                return Err(crate::runtime::client::connection::CodingAgentControlRejection {
                     control_id,
                     operation_id: operation_id.into(),
                     kind,
                     reason:
-                        crate::runtime::client::projection::CodingAgentControlRejectionReason::InvalidInput,
+                        crate::runtime::client::connection::CodingAgentControlRejectionReason::InvalidInput,
                 });
             }
         };
@@ -536,16 +536,16 @@ impl SnapshotCoordinator {
         let signature = format!("{:?}:{}", kind, payload.signature());
         if let Some(stored) = record.control_receipts.get(&key) {
             if stored != &signature {
-                return Err(crate::runtime::client::projection::CodingAgentControlRejection {
+                return Err(crate::runtime::client::connection::CodingAgentControlRejection {
                     control_id,
                     operation_id: operation_id.into(),
                     kind,
                     reason:
-                        crate::runtime::client::projection::CodingAgentControlRejectionReason::PayloadConflict,
+                        crate::runtime::client::connection::CodingAgentControlRejectionReason::PayloadConflict,
                 });
             }
             return Ok(
-                crate::runtime::client::projection::CodingAgentControlReceipt {
+                crate::runtime::client::connection::CodingAgentControlReceipt {
                     control_id,
                     operation_id: operation_id.into(),
                     kind,
@@ -553,10 +553,10 @@ impl SnapshotCoordinator {
             );
         }
         if record.control_receipts.len() >= MAX_RECEIPTS {
-            return Err(crate::runtime::client::projection::CodingAgentControlRejection { control_id, operation_id: operation_id.into(), kind, reason: crate::runtime::client::projection::CodingAgentControlRejectionReason::QueueCapacityExceeded });
+            return Err(crate::runtime::client::connection::CodingAgentControlRejection { control_id, operation_id: operation_id.into(), kind, reason: crate::runtime::client::connection::CodingAgentControlRejectionReason::QueueCapacityExceeded });
         }
         let queued_prepared_abort = if kind
-            == crate::runtime::client::projection::CodingAgentControlKind::Abort
+            == crate::runtime::client::connection::CodingAgentControlKind::Abort
         {
             match record.prepared_operation.as_ref() {
                 Some(prepared) if prepared.operation_id == operation_id => {
@@ -565,11 +565,11 @@ impl SnapshotCoordinator {
                 }
                 Some(_) => {
                     return Err(
-                            crate::runtime::client::projection::CodingAgentControlRejection {
+                            crate::runtime::client::connection::CodingAgentControlRejection {
                                 control_id,
                                 operation_id: operation_id.into(),
                                 kind,
-                                reason: crate::runtime::client::projection::CodingAgentControlRejectionReason::TargetMismatch,
+                                reason: crate::runtime::client::connection::CodingAgentControlRejectionReason::TargetMismatch,
                             },
                         );
                 }
@@ -582,9 +582,9 @@ impl SnapshotCoordinator {
             let dispatch = self.dispatch_control(handle, operation_id, kind, payload);
             if let Err(reason) = dispatch {
                 let queued_running_abort = kind
-                    == crate::runtime::client::projection::CodingAgentControlKind::Abort
+                    == crate::runtime::client::connection::CodingAgentControlKind::Abort
                     && reason
-                        == crate::runtime::client::projection::CodingAgentControlRejectionReason::TargetNotRunning
+                        == crate::runtime::client::connection::CodingAgentControlRejectionReason::TargetNotRunning
                     && matches!(
                         record.submitted_operation.as_ref(),
                         Some(SubmittedOperationStatus::Running {
@@ -596,7 +596,7 @@ impl SnapshotCoordinator {
                     record.pending_abort_operation_id = Some(operation_id.to_owned());
                 } else {
                     return Err(
-                        crate::runtime::client::projection::CodingAgentControlRejection {
+                        crate::runtime::client::connection::CodingAgentControlRejection {
                             control_id,
                             operation_id: operation_id.into(),
                             kind,
@@ -609,13 +609,13 @@ impl SnapshotCoordinator {
         record.control_receipts.insert(key.clone(), signature);
         record.control_receipt_order.push_back(key);
         let queue = match kind {
-            crate::runtime::client::projection::CodingAgentControlKind::Steer => {
+            crate::runtime::client::connection::CodingAgentControlKind::Steer => {
                 Some(&mut record.steer_drafts)
             }
-            crate::runtime::client::projection::CodingAgentControlKind::FollowUp => {
+            crate::runtime::client::connection::CodingAgentControlKind::FollowUp => {
                 Some(&mut record.follow_up_drafts)
             }
-            crate::runtime::client::projection::CodingAgentControlKind::Abort => None,
+            crate::runtime::client::connection::CodingAgentControlKind::Abort => None,
         };
         if let Some(queue) = queue
             && let Some(position) = queue.iter().position(|draft| draft.id == control_id.0)
@@ -623,7 +623,7 @@ impl SnapshotCoordinator {
             queue.remove(position);
         }
         Ok(
-            crate::runtime::client::projection::CodingAgentControlReceipt {
+            crate::runtime::client::connection::CodingAgentControlReceipt {
                 control_id,
                 operation_id: operation_id.into(),
                 kind,
@@ -635,44 +635,44 @@ impl SnapshotCoordinator {
         &self,
         handle: &ClientHandle,
         operation_id: &str,
-        kind: crate::runtime::client::projection::CodingAgentControlKind,
+        kind: crate::runtime::client::connection::CodingAgentControlKind,
         payload: PromptControlPayload,
-    ) -> Result<(), crate::runtime::client::projection::CodingAgentControlRejectionReason> {
+    ) -> Result<(), crate::runtime::client::connection::CodingAgentControlRejectionReason> {
         let mut prompt_binding = self.prompt_control.lock().unwrap();
         if let Some(active) = prompt_binding.as_mut() {
             if active.owner.id != handle.id {
                 return Err(
-                    crate::runtime::client::projection::CodingAgentControlRejectionReason::NotOwner,
+                    crate::runtime::client::connection::CodingAgentControlRejectionReason::NotOwner,
                 );
             }
             if active.operation_id != operation_id {
                 return Err(
-                    crate::runtime::client::projection::CodingAgentControlRejectionReason::TargetMismatch,
+                    crate::runtime::client::connection::CodingAgentControlRejectionReason::TargetMismatch,
                 );
             }
             return match (kind, payload) {
                 (
-                    crate::runtime::client::projection::CodingAgentControlKind::Abort,
+                    crate::runtime::client::connection::CodingAgentControlKind::Abort,
                     PromptControlPayload::Text(reason),
                 ) => active.sender.abort(reason),
                 (
-                    crate::runtime::client::projection::CodingAgentControlKind::Steer,
+                    crate::runtime::client::connection::CodingAgentControlKind::Steer,
                     PromptControlPayload::Text(text),
                 ) => active.sender.steer(text),
                 (
-                    crate::runtime::client::projection::CodingAgentControlKind::Steer,
+                    crate::runtime::client::connection::CodingAgentControlKind::Steer,
                     PromptControlPayload::Content(content),
                 ) => active.sender.steer_content(content),
                 (
-                    crate::runtime::client::projection::CodingAgentControlKind::FollowUp,
+                    crate::runtime::client::connection::CodingAgentControlKind::FollowUp,
                     PromptControlPayload::Text(text),
                 ) => active.sender.follow_up(text),
                 (
-                    crate::runtime::client::projection::CodingAgentControlKind::FollowUp,
+                    crate::runtime::client::connection::CodingAgentControlKind::FollowUp,
                     PromptControlPayload::Content(content),
                 ) => active.sender.follow_up_content(content),
                 (
-                    crate::runtime::client::projection::CodingAgentControlKind::Abort,
+                    crate::runtime::client::connection::CodingAgentControlKind::Abort,
                     PromptControlPayload::Content(_),
                 ) => Err(crate::runtime::facade::CodingSessionError::Input {
                     message: "abort control does not accept structured content".into(),
@@ -680,16 +680,16 @@ impl SnapshotCoordinator {
             }
             .map_err(|error| match error {
                 crate::runtime::facade::CodingSessionError::Busy { .. } => {
-                    crate::runtime::client::projection::CodingAgentControlRejectionReason::QueueCapacityExceeded
+                    crate::runtime::client::connection::CodingAgentControlRejectionReason::QueueCapacityExceeded
                 }
-                _ => crate::runtime::client::projection::CodingAgentControlRejectionReason::ControlChannelClosed,
+                _ => crate::runtime::client::connection::CodingAgentControlRejectionReason::ControlChannelClosed,
             });
         }
         drop(prompt_binding);
 
-        if kind != crate::runtime::client::projection::CodingAgentControlKind::Abort {
+        if kind != crate::runtime::client::connection::CodingAgentControlKind::Abort {
             return Err(
-                crate::runtime::client::projection::CodingAgentControlRejectionReason::TargetNotRunning,
+                crate::runtime::client::connection::CodingAgentControlRejectionReason::TargetNotRunning,
             );
         }
         let cancellation_bindings = self.operation_cancellations.lock().unwrap();
@@ -699,24 +699,24 @@ impl SnapshotCoordinator {
                 .any(|active| active.owner.id == handle.id)
             {
                 return Err(
-                    crate::runtime::client::projection::CodingAgentControlRejectionReason::TargetMismatch,
+                    crate::runtime::client::connection::CodingAgentControlRejectionReason::TargetMismatch,
                 );
             }
             return Err(
-                crate::runtime::client::projection::CodingAgentControlRejectionReason::TargetNotRunning,
+                crate::runtime::client::connection::CodingAgentControlRejectionReason::TargetNotRunning,
             );
         };
         if active.owner.id != handle.id {
             return Err(
-                crate::runtime::client::projection::CodingAgentControlRejectionReason::NotOwner,
+                crate::runtime::client::connection::CodingAgentControlRejectionReason::NotOwner,
             );
         }
         active.cancellation.request().map(|_| ()).map_err(|rejection| {
             match rejection {
-                super::control::OperationIdentityRejection::CancellationClosed { .. } => {
-                    crate::runtime::client::projection::CodingAgentControlRejectionReason::NoLongerCancellable
+                super::operation::control::OperationIdentityRejection::CancellationClosed { .. } => {
+                    crate::runtime::client::connection::CodingAgentControlRejectionReason::NoLongerCancellable
                 }
-                _ => crate::runtime::client::projection::CodingAgentControlRejectionReason::TargetNotRunning,
+                _ => crate::runtime::client::connection::CodingAgentControlRejectionReason::TargetNotRunning,
             }
         })
     }
@@ -725,7 +725,7 @@ impl SnapshotCoordinator {
         &self,
         owner: ClientHandle,
         operation_id: String,
-        channel_generation: super::control::PromptControlGeneration,
+        channel_generation: super::operation::control::PromptControlGeneration,
         sender: PromptControlHandle,
     ) {
         *self.prompt_control.lock().unwrap() = Some(PromptControlBinding {
@@ -739,7 +739,7 @@ impl SnapshotCoordinator {
     pub(crate) fn clear_prompt_control_if(
         &self,
         operation_id: &str,
-        channel_generation: super::control::PromptControlGeneration,
+        channel_generation: super::operation::control::PromptControlGeneration,
     ) {
         let mut binding = self.prompt_control.lock().unwrap();
         if binding.as_ref().is_some_and(|active| {
@@ -1417,7 +1417,7 @@ impl SnapshotCoordinator {
     pub(crate) fn acknowledge_outcome(
         &self,
         handle: &ClientHandle,
-        acknowledgement: &crate::runtime::client::projection::CodingAgentOutcomeAcknowledgementId,
+        acknowledgement: &crate::runtime::client::connection::CodingAgentOutcomeAcknowledgementId,
     ) -> Result<(), ClientRegistryError> {
         let mut state = self.state.lock().unwrap();
         let record = Self::record(&mut state, handle)?;
@@ -1675,8 +1675,9 @@ impl SnapshotCoordinator {
             if stored_id != operation_id {
                 continue;
             }
-            if crate::runtime::outcome::terminal_operation_kind(descriptor.submitted_kind)
-                != Some(terminal_operation.kind)
+            if crate::runtime::operation::contract::terminal_operation_kind(
+                descriptor.submitted_kind,
+            ) != Some(terminal_operation.kind)
             {
                 continue;
             }
@@ -1761,8 +1762,8 @@ impl SnapshotCoordinator {
 
 fn control_rejection_reason(
     error: &ClientRegistryError,
-) -> crate::runtime::client::projection::CodingAgentControlRejectionReason {
-    use crate::runtime::client::projection::CodingAgentControlRejectionReason;
+) -> crate::runtime::client::connection::CodingAgentControlRejectionReason {
+    use crate::runtime::client::connection::CodingAgentControlRejectionReason;
     match error {
         ClientRegistryError::Lifecycle(CodingAgentLifecycleRejection::Detached) => {
             CodingAgentControlRejectionReason::Detached

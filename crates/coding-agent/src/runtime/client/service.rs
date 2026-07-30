@@ -23,7 +23,7 @@ impl ClientService {
         &self,
         handle: &ClientHandle,
         operation_id: String,
-        descriptor: crate::runtime::outcome::OperationDescriptor,
+        descriptor: crate::runtime::operation::contract::OperationDescriptor,
         expected_prompt_draft: Option<&DraftRecord>,
     ) -> Result<(), ClientRegistryError> {
         self.coordinator.commit_submission_running(

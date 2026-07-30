@@ -6,7 +6,7 @@ use std::fmt;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-use super::control::OperationKind;
+use super::operation::control::OperationKind;
 use super::snapshot::SnapshotCoordinator;
 use crate::profiles::ProfileId;
 use crate::runtime::facade::CodingSessionError;

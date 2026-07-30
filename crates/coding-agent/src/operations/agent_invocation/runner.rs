@@ -12,10 +12,10 @@ use crate::operations::prompt::context::{
 use crate::operations::prompt::runner::PromptTurnRunner;
 use crate::profiles::{AgentProfile, ProfileId, ProfileKind, ProfileRegistry};
 use crate::runtime::capability::{ActorId, OperationCapabilitySnapshot};
-use crate::runtime::control::{OperationControl, OperationKind, PromptControlReceiver};
 use crate::runtime::facade::{CodingSessionError, PendingDelegationConfirmationState};
+use crate::runtime::operation::admission::OperationScheduler;
+use crate::runtime::operation::control::{OperationControl, OperationKind, PromptControlReceiver};
 use crate::runtime::public_error::CodingAgentPublicDiagnostic;
-use crate::runtime::scheduler::OperationScheduler;
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
 use crate::session::id::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
@@ -153,7 +153,7 @@ pub(crate) struct AgentInvocationContext {
     prompt_outcome: Option<InternalPromptTurnOutcome>,
     parent_capability_snapshot: Option<OperationCapabilitySnapshot>,
     child_capability_snapshot: Option<OperationCapabilitySnapshot>,
-    child_admission: Option<crate::runtime::intent::OperationPermit>,
+    child_admission: Option<crate::runtime::operation::permit::OperationPermit>,
     pending_delegation_confirmations: Vec<PendingDelegationConfirmationState>,
     failure_terminal_recorded: bool,
     defer_terminal_publication: bool,
