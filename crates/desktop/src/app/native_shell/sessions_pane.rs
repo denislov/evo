@@ -13,17 +13,21 @@ use std::sync::Arc;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{
+    NativeDesktopState,
+    center_drawer_host::CenterDrawerKind,
     center_navigation::CenterNavigationTarget,
     desktop_controls::{
         DesktopActionRow, DesktopControlSize, DesktopIcon, DesktopIconButton, DesktopRowState,
     },
     desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
     evo_brand::{EvoBrand, EvoBrandMode},
-    project_catalog_controller::{
-        ProjectCatalogGroup, ProjectCatalogState, session_matches_query, workspace_matches_query,
-    },
     semantic_status_color,
 };
+use crate::application::catalog::{
+    ProjectCatalogGroup, ProjectCatalogState, session_matches_query, workspace_matches_query,
+};
+use crate::application::{commands::DesktopCommandIntent, workspace::WorkspaceKey};
+use crate::ui::shell::{ShellUiState, presentation::semantic_status};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SessionsPaneEvent {
@@ -57,6 +61,55 @@ pub(super) struct SessionsPaneViewModel {
     pub(super) keyboard_focus_visible: bool,
     pub(super) presented_as_drawer: bool,
     pub(super) reduced_motion: bool,
+}
+
+pub(super) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> SessionsPaneViewModel {
+    let workspace = app.workspaces.active();
+    let snapshot = workspace
+        .projection
+        .as_ref()
+        .map(|projection| projection.snapshot());
+    let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
+    let mut runtime_states = app
+        .workspaces
+        .iter()
+        .filter_map(|(key, workspace)| {
+            let WorkspaceKey::Session(session_id) = key else {
+                return None;
+            };
+            workspace.projection.as_ref()?;
+            Some(SessionRuntimeState {
+                session_id: Arc::from(session_id.as_str()),
+                status: semantic_status(workspace.projection.as_ref()),
+            })
+        })
+        .collect::<Vec<_>>();
+    runtime_states.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    SessionsPaneViewModel {
+        panel_width: app.preferences.sessions_panel_width,
+        project_groups: Arc::from(app.catalog.project_groups()),
+        omitted_sessions: app.catalog.omitted(),
+        catalog_state: app.catalog.state().clone(),
+        active_session_id: Arc::from(
+            snapshot
+                .map(|snapshot| snapshot.session.session_id.as_str())
+                .unwrap_or_default(),
+        ),
+        skills_active: ui.center_surface == super::center_navigation::CenterSurface::Skills,
+        runtime_states: Arc::from(runtime_states),
+        composer_running,
+        awaiting_prompt_start: workspace.composer.submitted().is_some() && !composer_running,
+        session_pending: app.commands.contains_anywhere(|intent| {
+            matches!(
+                intent,
+                DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
+            )
+        }),
+        active_status: semantic_status(workspace.projection.as_ref()),
+        keyboard_focus_visible: ui.keyboard_focus_visible(),
+        presented_as_drawer: ui.active_drawer == Some(CenterDrawerKind::Sessions),
+        reduced_motion: app.preferences.reduced_motion,
+    }
 }
 
 pub(crate) struct SessionsPane {

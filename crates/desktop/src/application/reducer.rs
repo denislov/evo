@@ -1,28 +1,29 @@
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use coding_agent::api::{
-    authorization::ToolAuthorizationDecision,
-    embedding::CodingAgentThinkingLevel,
-    review::{CodingAgentFileReview, CodingAgentFileReviewRequest},
+    authorization::ToolAuthorizationDecision, embedding::CodingAgentThinkingLevel,
+    review::CodingAgentFileReviewRequest,
 };
 use desktop::preferences::DesktopPreferences;
 use desktop::runtime::{
     DesktopRecoveryAction, DesktopRuntimeCommandKind, DesktopRuntimeError,
-    DesktopRuntimeHydratedSnapshot, DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind,
-    DesktopRuntimeUpdate,
+    DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind, DesktopRuntimeUpdate,
 };
 use desktop::shell::truncate_label;
 use thiserror::Error;
 
 use super::{
+    catalog::ProjectCatalogController,
     change_set::{UiChangeSet, UiRegion},
     commands::DesktopCommandIntent,
     effect::{
         ClipboardFeedback, DesktopEffect, DesktopPickerKind, DesktopTimer, DesktopTimerKind,
         EffectIdentity, EffectRequestId, PlatformOutcome, PlatformResult,
     },
+    runtime_state::{ProjectionUpdateResult, RuntimeWorkspacePresentation},
     state::DesktopState,
     workspace::WorkspaceKey,
+    workspace_state::{RuntimeWorkspaceDefaults, WorkspaceState},
 };
 use crate::projection::ProjectionEvent;
 
@@ -269,125 +270,6 @@ pub(crate) fn runtime_update_observed_workspace_key(
     session_id.map(WorkspaceKey::session)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProjectionUpdateResult {
-    replaced: bool,
-    needs_resync: bool,
-    changes: UiChangeSet,
-}
-
-impl ProjectionUpdateResult {
-    pub(crate) const fn new(replaced: bool, needs_resync: bool, changes: UiChangeSet) -> Self {
-        Self {
-            replaced,
-            needs_resync,
-            changes,
-        }
-    }
-
-    pub(crate) const fn replaced(self) -> bool {
-        self.replaced
-    }
-
-    pub(crate) const fn changes(self) -> UiChangeSet {
-        self.changes
-    }
-
-    pub(crate) const fn needs_resync(self) -> bool {
-        self.needs_resync
-    }
-}
-
-/// Narrow state port for the runtime reducer.
-///
-/// All decisions stay in this module. The GPUI adapter implements only typed,
-/// explicit-workspace mutations; projection internals remain behind one method
-/// until DSK-732 narrows `DesktopProjection` itself.
-pub(crate) trait RuntimeUpdatePort {
-    fn active_workspace_key(&self) -> WorkspaceKey;
-    fn workspace_exists(&self, owner: &WorkspaceKey) -> bool;
-    fn command_owner(&self, command_id: u64) -> Option<WorkspaceKey>;
-    fn command_intent(&self, command_id: u64) -> Option<DesktopCommandIntent>;
-    fn command_matches(
-        &self,
-        command_id: u64,
-        owner: &WorkspaceKey,
-        intent: &DesktopCommandIntent,
-    ) -> bool;
-    fn transfer_command(&mut self, command_id: u64, owner: WorkspaceKey) -> bool;
-    fn require_command_owner_resync(
-        &mut self,
-        pending_owner: &WorkspaceKey,
-        observed_owner: &WorkspaceKey,
-    );
-    fn complete_command(
-        &mut self,
-        command_id: u64,
-        owner: &WorkspaceKey,
-        intent: &DesktopCommandIntent,
-    ) -> bool;
-    fn reject_command(
-        &mut self,
-        command_id: u64,
-        owner: &WorkspaceKey,
-        command: DesktopRuntimeCommandKind,
-    ) -> Option<DesktopCommandIntent>;
-    fn complete_operation_commands(&mut self, owner: &WorkspaceKey, operation_id: &str);
-    fn install_hydrated_workspace(
-        &mut self,
-        snapshot: &DesktopRuntimeHydratedSnapshot,
-        inherit_home_thinking: bool,
-        activate: bool,
-    ) -> bool;
-    fn remove_closed_workspace(&mut self, session_id: &str) -> usize;
-    fn remove_catalog_session(&mut self, session_id: &str);
-    fn replace_catalog(
-        &mut self,
-        sessions: Vec<desktop::runtime::DesktopSessionCatalogEntry>,
-        omitted: usize,
-    );
-    fn rename_catalog_session(
-        &mut self,
-        session_id: &str,
-        name: Option<String>,
-        updated_at: String,
-    ) -> bool;
-    fn insert_session_into_catalog(&mut self, owner: &WorkspaceKey) -> bool;
-    fn catalog_is_loading(&self) -> bool;
-    fn fail_catalog(&mut self, message: String);
-    fn cancel_all_commands(&mut self);
-    fn set_notice(&mut self, owner: &WorkspaceKey, notice: String);
-    fn accept_composer(&mut self, owner: &WorkspaceKey, command_id: u64) -> bool;
-    fn reject_composer(&mut self, owner: &WorkspaceKey, command_id: u64, notice: String) -> bool;
-    fn submitted_composer_command(&self, owner: &WorkspaceKey) -> Option<u64>;
-    fn reject_pending_composer(&mut self, owner: &WorkspaceKey, message: String);
-    fn set_file_review_ready(&mut self, owner: &WorkspaceKey, review: CodingAgentFileReview);
-    fn set_file_review_failed(
-        &mut self,
-        owner: &WorkspaceKey,
-        request: CodingAgentFileReviewRequest,
-        code: String,
-    );
-    fn apply_model_thinking_selection(
-        &mut self,
-        owner: &WorkspaceKey,
-        thinking_level: Option<CodingAgentThinkingLevel>,
-        thinking_fallback: bool,
-    );
-    fn selected_model_label(&self, owner: &WorkspaceKey) -> String;
-    fn selected_profile_label(&self, owner: &WorkspaceKey) -> String;
-    fn apply_projection_event(
-        &mut self,
-        owner: &WorkspaceKey,
-        event: Option<ProjectionEvent>,
-        creates_session_from_prompt: bool,
-        completed_prompt_command: Option<u64>,
-    ) -> ProjectionUpdateResult;
-    fn reserve_resync_command(&mut self, owner: &WorkspaceKey) -> Option<u64>;
-    fn abandon_resync_command(&mut self, owner: &WorkspaceKey, command_id: u64, message: String);
-    fn active_runtime_is_running(&self) -> bool;
-}
-
 pub(crate) trait PlatformUpdatePort {
     fn active_workspace_key(&self) -> WorkspaceKey;
     fn workspace_exists(&self, owner: &WorkspaceKey) -> bool;
@@ -442,17 +324,21 @@ enum ProjectionCompletion {
     },
 }
 
-fn reduce_runtime_update(
+fn reduce_runtime_update<Presentation: RuntimeWorkspacePresentation>(
     controller: &mut DesktopController,
-    port: &mut impl RuntimeUpdatePort,
+    state: &mut DesktopState<
+        WorkspaceState<Presentation>,
+        ProjectCatalogController,
+        RuntimeWorkspaceDefaults,
+    >,
     update: DesktopRuntimeUpdate,
 ) -> Transition {
     let _kind = runtime_update_kind(&update);
-    let initial_foreground = port.active_workspace_key();
+    let initial_foreground = state.workspaces.active_key().clone();
     let inherit_home_thinking = match &update {
         DesktopRuntimeUpdate::PromptAcceptedWithSession { .. }
         | DesktopRuntimeUpdate::PromptRejectedWithSession { .. } => true,
-        DesktopRuntimeUpdate::SessionChanged { command_id, .. } => port.command_matches(
+        DesktopRuntimeUpdate::SessionChanged { command_id, .. } => state.commands.matches(
             *command_id,
             &initial_foreground,
             &DesktopCommandIntent::CreateSession,
@@ -466,7 +352,7 @@ fn reduce_runtime_update(
             snapshot,
         } = &update
     {
-        let _ = port.transfer_command(
+        let _ = state.commands.transfer_command(
             *command_id,
             WorkspaceKey::session(&snapshot.session.session.session_id),
         );
@@ -474,55 +360,60 @@ fn reduce_runtime_update(
 
     let creates_session_from_prompt = match &update {
         DesktopRuntimeUpdate::PromptAcceptedWithSession { command_id, .. }
-        | DesktopRuntimeUpdate::PromptRejectedWithSession { command_id, .. } => port
-            .command_matches(
+        | DesktopRuntimeUpdate::PromptRejectedWithSession { command_id, .. } => {
+            state.commands.matches(
                 *command_id,
                 &initial_foreground,
                 &DesktopCommandIntent::Prompt,
-            ),
+            )
+        }
         _ => false,
     };
     if creates_session_from_prompt && let Some(snapshot) = runtime_update_hydrated_snapshot(&update)
     {
-        let _ = port.install_hydrated_workspace(snapshot, inherit_home_thinking, true);
+        let _ = state.install_hydrated_workspace(snapshot, inherit_home_thinking, true);
     }
 
     if let Some(command_id) = runtime_update_command_id(&update)
-        && let Some(pending_owner) = port.command_owner(command_id)
+        && let Some(pending_owner) = state.commands.owner(command_id).cloned()
         && let Some(observed_owner) = runtime_update_observed_workspace_key(&update)
         && pending_owner != observed_owner
     {
-        port.require_command_owner_resync(&pending_owner, &observed_owner);
-        let resync_owner = if port.workspace_exists(&pending_owner) {
+        state.require_command_owner_resync(&pending_owner, &observed_owner);
+        let resync_owner = if state.workspaces.contains(&pending_owner) {
             pending_owner
         } else {
-            port.active_workspace_key()
+            state.workspaces.active_key().clone()
         };
-        let foreground = port.active_workspace_key();
+        let foreground = state.workspaces.active_key().clone();
         let mut transition =
             workspace_update_transition(&foreground, &resync_owner, runtime_base_changes(&update));
-        transition.merge(reserve_resync_effect(controller, port, &resync_owner));
+        transition.merge(reserve_resync_effect(controller, state, &resync_owner));
         return transition;
     }
 
     if let DesktopRuntimeUpdate::SessionChanged { snapshot, .. } = &update {
         let target = WorkspaceKey::session(&snapshot.session.session.session_id);
-        if port.active_workspace_key() != target
-            && !port.install_hydrated_workspace(snapshot, inherit_home_thinking, true)
+        if state.workspaces.active_key() != &target
+            && !state.install_hydrated_workspace(snapshot, inherit_home_thinking, true)
         {
             if let DesktopRuntimeUpdate::SessionChanged { command_id, .. } = &update
-                && let Some(intent) = port.command_intent(*command_id).filter(|intent| {
-                    matches!(
-                        intent,
-                        DesktopCommandIntent::CreateSession
-                            | DesktopCommandIntent::OpenSession { .. }
-                    )
-                })
+                && let Some(intent) = state
+                    .commands
+                    .intent(*command_id)
+                    .cloned()
+                    .filter(|intent| {
+                        matches!(
+                            intent,
+                            DesktopCommandIntent::CreateSession
+                                | DesktopCommandIntent::OpenSession { .. }
+                        )
+                    })
             {
-                let owner = port.command_owner(*command_id).unwrap_or(target);
-                if port.complete_command(*command_id, &owner, &intent) {
-                    let foreground = port.active_workspace_key();
-                    port.set_notice(
+                let owner = state.commands.owner(*command_id).cloned().unwrap_or(target);
+                if state.complete_runtime_command(*command_id, &owner, &intent) {
+                    let foreground = state.workspaces.active_key().clone();
+                    state.set_runtime_notice(
                         &foreground,
                         "Session response failed projection validation; resync is required.".into(),
                     );
@@ -536,11 +427,15 @@ fn reduce_runtime_update(
     }
 
     let target = runtime_update_observed_workspace_key(&update)
-        .or_else(|| runtime_update_command_id(&update).and_then(|id| port.command_owner(id)))
-        .filter(|owner| port.workspace_exists(owner))
-        .unwrap_or_else(|| port.active_workspace_key());
+        .or_else(|| {
+            runtime_update_command_id(&update).and_then(|id| state.commands.owner(id).cloned())
+        })
+        .filter(|owner| state.workspaces.contains(owner))
+        .unwrap_or_else(|| state.workspaces.active_key().clone());
     let completion_owner = runtime_update_observed_workspace_key(&update)
-        .or_else(|| runtime_update_command_id(&update).and_then(|id| port.command_owner(id)))
+        .or_else(|| {
+            runtime_update_command_id(&update).and_then(|id| state.commands.owner(id).cloned())
+        })
         .unwrap_or_else(|| target.clone());
     let mut changes = runtime_base_changes(&update);
 
@@ -553,11 +448,12 @@ fn reduce_runtime_update(
             let intent = DesktopCommandIntent::CloseSession {
                 session_id: session_id.clone(),
             };
-            if port.complete_command(command_id, &owner, &intent) {
-                let cancelled = port.remove_closed_workspace(&session_id);
-                port.remove_catalog_session(&session_id);
-                port.set_notice(
-                    &port.active_workspace_key(),
+            if state.complete_runtime_command(command_id, &owner, &intent) {
+                let cancelled = state.remove_closed_workspace(&session_id);
+                state.catalog.remove_session(&session_id);
+                let foreground = state.workspaces.active_key().clone();
+                state.set_runtime_notice(
+                    &foreground,
                     if cancelled == 0 {
                         "Session closed.".into()
                     } else {
@@ -571,32 +467,40 @@ fn reduce_runtime_update(
         }
         DesktopRuntimeUpdate::FileReviewed { command_id, review } => {
             let request = CodingAgentFileReviewRequest::new(review.change.clone(), review.revision);
-            let owner = port.command_owner(command_id).unwrap_or(target.clone());
-            if port.complete_command(
+            let owner = state
+                .commands
+                .owner(command_id)
+                .cloned()
+                .unwrap_or(target.clone());
+            if state.complete_runtime_command(
                 command_id,
                 &owner,
                 &DesktopCommandIntent::FileReview { request },
             ) {
-                port.set_file_review_ready(&owner, review);
-                port.set_notice(&owner, "Changed-file review loaded.".into());
+                state.set_file_review_ready(&owner, review);
+                state.set_runtime_notice(&owner, "Changed-file review loaded.".into());
                 changes.insert(UiRegion::Inspector);
             }
-            let foreground = port.active_workspace_key();
+            let foreground = state.workspaces.active_key().clone();
             return workspace_update_transition(&foreground, &owner, changes);
         }
         DesktopRuntimeUpdate::ExternalEditorOpened {
             command_id,
             project_relative_path,
         } => {
-            let owner = port.command_owner(command_id).unwrap_or(target.clone());
-            if port.complete_command(
+            let owner = state
+                .commands
+                .owner(command_id)
+                .cloned()
+                .unwrap_or(target.clone());
+            if state.complete_runtime_command(
                 command_id,
                 &owner,
                 &DesktopCommandIntent::ExternalEditor {
                     project_relative_path: project_relative_path.clone(),
                 },
             ) {
-                port.set_notice(
+                state.set_runtime_notice(
                     &owner,
                     format!(
                         "Opened {} in the configured editor.",
@@ -605,7 +509,7 @@ fn reduce_runtime_update(
                 );
                 changes.insert(UiRegion::Inspector);
             }
-            let foreground = port.active_workspace_key();
+            let foreground = state.workspaces.active_key().clone();
             return workspace_update_transition(&foreground, &owner, changes);
         }
         DesktopRuntimeUpdate::SessionsListed {
@@ -613,10 +517,14 @@ fn reduce_runtime_update(
             sessions,
             omitted,
         } => {
-            if let Some(owner) = port.command_owner(command_id)
-                && port.complete_command(command_id, &owner, &DesktopCommandIntent::ListSessions)
+            if let Some(owner) = state.commands.owner(command_id).cloned()
+                && state.complete_runtime_command(
+                    command_id,
+                    &owner,
+                    &DesktopCommandIntent::ListSessions,
+                )
             {
-                port.replace_catalog(sessions, omitted);
+                state.catalog.replace_catalog(sessions, omitted);
                 changes.insert(UiRegion::Sessions);
             }
             return Transition::from_changes(changes);
@@ -631,9 +539,10 @@ fn reduce_runtime_update(
             let intent = DesktopCommandIntent::RenameSession {
                 session_id: session_id.clone(),
             };
-            if port.complete_command(command_id, &owner, &intent) {
-                port.rename_catalog_session(&session_id, name, updated_at);
-                port.set_notice(&port.active_workspace_key(), "Session name updated.".into());
+            if state.complete_runtime_command(command_id, &owner, &intent) {
+                state.catalog.rename_session(&session_id, name, updated_at);
+                let foreground = state.workspaces.active_key().clone();
+                state.set_runtime_notice(&foreground, "Session name updated.".into());
                 changes.insert(UiRegion::Sessions);
             }
             return Transition::from_changes(changes);
@@ -643,52 +552,56 @@ fn reduce_runtime_update(
             name,
             updated_at,
         } => {
-            if port.rename_catalog_session(&session_id, name, updated_at) {
+            if state.catalog.rename_session(&session_id, name, updated_at) {
                 changes.insert(UiRegion::Sessions);
             }
             return Transition::from_changes(changes);
         }
         update => {
-            let completion = capture_projection_completion(port, &target, &update);
-            reduce_pre_projection_update(port, &target, &completion_owner, &update, &mut changes);
+            let completion = capture_projection_completion(state, &target, &update);
+            reduce_pre_projection_update(state, &target, &completion_owner, &update, &mut changes);
             let completed_prompt_command = match &update {
                 DesktopRuntimeUpdate::PromptFinished { command_id, .. } => Some(*command_id),
                 _ => None,
             };
             let event = projection_event(update);
-            let projection = port.apply_projection_event(
+            let projection = state.apply_projection_event(
                 &target,
                 event,
                 creates_session_from_prompt,
                 completed_prompt_command,
             );
             changes.merge(projection.changes());
-            reconcile_projection_completion(port, &target, completion, projection, &mut changes);
+            reconcile_projection_completion(state, &target, completion, projection, &mut changes);
             if projection.needs_resync() {
-                let mut transition = reserve_resync_effect(controller, port, &target);
-                let foreground = port.active_workspace_key();
+                let mut transition = reserve_resync_effect(controller, state, &target);
+                let foreground = state.workspaces.active_key().clone();
                 transition.merge(workspace_update_transition(&foreground, &target, changes));
                 return transition;
             }
         }
     }
 
-    let foreground = port.active_workspace_key();
+    let foreground = state.workspaces.active_key().clone();
     workspace_update_transition(&foreground, &target, changes)
 }
 
-fn reserve_resync_effect(
+fn reserve_resync_effect<Presentation: RuntimeWorkspacePresentation>(
     controller: &mut DesktopController,
-    port: &mut impl RuntimeUpdatePort,
+    state: &mut DesktopState<
+        WorkspaceState<Presentation>,
+        ProjectCatalogController,
+        RuntimeWorkspaceDefaults,
+    >,
     owner: &WorkspaceKey,
 ) -> Transition {
-    let Some(command_id) = port.reserve_resync_command(owner) else {
+    let Some(command_id) = state.reserve_resync_command(owner) else {
         return Transition::default();
     };
     match controller.request_resync(owner.clone(), command_id) {
         Ok(transition) => transition,
         Err(error) => {
-            port.abandon_resync_command(owner, command_id, error.to_string());
+            state.abandon_resync_command(owner, command_id, error.to_string());
             Transition::changed(UiRegion::Toast)
         }
     }
@@ -765,8 +678,12 @@ pub(crate) fn projection_event(update: DesktopRuntimeUpdate) -> Option<Projectio
     }
 }
 
-fn capture_projection_completion(
-    port: &impl RuntimeUpdatePort,
+fn capture_projection_completion<Presentation: RuntimeWorkspacePresentation>(
+    state: &DesktopState<
+        WorkspaceState<Presentation>,
+        ProjectCatalogController,
+        RuntimeWorkspaceDefaults,
+    >,
     owner: &WorkspaceKey,
     update: &DesktopRuntimeUpdate,
 ) -> ProjectionCompletion {
@@ -774,7 +691,10 @@ fn capture_projection_completion(
         DesktopRuntimeUpdate::Reloaded {
             command_id,
             metadata,
-        } if port.command_matches(*command_id, owner, &DesktopCommandIntent::Reload) => {
+        } if state
+            .commands
+            .matches(*command_id, owner, &DesktopCommandIntent::Reload) =>
+        {
             ProjectionCompletion::Reload {
                 command_id: *command_id,
                 skill_count: metadata.project.resources.skill_names.len(),
@@ -788,7 +708,7 @@ fn capture_projection_completion(
             thinking_level,
             thinking_fallback,
             ..
-        } if port.command_matches(
+        } if state.commands.matches(
             *command_id,
             owner,
             &DesktopCommandIntent::Selection(*selection),
@@ -806,7 +726,7 @@ fn capture_projection_completion(
             action,
             recovery_id,
             ..
-        } if port.command_matches(
+        } if state.commands.matches(
             *command_id,
             owner,
             &DesktopCommandIntent::Recovery {
@@ -822,14 +742,18 @@ fn capture_projection_completion(
             }
         }
         DesktopRuntimeUpdate::Resynced { command_id, .. }
-            if port.command_matches(*command_id, owner, &DesktopCommandIntent::Resync) =>
+            if state
+                .commands
+                .matches(*command_id, owner, &DesktopCommandIntent::Resync) =>
         {
             ProjectionCompletion::Resync {
                 command_id: *command_id,
             }
         }
-        DesktopRuntimeUpdate::SessionChanged { command_id, .. } => port
-            .command_intent(*command_id)
+        DesktopRuntimeUpdate::SessionChanged { command_id, .. } => state
+            .commands
+            .intent(*command_id)
+            .cloned()
             .filter(|intent| {
                 matches!(
                     intent,
@@ -837,20 +761,25 @@ fn capture_projection_completion(
                 )
             })
             .and_then(|intent| {
-                port.command_owner(*command_id)
-                    .map(|owner| ProjectionCompletion::Session {
+                state.commands.owner(*command_id).cloned().map(|owner| {
+                    ProjectionCompletion::Session {
                         owner,
                         command_id: *command_id,
                         intent,
-                    })
+                    }
+                })
             })
             .unwrap_or(ProjectionCompletion::None),
         _ => ProjectionCompletion::None,
     }
 }
 
-fn reduce_pre_projection_update(
-    port: &mut impl RuntimeUpdatePort,
+fn reduce_pre_projection_update<Presentation: RuntimeWorkspacePresentation>(
+    state: &mut DesktopState<
+        WorkspaceState<Presentation>,
+        ProjectCatalogController,
+        RuntimeWorkspaceDefaults,
+    >,
     target: &WorkspaceKey,
     completion_owner: &WorkspaceKey,
     update: &DesktopRuntimeUpdate,
@@ -859,8 +788,11 @@ fn reduce_pre_projection_update(
     match update {
         DesktopRuntimeUpdate::PromptAccepted { command_id }
         | DesktopRuntimeUpdate::PromptAcceptedWithSession { command_id, .. } => {
-            if port.complete_command(*command_id, completion_owner, &DesktopCommandIntent::Prompt)
-                && port.accept_composer(target, *command_id)
+            if state.complete_runtime_command(
+                *command_id,
+                completion_owner,
+                &DesktopCommandIntent::Prompt,
+            ) && state.accept_composer(target, *command_id)
             {
                 changes.insert(UiRegion::Sessions);
             }
@@ -868,15 +800,15 @@ fn reduce_pre_projection_update(
         DesktopRuntimeUpdate::PromptRejectedWithSession {
             command_id, error, ..
         } => {
-            if port
-                .reject_command(
+            if state
+                .reject_runtime_command(
                     *command_id,
                     completion_owner,
                     DesktopRuntimeCommandKind::SubmitPrompt,
                 )
                 .is_some()
             {
-                port.reject_composer(
+                state.reject_composer(
                     target,
                     *command_id,
                     safe_runtime_rejection_notice(
@@ -888,11 +820,11 @@ fn reduce_pre_projection_update(
             }
         }
         DesktopRuntimeUpdate::PromptStarted { command_id, .. } => {
-            if port
+            if state
                 .submitted_composer_command(target)
                 .is_some_and(|submitted| submitted != *command_id)
             {
-                port.set_notice(
+                state.set_runtime_notice(
                     target,
                     "Prompt start did not match the submitted command.".into(),
                 );
@@ -906,8 +838,8 @@ fn reduce_pre_projection_update(
             let intent = DesktopCommandIntent::Abort {
                 operation_id: receipt.operation_id.clone(),
             };
-            if port.complete_command(*command_id, completion_owner, &intent) {
-                port.set_notice(
+            if state.complete_runtime_command(*command_id, completion_owner, &intent) {
+                state.set_runtime_notice(
                     target,
                     format!("Abort accepted for {}.", receipt.operation_id),
                 );
@@ -924,10 +856,10 @@ fn reduce_pre_projection_update(
                 DesktopRuntimeCommandKind::FollowUp => DesktopCommandIntent::FollowUp,
                 _ => unreachable!("match admits only active controls"),
             };
-            if port.complete_command(*command_id, completion_owner, &intent)
-                && port.accept_composer(target, *command_id)
+            if state.complete_runtime_command(*command_id, completion_owner, &intent)
+                && state.accept_composer(target, *command_id)
             {
-                port.set_notice(
+                state.set_runtime_notice(
                     target,
                     format!("{command:?} accepted for {}.", receipt.operation_id),
                 );
@@ -938,24 +870,28 @@ fn reduce_pre_projection_update(
             authorization_id,
             decision,
         } => {
-            let intent = port.command_intent(*command_id).filter(|intent| {
-                matches!(
-                    intent,
-                    DesktopCommandIntent::Authorization {
-                        authorization_id: pending,
-                        ..
-                    } if pending == authorization_id
-                )
-            });
+            let intent = state
+                .commands
+                .intent(*command_id)
+                .cloned()
+                .filter(|intent| {
+                    matches!(
+                        intent,
+                        DesktopCommandIntent::Authorization {
+                            authorization_id: pending,
+                            ..
+                        } if pending == authorization_id
+                    )
+                });
             if let Some(intent) = intent
-                && port.complete_command(*command_id, completion_owner, &intent)
+                && state.complete_runtime_command(*command_id, completion_owner, &intent)
             {
                 let decision = match decision {
                     ToolAuthorizationDecision::AllowOnce => "allow once",
                     ToolAuthorizationDecision::AllowForOperation => "allow for operation",
                     ToolAuthorizationDecision::Deny { .. } => "deny",
                 };
-                port.set_notice(
+                state.set_runtime_notice(
                     target,
                     format!("Authorization decision accepted: {decision}."),
                 );
@@ -967,7 +903,7 @@ fn reduce_pre_projection_update(
             code,
             ..
         } => reduce_command_rejected(
-            port,
+            state,
             target,
             completion_owner,
             *command_id,
@@ -982,11 +918,14 @@ fn reduce_pre_projection_update(
             ..
         } => {
             changes.insert(UiRegion::Sessions);
-            let _ =
-                port.complete_command(*command_id, completion_owner, &DesktopCommandIntent::Prompt);
-            port.complete_operation_commands(completion_owner, operation_id);
+            let _ = state.complete_runtime_command(
+                *command_id,
+                completion_owner,
+                &DesktopCommandIntent::Prompt,
+            );
+            state.complete_operation_commands(completion_owner, operation_id);
             if let Some(error) = error {
-                port.set_notice(
+                state.set_runtime_notice(
                     target,
                     format!(
                         "Prompt finished with runtime error ({}).",
@@ -1001,20 +940,20 @@ fn reduce_pre_projection_update(
                 "desktop runtime failed ({})",
                 truncate_label(&error.code, 28)
             );
-            if port.catalog_is_loading() {
-                port.fail_catalog(message.clone());
+            if state.catalog.state().is_loading() {
+                state.catalog.fail_refresh(message.clone());
             }
-            port.cancel_all_commands();
-            port.reject_pending_composer(target, message);
+            state.commands.cancel_all();
+            state.reject_pending_composer(target, message);
         }
         DesktopRuntimeUpdate::Stopped => {
             changes.insert(UiRegion::Sessions);
             let message = "desktop runtime stopped".to_owned();
-            if port.catalog_is_loading() {
-                port.fail_catalog(message.clone());
+            if state.catalog.state().is_loading() {
+                state.catalog.fail_refresh(message.clone());
             }
-            port.cancel_all_commands();
-            port.reject_pending_composer(target, message);
+            state.commands.cancel_all();
+            state.reject_pending_composer(target, message);
         }
         DesktopRuntimeUpdate::Reloaded { .. }
         | DesktopRuntimeUpdate::Resynced { .. }
@@ -1033,8 +972,12 @@ fn reduce_pre_projection_update(
     }
 }
 
-fn reduce_command_rejected(
-    port: &mut impl RuntimeUpdatePort,
+fn reduce_command_rejected<Presentation: RuntimeWorkspacePresentation>(
+    state: &mut DesktopState<
+        WorkspaceState<Presentation>,
+        ProjectCatalogController,
+        RuntimeWorkspaceDefaults,
+    >,
     target: &WorkspaceKey,
     completion_owner: &WorkspaceKey,
     command_id: u64,
@@ -1045,13 +988,13 @@ fn reduce_command_rejected(
     if command == DesktopRuntimeCommandKind::RenameSession {
         return;
     }
-    let rejected = port.reject_command(command_id, completion_owner, command);
+    let rejected = state.reject_runtime_command(command_id, completion_owner, command);
     let Some(intent) = rejected else {
         return;
     };
     match command {
         DesktopRuntimeCommandKind::SubmitPrompt => {
-            port.reject_composer(
+            state.reject_composer(
                 target,
                 command_id,
                 safe_runtime_rejection_notice(command, code),
@@ -1059,9 +1002,9 @@ fn reduce_command_rejected(
             changes.insert(UiRegion::Sessions);
         }
         DesktopRuntimeCommandKind::Abort => {
-            port.set_notice(target, safe_runtime_rejection_notice(command, code));
+            state.set_runtime_notice(target, safe_runtime_rejection_notice(command, code));
         }
-        DesktopRuntimeCommandKind::Reload => port.set_notice(
+        DesktopRuntimeCommandKind::Reload => state.set_runtime_notice(
             target,
             format!(
                 "Reload failed ({}); previous context retained.",
@@ -1069,7 +1012,7 @@ fn reduce_command_rejected(
             ),
         ),
         DesktopRuntimeCommandKind::SelectModel
-        | DesktopRuntimeCommandKind::SelectSessionProfile => port.set_notice(
+        | DesktopRuntimeCommandKind::SelectSessionProfile => state.set_runtime_notice(
             target,
             format!(
                 "{command:?} failed ({}); previous selection retained.",
@@ -1078,34 +1021,34 @@ fn reduce_command_rejected(
         ),
         DesktopRuntimeCommandKind::Steer | DesktopRuntimeCommandKind::FollowUp => {
             let notice = safe_runtime_rejection_notice(command, code);
-            if port.reject_composer(target, command_id, notice.clone()) {
-                port.set_notice(target, notice);
+            if state.reject_composer(target, command_id, notice.clone()) {
+                state.set_runtime_notice(target, notice);
             }
         }
         DesktopRuntimeCommandKind::DecideToolAuthorization => {
-            port.set_notice(target, safe_runtime_rejection_notice(command, code));
+            state.set_runtime_notice(target, safe_runtime_rejection_notice(command, code));
         }
         DesktopRuntimeCommandKind::RetryRecovery | DesktopRuntimeCommandKind::ResolveRecovery => {
-            port.set_notice(target, safe_runtime_rejection_notice(command, code));
+            state.set_runtime_notice(target, safe_runtime_rejection_notice(command, code));
             changes.insert(UiRegion::Inspector);
         }
         DesktopRuntimeCommandKind::Resync
         | DesktopRuntimeCommandKind::CreateSession
         | DesktopRuntimeCommandKind::OpenSession
         | DesktopRuntimeCommandKind::CloseSession => {
-            port.set_notice(target, safe_runtime_rejection_notice(command, code));
+            state.set_runtime_notice(target, safe_runtime_rejection_notice(command, code));
             changes.insert(UiRegion::Sessions);
         }
         DesktopRuntimeCommandKind::ListSessions => {
             let notice = safe_runtime_rejection_notice(command, code);
-            port.fail_catalog(notice.clone());
-            port.set_notice(target, notice);
+            state.catalog.fail_refresh(notice.clone());
+            state.set_runtime_notice(target, notice);
             changes.insert(UiRegion::Sessions);
         }
         DesktopRuntimeCommandKind::ReviewChangedFile => {
             if let DesktopCommandIntent::FileReview { request } = intent {
-                port.set_file_review_failed(target, request, code.to_owned());
-                port.set_notice(
+                state.set_file_review_failed(target, request, code.to_owned());
+                state.set_runtime_notice(
                     target,
                     format!("File review unavailable ({}).", truncate_label(code, 32)),
                 );
@@ -1113,7 +1056,7 @@ fn reduce_command_rejected(
             }
         }
         DesktopRuntimeCommandKind::OpenExternalEditor => {
-            port.set_notice(
+            state.set_runtime_notice(
                 target,
                 format!(
                     "External editor unavailable ({}).",
@@ -1126,8 +1069,12 @@ fn reduce_command_rejected(
     }
 }
 
-fn reconcile_projection_completion(
-    port: &mut impl RuntimeUpdatePort,
+fn reconcile_projection_completion<Presentation: RuntimeWorkspacePresentation>(
+    state: &mut DesktopState<
+        WorkspaceState<Presentation>,
+        ProjectCatalogController,
+        RuntimeWorkspaceDefaults,
+    >,
     target: &WorkspaceKey,
     completion: ProjectionCompletion,
     projection: ProjectionUpdateResult,
@@ -1137,8 +1084,8 @@ fn reconcile_projection_completion(
     match completion {
         ProjectionCompletion::None => {}
         ProjectionCompletion::Resync { command_id } => {
-            if port.complete_command(command_id, target, &DesktopCommandIntent::Resync) {
-                port.set_notice(
+            if state.complete_runtime_command(command_id, target, &DesktopCommandIntent::Resync) {
+                state.set_runtime_notice(
                     target,
                     if replaced {
                         "Runtime state resynchronized.".into()
@@ -1153,10 +1100,10 @@ fn reconcile_projection_completion(
             command_id,
             intent,
         } => {
-            let owner = port.command_owner(command_id).unwrap_or(owner);
-            if port.complete_command(command_id, &owner, &intent) {
+            let owner = state.commands.owner(command_id).cloned().unwrap_or(owner);
+            if state.complete_runtime_command(command_id, &owner, &intent) {
                 let created = matches!(intent, DesktopCommandIntent::CreateSession);
-                port.set_notice(
+                state.set_runtime_notice(
                     target,
                     if replaced {
                         match intent {
@@ -1171,7 +1118,7 @@ fn reconcile_projection_completion(
                     },
                 );
                 changes.insert(UiRegion::Sessions);
-                if replaced && created && port.insert_session_into_catalog(target) {
+                if replaced && created && state.insert_session_into_catalog(target) {
                     changes.insert(UiRegion::Sessions);
                 }
             }
@@ -1182,8 +1129,8 @@ fn reconcile_projection_completion(
             prompt_count,
             profile_count,
         } => {
-            if port.complete_command(command_id, target, &DesktopCommandIntent::Reload) {
-                port.set_notice(
+            if state.complete_runtime_command(command_id, target, &DesktopCommandIntent::Reload) {
+                state.set_runtime_notice(
                     target,
                     if replaced {
                         format!(
@@ -1202,29 +1149,29 @@ fn reconcile_projection_completion(
             thinking_level,
             thinking_fallback,
         } => {
-            if port.complete_command(
+            if state.complete_runtime_command(
                 command_id,
                 target,
                 &DesktopCommandIntent::Selection(selection),
             ) {
                 if replaced && selection == DesktopRuntimeSelectionKind::Model {
-                    port.apply_model_thinking_selection(target, thinking_level, thinking_fallback);
+                    state.apply_model_thinking_selection(target, thinking_level, thinking_fallback);
                 }
                 let notice = if replaced {
                     match selection {
                         DesktopRuntimeSelectionKind::Model => format!(
                             "Future prompts will use model {}.",
-                            truncate_label(&port.selected_model_label(target), 28)
+                            truncate_label(&state.selected_model_label(target), 28)
                         ),
                         DesktopRuntimeSelectionKind::SessionProfile => format!(
                             "Session profile changed to {}.",
-                            truncate_label(&port.selected_profile_label(target), 28)
+                            truncate_label(&state.selected_profile_label(target), 28)
                         ),
                     }
                 } else {
                     "Selection response failed projection validation; resync is required.".into()
                 };
-                port.set_notice(target, notice);
+                state.set_runtime_notice(target, notice);
             }
         }
         ProjectionCompletion::Recovery {
@@ -1236,8 +1183,8 @@ fn reconcile_projection_completion(
                 recovery_id: recovery_id.clone(),
                 action,
             };
-            if port.complete_command(command_id, target, &intent) {
-                port.set_notice(
+            if state.complete_runtime_command(command_id, target, &intent) {
+                state.set_runtime_notice(
                     target,
                     if replaced {
                         format!(
@@ -1370,21 +1317,28 @@ impl DesktopController {
         }
     }
 
-    pub(crate) fn reduce_runtime(
+    pub(crate) fn reduce_runtime<Presentation: RuntimeWorkspacePresentation>(
         &mut self,
-        port: &mut impl RuntimeUpdatePort,
+        state: &mut DesktopState<
+            WorkspaceState<Presentation>,
+            ProjectCatalogController,
+            RuntimeWorkspaceDefaults,
+        >,
         update: DesktopRuntimeUpdate,
     ) -> Transition {
-        reduce_runtime_update(self, port, update)
+        reduce_runtime_update(self, state, update)
     }
 
     /// Route an event through one mutable application-state authority while
     /// feature branches are migrated from the GPUI adapter in later tasks.
-    pub(crate) fn reduce<Workspace, Catalog>(
+    pub(crate) fn reduce<Workspace, Catalog, WorkspaceDefaults>(
         &mut self,
-        state: &mut DesktopState<Workspace, Catalog>,
+        state: &mut DesktopState<Workspace, Catalog, WorkspaceDefaults>,
         event: DesktopEvent,
-        delegate: impl FnOnce(&mut DesktopState<Workspace, Catalog>, DesktopEvent) -> Transition,
+        delegate: impl FnOnce(
+            &mut DesktopState<Workspace, Catalog, WorkspaceDefaults>,
+            DesktopEvent,
+        ) -> Transition,
     ) -> Transition {
         delegate(state, event)
     }

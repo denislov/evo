@@ -10,6 +10,12 @@ pub(super) struct SkillsPaneViewModel {
     pub(super) skills: Arc<[CodingAgentResourceCommand]>,
 }
 
+pub(super) fn view_model(skills: &Arc<[CodingAgentResourceCommand]>) -> SkillsPaneViewModel {
+    SkillsPaneViewModel {
+        skills: Arc::clone(skills),
+    }
+}
+
 pub(crate) struct SkillsPane {
     view_model: SkillsPaneViewModel,
 }

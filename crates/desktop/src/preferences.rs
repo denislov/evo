@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::channel::oneshot;
 use serde::{Deserialize, Serialize};
 
+use coding_agent::api::embedding::CodingAgentThinkingLevel;
+
 use crate::file_review::DesktopExternalEditorConfig;
 use crate::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH, SESSION_PANEL_MAX_WIDTH,
@@ -41,6 +43,46 @@ pub(crate) enum DesktopThinkingLevel {
     #[default]
     #[serde(other)]
     Default,
+}
+
+impl DesktopThinkingLevel {
+    pub(crate) const fn explicit(self) -> Option<CodingAgentThinkingLevel> {
+        match self {
+            Self::Default => None,
+            Self::Off => Some(CodingAgentThinkingLevel::Off),
+            Self::Minimal => Some(CodingAgentThinkingLevel::Minimal),
+            Self::Low => Some(CodingAgentThinkingLevel::Low),
+            Self::Medium => Some(CodingAgentThinkingLevel::Medium),
+            Self::High => Some(CodingAgentThinkingLevel::High),
+            Self::XHigh => Some(CodingAgentThinkingLevel::XHigh),
+        }
+    }
+
+    pub(crate) const fn from_explicit(level: Option<CodingAgentThinkingLevel>) -> Self {
+        match level {
+            None => Self::Default,
+            Some(CodingAgentThinkingLevel::Off) => Self::Off,
+            Some(CodingAgentThinkingLevel::Minimal) => Self::Minimal,
+            Some(CodingAgentThinkingLevel::Low) => Self::Low,
+            Some(CodingAgentThinkingLevel::Medium) => Self::Medium,
+            Some(CodingAgentThinkingLevel::High) => Self::High,
+            Some(CodingAgentThinkingLevel::XHigh) => Self::XHigh,
+        }
+    }
+
+    pub(crate) fn label(self, default: Option<&str>) -> String {
+        match self {
+            Self::Default => default
+                .map(|level| format!("default:{}", crate::shell::truncate_label(level, 10)))
+                .unwrap_or_else(|| "default".into()),
+            Self::Off => "off".into(),
+            Self::Minimal => "minimal".into(),
+            Self::Low => "low".into(),
+            Self::Medium => "medium".into(),
+            Self::High => "high".into(),
+            Self::XHigh => "xhigh".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

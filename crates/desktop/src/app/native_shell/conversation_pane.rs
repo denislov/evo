@@ -15,7 +15,7 @@ use std::{
 use unicode_width::UnicodeWidthChar as _;
 
 use super::{
-    ConversationBlockKind, conversation_block_visual,
+    ConversationBlockKind, SessionWorkspace, conversation_block_visual,
     conversation_controller::ConversationRenderReader,
     desktop_controls::{
         DesktopControlSize, DesktopCriticalButton, DesktopCriticalTone, DesktopIcon,
@@ -24,10 +24,12 @@ use super::{
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
     streaming_text::{StreamingText, markdown_completion_trace_enabled, trace_markdown_parse},
 };
+use crate::ui::shell::ShellUiState;
 use desktop::conversation::{
     ConversationRowMeasurement, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, compact_duration,
     conversation_copy_text,
 };
+use desktop::projection::DesktopRecoveryStatus;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
 use desktop::shell::{
     ASSISTANT_MESSAGE_MAX_WIDTH, CONVERSATION_CONTENT_MAX_WIDTH,
@@ -91,6 +93,114 @@ pub(super) struct ConversationPaneViewModel {
     pub(super) expanded_details: Rc<HashSet<String>>,
     pub(super) full_view_block_id: Option<String>,
     pub(super) diagnostic_recovery: Option<DesktopRecoveryIdentity>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConversationPaneSnapshot {
+    visible_count: usize,
+    event_count: usize,
+    message_count: usize,
+    tool_count: usize,
+    omitted_count: usize,
+    follow_latest: bool,
+    unseen_updates: usize,
+    selected_block_id: Option<String>,
+    expanded_details: HashSet<String>,
+    full_view_block_id: Option<String>,
+    diagnostic_recovery: Option<DesktopRecoveryIdentity>,
+}
+
+#[cfg(test)]
+impl ConversationPaneViewModel {
+    pub(super) fn snapshot(&self) -> ConversationPaneSnapshot {
+        ConversationPaneSnapshot {
+            visible_count: self.visible_count,
+            event_count: self.event_count,
+            message_count: self.message_count,
+            tool_count: self.tool_count,
+            omitted_count: self.omitted_count,
+            follow_latest: self.follow_latest,
+            unseen_updates: self.unseen_updates,
+            selected_block_id: self.selected_block_id.clone(),
+            expanded_details: self.expanded_details.as_ref().clone(),
+            full_view_block_id: self.full_view_block_id.clone(),
+            diagnostic_recovery: self.diagnostic_recovery.clone(),
+        }
+    }
+}
+
+pub(super) fn view_model(
+    workspace: &SessionWorkspace,
+    ui: &ShellUiState,
+) -> ConversationPaneViewModel {
+    let projection = workspace.projection.as_ref();
+    let diagnostic_recovery = projection.and_then(|projection| {
+        projection.recoveries().iter().find_map(|recovery| {
+            (recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative)
+                .then(|| recovery.identity.clone())
+                .flatten()
+        })
+    });
+    let visible_count = visible_count(workspace);
+    ConversationPaneViewModel {
+        render: workspace
+            .presentation
+            .conversation_controller
+            .render_reader(),
+        scroll: workspace
+            .presentation
+            .conversation_controller
+            .scroll
+            .clone(),
+        visible_count,
+        event_count: projection
+            .map(|projection| projection.recent_events().len())
+            .unwrap_or_default(),
+        message_count: projection
+            .map(|projection| projection.messages().len())
+            .unwrap_or_default(),
+        tool_count: projection
+            .map(|projection| projection.tools().len())
+            .unwrap_or_default(),
+        omitted_count: projection
+            .map(|projection| projection.conversation().omitted_blocks())
+            .unwrap_or_default(),
+        follow_latest: workspace
+            .presentation
+            .conversation_controller
+            .follow_latest_enabled(),
+        unseen_updates: workspace
+            .presentation
+            .conversation_controller
+            .unseen_updates(),
+        selected_block_id: workspace
+            .presentation
+            .conversation_controller
+            .selected_block_id()
+            .map(str::to_owned),
+        expanded_details: Rc::new(
+            workspace
+                .presentation
+                .conversation_controller
+                .expanded_details()
+                .clone(),
+        ),
+        full_view_block_id: ui
+            .conversation_full_message
+            .as_ref()
+            .map(|message| message.block_id.clone()),
+        diagnostic_recovery,
+    }
+}
+
+pub(super) fn visible_count(workspace: &SessionWorkspace) -> usize {
+    workspace.projection.as_ref().map_or(0, |projection| {
+        projection.conversation().blocks().len()
+            + usize::from(workspace.composer.submitted().is_some())
+            + projection.messages().len()
+            + projection.tools().len()
+    })
 }
 
 /// Markdown parse states outlive the frame that rendered them so a streaming row

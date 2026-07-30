@@ -87,6 +87,10 @@ impl ShellUiState {
         sequence
     }
 
+    pub(crate) const fn keyboard_focus_visible(&self) -> bool {
+        matches!(self.focus_input_modality, FocusInputModality::Keyboard)
+    }
+
     pub(crate) fn clear_conversation_announcement(&mut self, owner: &WorkspaceKey) -> bool {
         if !self
             .conversation_announcement

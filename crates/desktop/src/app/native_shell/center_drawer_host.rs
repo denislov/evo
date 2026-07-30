@@ -4,7 +4,8 @@ use gpui::{
     div, prelude::*, px, rgb,
 };
 
-use super::{InspectorPane, SessionsPane, actions};
+use super::{InspectorPane, NativeDesktopState, SessionsPane, actions};
+use crate::ui::shell::ShellUiState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CenterDrawerKind {
@@ -17,11 +18,19 @@ pub(super) enum CenterDrawerHostEvent {
     Dismiss,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CenterDrawerViewModel {
     pub(super) active: Option<CenterDrawerKind>,
     pub(super) sessions_width: u32,
     pub(super) inspector_width: u32,
+}
+
+pub(super) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> CenterDrawerViewModel {
+    CenterDrawerViewModel {
+        active: ui.active_drawer,
+        sessions_width: app.preferences.sessions_panel_width,
+        inspector_width: app.preferences.context_panel_width,
+    }
 }
 
 pub(crate) struct CenterDrawerHost {

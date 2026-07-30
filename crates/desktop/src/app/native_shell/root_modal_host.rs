@@ -11,10 +11,12 @@ use gpui_component::{Selectable as _, button::Button};
 use std::sync::Arc;
 
 use super::{
-    ConversationFullMessageView, DesktopPaletteCommand, PALETTE_ENTRIES, actions,
+    ConversationFullMessageView, DesktopPaletteCommand, NativeDesktopState, PALETTE_ENTRIES,
+    actions,
     desktop_controls::{DesktopCriticalButton, DesktopCriticalTone},
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
+use crate::ui::shell::ShellUiState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RootModalHostEvent {
@@ -33,12 +35,41 @@ pub(super) struct RootModalAuthorizationView {
     pub(super) decision_pending: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RootModalViewModel {
     pub(super) palette_open: bool,
     pub(super) palette_selected: usize,
     pub(super) authorization: Option<RootModalAuthorizationView>,
     pub(super) full_message: Option<ConversationFullMessageView>,
+}
+
+pub(super) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> RootModalViewModel {
+    let authorization = app
+        .workspaces
+        .active()
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.snapshot().pending_authorizations.first())
+        .cloned()
+        .map(|request| {
+            let decision_pending = app
+                .commands
+                .authorization(app.workspaces.active_key())
+                .is_some_and(|(_, authorization_id, operation_id)| {
+                    authorization_id == request.authorization_id
+                        && operation_id == request.operation_id
+                });
+            RootModalAuthorizationView {
+                request,
+                decision_pending,
+            }
+        });
+    RootModalViewModel {
+        palette_open: ui.command_palette.is_open(),
+        palette_selected: ui.command_palette.selected(),
+        authorization,
+        full_message: ui.conversation_full_message.clone(),
+    }
 }
 
 pub(crate) struct RootModalHost {

@@ -1,3 +1,5 @@
+use desktop::conversation::ComposerAdmission;
+use desktop::runtime::MAX_PROMPT_ATTACHMENTS;
 use desktop::shell::{
     COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, CONVERSATION_CONTENT_MAX_WIDTH, SemanticTheme,
 };
@@ -16,7 +18,7 @@ use std::{
 };
 
 use super::{
-    ComposerRunningMode,
+    ComposerRunningMode, SessionWorkspace,
     desktop_controls::{
         DesktopControlSize, DesktopControlWeight, DesktopIcon, DesktopIconButton,
         DesktopProjectDirectoryControl, DesktopProjectDirectoryState, DesktopSelector,
@@ -52,6 +54,89 @@ pub(super) struct ComposerPaneViewModel {
     pub(super) attachments_enabled: bool,
     pub(super) attachment_disabled_reason: Option<Arc<str>>,
     pub(super) rejection: Option<Arc<str>>,
+}
+
+pub(super) fn view_model(workspace: &SessionWorkspace) -> ComposerPaneViewModel {
+    let snapshot = workspace
+        .projection
+        .as_ref()
+        .map(|projection| projection.snapshot());
+    let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
+    let composer_pending = matches!(
+        workspace.composer.admission(),
+        ComposerAdmission::Pending { .. }
+    );
+    let awaiting_prompt_start = workspace.composer.submitted().is_some() && !composer_running;
+    let attachment_disabled_reason = attachment_disabled_reason(workspace);
+    let project_directory_state = if workspace.projection.is_some() {
+        DesktopProjectDirectoryState::Locked
+    } else if !workspace.project_directory_editable() || composer_pending || awaiting_prompt_start {
+        DesktopProjectDirectoryState::Pending
+    } else {
+        DesktopProjectDirectoryState::Editable
+    };
+    let project_directory_path = workspace.project_directory();
+    ComposerPaneViewModel {
+        composer_pending,
+        composer_running,
+        awaiting_prompt_start,
+        authorization_pending: snapshot
+            .is_some_and(|snapshot| !snapshot.pending_authorizations.is_empty()),
+        running_mode: workspace.presentation.composer_running_mode,
+        project_directory: ComposerProjectDirectoryViewModel {
+            value: Arc::from(
+                project_directory_path
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "无项目".into()),
+            ),
+            state: project_directory_state,
+            is_projectless: project_directory_path.is_none(),
+        },
+        attachments: workspace
+            .composer_attachments
+            .iter()
+            .map(|path| ComposerAttachmentViewModel {
+                label: Arc::from(
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("attachment"),
+                ),
+                path: Arc::from(path.display().to_string()),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        attachments_enabled: attachment_disabled_reason.is_none()
+            && workspace.composer_attachments.len() < MAX_PROMPT_ATTACHMENTS,
+        attachment_disabled_reason: attachment_disabled_reason.map(Arc::from),
+        rejection: workspace.composer.rejection().map(Arc::from),
+    }
+}
+
+pub(super) fn attachment_disabled_reason(workspace: &SessionWorkspace) -> Option<&'static str> {
+    let supports_images = workspace
+        .project
+        .models
+        .iter()
+        .find(|model| model.id == workspace.project.selected_model_id)
+        .is_some_and(|model| model.supports_images);
+    if !supports_images {
+        return Some("Selected model does not support image attachments.");
+    }
+    let snapshot = workspace
+        .projection
+        .as_ref()
+        .map(|projection| projection.snapshot());
+    if snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some()) {
+        return Some("Attachments are unavailable while an operation is running.");
+    }
+    if matches!(
+        workspace.composer.admission(),
+        ComposerAdmission::Pending { .. }
+    ) || workspace.composer.submitted().is_some()
+    {
+        return Some("Attachments are unavailable while a prompt is starting.");
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

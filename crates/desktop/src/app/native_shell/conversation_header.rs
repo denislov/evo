@@ -1,3 +1,7 @@
+use coding_agent::api::{
+    embedding::{CodingAgentModelChoice, CodingAgentThinkingLevel},
+    view::ProfileKind,
+};
 use desktop::preferences::DesktopThinkingLevel;
 use desktop::shell::{
     CENTER_HEADER_HEIGHT, PanelVisibility, SemanticStatus, SemanticTheme, ShellLayout,
@@ -7,9 +11,11 @@ use gpui::{
     div, prelude::*, px, rgb,
 };
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use super::{
+    NativeDesktopState,
+    center_drawer_host::CenterDrawerKind,
     conversation_focus_accent,
     desktop_controls::{
         DesktopCriticalButton, DesktopCriticalTone, DesktopIcon, DesktopIconButton, DesktopSelector,
@@ -17,6 +23,8 @@ use super::{
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
     semantic_status_color,
 };
+use crate::application::commands::DesktopCommandIntent;
+use crate::ui::shell::{ShellUiState, presentation::semantic_status};
 
 /// Stable space for the attention-only runtime indicator. Idle leaves this
 /// slot empty so status changes never move the selectors or panel actions.
@@ -112,6 +120,220 @@ pub(super) struct ConversationHeaderViewModel {
     pub(super) inspector_drawer_open: bool,
     pub(super) sessions_panel_width: u32,
     pub(super) context_panel_width: u32,
+}
+
+pub(super) fn view_model(
+    app: &NativeDesktopState,
+    ui: &ShellUiState,
+) -> ConversationHeaderViewModel {
+    let workspace = app.workspaces.active();
+    let snapshot = workspace
+        .projection
+        .as_ref()
+        .map(|projection| projection.snapshot());
+    let project = &workspace.project;
+    let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
+    let awaiting_prompt_start = workspace.composer.submitted().is_some() && !composer_running;
+    let reload_pending = app
+        .commands
+        .contains(app.workspaces.active_key(), &DesktopCommandIntent::Reload);
+    let selection_pending = app
+        .commands
+        .contains_where(app.workspaces.active_key(), |intent| {
+            matches!(intent, DesktopCommandIntent::Selection(_))
+        });
+    let current_model_id = project.selected_model_id.as_str();
+    let current_profile_id = snapshot
+        .map(|snapshot| snapshot.session.default_agent_profile_id.as_str())
+        .unwrap_or_else(|| project.default_agent_profile_id.as_str());
+    let model = project
+        .models
+        .iter()
+        .find(|model| model.id == current_model_id)
+        .map(|model| model.name.as_str())
+        .unwrap_or(current_model_id);
+    let current_model = project
+        .models
+        .iter()
+        .find(|model| model.id == current_model_id);
+    let profile = project
+        .profiles
+        .iter()
+        .find(|profile| profile.id.as_str() == current_profile_id)
+        .map(|profile| profile.display_name.as_str())
+        .unwrap_or(current_profile_id);
+    let (model_groups, unavailable_current_model) = model_menu(&project.models, current_model_id);
+    let profile_options = project
+        .profiles
+        .iter()
+        .map(|profile| ConversationHeaderSelectorOption {
+            id: Arc::from(profile.id.as_str()),
+            label: Arc::from(format!(
+                "{} · {}{}",
+                profile.display_name,
+                profile.id.as_str(),
+                if profile.kind == ProfileKind::Team {
+                    " · team profile"
+                } else {
+                    ""
+                }
+            )),
+            selectable: profile.kind == ProfileKind::Agent,
+        })
+        .collect::<Vec<_>>();
+    let project_name = project
+        .cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| desktop::shell::truncate_label(name, 18))
+        .unwrap_or_else(|| "Project".into());
+
+    ConversationHeaderViewModel {
+        idle: workspace.projection.is_none(),
+        status: semantic_status(workspace.projection.as_ref()),
+        composer_running,
+        abort_pending: app
+            .commands
+            .contains_where(app.workspaces.active_key(), |intent| {
+                matches!(intent, DesktopCommandIntent::Abort { .. })
+            }),
+        reload_pending,
+        selector_disabled: composer_running
+            || awaiting_prompt_start
+            || reload_pending
+            || selection_pending,
+        model: Arc::from(desktop::shell::truncate_label(model, 10)),
+        profile: Arc::from(desktop::shell::truncate_label(profile, 9)),
+        thinking: Arc::from(
+            if workspace.thinking_selection == DesktopThinkingLevel::Default {
+                "Auto".to_owned()
+            } else {
+                desktop::shell::truncate_label(&workspace.thinking_selection.label(None), 12)
+            },
+        ),
+        thinking_selection: workspace.thinking_selection,
+        thinking_options: thinking_menu(current_model).into(),
+        thinking_hint: workspace.thinking_hint.clone(),
+        current_model_id: Arc::from(current_model_id),
+        current_profile_id: Arc::from(current_profile_id),
+        model_groups: model_groups.into(),
+        unavailable_current_model,
+        profile_options: profile_options.into(),
+        project_name: Arc::from(project_name),
+        keyboard_focus_visible: ui.keyboard_focus_visible(),
+        panel_visibility: PanelVisibility {
+            sessions: app.preferences.sessions_panel_visible,
+            context: app.preferences.context_panel_visible,
+        },
+        sessions_drawer_open: ui.active_drawer == Some(CenterDrawerKind::Sessions),
+        inspector_drawer_open: ui.active_drawer == Some(CenterDrawerKind::Inspector),
+        sessions_panel_width: app.preferences.sessions_panel_width,
+        context_panel_width: app.preferences.context_panel_width,
+    }
+}
+
+pub(super) fn thinking_menu(
+    model: Option<&CodingAgentModelChoice>,
+) -> Vec<ConversationHeaderThinkingOption> {
+    let Some(capability) = model.map(|model| &model.thinking_capability) else {
+        return Vec::new();
+    };
+    if !capability.supported {
+        return Vec::new();
+    }
+    let mut options = vec![ConversationHeaderThinkingOption {
+        selection: DesktopThinkingLevel::Default,
+        label: "Auto",
+    }];
+    if capability.can_disable {
+        options.push(ConversationHeaderThinkingOption {
+            selection: DesktopThinkingLevel::Off,
+            label: "Off",
+        });
+    }
+    for level in &capability.explicit_levels {
+        if *level == CodingAgentThinkingLevel::Off {
+            continue;
+        }
+        let selection = DesktopThinkingLevel::from_explicit(Some(*level));
+        if options.iter().any(|option| option.selection == selection) {
+            continue;
+        }
+        options.push(ConversationHeaderThinkingOption {
+            selection,
+            label: match level {
+                CodingAgentThinkingLevel::Off => "Off",
+                CodingAgentThinkingLevel::Minimal => "Minimal",
+                CodingAgentThinkingLevel::Low => "Low",
+                CodingAgentThinkingLevel::Medium => "Medium",
+                CodingAgentThinkingLevel::High => "High",
+                CodingAgentThinkingLevel::XHigh => "XHigh",
+            },
+        });
+    }
+    options
+}
+
+pub(super) fn model_menu(
+    models: &[CodingAgentModelChoice],
+    current_model_id: &str,
+) -> (
+    Vec<ConversationHeaderModelGroup>,
+    Option<ConversationHeaderModelWarning>,
+) {
+    let mut grouped = BTreeMap::<&str, Vec<ConversationHeaderModelOption>>::new();
+    for model in models
+        .iter()
+        .filter(|model| model.configured && model.supports_text)
+    {
+        grouped
+            .entry(model.provider.as_str())
+            .or_default()
+            .push(ConversationHeaderModelOption {
+                id: Arc::from(model.id.as_str()),
+                name: Arc::from(model.name.as_str()),
+                display_name: Arc::from(desktop::shell::truncate_label(&model.name, 44)),
+            });
+    }
+
+    let groups = grouped
+        .into_iter()
+        .map(|(provider, mut options)| {
+            options.sort_by(|left, right| {
+                left.name
+                    .cmp(&right.name)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            ConversationHeaderModelGroup {
+                provider: Arc::from(provider),
+                options: options.into(),
+            }
+        })
+        .collect();
+    let unavailable_current_model = models
+        .iter()
+        .find(|model| model.id == current_model_id)
+        .filter(|model| !(model.configured && model.supports_text))
+        .map(|model| ConversationHeaderModelWarning {
+            id: Arc::from(model.id.as_str()),
+            name: Arc::from(model.name.as_str()),
+            reason: Arc::from(if !model.supports_text {
+                "No text input"
+            } else {
+                "Authentication required"
+            }),
+        })
+        .or_else(|| {
+            (!models.iter().any(|model| model.id == current_model_id)).then(|| {
+                ConversationHeaderModelWarning {
+                    id: Arc::from(current_model_id),
+                    name: Arc::from(current_model_id),
+                    reason: Arc::from("Not in model catalog"),
+                }
+            })
+        });
+
+    (groups, unavailable_current_model)
 }
 
 pub(crate) struct ConversationHeader {
