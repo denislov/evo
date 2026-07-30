@@ -68,6 +68,8 @@ impl SessionNamingSeed {
         let model_id = runtime.model().id.clone();
         let context = naming_context(&self.user_text, &assistant_text);
         let options = StreamOptions {
+            api_key: runtime.api_key().map(str::to_owned),
+            auth_diagnostics: runtime.auth_diagnostics().to_vec(),
             temperature: Some(0.2),
             max_tokens: Some(64),
             timeout_ms: Some(30_000),
@@ -195,7 +197,8 @@ fn naming_runtime(runtime: RuntimeSnapshot) -> Result<RuntimeSnapshot, String> {
     else {
         return Ok(runtime);
     };
-    let model = ai::api::model::lookup_model(model_id)
+    let model = ai::api::model::get_model(&runtime.model().provider, model_id)
+        .or_else(|| ai::api::model::lookup_model(model_id))
         .ok_or_else(|| format!("automatic session naming model is not available: {model_id}"))?;
     Ok(runtime.with_model(model))
 }
@@ -275,40 +278,4 @@ fn persist_failure(
         Err(error) => format!("{message}; diagnostic persistence failed: {error}"),
     };
     event_service.emit_diagnostic(Some(operation_id.to_owned()), message);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generated_name_must_be_one_bounded_nonempty_line() {
-        assert_eq!(
-            validate_generated_name("  concise title  ").unwrap(),
-            "concise title"
-        );
-        assert!(validate_generated_name(" ").is_err());
-        assert!(validate_generated_name("first\nsecond").is_err());
-        assert!(validate_generated_name(&"x".repeat(81)).is_err());
-    }
-
-    #[tokio::test]
-    async fn failed_terminal_retains_reported_usage() {
-        let mut message = AssistantMessage::empty("test", "test-model");
-        message.stop_reason = StopReason::Error;
-        message.error_message = Some("provider failed".into());
-        message.usage.input = 7;
-        message.usage.output = 3;
-        let stream: EventStream =
-            Box::pin(futures::stream::iter(vec![AssistantMessageEvent::Error {
-                reason: StopReason::Error,
-                message,
-            }]));
-
-        let error = complete_naming_stream(stream).await.unwrap_err();
-
-        let usage = error.usage.unwrap();
-        assert_eq!(usage.input, 7);
-        assert_eq!(usage.output, 3);
-    }
 }

@@ -4,8 +4,6 @@ use crate::tools::filesystem_target_for_execution;
 use crate::tools::output::{DEFAULT_MAX_BYTES, TruncationLimit, format_size, truncate_head};
 use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
 use ai::api::conversation::ContentBlock;
-#[cfg(test)]
-use std::path::Path;
 use std::sync::Arc;
 
 const DESCRIPTION: &str = "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first).";
@@ -38,21 +36,6 @@ fn limit_arg(args: &serde_json::Value, default: usize) -> usize {
         })
         .map(|n| n.max(1) as usize)
         .unwrap_or(default)
-}
-
-#[cfg(test)]
-pub async fn ls_execute(cwd: &Path, args: serde_json::Value) -> Result<Vec<ContentBlock>, String> {
-    let filesystem =
-        FilesystemCapability::new(cwd.to_path_buf()).map_err(|error| error.to_string())?;
-    let requested = args
-        .get("path")
-        .and_then(|value| value.as_str())
-        .unwrap_or(".");
-    let target = filesystem
-        .prepare_target_for_tool("ls", requested)
-        .await
-        .map_err(|error| error.to_string())?;
-    ls_target(&target, args).await
 }
 
 async fn ls_target(

@@ -74,30 +74,6 @@ pub fn merge_stdin_prompt(prompt: &str, stdin: Option<&str>) -> String {
     }
 }
 
-#[cfg(test)]
-pub fn process_at_file_references(
-    prompt: &str,
-    cwd: &Path,
-) -> Result<ProcessedPromptInput, ApplicationError> {
-    process_at_file_references_with_options(prompt, cwd, ImageResizeOptions::default())
-}
-
-#[cfg(test)]
-pub fn process_at_file_references_with_options(
-    prompt: &str,
-    cwd: &Path,
-    resize_options: ImageResizeOptions,
-) -> Result<ProcessedPromptInput, ApplicationError> {
-    process_at_file_references_with_processing_options(
-        prompt,
-        cwd,
-        ImageProcessingOptions {
-            resize: resize_options,
-            block_images: false,
-        },
-    )
-}
-
 pub fn process_at_file_references_with_processing_options(
     prompt: &str,
     cwd: &Path,

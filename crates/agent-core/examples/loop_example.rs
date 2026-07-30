@@ -3,8 +3,8 @@ use agent_core::api::tool::{AgentTool, AgentToolOutput};
 use ai::api::client::AiClient;
 use ai::api::conversation::{ContentBlock, StopReason};
 use ai::api::model::{Model, ModelCost, ModelInput};
+use ai::api::provider::faux::FauxProvider;
 use ai::api::stream::AssistantMessageEvent;
-use ai::api::testing::FauxProvider;
 use futures::StreamExt;
 use std::sync::Arc;
 

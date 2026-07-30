@@ -82,14 +82,4 @@ impl CodingAgentSession {
             registration.generation,
         ))
     }
-
-    #[cfg(test)]
-    pub(crate) fn prompt_control_handle(
-        &mut self,
-    ) -> Result<PromptControlHandle, CodingSessionError> {
-        self.runtime_host
-            .operation_supervisor
-            .control
-            .prompt_control_handle()
-    }
 }

@@ -32,7 +32,7 @@ impl ProviderError {
             status: None,
             message: format!(
                 "No API key found for provider {}. Set the appropriate env var or pass apiKey in options.",
-                model_id
+                provider
             ),
             retry_after_ms: None,
         }

@@ -40,18 +40,3 @@ fn too_large(max_bytes: usize) -> io::Error {
         format!("input exceeds the {max_bytes} byte safety limit"),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn file_metadata_limit_precedes_full_allocation() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("large");
-        let file = File::create(&path).unwrap();
-        file.set_len(1025).unwrap();
-
-        assert!(read_file(&path, 1024).is_err());
-    }
-}

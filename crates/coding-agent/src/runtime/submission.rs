@@ -43,27 +43,6 @@ pub(super) struct SubmissionCommitGuard {
 }
 
 impl SubmissionCommitGuard {
-    #[cfg(test)]
-    pub(super) fn for_tests(
-        client_service: ClientService,
-        coordinator: Arc<SnapshotCoordinator>,
-        handle: snapshot_coordinator::ClientHandle,
-        descriptor: public_operation::OperationDescriptor,
-        expected_prompt_draft: Option<snapshot_coordinator::DraftRecord>,
-    ) -> Self {
-        Self {
-            client_service,
-            coordinator,
-            handle,
-            operation_id: "op_submission_test".into(),
-            lifecycle: Arc::new(Mutex::new(SubmissionLeaseLifecycle::Consuming)),
-            execution: None,
-            descriptor,
-            expected_prompt_draft,
-            finished: false,
-        }
-    }
-
     pub(super) fn commit_execution(
         &mut self,
         execution: &OperationExecution,

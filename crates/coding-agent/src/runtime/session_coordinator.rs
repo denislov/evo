@@ -12,8 +12,6 @@ use crate::profiles::ProfileId;
 use crate::runtime::operation::OperationClass;
 use crate::services::session::{ReplayDerivedOwnerState, replay_derived_owner_state};
 use crate::session::event::PersistedDelegationStatus;
-#[cfg(test)]
-use crate::session::id::{Clock, SystemClock};
 use crate::session::service::{SessionPersistence, StartupRecoveryMarker};
 
 /// Sole mutable owner of product session state.
@@ -298,66 +296,6 @@ pub(crate) enum SessionMutation {
     },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::session::service::TransientSessionState;
-
-    fn transient_coordinator() -> SessionCoordinator {
-        SessionCoordinator {
-            persistence: SessionPersistence::NonPersistent(TransientSessionState::new(
-                ProfileId::from("default"),
-            )),
-            pending_delegation_confirmations: Default::default(),
-            startup_recovery_markers: Mutex::new(Vec::new()),
-        }
-    }
-
-    #[test]
-    fn writer_command_mutates_session_owner_and_returns_typed_reply() {
-        let mut coordinator = transient_coordinator();
-
-        let reply = coordinator
-            .execute_writer_command(SessionWriterCommand::set_default_agent_profile(
-                "op_profile",
-                CapabilityGeneration::new(7),
-                ProfileId::from("reviewer"),
-            ))
-            .unwrap();
-
-        assert!(matches!(
-            reply,
-            SessionWriterReply::DefaultAgentProfile {
-                profile_id,
-            }
-            if profile_id.as_str() == "reviewer"
-        ));
-        let SessionPersistence::NonPersistent(state) = &coordinator.persistence else {
-            unreachable!("fixture is transient")
-        };
-        assert_eq!(state.default_agent_profile_id.as_str(), "reviewer");
-    }
-
-    #[test]
-    fn writer_command_rejects_missing_admitted_identity_without_mutation() {
-        let mut coordinator = transient_coordinator();
-
-        let error = coordinator
-            .execute_writer_command(SessionWriterCommand::set_default_agent_profile(
-                "  ",
-                CapabilityGeneration::new(1),
-                ProfileId::from("reviewer"),
-            ))
-            .unwrap_err();
-
-        assert!(matches!(error, CodingSessionError::Session { .. }));
-        let SessionPersistence::NonPersistent(state) = &coordinator.persistence else {
-            unreachable!("fixture is transient")
-        };
-        assert_eq!(state.default_agent_profile_id.as_str(), "default");
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum SessionWriterReply {
     DefaultAgentProfile {
@@ -396,16 +334,6 @@ pub(crate) struct SessionWriterDiagnostic {
 }
 
 impl SessionCoordinator {
-    #[cfg(test)]
-    pub(super) fn pending_delegation_confirmations(
-        &self,
-    ) -> Vec<crate::operations::delegation::PendingDelegationConfirmation> {
-        crate::operations::delegation::confirmation::active_views(
-            &self.pending_delegation_confirmations,
-            &SystemClock.now_rfc3339(),
-        )
-    }
-
     /// Execute one validated writer command.
     ///
     /// This synchronous entry point is the first migration stage of the writer

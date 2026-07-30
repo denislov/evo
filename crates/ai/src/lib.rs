@@ -8,14 +8,10 @@ mod model;
 mod protocol;
 mod providers;
 mod registry;
-#[cfg(any(test, feature = "test-support"))]
-mod testing;
 mod transport;
 
 #[cfg(test)]
 extern crate self as ai;
-#[cfg(test)]
-mod internal_tests;
 
 /// Stable facade for embedding `ai`.
 ///

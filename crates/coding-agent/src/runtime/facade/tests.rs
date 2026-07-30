@@ -226,9 +226,17 @@ mod cases {
     }
 
     fn prompt_options_with_auto_naming(api: &str, prompt: &str) -> PromptTurnOptions {
+        prompt_options_with_auto_naming_and_api_key(api, prompt, None)
+    }
+
+    fn prompt_options_with_auto_naming_and_api_key(
+        api: &str,
+        prompt: &str,
+        api_key: Option<&str>,
+    ) -> PromptTurnOptions {
         PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
             model: model(api),
-            api_key: None,
+            api_key: api_key.map(str::to_owned),
             auth_diagnostics: Vec::new(),
             system_prompt: Some("system".into()),
             max_turns: Some(2),
@@ -994,6 +1002,48 @@ mod cases {
                 message.provider = Some("recording".into());
                 message.content.push(ContentBlock::Text {
                     text: response,
+                    text_signature: None,
+                });
+                yield AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                };
+            })
+        }
+    }
+
+    struct CredentialCheckingProvider {
+        seen_keys: Arc<Mutex<Vec<Option<String>>>>,
+        expected_key: String,
+    }
+
+    impl ApiProvider for CredentialCheckingProvider {
+        fn stream(&self, model: &Model, _ctx: Context, opts: Option<StreamOptions>) -> EventStream {
+            let api_key = opts.and_then(|options| options.api_key);
+            let call_index = {
+                let mut seen = self.seen_keys.lock().unwrap();
+                seen.push(api_key.clone());
+                seen.len()
+            };
+            let model_id = model.id.clone();
+            let expected_key = self.expected_key.clone();
+            Box::pin(stream! {
+                let mut message = AssistantMessage::empty("credential-checking", &model_id);
+                if api_key.as_deref() != Some(expected_key.as_str()) {
+                    message.stop_reason = StopReason::Error;
+                    message.error_message = Some("missing scoped test credential".into());
+                    yield AssistantMessageEvent::Error {
+                        reason: StopReason::Error,
+                        message,
+                    };
+                    return;
+                }
+                message.content.push(ContentBlock::Text {
+                    text: if call_index == 1 {
+                        "answer".into()
+                    } else {
+                        "Credential title".into()
+                    },
                     text_signature: None,
                 });
                 yield AssistantMessageEvent::Done {
@@ -4346,6 +4396,10 @@ mod cases {
         let mut session = CodingAgentSession::create_internal(options.clone())
             .await
             .unwrap();
+        let mut name_updates = session
+            .subscribe_session_name_updates()
+            .expect("persistent sessions expose durable name updates");
+        assert_eq!(name_updates.current().name, None);
 
         let first = session
             .run_internal(CodingAgentOperation::Prompt(
@@ -4357,6 +4411,12 @@ mod cases {
             prompt_outcome(first),
             PromptTurnOutcome::Success { .. }
         ));
+        let observed_name =
+            tokio::time::timeout(std::time::Duration::from_secs(1), name_updates.changed())
+                .await
+                .expect("automatic naming publishes its committed result")
+                .expect("the session remains available while naming completes");
+        assert_eq!(observed_name.name.as_deref(), Some("First concise title"));
         assert_eq!(
             wait_for_session_name(&options).await.as_deref(),
             Some("First concise title")
@@ -4402,6 +4462,55 @@ mod cases {
     }
 
     #[tokio::test]
+    async fn auto_naming_forwards_the_current_provider_scoped_credential() {
+        let api = "coding-session-auto-name-credential";
+        let seen_keys = Arc::new(Mutex::new(Vec::new()));
+        let provider_guard = crate::test_support::ProviderGuard::register(
+            api,
+            Arc::new(CredentialCheckingProvider {
+                seen_keys: Arc::clone(&seen_keys),
+                expected_key: "scoped-test-key".into(),
+            }),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = "sess_auto_name_credential";
+        let options = CodingAgentSessionOptions::new()
+            .with_ai_client(provider_guard.ai_client())
+            .with_session_id(session_id)
+            .with_session_log_root(temp.path());
+        let mut session = CodingAgentSession::create_internal(options.clone())
+            .await
+            .unwrap();
+
+        let outcome = session
+            .run_internal(CodingAgentOperation::Prompt(
+                prompt_options_with_auto_naming_and_api_key(
+                    api,
+                    "question",
+                    Some("scoped-test-key"),
+                ),
+            ))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            prompt_outcome(outcome),
+            PromptTurnOutcome::Success { .. }
+        ));
+        assert_eq!(
+            wait_for_session_name(&options).await.as_deref(),
+            Some("Credential title")
+        );
+        assert_eq!(
+            *seen_keys.lock().unwrap(),
+            vec![
+                Some("scoped-test-key".into()),
+                Some("scoped-test-key".into())
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn existing_session_name_skips_background_model_call() {
         let api = "coding-session-auto-name-existing";
         let provider_guard = crate::test_support::ProviderGuard::register(
@@ -4420,7 +4529,6 @@ mod cases {
         let mut session = CodingAgentSession::create_internal(options.clone())
             .await
             .unwrap();
-
         session
             .run_internal(CodingAgentOperation::Prompt(
                 prompt_options_with_auto_naming(api, "question"),
@@ -4455,6 +4563,9 @@ mod cases {
         let mut session = CodingAgentSession::create_internal(options.clone())
             .await
             .unwrap();
+        let mut name_updates = session
+            .subscribe_session_name_updates()
+            .expect("persistent sessions expose durable name updates");
 
         session
             .run_internal(CodingAgentOperation::Prompt(
@@ -4462,6 +4573,12 @@ mod cases {
             ))
             .await
             .unwrap();
+        let observed_name =
+            tokio::time::timeout(std::time::Duration::from_secs(1), name_updates.changed())
+                .await
+                .expect("failed automatic naming still closes the observer")
+                .expect("the session remains available after naming failure");
+        assert_eq!(observed_name.name, None);
         let events = wait_for_session_event(temp.path(), session_id, |event| {
             matches!(
                 event,

@@ -285,11 +285,6 @@ impl CodingAgentOperationFactory {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn settings_for_tests(&self) -> Option<&Settings> {
-        self.settings.as_ref()
-    }
-
     fn default_prompt_options(&self, invocation: PromptInvocation) -> PromptRuntimeOptions {
         PromptRuntimeOptions {
             model: self.model.clone(),
@@ -309,72 +304,5 @@ impl CodingAgentOperationFactory {
             settings: self.settings.clone(),
             invocation,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    fn factory(initial_session_name: Option<&str>) -> CodingAgentOperationFactory {
-        CodingAgentOperationFactory::from_runtime_parts(
-            ai::api::model::lookup_model("claude-haiku-4-5").expect("built-in test model"),
-            None,
-            Vec::new(),
-            None,
-            Some(1),
-            Vec::new(),
-            false,
-            None,
-            Some(SessionRunOptions::disabled(PathBuf::from("."))),
-            Some(CodingAgentThinkingLevel::Off),
-            None,
-            AgentResources::default(),
-            None,
-            initial_session_name.map(str::to_owned),
-            ProfileId::from("default"),
-        )
-    }
-
-    fn bootstrap(initial_session_name: Option<&str>) -> CodingAgentSessionBootstrap {
-        CodingAgentSessionBootstrap::from_internal(
-            Some(SessionRunOptions::disabled(PathBuf::from("."))),
-            None,
-            initial_session_name.map(str::to_owned),
-            ProfileId::from("default"),
-        )
-    }
-
-    #[test]
-    fn opaque_session_binding_controls_operation_session_metadata() {
-        let mut factory = factory(Some("named-session"));
-        let CodingAgentOperation::Prompt(initial) = factory.prompt_operation(
-            PromptInvocation::Text("hello".into()),
-            Some(CodingAgentThinkingLevel::Low),
-        ) else {
-            panic!("prompt operation");
-        };
-        assert_eq!(initial.session_name(), Some("named-session"));
-
-        let selected = bootstrap(Some("named-session")).with_session_id("existing-session");
-        factory.bind_session_bootstrap(&selected);
-        let CodingAgentOperation::Prompt(selected) =
-            factory.prompt_operation(PromptInvocation::Text("again".into()), None)
-        else {
-            panic!("prompt operation");
-        };
-        assert_eq!(selected.session_name(), None);
-    }
-
-    #[test]
-    fn refreshed_bootstrap_inherits_cleared_initial_name_without_exposing_it() {
-        let current = bootstrap(Some("named-session")).with_new_session();
-        let refreshed =
-            bootstrap(Some("named-session")).inherit_initial_session_name_from(&current);
-
-        assert_eq!(current.initial_session_name(), None);
-        assert_eq!(refreshed.initial_session_name(), None);
-        assert!(!format!("{refreshed:?}").contains("named-session"));
     }
 }

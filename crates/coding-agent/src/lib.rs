@@ -12,8 +12,6 @@ mod services;
 
 #[cfg(test)]
 extern crate self as coding_agent;
-#[cfg(test)]
-mod internal_tests;
 
 mod config;
 mod resources;
@@ -96,6 +94,7 @@ pub mod api {
             CodingAgentOperationTask, CodingAgentRecoveryResolutionRequest,
             CodingAgentRecoveryResolutionResult, CodingAgentRecoveryRetryRequest,
             CodingAgentRecoveryRetryResult, CodingAgentRuntimeShutdownHandle, CodingAgentSession,
+            CodingAgentSessionNameUpdate, CodingAgentSessionNameUpdateReceiver,
             CodingAgentSessionOptions, CodingAgentShutdownOutcome,
         };
     }

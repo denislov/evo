@@ -523,6 +523,11 @@ pub enum DesktopRuntimeUpdate {
         name: Option<String>,
         updated_at: String,
     },
+    SessionNameObserved {
+        session_id: String,
+        name: Option<String>,
+        updated_at: String,
+    },
     SelectionChanged {
         command_id: u64,
         selection: DesktopRuntimeSelectionKind,
@@ -614,6 +619,7 @@ impl DesktopRuntimeUpdate {
             Self::SessionClosed { .. } => "session_closed",
             Self::SessionsListed { .. } => "sessions_listed",
             Self::SessionRenamed { .. } => "session_renamed",
+            Self::SessionNameObserved { .. } => "session_name_observed",
             Self::SelectionChanged { .. } => "selection_changed",
             Self::PromptAccepted { .. } => "prompt_accepted",
             Self::PromptAcceptedWithSession { .. } => "prompt_accepted_with_session",

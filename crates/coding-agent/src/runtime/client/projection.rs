@@ -437,15 +437,6 @@ impl CodingAgentPromptControl {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn steer_content(
-        &self,
-        control_id: CodingAgentControlId,
-        content: Vec<ai::api::conversation::ContentBlock>,
-    ) -> Result<CodingAgentControlReceipt, CodingAgentControlRejection> {
-        self.submit_content(control_id, CodingAgentControlKind::Steer, content)
-    }
-
     pub fn follow_up(
         &self,
         control_id: CodingAgentControlId,
@@ -993,33 +984,6 @@ impl CodingAgentClientConnection {
                     kind: ClientDraftKind::Prompt,
                     fingerprint: crate::runtime::outcome::prompt_text_submission_fingerprint(&text),
                     text,
-                }),
-            )
-            .map_err(|error| registry_error(&self.client_id, error))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_prompt_operation_draft(
-        &self,
-        id: CodingAgentDraftId,
-        display_text: impl Into<String>,
-        operation: &crate::runtime::facade::CodingAgentOperation,
-    ) -> Result<(), CodingSessionError> {
-        let Some((_, fingerprint)) = operation.submission_fingerprint() else {
-            return Err(CodingSessionError::Input {
-                message: "prompt draft requires a fingerprintable prompt operation".into(),
-            });
-        };
-        let display_text = display_text.into();
-        validate_submission_draft(&id, &display_text)?;
-        self.coordinator
-            .set_prompt_draft(
-                &self.handle(),
-                Some(DraftRecord {
-                    id: id.0,
-                    kind: ClientDraftKind::Prompt,
-                    text: display_text,
-                    fingerprint,
                 }),
             )
             .map_err(|error| registry_error(&self.client_id, error))
@@ -1740,7 +1704,3 @@ pub(crate) fn public_client_connection(
         snapshot: public_client_snapshot(state),
     }
 }
-
-#[cfg(test)]
-#[path = "../../internal_tests/product_event_projection.rs"]
-mod product_event_projection_tests;

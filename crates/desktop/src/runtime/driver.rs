@@ -23,8 +23,11 @@ use coding_agent::api::review::{
 };
 use coding_agent::api::runtime::{
     CodingAgentRecoveryResolutionRequest, CodingAgentRecoveryRetryRequest, CodingAgentSession,
+    CodingAgentSessionNameUpdateReceiver,
 };
-use coding_agent::api::view::{CodingAgentTranscriptSnapshot, ProfileId};
+use coding_agent::api::view::{
+    CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot, ProfileId,
+};
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{mpsc, watch};
 use tokio::task;
@@ -576,6 +579,20 @@ impl RuntimeState {
             .workspaces
             .remove(session_id)
             .expect("validated idle workspace must remain present");
+        let session_name_updates = match session.subscribe_session_name_updates() {
+            Some(updates) if updates.current().name.is_none() => {
+                let transcript = session.transcript_snapshot()?;
+                (!transcript.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        CodingAgentSessionTranscriptItem::User { .. }
+                            | CodingAgentSessionTranscriptItem::Assistant { .. }
+                    )
+                }))
+                .then_some(updates)
+            }
+            Some(_) | None => None,
+        };
         let connection = match session.connect(CodingAgentClientId::new(DESKTOP_CLIENT_ID)) {
             Ok(connection) => connection,
             Err(error) => {
@@ -666,6 +683,7 @@ impl RuntimeState {
             events,
             pending_recovery,
             last_forwarded_sequence: requested_after,
+            session_name_updates,
             task,
         })
     }
@@ -733,6 +751,7 @@ pub(super) struct ActivePrompt {
     pub(super) events: DesktopProductEventSource,
     pub(super) pending_recovery: Option<CodingAgentFreshSnapshotRecovery>,
     pub(super) last_forwarded_sequence: u64,
+    pub(super) session_name_updates: Option<CodingAgentSessionNameUpdateReceiver>,
     pub(super) task: task::JoinHandle<PromptTaskOutput>,
 }
 
@@ -923,6 +942,8 @@ pub(super) async fn run_runtime(
                     let _ = completed.connection.detach();
                     match result {
                         Ok((session, operation_result)) => {
+                            let prompt_succeeded = operation_result.is_ok();
+                            let session_name_updates = completed.session_name_updates.take();
                             let operation_started =
                                 ensure_operation_started(&mut completed, None, &priority_updates)
                                     .await;
@@ -971,6 +992,22 @@ pub(super) async fn run_runtime(
                                 .is_err()
                             {
                                 continue;
+                            }
+                            if prompt_succeeded && let Some(mut name_updates) = session_name_updates
+                            {
+                                let name_updates_sender = priority_updates.clone();
+                                let named_session_id = session_id.clone();
+                                task::spawn(async move {
+                                    if let Some(update) = name_updates.changed().await {
+                                        let _ = name_updates_sender
+                                            .send(DesktopRuntimeUpdate::SessionNameObserved {
+                                                session_id: named_session_id,
+                                                name: update.name,
+                                                updated_at: update.updated_at,
+                                            })
+                                            .await;
+                                    }
+                                });
                             }
                         }
                         Err(_) => {

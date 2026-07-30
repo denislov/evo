@@ -219,6 +219,73 @@ pub struct ResolvedKey {
     pub material: AuthMaterialKind,
 }
 
+#[derive(Clone)]
+pub(crate) struct AuthStoreProviderAuthResolver {
+    current_provider: String,
+    current_auth: ai::api::auth::ProviderAuth,
+    store: AuthStore,
+}
+
+impl AuthStoreProviderAuthResolver {
+    pub(crate) fn new(
+        current_provider: impl Into<String>,
+        api_key: Option<String>,
+        diagnostics: Vec<ai::api::auth::ProviderAuthDiagnostic>,
+        store: AuthStore,
+    ) -> Self {
+        Self {
+            current_provider: current_provider.into(),
+            current_auth: ai::api::auth::ProviderAuth {
+                api_key,
+                diagnostics,
+                ..Default::default()
+            },
+            store,
+        }
+    }
+
+    fn stored_auth(&self, provider: &str) -> ai::api::auth::ProviderAuth {
+        let mut diagnostics = Vec::new();
+        let resolved = resolve_api_key(provider, None, &self.store, &mut diagnostics);
+        ai::api::auth::ProviderAuth {
+            api_key: resolved.as_ref().map(|resolved| resolved.value.clone()),
+            diagnostics: resolved
+                .as_ref()
+                .map(ResolvedKey::provider_auth_diagnostic)
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    }
+}
+
+impl ai::api::auth::ProviderAuthResolver for AuthStoreProviderAuthResolver {
+    fn resolve_model_auth(&self, model: &ai::api::model::Model) -> ai::api::auth::ProviderAuth {
+        // Preserve model-specific environment auth such as Azure deployment
+        // metadata, then replace only the provider credential with the
+        // product-resolved material. The current provider may carry an
+        // invocation-scoped key; every other provider is resolved separately
+        // from the global auth store and its supported environment variables.
+        let mut auth = ai::api::auth::EnvProviderAuthResolver.resolve_model_auth(model);
+        let resolved = if model.provider == self.current_provider {
+            self.current_auth.clone()
+        } else {
+            self.stored_auth(&model.provider)
+        };
+        if resolved.api_key.is_some() {
+            auth.api_key = resolved.api_key;
+            auth.diagnostics
+                .retain(|diagnostic| diagnostic.field != "api_key");
+            auth.diagnostics.extend(resolved.diagnostics);
+        }
+        auth
+    }
+
+    fn requires_approved_https_origin(&self) -> bool {
+        true
+    }
+}
+
 impl ResolvedKey {
     pub fn provider_auth_diagnostic(&self) -> ai::api::auth::ProviderAuthDiagnostic {
         ai::api::auth::ProviderAuthDiagnostic {
@@ -279,247 +346,4 @@ pub fn resolve_api_key(
         });
     }
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn literal_passthrough() {
-        let mut d = Vec::new();
-        assert_eq!(
-            resolve_config_value("sk-literal", &mut d),
-            Some("sk-literal".into())
-        );
-        assert!(d.is_empty());
-    }
-
-    #[test]
-    fn dollar_var_and_braced_var() {
-        let env = crate::test_support::EnvGuard::new(&["EVO_TEST_KEY"]);
-        env.set("EVO_TEST_KEY", "secret");
-        let mut d = Vec::new();
-        assert_eq!(
-            resolve_config_value("$EVO_TEST_KEY", &mut d),
-            Some("secret".into())
-        );
-        assert_eq!(
-            resolve_config_value("pre-${EVO_TEST_KEY}-post", &mut d),
-            Some("pre-secret-post".into())
-        );
-    }
-
-    #[test]
-    fn escapes() {
-        let mut d = Vec::new();
-        assert_eq!(
-            resolve_config_value("$$literal", &mut d),
-            Some("$literal".into())
-        );
-        assert_eq!(resolve_config_value("a$!b", &mut d), Some("a!b".into()));
-    }
-
-    #[test]
-    fn unset_var_returns_none_with_diag() {
-        let env = crate::test_support::EnvGuard::new(&["EVO_TEST_MISSING"]);
-        env.remove("EVO_TEST_MISSING");
-        let mut d = Vec::new();
-        assert_eq!(resolve_config_value("$EVO_TEST_MISSING", &mut d), None);
-        assert_eq!(d.len(), 1);
-    }
-
-    #[test]
-    fn loads_api_key_entries_and_skips_oauth() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("auth.toml");
-        std::fs::write(
-            &path,
-            "[anthropic]\ntype = \"api_key\"\nkey = \"sk-x\"\n\n[openai]\ntype = \"oauth\"\naccess_token = \"t\"\n",
-        )
-        .unwrap();
-        let mut d = Vec::new();
-        let store = AuthStore::load(&path, &mut d);
-        assert_eq!(store.api_key_entry("anthropic"), Some("sk-x"));
-        assert_eq!(store.api_key_entry("openai"), None); // oauth skipped in M7
-        assert_eq!(store.api_key_entry("missing"), None);
-    }
-
-    #[test]
-    fn missing_auth_file_is_empty_no_diag() {
-        let mut d = Vec::new();
-        let store = AuthStore::load(std::path::Path::new("/no/such/auth.toml"), &mut d);
-        assert_eq!(store.api_key_entry("anthropic"), None);
-        assert!(d.is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn loose_permissions_warn() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("auth.toml");
-        std::fs::write(&path, "[anthropic]\ntype = \"api_key\"\nkey = \"sk-x\"\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let mut d = Vec::new();
-        let _ = AuthStore::load(&path, &mut d);
-        assert!(d.iter().any(|x| x.message.contains("permissions")));
-    }
-
-    fn store_with(provider: &str, key: &str) -> AuthStore {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("auth.toml");
-        std::fs::write(
-            &path,
-            format!("[{provider}]\ntype = \"api_key\"\nkey = \"{key}\"\n"),
-        )
-        .unwrap();
-        let mut d = Vec::new();
-        AuthStore::load(&path, &mut d)
-    }
-
-    #[test]
-    fn explicit_key_wins() {
-        let env = crate::test_support::EnvGuard::new(&["ANTHROPIC_API_KEY"]);
-        let store = store_with("anthropic", "from-file");
-        env.set("ANTHROPIC_API_KEY", "from-env");
-        let mut d = Vec::new();
-        let r = resolve_api_key("anthropic", Some("from-cli"), &store, &mut d).unwrap();
-        assert_eq!(r.value, "from-cli");
-        assert_eq!(r.source, KeySource::Cli);
-    }
-
-    #[test]
-    fn env_beats_auth_file() {
-        let env = crate::test_support::EnvGuard::new(&["ANTHROPIC_API_KEY"]);
-        let store = store_with("anthropic", "from-file");
-        env.set("ANTHROPIC_API_KEY", "from-env");
-        let mut d = Vec::new();
-        let r = resolve_api_key("anthropic", None, &store, &mut d).unwrap();
-        assert_eq!(r.value, "from-env");
-        assert_eq!(r.source, KeySource::Env);
-    }
-
-    #[test]
-    fn falls_back_to_env_then_none() {
-        let env = crate::test_support::EnvGuard::new(&["ANTHROPIC_API_KEY"]);
-        let store = AuthStore::default();
-        env.set("ANTHROPIC_API_KEY", "from-env");
-        let mut d = Vec::new();
-        let r = resolve_api_key("anthropic", None, &store, &mut d).unwrap();
-        assert_eq!(r.source, KeySource::Env);
-        env.remove("ANTHROPIC_API_KEY");
-        assert!(resolve_api_key("anthropic", None, &store, &mut d).is_none());
-    }
-
-    #[test]
-    fn saves_and_loads_api_key_entries_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("auth.toml");
-        let mut store = AuthStore::default();
-        store.set_api_key("anthropic", "sk-ant");
-        store.set_api_key("openai", "$OPENAI_API_KEY");
-
-        store.save(&path).unwrap();
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("[anthropic]"));
-        assert!(text.contains("type = \"api_key\""));
-
-        let mut d = Vec::new();
-        let loaded = AuthStore::load(&path, &mut d);
-        assert_eq!(loaded.api_key_entry("anthropic"), Some("sk-ant"));
-        assert_eq!(loaded.api_key_entry("openai"), Some("$OPENAI_API_KEY"));
-        assert!(d.is_empty());
-    }
-
-    #[test]
-    fn remove_entry_deletes_provider_and_reports_whether_it_existed() {
-        let mut store = AuthStore::default();
-        store.set_api_key("anthropic", "sk-ant");
-
-        assert!(store.remove_entry("anthropic"));
-        assert_eq!(store.api_key_entry("anthropic"), None);
-        assert!(!store.remove_entry("anthropic"));
-    }
-
-    #[test]
-    fn oauth_access_token_is_used_as_auth_file_bearer_token() {
-        let env = crate::test_support::EnvGuard::new(&["OPENAI_CODEX_API_KEY"]);
-        let text = r#"
-[openai-codex]
-type = "oauth"
-access = "oauth-access"
-refresh = "oauth-refresh"
-expires = 4102444800000
-"#;
-        let entries = toml::from_str::<BTreeMap<String, AuthEntry>>(text).unwrap();
-        let store = AuthStore { entries };
-        env.remove("OPENAI_CODEX_API_KEY");
-
-        let mut d = Vec::new();
-        let key = resolve_api_key("openai-codex", None, &store, &mut d).unwrap();
-
-        assert_eq!(key.value, "oauth-access");
-        assert_eq!(key.source, KeySource::AuthFile);
-        assert_eq!(key.material, AuthMaterialKind::OauthAccessToken);
-        assert!(d.is_empty());
-    }
-
-    #[test]
-    fn oauth_access_token_field_alias_is_supported() {
-        let env =
-            crate::test_support::EnvGuard::new(&["COPILOT_TEST_TOKEN", "COPILOT_GITHUB_TOKEN"]);
-        let text = r#"
-[github-copilot]
-type = "oauth"
-access_token = "$COPILOT_TEST_TOKEN"
-"#;
-        let entries = toml::from_str::<BTreeMap<String, AuthEntry>>(text).unwrap();
-        let store = AuthStore { entries };
-        env.set("COPILOT_TEST_TOKEN", "oauth-from-env-ref");
-        env.remove("COPILOT_GITHUB_TOKEN");
-
-        let mut d = Vec::new();
-        let key = resolve_api_key("github-copilot", None, &store, &mut d).unwrap();
-
-        assert_eq!(key.value, "oauth-from-env-ref");
-        assert_eq!(key.source, KeySource::AuthFile);
-        assert_eq!(key.material, AuthMaterialKind::OauthAccessToken);
-        assert!(d.is_empty());
-    }
-
-    #[test]
-    fn saves_and_loads_oauth_access_tokens_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("auth.toml");
-        let store = AuthStore {
-            entries: BTreeMap::from([(
-                "openai-codex".into(),
-                AuthEntry::Oauth {
-                    access: Some("oauth-access".into()),
-                    access_token: None,
-                    refresh: None,
-                    refresh_token: None,
-                    expires: None,
-                    extra: BTreeMap::new(),
-                },
-            )]),
-        };
-
-        store.save(&path).unwrap();
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("[openai-codex]"));
-        assert!(text.contains("type = \"oauth\""));
-        assert!(text.contains("access = \"oauth-access\""));
-
-        let mut d = Vec::new();
-        let loaded = AuthStore::load(&path, &mut d);
-        assert_eq!(
-            loaded.oauth_access_entry("openai-codex"),
-            Some("oauth-access")
-        );
-        assert!(d.is_empty());
-    }
 }

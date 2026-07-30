@@ -72,11 +72,6 @@ pub fn resolve_resource_paths(paths: &[String], cwd: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg(test)]
-pub fn discover_context_files(cwd: &Path, agent_dir: &Path, disabled: bool) -> Vec<ContextFile> {
-    discover_context_files_with_project(cwd, agent_dir, disabled, true)
-}
-
 pub fn discover_context_files_with_project(
     cwd: &Path,
     agent_dir: &Path,

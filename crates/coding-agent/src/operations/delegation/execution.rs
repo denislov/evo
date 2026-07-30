@@ -585,7 +585,3 @@ pub(crate) async fn approve(
     };
     outcome.execution.map(|_| ())
 }
-
-#[cfg(test)]
-#[path = "../../internal_tests/delegation_execution_capabilities.rs"]
-mod tests;

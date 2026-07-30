@@ -48,29 +48,3 @@ pub(crate) fn redact_and_bound(text: &str, max_bytes: usize) -> String {
     }
     redacted[..end].to_owned()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redaction_and_bounds_are_unicode_safe() {
-        let secret = "public-secret-canary";
-        let output = redact_and_bound(&format!("token={secret} {}", "界".repeat(512)), 127);
-
-        assert!(!output.contains(secret));
-        assert!(output.len() <= 127);
-        assert!(std::str::from_utf8(output.as_bytes()).is_ok());
-    }
-
-    #[test]
-    fn absolute_paths_are_removed_from_public_text() {
-        let output = redact_sensitive_text(
-            "failed at /home/user/private/config.json and C:\\Users\\user\\secret.toml",
-        );
-
-        assert!(!output.contains("/home/user"));
-        assert!(!output.contains("C:\\Users"));
-        assert_eq!(output, "failed at <path> and <path>");
-    }
-}

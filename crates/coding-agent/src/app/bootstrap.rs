@@ -178,30 +178,6 @@ fn first_model_for_provider(provider: &str) -> Option<Model> {
     clippy::too_many_arguments,
     reason = "public bootstrap compatibility keeps established configuration inputs explicit"
 )]
-#[cfg(test)]
-pub fn build_agent_config(
-    model: Model,
-    system_prompt: Option<String>,
-    max_turns: Option<u32>,
-    api_key: Option<String>,
-    thinking_level: Option<ThinkingLevel>,
-    tool_execution: Option<ToolExecutionMode>,
-    resources: AgentResources,
-    settings: Option<&crate::config::Settings>,
-) -> AgentConfig {
-    build_agent_config_with_auth_diagnostics(
-        model,
-        system_prompt,
-        max_turns,
-        api_key,
-        Vec::new(),
-        thinking_level,
-        tool_execution,
-        resources,
-        settings,
-    )
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "bootstrap assembly keeps resolved authentication and runtime inputs explicit"

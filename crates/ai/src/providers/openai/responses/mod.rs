@@ -43,13 +43,13 @@ impl ApiProvider for OpenAIResponsesProvider {
         let Some(api_key) = key else {
             let model_id = model.id.clone();
             let provider = model.provider.clone();
+            let error_message = format!(
+                "No API key found for provider {provider}. Set the appropriate env var or pass apiKey in options."
+            );
             return Box::pin(stream! {
                 let mut msg = AssistantMessage::empty("openai-responses", &model_id);
                 msg.provider = Some(provider);
-                msg.error_message = Some(format!(
-                    "No API key found for provider {}. Set the appropriate env var or pass apiKey in options.",
-                    model_id
-                ));
+                msg.error_message = Some(error_message);
                 msg.stop_reason = StopReason::Error;
                 yield AssistantMessageEvent::Error {
                     reason: StopReason::Error,

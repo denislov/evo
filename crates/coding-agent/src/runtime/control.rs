@@ -64,25 +64,6 @@ impl OperationKind {
             _ => return None,
         })
     }
-
-    #[cfg(test)]
-    fn root_class(self) -> OperationClass {
-        match self {
-            Self::Prompt
-            | Self::Compact
-            | Self::BranchSummary
-            | Self::ForkSession
-            | Self::SwitchActiveLeaf
-            | Self::SetSessionTreeLabel
-            | Self::SetSessionName
-            | Self::SelfHealingEdit => OperationClass::SessionWriteRoot,
-            Self::SetDefaultAgentProfile => OperationClass::RuntimeWrite,
-            Self::DelegationConfirmation
-            | Self::AgentInvocation
-            | Self::AgentTeam
-            | Self::Export => OperationClass::NonSessionRoot,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -429,15 +410,6 @@ struct ActiveChildOperation {
     owner_released: bool,
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OperationResourceSnapshot {
-    pub(crate) root_operation_ids: Vec<String>,
-    pub(crate) child_operation_ids: Vec<String>,
-    pub(crate) cancelled_operation_ids: Vec<String>,
-    pub(crate) released_owner_ids: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OperationActivity {
     session_write: Option<OperationKind>,
@@ -453,21 +425,6 @@ impl OperationActivity {
             non_session_roots: Vec::new(),
             runtime_write: None,
             non_session_root_limit: DEFAULT_RUNTIME_ROOT_LIMIT,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_tests(
-        session_write: Option<OperationKind>,
-        non_session_roots: Vec<OperationKind>,
-        runtime_write: Option<OperationKind>,
-        non_session_root_limit: usize,
-    ) -> Self {
-        Self {
-            session_write,
-            non_session_roots,
-            runtime_write,
-            non_session_root_limit,
         }
     }
 
@@ -498,51 +455,6 @@ impl OperationActivity {
 }
 
 impl OperationStateInner {
-    #[cfg(test)]
-    fn resource_snapshot(&self) -> OperationResourceSnapshot {
-        let mut roots = self
-            .root_identities()
-            .map(|active| active.operation_id.clone())
-            .collect::<Vec<_>>();
-        let mut children = self
-            .children
-            .iter()
-            .map(|active| active.operation_id.clone())
-            .collect::<Vec<_>>();
-        let mut cancelled = self
-            .root_identities()
-            .filter(|active| active.cancellation.is_cancelled())
-            .map(|active| active.operation_id.clone())
-            .chain(
-                self.children
-                    .iter()
-                    .filter(|active| active.cancellation.is_cancelled())
-                    .map(|active| active.operation_id.clone()),
-            )
-            .collect::<Vec<_>>();
-        let mut released = self
-            .root_identities()
-            .filter(|active| active.owner_released)
-            .map(|active| active.operation_id.clone())
-            .chain(
-                self.children
-                    .iter()
-                    .filter(|active| active.owner_released)
-                    .map(|active| active.operation_id.clone()),
-            )
-            .collect::<Vec<_>>();
-        roots.sort();
-        children.sort();
-        cancelled.sort();
-        released.sort();
-        OperationResourceSnapshot {
-            root_operation_ids: roots,
-            child_operation_ids: children,
-            cancelled_operation_ids: cancelled,
-            released_owner_ids: released,
-        }
-    }
-
     fn activity(&self) -> OperationActivity {
         OperationActivity {
             session_write: self.session_write.as_ref().map(|active| active.kind),
@@ -822,11 +734,6 @@ impl OperationIdentityRejection {
 }
 
 impl OperationState {
-    #[cfg(test)]
-    pub(crate) fn new() -> Self {
-        Self::with_snapshot_coordinator(SnapshotCoordinator::new())
-    }
-
     pub(crate) fn with_snapshot_coordinator(
         snapshot_coordinator: Arc<SnapshotCoordinator>,
     ) -> Self {
@@ -843,28 +750,11 @@ impl OperationState {
         }
     }
 
-    #[cfg(test)]
-    fn with_non_session_root_limit(limit: usize) -> Self {
-        assert!(limit > 0, "runtime root limit must be positive");
-        let state = Self::new();
-        state
-            .shared
-            .lock()
-            .expect("operation state lock poisoned")
-            .non_session_root_limit = limit;
-        state
-    }
-
     pub(crate) fn activity(&self) -> OperationActivity {
         self.shared
             .lock()
             .expect("operation state lock poisoned")
             .activity()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active(&self) -> Option<OperationKind> {
-        self.activity().primary()
     }
 
     fn ensure_active_target(
@@ -917,16 +807,6 @@ impl OperationState {
         }
 
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_root(
-        &self,
-        class: OperationClass,
-        kind: OperationKind,
-        operation_id: String,
-    ) -> Result<OperationGuard, CodingSessionError> {
-        self.begin_root_inner(class, kind, operation_id, None)
     }
 
     pub(crate) fn begin_root_with_capability_generation(
@@ -1124,24 +1004,6 @@ impl OperationState {
             .expect("operation state lock poisoned")
             .cancel_capability_generations_before(generation)
     }
-
-    #[cfg(test)]
-    fn child_count(&self) -> usize {
-        self.shared
-            .lock()
-            .expect("operation state lock poisoned")
-            .children
-            .len()
-    }
-
-    #[cfg(test)]
-    fn begin(
-        &self,
-        kind: OperationKind,
-        operation_id: String,
-    ) -> Result<OperationGuard, CodingSessionError> {
-        self.begin_root(kind.root_class(), kind, operation_id)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1151,11 +1013,6 @@ pub(crate) struct OperationControl {
 }
 
 impl OperationControl {
-    #[cfg(test)]
-    pub(crate) fn new() -> Self {
-        Self::with_snapshot_coordinator(SnapshotCoordinator::new())
-    }
-
     pub(crate) fn with_snapshot_coordinator(
         snapshot_coordinator: Arc<SnapshotCoordinator>,
     ) -> Self {
@@ -1165,40 +1022,8 @@ impl OperationControl {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_non_session_root_limit(limit: usize) -> Self {
-        Self {
-            state: OperationState::with_non_session_root_limit(limit),
-            prompt_control: PromptControlState::new(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active(&self) -> Option<OperationKind> {
-        self.state.active()
-    }
-
     pub(crate) fn activity(&self) -> OperationActivity {
         self.state.activity()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resource_snapshot(&self) -> OperationResourceSnapshot {
-        self.state
-            .shared
-            .lock()
-            .expect("operation state lock poisoned")
-            .resource_snapshot()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_root(
-        &self,
-        class: OperationClass,
-        kind: OperationKind,
-        operation_id: String,
-    ) -> Result<OperationGuard, CodingSessionError> {
-        self.state.begin_root(class, kind, operation_id)
     }
 
     pub(crate) fn begin_root_with_capability_generation(
@@ -1214,17 +1039,6 @@ impl OperationControl {
             operation_id,
             capability_generation,
         )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_child(
-        &self,
-        kind: OperationKind,
-        operation_id: String,
-        parent_operation_id: String,
-    ) -> Result<ChildOperationGuard, CodingSessionError> {
-        self.state
-            .begin_child(kind, operation_id, parent_operation_id)
     }
 
     pub(crate) fn begin_child_with_capability_generation(
@@ -1257,32 +1071,6 @@ impl OperationControl {
             .cancel_open_operations()
     }
 
-    #[cfg(test)]
-    pub(crate) fn child_count(&self) -> usize {
-        self.state.child_count()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin(
-        &self,
-        kind: OperationKind,
-        operation_id: String,
-    ) -> Result<OperationGuard, CodingSessionError> {
-        self.begin_root(kind.root_class(), kind, operation_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn prompt_control_handle(
-        &mut self,
-    ) -> Result<PromptControlHandle, CodingSessionError> {
-        if self.state.activity().session_write() != Some(OperationKind::Prompt) {
-            self.state.ensure_session_write_idle()?;
-        }
-        self.prompt_control
-            .create()
-            .map(|registration| registration.handle)
-    }
-
     pub(crate) fn current_prompt_control_registration(&self) -> Option<PromptControlRegistration> {
         self.prompt_control.current()
     }
@@ -1298,16 +1086,6 @@ impl OperationControl {
             Some(registration) => Ok(registration),
             None => self.prompt_control.create(),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn prompt_control_registration(
-        &mut self,
-    ) -> Result<PromptControlRegistration, CodingSessionError> {
-        if self.state.activity().session_write() != Some(OperationKind::Prompt) {
-            self.state.ensure_session_write_idle()?;
-        }
-        self.prompt_control.create()
     }
 
     pub(crate) fn prompt_control_cleanup(&self) -> PromptControlCleanup {
@@ -1538,653 +1316,5 @@ impl Drop for ChildOperationGuard {
             self.snapshot_coordinator
                 .set_active_operation(current_primary);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn operation_guard_sets_active_operation_and_drop_clears_it() {
-        let state = OperationState::new();
-
-        let guard = state
-            .begin(OperationKind::Prompt, "op_test".into())
-            .unwrap();
-
-        assert_eq!(state.active(), Some(OperationKind::Prompt));
-
-        drop(guard);
-
-        assert_eq!(state.active(), None);
-    }
-
-    #[test]
-    fn stale_guard_cannot_clear_a_replaced_operation_identity() {
-        let state = OperationState::new();
-        let guard = state.begin(OperationKind::Prompt, "op_old".into()).unwrap();
-        state
-            .shared
-            .lock()
-            .unwrap()
-            .session_write
-            .as_mut()
-            .unwrap()
-            .operation_id = "op_new".into();
-
-        drop(guard);
-
-        let active = state.shared.lock().unwrap().session_write.clone().unwrap();
-        assert_eq!(active.kind, OperationKind::Prompt);
-        assert_eq!(active.operation_id, "op_new");
-    }
-
-    #[test]
-    fn active_target_validation_distinguishes_absent_kind_and_id_mismatch() {
-        let state = OperationState::new();
-        assert_eq!(
-            state.ensure_active_target(OperationKind::Prompt, "op_prompt"),
-            Err(OperationIdentityRejection::NoActiveOperation {
-                expected_kind: OperationKind::Prompt,
-                expected_operation_id: "op_prompt".into(),
-            })
-        );
-
-        let compact = state
-            .begin(OperationKind::Compact, "op_compact".into())
-            .unwrap();
-        assert_eq!(
-            state.ensure_active_target(OperationKind::Prompt, "op_prompt"),
-            Err(OperationIdentityRejection::KindMismatch {
-                expected_kind: OperationKind::Prompt,
-                active_kind: OperationKind::Compact,
-                expected_operation_id: "op_prompt".into(),
-            })
-        );
-        drop(compact);
-
-        let prompt = state
-            .begin(OperationKind::Prompt, "op_active".into())
-            .unwrap();
-        assert_eq!(
-            state.ensure_active_target(OperationKind::Prompt, "op_stale"),
-            Err(OperationIdentityRejection::TargetMismatch {
-                kind: OperationKind::Prompt,
-                expected_operation_id: "op_stale".into(),
-                active_operation_id: "op_active".into(),
-            })
-        );
-        assert!(
-            state
-                .ensure_active_target(OperationKind::Prompt, "op_active")
-                .is_ok()
-        );
-        drop(prompt);
-    }
-
-    #[test]
-    fn operation_guard_clears_active_operation_after_error_return() {
-        let state = OperationState::new();
-
-        let result: Result<(), CodingSessionError> = (|| {
-            let _guard = state.begin(OperationKind::Compact, "op_test".into())?;
-            Err(CodingSessionError::Workflow {
-                message: "node failed".into(),
-            })
-        })();
-
-        assert!(result.is_err());
-        assert_eq!(state.active(), None);
-    }
-
-    #[test]
-    fn begin_reports_current_operation_when_busy() {
-        let state = OperationState::new();
-        let _guard = state
-            .begin(OperationKind::Compact, "op_test".into())
-            .unwrap();
-
-        let error = state
-            .begin(OperationKind::Prompt, "op_test".into())
-            .unwrap_err();
-
-        assert_eq!(
-            error,
-            CodingSessionError::Busy {
-                operation: "compact".into(),
-            }
-        );
-        assert_eq!(state.active(), Some(OperationKind::Compact));
-    }
-
-    #[test]
-    fn independent_root_guards_release_only_their_own_slots() {
-        let state = OperationState::with_non_session_root_limit(2);
-        let session_write = state
-            .begin_root(
-                OperationClass::SessionWriteRoot,
-                OperationKind::Prompt,
-                "session-root".into(),
-            )
-            .unwrap();
-        let non_session = state
-            .begin_root(
-                OperationClass::NonSessionRoot,
-                OperationKind::AgentInvocation,
-                "runtime-root".into(),
-            )
-            .unwrap();
-
-        assert_eq!(state.active(), Some(OperationKind::Prompt));
-        drop(session_write);
-        assert_eq!(state.active(), Some(OperationKind::AgentInvocation));
-        assert_eq!(
-            state.activity().non_session_root_blocker(),
-            None,
-            "one of two runtime root slots remains available"
-        );
-        drop(non_session);
-        assert_eq!(state.active(), None);
-    }
-
-    #[test]
-    fn duplicate_operation_identity_is_rejected_across_root_slots() {
-        let state = OperationState::new();
-        let session_write = state
-            .begin_root(
-                OperationClass::SessionWriteRoot,
-                OperationKind::Prompt,
-                "shared-id".into(),
-            )
-            .unwrap();
-
-        assert_eq!(
-            state
-                .begin_root(
-                    OperationClass::NonSessionRoot,
-                    OperationKind::AgentInvocation,
-                    "shared-id".into(),
-                )
-                .unwrap_err(),
-            CodingSessionError::Busy {
-                operation: "prompt".into(),
-            }
-        );
-        drop(session_write);
-    }
-
-    #[test]
-    fn prompt_control_handle_sends_abort_steer_and_follow_up_commands() {
-        let (handle, mut receiver) = prompt_control_channel();
-
-        handle.abort("user cancelled").unwrap();
-        handle.steer("prefer concise answer").unwrap();
-        handle.follow_up("continue with tests").unwrap();
-
-        assert_eq!(
-            receiver.try_recv().unwrap(),
-            PromptControlCommand::Abort {
-                reason: "user cancelled".into(),
-            }
-        );
-        assert_eq!(
-            receiver.try_recv().unwrap(),
-            PromptControlCommand::Steer {
-                text: "prefer concise answer".into(),
-            }
-        );
-        assert_eq!(
-            receiver.try_recv().unwrap(),
-            PromptControlCommand::FollowUp {
-                text: "continue with tests".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn child_registry_requires_live_lineage_and_defers_root_release_until_drain() {
-        let coordinator = SnapshotCoordinator::new();
-        let control = OperationControl::with_snapshot_coordinator(coordinator.clone());
-        let orphan = control
-            .begin_child(
-                OperationKind::Prompt,
-                "orphan-child".into(),
-                "missing-parent".into(),
-            )
-            .unwrap_err();
-        assert_eq!(orphan.code(), "unsupported_capability");
-
-        let mut root = control
-            .begin(OperationKind::AgentInvocation, "root-agent".into())
-            .unwrap();
-        root.bind_capability_generation(CapabilityGeneration::new(7));
-        let mut child = control
-            .begin_child(
-                OperationKind::AgentInvocation,
-                "delegated-agent".into(),
-                "root-agent".into(),
-            )
-            .unwrap();
-        child.bind_capability_generation(CapabilityGeneration::new(7));
-        let mut grandchild = control
-            .begin_child(
-                OperationKind::Prompt,
-                "delegated-prompt".into(),
-                "delegated-agent".into(),
-            )
-            .unwrap();
-        grandchild.bind_capability_generation(CapabilityGeneration::new(7));
-        let child_cancellation = child.cancellation_token();
-        let grandchild_cancellation = grandchild.cancellation_token();
-        assert_eq!(control.child_count(), 2);
-        assert_eq!(
-            control.resource_snapshot(),
-            OperationResourceSnapshot {
-                root_operation_ids: vec!["root-agent".into()],
-                child_operation_ids: vec!["delegated-agent".into(), "delegated-prompt".into()],
-                cancelled_operation_ids: Vec::new(),
-                released_owner_ids: Vec::new(),
-            }
-        );
-        assert!(matches!(
-            control.begin_child(
-                OperationKind::Prompt,
-                "delegated-agent".into(),
-                "root-agent".into(),
-            ),
-            Err(CodingSessionError::Busy { .. })
-        ));
-
-        drop(root);
-
-        assert!(child_cancellation.is_cancelled());
-        assert!(grandchild_cancellation.is_cancelled());
-        assert_eq!(
-            control.resource_snapshot(),
-            OperationResourceSnapshot {
-                root_operation_ids: vec!["root-agent".into()],
-                child_operation_ids: vec!["delegated-agent".into(), "delegated-prompt".into()],
-                cancelled_operation_ids: vec!["delegated-agent".into(), "delegated-prompt".into(),],
-                released_owner_ids: vec!["root-agent".into()],
-            }
-        );
-        assert_eq!(control.active(), Some(OperationKind::AgentInvocation));
-        assert_eq!(
-            coordinator
-                .state
-                .lock()
-                .unwrap()
-                .operation_event_contexts
-                .len(),
-            3
-        );
-        {
-            let state = coordinator.state.lock().unwrap();
-            let contexts = &state.operation_event_contexts;
-            assert_eq!(contexts["root-agent"].parent_operation_id, None);
-            assert_eq!(contexts["root-agent"].root_operation_id, "root-agent");
-            assert_eq!(
-                contexts["delegated-agent"].parent_operation_id.as_deref(),
-                Some("root-agent")
-            );
-            assert_eq!(contexts["delegated-agent"].root_operation_id, "root-agent");
-            assert_eq!(
-                contexts["delegated-prompt"].parent_operation_id.as_deref(),
-                Some("delegated-agent")
-            );
-            assert_eq!(contexts["delegated-prompt"].root_operation_id, "root-agent");
-        }
-        assert!(matches!(
-            control.begin_child(
-                OperationKind::Prompt,
-                "late-child".into(),
-                "root-agent".into(),
-            ),
-            Err(CodingSessionError::UnsupportedCapability { .. })
-        ));
-
-        drop(child);
-        assert_eq!(control.child_count(), 2);
-        assert_eq!(control.active(), Some(OperationKind::AgentInvocation));
-        assert_eq!(
-            coordinator
-                .state
-                .lock()
-                .unwrap()
-                .operation_event_contexts
-                .len(),
-            3
-        );
-        drop(grandchild);
-        assert_eq!(control.child_count(), 0);
-        assert_eq!(control.active(), None);
-        assert_eq!(
-            control.resource_snapshot(),
-            OperationResourceSnapshot {
-                root_operation_ids: Vec::new(),
-                child_operation_ids: Vec::new(),
-                cancelled_operation_ids: Vec::new(),
-                released_owner_ids: Vec::new(),
-            }
-        );
-        assert!(
-            coordinator
-                .state
-                .lock()
-                .unwrap()
-                .operation_event_contexts
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn shutdown_cancellation_reaches_every_open_root_and_child_once() {
-        let control = OperationControl::with_non_session_root_limit(2);
-        let root = control
-            .begin_root(
-                OperationClass::SessionWriteRoot,
-                OperationKind::Prompt,
-                "prompt-root".into(),
-            )
-            .unwrap();
-        let other_root = control
-            .begin_root(
-                OperationClass::NonSessionRoot,
-                OperationKind::AgentInvocation,
-                "agent-root".into(),
-            )
-            .unwrap();
-        let child = control
-            .begin_child(
-                OperationKind::Prompt,
-                "agent-child".into(),
-                "agent-root".into(),
-            )
-            .unwrap();
-
-        assert_eq!(
-            control.cancel_open_operations_for_shutdown(),
-            vec!["agent-child", "agent-root", "prompt-root"]
-        );
-        assert!(root.cancellation_token().unwrap().is_cancelled());
-        assert!(other_root.cancellation_token().unwrap().is_cancelled());
-        assert!(child.cancellation_token().is_cancelled());
-        assert!(control.cancel_open_operations_for_shutdown().is_empty());
-
-        drop(root);
-        drop(other_root);
-        drop(child);
-        let final_snapshot = control.resource_snapshot();
-        assert!(final_snapshot.root_operation_ids.is_empty());
-        assert!(final_snapshot.child_operation_ids.is_empty());
-    }
-
-    #[test]
-    fn operation_control_owns_prompt_control_receiver_lifecycle() {
-        let mut control = OperationControl::new();
-
-        let handle = control.prompt_control_handle().unwrap();
-        handle.steer("prefer tests").unwrap();
-
-        let mut receiver = control
-            .take_prompt_control_receiver()
-            .expect("prompt receiver should be owned by operation control");
-
-        assert_eq!(
-            receiver.try_recv().unwrap(),
-            PromptControlCommand::Steer {
-                text: "prefer tests".into(),
-            }
-        );
-        assert!(control.take_prompt_control_receiver().is_none());
-    }
-
-    #[test]
-    fn prompt_control_can_be_prepared_while_a_non_session_root_is_active() {
-        let mut control = OperationControl::new();
-        let root = control
-            .begin_root(
-                OperationClass::NonSessionRoot,
-                OperationKind::AgentInvocation,
-                "runtime-root".into(),
-            )
-            .unwrap();
-
-        let handle = control.prompt_control_handle().unwrap();
-        handle.follow_up("next prompt input").unwrap();
-        let mut receiver = control.take_prompt_control_receiver().unwrap();
-        assert_eq!(
-            receiver.try_recv().unwrap(),
-            PromptControlCommand::FollowUp {
-                text: "next prompt input".into(),
-            }
-        );
-        drop(root);
-    }
-
-    #[test]
-    fn prompt_control_registration_requires_the_exact_active_prompt_target() {
-        let mut control = OperationControl::new();
-        let prompt = control
-            .begin(OperationKind::Prompt, "op_active".into())
-            .unwrap();
-
-        let error = control
-            .prompt_control_registration_for("op_stale")
-            .unwrap_err();
-        assert_eq!(error.code(), "unsupported_capability");
-        assert!(error.to_string().contains("op_stale"));
-        assert!(error.to_string().contains("op_active"));
-        assert!(control.current_prompt_control_registration().is_none());
-
-        let registration = control
-            .prompt_control_registration_for("op_active")
-            .unwrap();
-        registration.handle.abort("stop").unwrap();
-        assert!(control.take_prompt_control_receiver().is_some());
-        drop(prompt);
-    }
-
-    #[test]
-    fn operation_control_rejects_prompt_handle_while_busy_or_pending() {
-        let mut control = OperationControl::new();
-        let _guard = control
-            .begin(OperationKind::Compact, "op_test".into())
-            .unwrap();
-
-        assert_eq!(
-            control.prompt_control_handle().unwrap_err(),
-            CodingSessionError::Busy {
-                operation: "compact".into(),
-            }
-        );
-        drop(_guard);
-
-        let _handle = control.prompt_control_handle().unwrap();
-        assert_eq!(
-            control.prompt_control_handle().unwrap_err(),
-            CodingSessionError::Busy {
-                operation: "prompt_control".into(),
-            }
-        );
-        control.clear_prompt_control_receiver();
-        assert!(control.prompt_control_handle().is_ok());
-    }
-
-    #[test]
-    fn prompt_control_handle_reports_closed_receiver() {
-        let (handle, receiver) = prompt_control_channel();
-        drop(receiver);
-
-        let error = handle.abort("stop").unwrap_err();
-
-        assert_eq!(
-            error,
-            CodingSessionError::Session {
-                message: "prompt control receiver is closed".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn prompt_control_cleanup_is_idempotent_and_preserves_newer_generation() {
-        let mut control = OperationControl::new();
-        let first = control.prompt_control_registration().unwrap();
-        let cleanup = control.prompt_control_cleanup();
-        let _first_receiver = control
-            .take_prompt_control_receiver()
-            .expect("first generation receiver");
-        let second = control.prompt_control_registration().unwrap();
-
-        cleanup.clear_if_generation(first.generation);
-        cleanup.clear_if_generation(first.generation);
-
-        assert_eq!(
-            control
-                .current_prompt_control_registration()
-                .expect("newer generation must remain")
-                .generation,
-            second.generation
-        );
-        let mut second_receiver = control
-            .take_prompt_control_receiver()
-            .expect("newer receiver must remain");
-        second.handle.follow_up("newer control").unwrap();
-        assert_eq!(
-            second_receiver.try_recv().unwrap(),
-            PromptControlCommand::FollowUp {
-                text: "newer control".into(),
-            }
-        );
-
-        cleanup.clear_if_generation(second.generation);
-        cleanup.clear_if_generation(second.generation);
-        assert!(control.current_prompt_control_registration().is_none());
-    }
-
-    #[test]
-    fn capability_revocation_cancels_only_older_root_and_child_identities() {
-        let coordinator = SnapshotCoordinator::new();
-        let control = OperationControl::with_snapshot_coordinator(coordinator.clone());
-        let old_root = control
-            .begin_root_with_capability_generation(
-                OperationClass::NonSessionRoot,
-                OperationKind::AgentInvocation,
-                "op_old_root".into(),
-                CapabilityGeneration::new(1),
-            )
-            .unwrap();
-        let old_child = control
-            .begin_child_with_capability_generation(
-                OperationKind::AgentInvocation,
-                "op_old_child".into(),
-                "op_old_root".into(),
-                CapabilityGeneration::new(1),
-            )
-            .unwrap();
-        let generation = coordinator.install_next_capability_generation().unwrap();
-        let current_root = control
-            .begin_root_with_capability_generation(
-                OperationClass::NonSessionRoot,
-                OperationKind::AgentInvocation,
-                "op_current".into(),
-                generation,
-            )
-            .unwrap();
-
-        let cancelled = control.cancel_capability_generations_before(generation);
-
-        assert_eq!(cancelled, ["op_old_child", "op_old_root"]);
-        assert!(old_root.cancellation_token().unwrap().is_cancelled());
-        assert!(old_child.cancellation_token().is_cancelled());
-        assert!(!current_root.cancellation_token().unwrap().is_cancelled());
-    }
-
-    #[test]
-    fn operation_cancellation_is_idempotent_and_cascades_to_descendants() {
-        let control = OperationControl::new();
-        let root = control
-            .begin_root(
-                OperationClass::NonSessionRoot,
-                OperationKind::AgentInvocation,
-                "op-root".into(),
-            )
-            .unwrap();
-        let child = control
-            .begin_child(OperationKind::Prompt, "op-child".into(), "op-root".into())
-            .unwrap();
-        let handle = root.cancellation_handle();
-
-        assert_eq!(
-            handle.request().unwrap(),
-            OperationCancellationOutcome::Requested {
-                kind: OperationKind::AgentInvocation,
-            }
-        );
-        assert!(root.cancellation_token().unwrap().is_cancelled());
-        assert!(child.cancellation_token().is_cancelled());
-        assert_eq!(
-            handle.request().unwrap(),
-            OperationCancellationOutcome::AlreadyRequested {
-                kind: OperationKind::AgentInvocation,
-            }
-        );
-    }
-
-    #[test]
-    fn cancellation_gate_arbitrates_commit_against_abort() {
-        let control = OperationControl::new();
-        let committed = control
-            .begin_root(
-                OperationClass::RuntimeWrite,
-                OperationKind::SetDefaultAgentProfile,
-                "op-committed".into(),
-            )
-            .unwrap();
-        let committed_handle = committed.cancellation_handle();
-        committed_handle.close().unwrap();
-        assert_eq!(
-            committed_handle.request().unwrap_err(),
-            OperationIdentityRejection::CancellationClosed {
-                kind: OperationKind::SetDefaultAgentProfile,
-                operation_id: "op-committed".into(),
-            }
-        );
-        assert!(!committed.cancellation_token().unwrap().is_cancelled());
-        drop(committed);
-
-        let cancelled = control
-            .begin_root(
-                OperationClass::RuntimeWrite,
-                OperationKind::SetDefaultAgentProfile,
-                "op-cancelled".into(),
-            )
-            .unwrap();
-        let cancelled_handle = cancelled.cancellation_handle();
-        cancelled_handle.request().unwrap();
-        assert_eq!(
-            cancelled_handle.close().unwrap_err(),
-            CodingSessionError::Cancelled
-        );
-    }
-
-    #[test]
-    fn production_admission_rejects_a_snapshot_stale_after_generation_install() {
-        let coordinator = SnapshotCoordinator::new();
-        let control = OperationControl::with_snapshot_coordinator(coordinator.clone());
-        coordinator.install_next_capability_generation().unwrap();
-
-        let error = control
-            .begin_root_with_capability_generation(
-                OperationClass::NonSessionRoot,
-                OperationKind::AgentInvocation,
-                "op_stale".into(),
-                CapabilityGeneration::new(1),
-            )
-            .unwrap_err();
-
-        assert_eq!(error.code(), "unsupported_capability");
-        assert!(error.to_string().contains("stale capability generation"));
     }
 }

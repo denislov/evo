@@ -1,9 +1,0 @@
-{
-  "schema": "evo.session",
-  "version": 1,
-  "session_id": "sess_v2_no_sequence",
-  "created_at": "2026-07-01T00:00:00Z",
-  "updated_at": "2026-07-01T00:00:01Z",
-  "default_agent_profile_id": "default",
-  "event_log": "events.jsonl"
-}

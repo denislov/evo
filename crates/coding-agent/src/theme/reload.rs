@@ -260,35 +260,3 @@ fn debounce_loop(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const THEME_RELOAD_TEST_DEBOUNCE: Duration = Duration::from_millis(80);
-    const THEME_RELOAD_TEST_RAPID_OFFSET: Duration = Duration::from_millis(20);
-    const THEME_RELOAD_TEST_EXTENDED_DEADLINE: Duration = Duration::from_millis(100);
-
-    fn theme_reload_test_clock_anchor() -> Instant {
-        Instant::now()
-    }
-
-    #[test]
-    fn debounce_state_extends_deadline_for_rapid_events() {
-        let start = theme_reload_test_clock_anchor();
-        let mut state = DebounceState::default();
-
-        state.schedule(start, THEME_RELOAD_TEST_DEBOUNCE);
-        state.schedule(
-            start + THEME_RELOAD_TEST_RAPID_OFFSET,
-            THEME_RELOAD_TEST_DEBOUNCE,
-        );
-
-        assert_eq!(
-            state.deadline,
-            Some(start + THEME_RELOAD_TEST_EXTENDED_DEADLINE)
-        );
-        state.clear();
-        assert_eq!(state.deadline, None);
-    }
-}

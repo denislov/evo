@@ -15,8 +15,6 @@ use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
 use ai::api::conversation::ContentBlock;
 use futures::future::{BoxFuture, FutureExt};
 use std::io::{Read, Seek, SeekFrom, Write};
-#[cfg(test)]
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use unicode_normalization::UnicodeNormalization;
 
@@ -395,11 +393,6 @@ impl OpenedEditFile for RealOpenedEditFile {
     }
 }
 
-#[cfg(test)]
-pub async fn edit_execute(cwd: &Path, args: serde_json::Value) -> Result<AgentToolOutput, String> {
-    edit_execute_with_operations(cwd, args, Arc::new(RealEditOperations)).await
-}
-
 async fn edit_tool_execute_with_operations(
     filesystem: &FilesystemCapability,
     context: &agent_core::api::tool::ToolExecutionContext,
@@ -497,35 +490,6 @@ fn self_healing_outcome_to_tool_output(outcome: SelfHealingEditOutcome) -> Agent
         text_signature: None,
     }])
     .with_details(details)
-}
-
-#[cfg(test)]
-pub async fn edit_execute_with_operations(
-    cwd: &Path,
-    args: serde_json::Value,
-    ops: Arc<dyn EditOperations>,
-) -> Result<AgentToolOutput, String> {
-    let filesystem =
-        FilesystemCapability::new(cwd.to_path_buf()).map_err(|error| error.to_string())?;
-    edit_execute_with_capability(&filesystem, args, ops).await
-}
-
-#[cfg(test)]
-pub(crate) async fn edit_execute_with_capability(
-    filesystem: &FilesystemCapability,
-    args: serde_json::Value,
-    ops: Arc<dyn EditOperations>,
-) -> Result<AgentToolOutput, String> {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("edit: missing or non-string 'path' argument")?
-        .to_string();
-    let target = filesystem
-        .prepare_target_for_tool("edit", &path)
-        .await
-        .map_err(|error| error.to_string())?;
-    edit_execute_with_target(&target, args, ops).await
 }
 
 pub(crate) async fn edit_execute_with_target(

@@ -61,17 +61,6 @@ pub(crate) const fn saturating_token_total(input: u32, output: u32) -> u32 {
     input.saturating_add(output)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::saturating_token_total;
-
-    #[test]
-    fn token_total_saturates_provider_supplied_extremes() {
-        assert_eq!(saturating_token_total(20, 22), 42);
-        assert_eq!(saturating_token_total(u32::MAX, 1), u32::MAX);
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum StopReason {

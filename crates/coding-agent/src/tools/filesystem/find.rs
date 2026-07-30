@@ -77,24 +77,6 @@ fn sort_paths(paths: &mut [String]) {
     });
 }
 
-#[cfg(test)]
-pub async fn find_execute(
-    cwd: &Path,
-    args: serde_json::Value,
-) -> Result<Vec<ContentBlock>, String> {
-    let filesystem =
-        FilesystemCapability::new(cwd.to_path_buf()).map_err(|error| error.to_string())?;
-    let requested = args
-        .get("path")
-        .and_then(|value| value.as_str())
-        .unwrap_or(".");
-    let target = filesystem
-        .prepare_target_for_tool("find", requested)
-        .await
-        .map_err(|error| error.to_string())?;
-    find_target(&target, args).await
-}
-
 async fn find_target(
     target: &FilesystemTarget,
     args: serde_json::Value,

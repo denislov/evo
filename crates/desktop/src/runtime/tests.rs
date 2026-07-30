@@ -3176,6 +3176,7 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
         events,
         pending_recovery,
         last_forwarded_sequence: requested_after,
+        session_name_updates: None,
         task,
     };
     let switch = dispatch_active_command(

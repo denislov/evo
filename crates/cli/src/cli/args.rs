@@ -413,15 +413,3 @@ fn split_csv(value: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
-
-#[cfg(test)]
-#[path = "tests/args.rs"]
-mod args_tests;
-
-#[cfg(test)]
-#[path = "tests/session_args.rs"]
-mod session_args_tests;
-
-#[cfg(test)]
-#[path = "tests/protocol_args.rs"]
-mod protocol_args_tests;

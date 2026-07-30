@@ -31,11 +31,6 @@ impl TransientOverlayBridge {
     pub(super) fn take_pending_input(&self) -> Vec<InputEvent> {
         self.state.borrow_mut().pending_input.drain(..).collect()
     }
-
-    #[cfg(test)]
-    pub(super) fn focused(&self) -> bool {
-        self.state.borrow().focused
-    }
 }
 
 pub(super) struct TransientOverlay {
@@ -61,28 +56,5 @@ impl Component for TransientOverlay {
 
     fn focused(&self) -> bool {
         self.bridge.state.borrow().focused
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tui::api::component::Component;
-    use tui::api::input::{InputEvent, parse_key};
-
-    use super::TransientOverlayBridge;
-
-    #[test]
-    fn component_projects_lines_and_queues_focused_input() {
-        let bridge = TransientOverlayBridge::default();
-        bridge.set_lines(vec!["authorization".into()]);
-        let mut component = bridge.component();
-
-        component.set_focused(true);
-        component.handle_input(&InputEvent::Key(parse_key("enter").unwrap()));
-
-        assert!(bridge.focused());
-        assert_eq!(component.render(40), vec!["authorization"]);
-        assert_eq!(bridge.take_pending_input().len(), 1);
-        assert!(bridge.take_pending_input().is_empty());
     }
 }

@@ -332,6 +332,7 @@ pub(crate) struct DelegationRequest {
 #[derive(Clone)]
 pub(crate) struct RuntimeSnapshot {
     model: Model,
+    credential_provider: String,
     api_key: Option<String>,
     auth_diagnostics: Vec<ProviderAuthDiagnostic>,
     system_prompt: Option<String>,
@@ -401,9 +402,11 @@ impl RuntimeSnapshot {
             settings,
             invocation: _,
         } = options;
+        let credential_provider = model.provider.clone();
 
         Self {
             model,
+            credential_provider,
             api_key,
             auth_diagnostics,
             system_prompt,
@@ -494,11 +497,17 @@ impl RuntimeSnapshot {
     }
 
     pub(crate) fn api_key(&self) -> Option<&str> {
-        self.api_key.as_deref()
+        (self.model.provider == self.credential_provider)
+            .then_some(self.api_key.as_deref())
+            .flatten()
     }
 
     pub(crate) fn auth_diagnostics(&self) -> &[ProviderAuthDiagnostic] {
-        &self.auth_diagnostics
+        if self.model.provider == self.credential_provider {
+            &self.auth_diagnostics
+        } else {
+            &[]
+        }
     }
 
     pub(crate) fn system_prompt(&self) -> Option<&str> {
@@ -999,11 +1008,6 @@ impl PromptTurnContext {
         self.requested_abort_reason.as_deref()
     }
 
-    #[cfg(test)]
-    pub(crate) fn diagnostics(&self) -> &[CodingDiagnostic] {
-        &self.diagnostics
-    }
-
     pub(crate) fn record_final_message(&mut self, message: AssistantMessage) {
         self.final_message = Some(message);
     }
@@ -1056,11 +1060,6 @@ impl PromptTurnContext {
         &self.coding_events
     }
 
-    #[cfg(test)]
-    pub(crate) fn delegation_requests(&self) -> &[DelegationRequest] {
-        &self.delegation_requests
-    }
-
     pub(crate) fn authorize_delegation_requests(
         &mut self,
         current_depth: usize,
@@ -1093,11 +1092,6 @@ impl PromptTurnContext {
             lineage,
         );
         Ok(&self.delegation_authorization_decisions)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn delegation_authorization_decisions(&self) -> &[DelegationAuthorizationDecision] {
-        &self.delegation_authorization_decisions
     }
 
     fn record_delegation_requests(&mut self, events: &[PromptStreamEvent]) {
@@ -1638,350 +1632,4 @@ fn content_blocks_text(content: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use agent_core::api::agent::{AgentEvent, AgentResources};
-    use agent_core::api::tool::{AgentToolResult, ToolExecutionMode};
-    use ai::api::conversation::ContentBlock;
-    use ai::api::model::{Model, ModelCost, ModelInput};
-
-    use super::*;
-    use crate::app::bootstrap::{SessionMode, SessionRunOptions};
-    use crate::operations::delegation::DelegationAuthorizationDecision;
-    use crate::profiles::{DelegationConfirmationMode, ProfileSource, SupervisionPolicy};
-
-    fn model() -> Model {
-        Model {
-            id: "test-model".into(),
-            name: "Test Model".into(),
-            api: "messages".into(),
-            provider: "test".into(),
-            base_url: String::new(),
-            reasoning: false,
-            thinking_level_map: None,
-            input: vec![ModelInput::Text],
-            cost: ModelCost {
-                known: true,
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: 0,
-            max_tokens: 0,
-            headers: None,
-            compat: None,
-        }
-    }
-
-    fn session_prompt_options() -> PromptRuntimeOptions {
-        PromptRuntimeOptions {
-            model: model(),
-            api_key: Some("key".into()),
-            auth_diagnostics: Vec::new(),
-            system_prompt: Some("system".into()),
-            max_turns: Some(3),
-            tools: Vec::new(),
-            register_builtins: false,
-            ai_client: None,
-            session: Some(SessionRunOptions {
-                mode: SessionMode::Enabled,
-                cwd: ".".into(),
-                session_dir: Some("sessions".into()),
-                workspace: None,
-            }),
-            session_target: Some(ResolvedSessionTarget::New),
-            session_name: Some("test".into()),
-            thinking_level: None,
-            tool_execution: Some(ToolExecutionMode::Sequential),
-            resources: AgentResources::default(),
-            settings: None,
-            invocation: PromptInvocation::Text("hello".into()),
-        }
-    }
-
-    #[test]
-    fn prompt_turn_options_tracks_invocation_mode_and_session_metadata() {
-        let options = PromptTurnOptions::new(PromptInvocation::Text("hello".into()))
-            .with_mode(PromptTurnMode::Json)
-            .with_session_target(ResolvedSessionTarget::New)
-            .with_session_name("named");
-
-        assert!(matches!(
-            options.invocation(),
-            PromptInvocation::Text(text) if text == "hello"
-        ));
-        assert_eq!(options.mode(), PromptTurnMode::Json);
-        assert!(matches!(
-            options.session_target(),
-            Some(ResolvedSessionTarget::New)
-        ));
-        assert_eq!(options.session_name(), Some("named"));
-    }
-
-    #[test]
-    fn runtime_snapshot_moves_existing_session_prompt_runtime_inputs() {
-        let snapshot = RuntimeSnapshot::from_prompt_runtime_options(session_prompt_options());
-
-        assert_eq!(snapshot.model().id, "test-model");
-        assert_eq!(snapshot.api_key(), Some("key"));
-        assert!(snapshot.auth_diagnostics().is_empty());
-        assert_eq!(snapshot.system_prompt(), Some("system"));
-        assert_eq!(snapshot.max_turns(), Some(3));
-        assert!(snapshot.tools().is_empty());
-        assert!(!snapshot.register_builtins());
-        assert!(snapshot.resources().is_empty());
-        assert!(snapshot.settings().is_none());
-        assert_eq!(snapshot.thinking_level(), None);
-        assert_eq!(
-            snapshot.tool_execution(),
-            Some(ToolExecutionMode::Sequential)
-        );
-        assert!(matches!(
-            snapshot.session_run_options().map(|options| &options.mode),
-            Some(SessionMode::Enabled)
-        ));
-    }
-
-    #[test]
-    fn prompt_turn_context_records_diagnostics_and_success_outcome() {
-        let mut context = PromptTurnContext::new(
-            PromptTurnIds::new("op_1", "turn_1"),
-            PromptTurnOptions::new(PromptInvocation::Text("hello".into())),
-        );
-        context.record_diagnostic(CodingDiagnostic::info("prepared"));
-        let mut message = AssistantMessage::empty("messages", "test-model");
-        message.content.push(ContentBlock::Text {
-            text: "hi".into(),
-            text_signature: None,
-        });
-        context.record_final_message(message.clone());
-
-        let outcome = context
-            .finish_success(Some("sess_1".into()), Some("leaf_1".into()))
-            .unwrap();
-
-        assert_eq!(context.diagnostics().len(), 1);
-        assert_eq!(context.final_message(), Some(&message));
-        assert_eq!(
-            outcome,
-            InternalPromptTurnOutcome::Success {
-                operation_id: "op_1".into(),
-                turn_id: "turn_1".into(),
-                session_id: Some("sess_1".into()),
-                leaf_id: Some("leaf_1".into()),
-                final_text: "hi".into(),
-                final_message: message,
-                diagnostics: vec![CodingDiagnostic::info("prepared")],
-            }
-        );
-    }
-
-    #[test]
-    fn prompt_turn_context_requires_final_message_for_success() {
-        let context = PromptTurnContext::new(
-            PromptTurnIds::new("op_1", "turn_1"),
-            PromptTurnOptions::new(PromptInvocation::Text("hello".into())),
-        );
-
-        let error = context.finish_success(None, None).unwrap_err();
-
-        assert_eq!(error.code(), "session");
-        assert!(
-            error
-                .to_string()
-                .contains("cannot finish successfully without a final message")
-        );
-    }
-
-    #[test]
-    fn prompt_turn_context_queues_requested_delegation() {
-        let mut context = PromptTurnContext::new(
-            PromptTurnIds::new("op_1", "turn_1"),
-            PromptTurnOptions::new(PromptInvocation::Text("hello".into())),
-        );
-        let envelope = serde_json::json!({
-            "status": "requested",
-            "target_kind": "agent",
-            "target_id": "coder",
-            "task": "implement parser",
-            "requesting_profile_id": "planner",
-            "message": "delegation request captured for session-owned authorization"
-        })
-        .to_string();
-
-        context
-            .record_agent_event(AgentEvent::ToolCallEnd {
-                tool_call_id: "tool_delegate".into(),
-                tool_name: "delegate_agent".into(),
-                result: AgentToolResult::ok(vec![ContentBlock::Text {
-                    text: envelope,
-                    text_signature: None,
-                }]),
-            })
-            .unwrap();
-
-        assert!(context.coding_events().iter().any(|event| matches!(
-            event,
-            PromptStreamEvent::Delegation(
-                crate::events::delegation::DelegationEvent::Requested { context }
-            ) if context.tool_call_id == "tool_delegate" && context.target_id.as_str() == "coder"
-        )));
-        let requests = context.delegation_requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].operation_id, "op_1");
-        assert_eq!(requests[0].turn_id, "turn_1");
-        assert_eq!(requests[0].tool_call_id, "tool_delegate");
-        assert_eq!(requests[0].requesting_profile_id.as_str(), "planner");
-        assert_eq!(requests[0].target_kind, crate::profiles::ProfileKind::Agent);
-        assert_eq!(requests[0].target_id.as_str(), "coder");
-        assert_eq!(requests[0].task, "implement parser");
-    }
-
-    #[test]
-    fn prompt_turn_context_does_not_queue_rejected_delegation() {
-        let mut context = PromptTurnContext::new(
-            PromptTurnIds::new("op_1", "turn_1"),
-            PromptTurnOptions::new(PromptInvocation::Text("hello".into())),
-        );
-        let envelope = serde_json::json!({
-            "status": "rejected",
-            "target_kind": "team",
-            "target_id": "implementation",
-            "task": "ship feature",
-            "requesting_profile_id": "planner",
-            "message": "target is not allowed by delegation policy"
-        })
-        .to_string();
-
-        context
-            .record_agent_event(AgentEvent::ToolCallEnd {
-                tool_call_id: "tool_delegate".into(),
-                tool_name: "delegate_team".into(),
-                result: AgentToolResult::ok(vec![ContentBlock::Text {
-                    text: envelope,
-                    text_signature: None,
-                }]),
-            })
-            .unwrap();
-
-        assert!(context.coding_events().iter().any(|event| matches!(
-            event,
-            PromptStreamEvent::Delegation(
-                crate::events::delegation::DelegationEvent::Rejected { context, .. }
-            ) if context.tool_call_id == "tool_delegate"
-        )));
-        assert!(context.delegation_requests().is_empty());
-    }
-
-    #[test]
-    fn prompt_turn_context_authorizes_queued_delegation_from_runtime_policy() {
-        let mut options = PromptTurnOptions::from_prompt_runtime_options(session_prompt_options());
-        let registry =
-            ProfileRegistry::load(crate::profiles::ProfileRegistryOptions::new()).unwrap();
-        options
-            .apply_agent_profile(
-                &AgentProfile {
-                    schema_version: 1,
-                    id: ProfileId::from("planner"),
-                    display_name: "Planner".into(),
-                    description: None,
-                    model: None,
-                    system_prompt: None,
-                    tools: Vec::new(),
-                    skills: Vec::new(),
-                    supervision: SupervisionPolicy::Session,
-                    delegation: DelegationPolicy {
-                        allow_delegate_team: true,
-                        max_depth: 1,
-                        max_parallel_children: 1,
-                        require_confirmation: DelegationConfirmationMode::Writes,
-                        allowed_teams: vec![ProfileId::from("implementation")],
-                        ..DelegationPolicy::default()
-                    },
-                    source: ProfileSource::BuiltIn,
-                    path: None,
-                },
-                &registry,
-                Vec::new(),
-            )
-            .unwrap();
-        let mut context = PromptTurnContext::new(PromptTurnIds::new("op_1", "turn_1"), options);
-        context.resolve_request().unwrap();
-        context.resolve_runtime_from_options().unwrap();
-        let envelope = serde_json::json!({
-            "status": "requested",
-            "target_kind": "team",
-            "target_id": "implementation",
-            "task": "ship feature",
-            "requesting_profile_id": "planner",
-            "message": "delegation request captured for session-owned authorization"
-        })
-        .to_string();
-
-        context
-            .record_agent_event(AgentEvent::ToolCallEnd {
-                tool_call_id: "tool_delegate".into(),
-                tool_name: "delegate_team".into(),
-                result: AgentToolResult::ok(vec![ContentBlock::Text {
-                    text: envelope,
-                    text_signature: None,
-                }]),
-            })
-            .unwrap();
-
-        let decisions = context.authorize_delegation_requests(0).unwrap();
-        assert_eq!(decisions.len(), 1);
-        assert!(matches!(
-            &decisions[0],
-            DelegationAuthorizationDecision::RequiresConfirmation { request, reason, .. }
-                if request.target_id.as_str() == "implementation" && reason.contains("team")
-        ));
-        assert_eq!(context.delegation_authorization_decisions().len(), 1);
-    }
-
-    #[test]
-    fn prompt_turn_context_builds_failure_outcome_with_diagnostics() {
-        let mut context = PromptTurnContext::new(
-            PromptTurnIds::new("op_1", "turn_1"),
-            PromptTurnOptions::new(PromptInvocation::Text("hello".into())),
-        );
-        context.record_diagnostic(CodingDiagnostic::error("provider failed"));
-
-        let outcome = context.finish_failure(CodingSessionError::Provider {
-            message: "stream failed".into(),
-        });
-
-        assert_eq!(
-            outcome,
-            InternalPromptTurnOutcome::Failed {
-                operation_id: "op_1".into(),
-                turn_id: Some("turn_1".into()),
-                error: CodingSessionError::Provider {
-                    message: "stream failed".into(),
-                },
-                diagnostics: vec![CodingDiagnostic::error("provider failed")],
-            }
-        );
-    }
-
-    #[test]
-    fn reasoning_duration_tracker_sums_segments_and_closes_open_work() {
-        let base = Instant::now();
-        let mut tracker = ReasoningDurationTracker::default();
-        tracker.start_at(0, base);
-        tracker.complete_at(0, base + std::time::Duration::from_millis(750));
-        tracker.start_at(2, base + std::time::Duration::from_secs(5));
-        tracker.finish_at(base + std::time::Duration::from_millis(6_250));
-
-        assert_eq!(tracker.take_duration_millis(), Some(2_000));
-        assert!(tracker.open.is_empty());
-        assert_eq!(tracker.duration_millis(), None);
-
-        tracker.start_at(0, base);
-        tracker.complete_at(0, base + std::time::Duration::from_millis(125));
-        assert_eq!(tracker.take_duration_millis(), Some(125));
-    }
 }

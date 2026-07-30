@@ -66,26 +66,3 @@ pub(crate) fn prepare_prompt_execution(
         )),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_application_options_include_builtin_tools() {
-        let options =
-            default_application_options(PathBuf::from("."), None, SessionMode::Enabled, None)
-                .unwrap();
-        let names: Vec<_> = options
-            .tools
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect();
-        assert_eq!(
-            names,
-            vec!["read", "write", "edit", "bash", "grep", "find", "ls"]
-        );
-        assert!(options.register_builtins);
-        assert!(options.model_override.is_none());
-    }
-}

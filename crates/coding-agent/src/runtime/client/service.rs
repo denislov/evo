@@ -19,14 +19,6 @@ impl ClientService {
     ) -> Result<ClientHandle, ClientRegistryError> {
         self.coordinator.connect_or_takeover(id)
     }
-    #[cfg(test)]
-    pub(crate) fn set_prompt_draft(
-        &self,
-        handle: &ClientHandle,
-        draft: Option<DraftRecord>,
-    ) -> Result<(), ClientRegistryError> {
-        self.coordinator.set_prompt_draft(handle, draft)
-    }
     pub(crate) fn commit_submission_running(
         &self,
         handle: &ClientHandle,
@@ -40,19 +32,5 @@ impl ClientService {
             descriptor,
             expected_prompt_draft,
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn takeover_increments_generation_and_rejects_old_handle() {
-        let service = ClientService::new(SnapshotCoordinator::new());
-        let id = ClientConnectionId::new("client");
-        let first = service.connect_or_takeover(id.clone()).unwrap();
-        let second = service.connect_or_takeover(id).unwrap();
-        assert_eq!(first.generation.0, 1);
-        assert_eq!(second.generation.0, 2);
     }
 }

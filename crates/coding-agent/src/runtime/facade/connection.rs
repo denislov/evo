@@ -21,6 +21,19 @@ impl CodingAgentSession {
             .map_err(CodingAgentPublicError::from)
     }
 
+    /// Subscribe to durable session-name changes without polling the session
+    /// catalog. The receiver is available only for persistent sessions.
+    pub fn subscribe_session_name_updates(&self) -> Option<CodingAgentSessionNameUpdateReceiver> {
+        match &self.runtime_host.session_coordinator.persistence {
+            SessionPersistence::Persistent(session_service) => {
+                Some(CodingAgentSessionNameUpdateReceiver {
+                    inner: session_service.subscribe_session_name_updates(),
+                })
+            }
+            SessionPersistence::NonPersistent(_) => None,
+        }
+    }
+
     pub(crate) fn transcript_snapshot_internal(
         &self,
     ) -> Result<CodingAgentTranscriptSnapshot, CodingSessionError> {
@@ -222,18 +235,6 @@ impl CodingAgentSession {
         ))
     }
 
-    #[cfg(test)]
-    pub(crate) fn ui_snapshot(&self, client_drafts: Vec<ClientDraft>) -> UiSnapshot {
-        self.emit_pending_startup_recovery_markers();
-        IntentRouter::admit_query(
-            &self.runtime_host.operation_supervisor.control,
-            QueryIntent::SessionView,
-        );
-        let mut snapshot = self.runtime_host.client_projection.coordinator.snapshot();
-        snapshot.client_drafts = client_drafts;
-        snapshot
-    }
-
     pub(in crate::runtime) fn refresh_snapshot_projection(&self) {
         let session = self.view();
         let capabilities = self.capabilities();
@@ -257,6 +258,23 @@ impl CodingAgentSession {
                 generation,
                 committed_session_sequence,
             );
+    }
+}
+
+impl CodingAgentSessionNameUpdateReceiver {
+    /// Return the current durable name state at the subscription cursor.
+    pub fn current(&self) -> CodingAgentSessionNameUpdate {
+        let update = self.inner.borrow();
+        CodingAgentSessionNameUpdate {
+            name: update.name.clone(),
+            updated_at: update.updated_at.clone(),
+        }
+    }
+
+    /// Wait for the next committed durable name change.
+    pub async fn changed(&mut self) -> Option<CodingAgentSessionNameUpdate> {
+        self.inner.changed().await.ok()?;
+        Some(self.current())
     }
 }
 

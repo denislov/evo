@@ -101,17 +101,6 @@ impl OperationFinalizer {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn terminal_status(
-        result: &Result<OperationOutcome, CodingSessionError>,
-    ) -> ProductEventTerminalStatus {
-        match Self::payload(result) {
-            FinalizationPayload::Completed => ProductEventTerminalStatus::Completed,
-            FinalizationPayload::Aborted { .. } => ProductEventTerminalStatus::Aborted,
-            FinalizationPayload::Failed { .. } => ProductEventTerminalStatus::Failed,
-        }
-    }
-
     fn payload(result: &Result<OperationOutcome, CodingSessionError>) -> FinalizationPayload {
         match result {
             Ok(

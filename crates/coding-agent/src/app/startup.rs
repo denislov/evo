@@ -19,6 +19,7 @@ use ai::api::client::AiClient;
 use ai::api::model::Model;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicationDiagnosticSeverity {
@@ -155,6 +156,16 @@ pub fn resolve_application_context(
         loaded_resources.skills.clone(),
         loaded_resources.prompt_templates.clone(),
     );
+    let ai_client = options.ai_client.or_else(|| {
+        Some(AiClient::with_auth_resolver(Arc::new(
+            config::auth::AuthStoreProviderAuthResolver::new(
+                provider,
+                api_key.clone(),
+                auth_diagnostics.clone(),
+                config.auth.clone(),
+            ),
+        )))
+    });
 
     Ok(ResolvedApplicationContext {
         cwd,
@@ -170,7 +181,7 @@ pub fn resolve_application_context(
         tools,
         register_builtins: options.register_builtins,
         global_config_only,
-        ai_client: options.ai_client,
+        ai_client,
         session,
         session_target,
         session_name,

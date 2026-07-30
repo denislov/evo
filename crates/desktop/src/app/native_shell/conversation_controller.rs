@@ -1,7 +1,8 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    collections::{HashSet, VecDeque},
+    collections::{HashSet, VecDeque, vec_deque},
+    iter::Peekable,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -84,6 +85,66 @@ impl<'a> ConversationSource<'a> {
     /// Durable blocks plus the optimistic submitted row plus live overlays.
     pub(super) fn visible_count(&self) -> usize {
         self.durable_count() + self.submitted_count() + self.messages.len() + self.tools.len()
+    }
+
+    /// Live overlays in the order the turn actually produced them.
+    ///
+    /// Messages and tools are folded onto two independent queues, so neither
+    /// one alone carries the interleaving. Concatenating them instead — every
+    /// message, then every tool — sinks each running tool below the assistant
+    /// message that came after it, and shifts it again on every new message.
+    /// Both queues are already ascending in `started_sequence`, so this is a
+    /// merge rather than a sort: no allocation, no reordering.
+    pub(super) fn live_overlays(&self) -> LiveOverlayIter<'a> {
+        LiveOverlayIter {
+            messages: self.messages.iter().peekable(),
+            tools: self.tools.iter().peekable(),
+        }
+    }
+}
+
+/// One row of the live tail, in event order.
+#[derive(Clone, Copy)]
+pub(super) enum LiveOverlay<'a> {
+    Message(&'a DesktopMessageOverlay),
+    Tool(&'a DesktopToolOverlay),
+}
+
+impl LiveOverlay<'_> {
+    const fn updated_sequence(self) -> u64 {
+        match self {
+            Self::Message(message) => message.updated_sequence,
+            Self::Tool(tool) => tool.updated_sequence,
+        }
+    }
+
+    fn row_id(self) -> String {
+        match self {
+            Self::Message(message) => message_block_id(message),
+            Self::Tool(tool) => tool_block_id(tool),
+        }
+    }
+}
+
+pub(super) struct LiveOverlayIter<'a> {
+    messages: Peekable<vec_deque::Iter<'a, DesktopMessageOverlay>>,
+    tools: Peekable<vec_deque::Iter<'a, DesktopToolOverlay>>,
+}
+
+impl<'a> Iterator for LiveOverlayIter<'a> {
+    type Item = LiveOverlay<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next_message = self.messages.peek().map(|message| message.started_sequence);
+        let next_tool = self.tools.peek().map(|tool| tool.started_sequence);
+        match (next_message, next_tool) {
+            (Some(message), Some(tool)) if tool < message => {
+                self.tools.next().map(LiveOverlay::Tool)
+            }
+            (Some(_), _) => self.messages.next().map(LiveOverlay::Message),
+            (None, Some(_)) => self.tools.next().map(LiveOverlay::Tool),
+            (None, None) => None,
+        }
     }
 }
 
@@ -669,6 +730,20 @@ impl ConversationController {
         )
     }
 
+    fn resolve_live_row(
+        &mut self,
+        overlay: LiveOverlay<'_>,
+        session_id: &str,
+        panel_width: u32,
+    ) -> ConversationRowRenderData {
+        match overlay {
+            LiveOverlay::Message(message) => {
+                self.resolve_message_row(message, session_id, panel_width)
+            }
+            LiveOverlay::Tool(tool) => self.resolve_tool_row(tool, session_id, panel_width),
+        }
+    }
+
     /// Rebuild every durable and live row from the projection.
     fn rebuild_rows(&mut self, source: &ConversationSource<'_>, panel_width: u32) {
         let session_id = source.session_id().to_owned();
@@ -710,11 +785,8 @@ impl ConversationController {
         if let Some(row) = self.resolve_submitted_row(source, &session_id, panel_width) {
             rows.push(row);
         }
-        for message in source.messages {
-            rows.push(self.resolve_message_row(message, &session_id, panel_width));
-        }
-        for tool in source.tools {
-            rows.push(self.resolve_tool_row(tool, &session_id, panel_width));
+        for overlay in source.live_overlays() {
+            rows.push(self.resolve_live_row(overlay, &session_id, panel_width));
         }
 
         self.render_cache.finish_frame();
@@ -747,11 +819,8 @@ impl ConversationController {
         if let Some(row) = self.resolve_submitted_row(source, &session_id, panel_width) {
             live_rows.push(row);
         }
-        for message in source.messages {
-            live_rows.push(self.resolve_message_row(message, &session_id, panel_width));
-        }
-        for tool in source.tools {
-            live_rows.push(self.resolve_tool_row(tool, &session_id, panel_width));
+        for overlay in source.live_overlays() {
+            live_rows.push(self.resolve_live_row(overlay, &session_id, panel_width));
         }
         self.render_cache.finish_incremental();
 
@@ -786,32 +855,20 @@ impl ConversationController {
         self.render_cache.begin_frame();
 
         for sequence in sequences {
-            if let Some((position, message)) = source
-                .messages
-                .iter()
+            // At most one live row carries a given sequence: every product event
+            // updates exactly one message or one tool.
+            let Some((position, overlay)) = source
+                .live_overlays()
                 .enumerate()
-                .find(|(_, message)| message.updated_sequence == sequence)
-            {
-                let row = self.resolve_message_row(message, &session_id, panel_width);
-                let desired_index = durable_count + submitted_count + position;
-                let refresh =
-                    self.upsert_render_row(durable_count, desired_index, row, panel_width, now);
-                next_refresh_after = minimum_duration(next_refresh_after, refresh);
-            }
-
-            if let Some((position, tool)) = source
-                .tools
-                .iter()
-                .enumerate()
-                .find(|(_, tool)| tool.updated_sequence == sequence)
-            {
-                let row = self.resolve_tool_row(tool, &session_id, panel_width);
-                let desired_index =
-                    durable_count + submitted_count + source.messages.len() + position;
-                let refresh =
-                    self.upsert_render_row(durable_count, desired_index, row, panel_width, now);
-                next_refresh_after = minimum_duration(next_refresh_after, refresh);
-            }
+                .find(|(_, overlay)| overlay.updated_sequence() == sequence)
+            else {
+                continue;
+            };
+            let row = self.resolve_live_row(overlay, &session_id, panel_width);
+            let desired_index = durable_count + submitted_count + position;
+            let refresh =
+                self.upsert_render_row(durable_count, desired_index, row, panel_width, now);
+            next_refresh_after = minimum_duration(next_refresh_after, refresh);
         }
         self.render_cache.finish_incremental();
         self.live_rows_match(source)
@@ -880,23 +937,12 @@ impl ConversationController {
             }
             index += 1;
         }
-        for message in source.messages {
+        for overlay in source.live_overlays() {
             let Some(row) = render_rows.get(index) else {
                 return false;
             };
-            if row.item_key.row_id() != message_block_id(message)
-                || row.source_revision != message.updated_sequence
-            {
-                return false;
-            }
-            index += 1;
-        }
-        for tool in source.tools {
-            let Some(row) = render_rows.get(index) else {
-                return false;
-            };
-            if row.item_key.row_id() != tool_block_id(tool)
-                || row.source_revision != tool.updated_sequence
+            if row.item_key.row_id() != overlay.row_id()
+                || row.source_revision != overlay.updated_sequence()
             {
                 return false;
             }

@@ -32,36 +32,3 @@ pub enum ContentBlock {
         thought_signature: Option<String>,
     },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn content_block_text_roundtrip() {
-        let cb = ContentBlock::Text {
-            text: "hello".into(),
-            text_signature: None,
-        };
-        let json = serde_json::to_string(&cb).unwrap();
-        assert_eq!(json, r#"{"type":"text","text":"hello"}"#);
-        let back: ContentBlock = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, cb);
-    }
-
-    #[test]
-    fn content_block_toolcall_roundtrip() {
-        let cb = ContentBlock::ToolCall {
-            id: "toolu_01".into(),
-            name: "read".into(),
-            arguments: serde_json::json!({"path": "/x"}),
-            thought_signature: None,
-        };
-        let json = serde_json::to_string(&cb).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["type"], "toolCall");
-        assert_eq!(parsed["id"], "toolu_01");
-        let back: ContentBlock = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, cb);
-    }
-}

@@ -68,15 +68,6 @@ impl CodingAgentSessionOptions {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_workspace_global_config_dir_for_tests(
-        mut self,
-        dir: impl Into<PathBuf>,
-    ) -> Self {
-        self.workspace_global_config_dir = Some(dir.into());
-        self
-    }
-
     pub fn with_session_log_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.session_log_root = Some(root.into());
         self
@@ -147,6 +138,19 @@ impl CodingAgentSessionOptions {
 pub struct CodingAgentSessionView {
     pub session_id: String,
     pub default_agent_profile_id: ProfileId,
+}
+
+/// A committed durable-session name change observed after subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodingAgentSessionNameUpdate {
+    pub name: Option<String>,
+    pub updated_at: String,
+}
+
+/// Receiver for committed session-name changes, including automatic naming.
+#[derive(Debug)]
+pub struct CodingAgentSessionNameUpdateReceiver {
+    pub(crate) inner: tokio::sync::watch::Receiver<crate::session::service::SessionNameUpdate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

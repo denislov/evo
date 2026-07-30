@@ -54,6 +54,7 @@ pub mod auth {
 /// Provider registration contracts and built-in provider installation.
 /// Low-level agent runtimes must not depend on this category.
 pub mod provider {
+    pub use crate::providers::faux;
     pub use crate::providers::{builtin_provider_apis, register_builtins_into};
     pub use crate::registry::{ApiProvider, ProviderRegistry};
 }
@@ -77,10 +78,4 @@ pub mod compatibility {
         ThinkingLevelMap, ThinkingLevelValue, VercelGatewayRouting,
         compatibility_field_disposition,
     };
-}
-
-/// Deterministic provider fixtures for downstream tests and examples.
-#[cfg(any(test, feature = "test-support"))]
-pub mod testing {
-    pub use crate::testing::faux::{FauxCall, FauxProvider, FauxResponse, FauxState, FauxToolCall};
 }

@@ -168,24 +168,6 @@ fn output_match_block(
     any_truncated
 }
 
-#[cfg(test)]
-pub async fn grep_execute(
-    cwd: &Path,
-    args: serde_json::Value,
-) -> Result<Vec<ContentBlock>, String> {
-    let filesystem =
-        FilesystemCapability::new(cwd.to_path_buf()).map_err(|error| error.to_string())?;
-    let requested = args
-        .get("path")
-        .and_then(|value| value.as_str())
-        .unwrap_or(".");
-    let target = filesystem
-        .prepare_target_for_tool("grep", requested)
-        .await
-        .map_err(|error| error.to_string())?;
-    grep_target(&target, args).await
-}
-
 async fn grep_target(
     target: &FilesystemTarget,
     args: serde_json::Value,

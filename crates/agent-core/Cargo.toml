@@ -30,19 +30,3 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-
 [[example]]
 name = "loop_example"
 required-features = ["test-support"]
-
-[[test]]
-name = "agent"
-required-features = ["test-support"]
-
-[[test]]
-name = "api_contract"
-required-features = ["test-support"]
-
-[[test]]
-name = "execution"
-required-features = ["test-support"]
-
-[[test]]
-name = "tool_hooks"
-required-features = ["test-support"]

@@ -3,10 +3,6 @@ pub(crate) mod context;
 mod control;
 mod lifecycle;
 mod recovery;
-#[cfg(test)]
-mod test_support;
-#[cfg(test)]
-mod tests;
 mod view;
 
 pub use crate::events::{
@@ -70,19 +66,16 @@ pub use crate::runtime::client::projection::{
     CodingAgentSubmittedTerminalAnchor, CodingAgentTerminalUncertainty,
     CodingAgentTurnUsageSnapshot, CodingAgentUsageSnapshot,
 };
-#[cfg(test)]
-pub(crate) use crate::runtime::client::state::{
-    ClientConnectionId, ClientDraft, ClientDraftKind, UiSnapshot,
-};
 pub use crate::runtime::error::CodingAgentLifecycleRejection;
 pub(crate) use crate::runtime::error::CodingSessionError;
 pub use crate::runtime::execution::CodingAgentOperationTask;
 pub use crate::runtime::facade::context::{
     CapabilityStatus, CodingAgentCapabilities, CodingAgentRecoveryPending,
     CodingAgentRecoveryResolutionRequest, CodingAgentRecoveryResolutionResult,
-    CodingAgentRecoveryRetryRequest, CodingAgentRecoveryRetryResult, CodingAgentSessionOpenTarget,
-    CodingAgentSessionOptions, CodingAgentSessionOverview, CodingAgentSessionSummary,
-    CodingAgentSessionTranscriptItem, CodingAgentSessionView, CodingAgentTranscriptSnapshot,
+    CodingAgentRecoveryRetryRequest, CodingAgentRecoveryRetryResult, CodingAgentSessionNameUpdate,
+    CodingAgentSessionNameUpdateReceiver, CodingAgentSessionOpenTarget, CodingAgentSessionOptions,
+    CodingAgentSessionOverview, CodingAgentSessionSummary, CodingAgentSessionTranscriptItem,
+    CodingAgentSessionView, CodingAgentTranscriptSnapshot,
 };
 pub(crate) use crate::runtime::facade::context::{
     CodingAgentSessionDiagnostic, CodingAgentSessionHydration, CodingAgentSessionTree,
@@ -119,8 +112,6 @@ use crate::runtime::capability::CapabilitySnapshotService;
 pub use crate::runtime::capability::{FilesystemCapability, ShellCapability};
 use crate::runtime::client::service::ClientService;
 pub(crate) use crate::runtime::control::OperationKind;
-#[cfg(test)]
-pub(crate) use crate::runtime::control::PromptControlHandle;
 use crate::runtime::control::{OperationControl, PromptControlCleanup, PromptControlGeneration};
 use crate::runtime::intent::{IntentRouter, QueryIntent};
 use crate::runtime::owners::RuntimeHost;

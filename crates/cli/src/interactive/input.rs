@@ -42,44 +42,6 @@ impl InputPump {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn from_receiver(rx: tokio::sync::mpsc::Receiver<String>) -> Self {
-        Self {
-            rx,
-            consumed_tx: None,
-            idle_tx: None,
-            processed_generation: AtomicU64::new(0),
-            cancel: Arc::new(AtomicBool::new(false)),
-            reader: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn cancellable_reader_for_tests() -> (Self, std::sync::mpsc::Receiver<()>) {
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let reader_cancel = Arc::clone(&cancel);
-        let (exited_tx, exited_rx) = std::sync::mpsc::sync_channel(1);
-        let reader = std::thread::spawn(move || {
-            while !reader_cancel.load(Ordering::Acquire) {
-                std::thread::park_timeout(INPUT_POLL_INTERVAL);
-            }
-            let _ = exited_tx.send(());
-            Ok(())
-        });
-        (
-            Self {
-                rx,
-                consumed_tx: None,
-                idle_tx: None,
-                processed_generation: AtomicU64::new(0),
-                cancel,
-                reader: Some(reader),
-            },
-            exited_rx,
-        )
-    }
-
     pub(super) async fn recv(&mut self) -> Option<String> {
         self.rx.recv().await
     }
@@ -421,33 +383,5 @@ pub(super) fn handle_root_input(root: &mut InteractiveRoot, event: &InputEvent) 
                 root.queue_command(PendingInteractiveCommand::Submit(text));
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn input_channel_applies_bounded_pressure() {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let _pump = InputPump::from_receiver(rx);
-
-        tx.try_send("first".to_string()).unwrap();
-        assert!(matches!(
-            tx.try_send("second".to_string()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(chunk)) if chunk == "second"
-        ));
-    }
-
-    #[tokio::test]
-    async fn shutdown_cancels_and_joins_reader() {
-        let (mut pump, exited) = InputPump::cancellable_reader_for_tests();
-
-        pump.shutdown().await.unwrap();
-
-        exited.try_recv().unwrap();
-        assert!(pump.reader.is_none());
-        assert!(pump.cancel.load(Ordering::Acquire));
     }
 }

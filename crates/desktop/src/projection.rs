@@ -216,6 +216,9 @@ pub struct DesktopMessageOverlay {
     pub thinking: String,
     pub reasoning_duration_millis: Option<u64>,
     pub status: DesktopMessageStatus,
+    /// Sequence this message was first seen at, so the presenter can interleave
+    /// the live message and tool queues in the order the turn produced them.
+    pub started_sequence: u64,
     pub updated_sequence: u64,
     pub truncated: bool,
 }
@@ -233,6 +236,7 @@ impl From<&CodingAgentClientMessage> for DesktopMessageOverlay {
                 CodingAgentClientMessageStatus::Streaming => DesktopMessageStatus::Streaming,
                 CodingAgentClientMessageStatus::Completed => DesktopMessageStatus::Completed,
             },
+            started_sequence: message.started_sequence,
             updated_sequence: message.updated_sequence,
             truncated: message.truncated,
         }
@@ -255,6 +259,9 @@ pub struct DesktopToolOverlay {
     pub arguments: String,
     pub detail: String,
     pub status: DesktopToolStatus,
+    /// Sequence this tool call was first seen at. See
+    /// [`DesktopMessageOverlay::started_sequence`].
+    pub started_sequence: u64,
     pub updated_sequence: u64,
     pub truncated: bool,
 }
@@ -273,6 +280,7 @@ impl From<&CodingAgentClientTool> for DesktopToolOverlay {
                 CodingAgentClientToolStatus::Completed => DesktopToolStatus::Completed,
                 CodingAgentClientToolStatus::Failed => DesktopToolStatus::Failed,
             },
+            started_sequence: tool.started_sequence,
             updated_sequence: tool.updated_sequence,
             truncated: tool.truncated,
         }
@@ -530,6 +538,7 @@ impl DesktopProjection {
             DesktopRuntimeUpdate::PromptAccepted { .. }
             | DesktopRuntimeUpdate::SessionsListed { .. }
             | DesktopRuntimeUpdate::SessionRenamed { .. }
+            | DesktopRuntimeUpdate::SessionNameObserved { .. }
             | DesktopRuntimeUpdate::ControlAccepted { .. }
             | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
             | DesktopRuntimeUpdate::FileReviewed { .. }
@@ -665,7 +674,7 @@ impl DesktopProjection {
             });
         };
         let mut candidate = self.product.clone();
-        if let Err(issue) = candidate.replace_snapshot(session) {
+        if let Err(issue) = candidate.replace_metadata_snapshot(session) {
             return self.require_resync(issue.into());
         }
         self.product = candidate;
@@ -688,7 +697,7 @@ impl DesktopProjection {
             pending_recoveries,
         } = replacement;
         let mut candidate = self.product.clone();
-        if let Err(issue) = candidate.replace_snapshot(session) {
+        if let Err(issue) = candidate.replace_metadata_snapshot(session) {
             return self.require_resync(issue.into());
         }
         if let Err(issue) = candidate.replace_pending_recoveries(pending_recoveries.clone()) {

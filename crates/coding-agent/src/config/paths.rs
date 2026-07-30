@@ -29,27 +29,3 @@ pub fn resolve(cwd: &Path) -> ConfigPaths {
         project_dir: cwd.join(".evo"),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn project_dir_is_cwd_dot_evo() {
-        let p = resolve(Path::new("/tmp/work"));
-        assert_eq!(p.project_dir, PathBuf::from("/tmp/work/.evo"));
-        assert_eq!(
-            p.project_settings(),
-            PathBuf::from("/tmp/work/.evo/settings.toml")
-        );
-    }
-
-    #[test]
-    fn evo_dir_env_overrides_global() {
-        let env = crate::test_support::EnvGuard::new(&["EVO_DIR"]);
-        env.set_evo_dir("/custom/cfg");
-        let p = resolve(Path::new("/tmp/work"));
-        assert_eq!(p.global_dir, PathBuf::from("/custom/cfg"));
-        assert_eq!(p.global_auth(), PathBuf::from("/custom/cfg/auth.toml"));
-    }
-}

@@ -6,8 +6,6 @@ use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
 use ai::api::conversation::ContentBlock;
 use futures::future::{BoxFuture, FutureExt};
 use std::io::{Seek, SeekFrom, Write};
-#[cfg(test)]
-use std::path::Path;
 use std::sync::Arc;
 
 const DESCRIPTION: &str = "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.";
@@ -89,33 +87,6 @@ impl WriteOperations for RealWriteOperations {
         }
         .boxed()
     }
-}
-
-#[cfg(test)]
-pub async fn write_execute(
-    cwd: &Path,
-    args: serde_json::Value,
-) -> Result<Vec<ContentBlock>, String> {
-    write_execute_with_operations(cwd, args, Arc::new(RealWriteOperations)).await
-}
-
-#[cfg(test)]
-pub async fn write_execute_with_operations(
-    cwd: &Path,
-    args: serde_json::Value,
-    ops: Arc<dyn WriteOperations>,
-) -> Result<Vec<ContentBlock>, String> {
-    let filesystem =
-        FilesystemCapability::new(cwd.to_path_buf()).map_err(|error| error.to_string())?;
-    let requested = args
-        .get("path")
-        .and_then(|value| value.as_str())
-        .unwrap_or(".");
-    let target = filesystem
-        .prepare_target_for_tool("write", requested)
-        .await
-        .map_err(|error| error.to_string())?;
-    write_target_with_operations(&target, args, ops).await
 }
 
 async fn write_target_with_operations(

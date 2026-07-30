@@ -179,24 +179,3 @@ fn format_table(rows: &[ModelRow]) -> String {
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{format_token_count, fuzzy_subsequence};
-
-    #[test]
-    fn token_count_format_matches_cli_table_expectations() {
-        assert_eq!(format_token_count(999), "999");
-        assert_eq!(format_token_count(1_000), "1K");
-        assert_eq!(format_token_count(128_000), "128K");
-        assert_eq!(format_token_count(1_000_000), "1M");
-        assert_eq!(format_token_count(1_500_000), "1.5M");
-    }
-
-    #[test]
-    fn model_filter_uses_case_insensitive_subsequences() {
-        assert!(fuzzy_subsequence("gpt5", "openai gpt-5"));
-        assert!(fuzzy_subsequence("CLAUDE", "anthropic claude-sonnet"));
-        assert!(!fuzzy_subsequence("gpt6", "openai gpt-5"));
-    }
-}

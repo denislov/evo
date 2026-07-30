@@ -97,44 +97,6 @@ impl CodingAgentSession {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) async fn non_persistent_with_event_capacity_for_tests(
-        options: CodingAgentSessionOptions,
-        event_capacity: usize,
-    ) -> Result<Self, CodingSessionError> {
-        let mut session = Self::non_persistent_internal(options).await?;
-        session.runtime_host.event_hub.service =
-            EventService::with_event_capacity_and_coordinator_for_tests(
-                event_capacity,
-                session.runtime_host.client_projection.coordinator.clone(),
-            );
-        session
-            .runtime_host
-            .authorization_service
-            .set_event_service(session.runtime_host.event_hub.service.clone());
-        Ok(session)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn non_persistent_with_event_capacities_for_tests(
-        options: CodingAgentSessionOptions,
-        channel_capacity: usize,
-        retained_capacity: usize,
-    ) -> Result<Self, CodingSessionError> {
-        let mut session = Self::non_persistent_internal(options).await?;
-        session.runtime_host.event_hub.service =
-            EventService::with_event_capacities_and_coordinator_for_tests(
-                channel_capacity,
-                retained_capacity,
-                session.runtime_host.client_projection.coordinator.clone(),
-            );
-        session
-            .runtime_host
-            .authorization_service
-            .set_event_service(session.runtime_host.event_hub.service.clone());
-        Ok(session)
-    }
-
     pub fn list(
         options: CodingAgentSessionOptions,
     ) -> Result<Vec<CodingAgentSessionSummary>, CodingAgentPublicError> {

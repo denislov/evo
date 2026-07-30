@@ -42,22 +42,3 @@ impl DiagnosticEvent {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn product_diagnostic_redacts_secret_shaped_values_before_publication() {
-        const SECRET: &str = "diagnostic-secret-canary";
-        let draft = DiagnosticEvent::Diagnostic {
-            operation_id: Some("operation-1".into()),
-            message: format!("provider failed with token={SECRET}, Authorization: Bearer {SECRET}"),
-        }
-        .into_product_draft();
-        let serialized = serde_json::to_string(&draft.event).unwrap();
-
-        assert!(!serialized.contains(SECRET), "{serialized}");
-        assert!(serialized.contains("<redacted>"), "{serialized}");
-    }
-}

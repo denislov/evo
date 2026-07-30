@@ -116,6 +116,16 @@ pub(super) fn reconcile_direct_update(
                 inspector_dirty: false,
             }
         }
+        DesktopRuntimeUpdate::SessionNameObserved {
+            session_id,
+            name,
+            updated_at,
+        } => DirectCommandUpdate::Consumed {
+            sessions_dirty: shell
+                .project_catalog
+                .rename_session(&session_id, name, updated_at),
+            inspector_dirty: false,
+        },
         update => DirectCommandUpdate::Continue(Box::new(update)),
     }
 }

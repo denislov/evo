@@ -51,14 +51,6 @@ impl CodingAgentSession {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(super) fn resolve_operation_admission(
-        &self,
-        operation: &Operation,
-    ) -> Result<OperationExecution, CodingSessionError> {
-        self.resolve_operation_admission_with_id(operation, None)
-    }
-
     pub(super) fn resolve_operation_admission_with_id(
         &self,
         operation: &Operation,
@@ -201,27 +193,5 @@ impl CodingAgentSession {
             .into_iter()
             .map(str::to_owned)
             .collect()
-    }
-
-    #[cfg(test)]
-    pub(super) fn delegation_approval_operation_kind(
-        &self,
-        operation_id: &str,
-        tool_call_id: &str,
-        now: &str,
-    ) -> Result<OperationKind, CodingSessionError> {
-        let pending = crate::operations::delegation::confirmation::active_pending(
-            &self
-                .runtime_host
-                .session_coordinator
-                .pending_delegation_confirmations,
-            operation_id,
-            tool_call_id,
-            now,
-        )?;
-        Ok(match pending.request.target_kind {
-            ProfileKind::Agent => OperationKind::AgentInvocation,
-            ProfileKind::Team => OperationKind::AgentTeam,
-        })
     }
 }

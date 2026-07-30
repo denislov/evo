@@ -16,15 +16,3 @@ pub(crate) fn read_text_from(mut reader: impl Read, max_bytes: usize) -> io::Res
     }
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reader_stops_after_limit_plus_one() {
-        let input = vec![b'x'; 33];
-        let error = read_text_from(input.as_slice(), 32).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    }
-}

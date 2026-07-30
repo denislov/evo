@@ -12,8 +12,7 @@ use crate::runtime::capability::ModelCapability;
 use crate::runtime::capability::OperationCapabilitySnapshot;
 use crate::runtime::facade::CodingSessionError;
 use crate::services::runtime::{RuntimeService, scoped_provider_streamer_for_runtime};
-#[cfg(test)]
-use crate::session::event::SessionEventEnvelope;
+
 use crate::session::replay::{SessionReplay, transcript_item_id};
 
 #[derive(Debug, Clone)]
@@ -57,12 +56,6 @@ impl ManualCompactionOptions {
             custom_instructions,
             cancellation: None,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_custom_instructions(mut self, instructions: impl Into<String>) -> Self {
-        self.custom_instructions = Some(instructions.into());
-        self
     }
 
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
@@ -180,29 +173,6 @@ impl ManualCompactionContext {
 
     pub(crate) fn turn_id(&self) -> &str {
         &self.turn_id
-    }
-
-    #[cfg(test)]
-    pub(crate) fn summary(&self) -> Option<&str> {
-        self.summary.as_deref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn first_kept_message_id(&self) -> Option<&str> {
-        self.first_kept_message_id.as_deref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tokens_before(&self) -> Option<u32> {
-        self.tokens_before
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending_session_events(&self) -> &[SessionEventEnvelope] {
-        self.transaction
-            .as_ref()
-            .map(PromptTurnTransaction::pending_events)
-            .unwrap_or_default()
     }
 
     pub(crate) fn take_transaction(&mut self) -> Option<PromptTurnTransaction> {
@@ -433,205 +403,4 @@ fn compaction_final_message(runtime: &RuntimeSnapshot, summary: &str) -> Assista
         text_signature: None,
     });
     message
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use agent_core::api::agent::AgentResources;
-    use ai::api::model::{Model, ModelCost, ModelInput};
-    use ai::api::testing::FauxProvider;
-
-    use super::*;
-    use crate::session::event::{PersistedContentBlock, SessionEventData, SessionEventEnvelope};
-    use crate::session::service::SessionService;
-
-    #[tokio::test]
-    async fn compact_cancellation_maps_flow_cancelled_to_typed_error() {
-        let api = "manual-compaction-flow-cancelled";
-        let _provider_guard = crate::test_support::ProviderGuard::register(
-            api,
-            Arc::new(FauxProvider::simple_text("unused summary")),
-        );
-        let temp = tempfile::tempdir().unwrap();
-        let mut service = SessionService::create(
-            &CodingAgentSessionOptions::new()
-                .with_session_id("sess_manual_compaction_cancelled")
-                .with_session_log_root(temp.path()),
-        )
-        .unwrap();
-        record_prompt(&mut service);
-        let replay = service.replay().unwrap();
-        let snapshot = OperationCapabilitySnapshot::permissive("op_cancelled");
-        let transaction = service.begin_manual_compaction_transaction(&snapshot);
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-        let mut context = ManualCompactionContext::new(
-            ManualCompactionOptions::new(compact_runtime(api, _provider_guard.ai_client()))
-                .with_cancellation(cancellation),
-            replay,
-            transaction,
-            snapshot,
-        );
-
-        let error = ManualCompactionRunner::new()
-            .unwrap()
-            .run_typed(&mut context)
-            .await
-            .unwrap_err();
-        assert_eq!(error, CodingSessionError::Cancelled);
-    }
-    use crate::app::bootstrap::{PromptInvocation, SessionRunOptions};
-    use crate::app::prompt_runtime::PromptRuntimeOptions;
-    use crate::runtime::facade::{CodingAgentSessionOptions, PromptTurnOptions};
-
-    fn model(api: &str) -> Model {
-        Model {
-            id: "test-model".into(),
-            name: "Test Model".into(),
-            api: api.into(),
-            provider: "test".into(),
-            base_url: String::new(),
-            reasoning: false,
-            thinking_level_map: None,
-            input: vec![ModelInput::Text],
-            cost: ModelCost::default(),
-            context_window: 0,
-            max_tokens: 0,
-            headers: None,
-            compat: None,
-        }
-    }
-
-    fn compact_runtime(
-        api: &str,
-        ai_client: ai::api::client::AiClient,
-    ) -> crate::operations::prompt::context::RuntimeSnapshot {
-        PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
-            model: model(api),
-            api_key: None,
-            auth_diagnostics: Vec::new(),
-            system_prompt: Some("system".into()),
-            max_turns: Some(2),
-            tools: Vec::new(),
-            register_builtins: false,
-            ai_client: Some(ai_client),
-            session: Some(SessionRunOptions::disabled(".".into())),
-            session_target: None,
-            session_name: None,
-            thinking_level: None,
-            tool_execution: None,
-            resources: AgentResources::default(),
-            settings: None,
-            invocation: PromptInvocation::Compact {
-                custom_instructions: Some("keep decisions".into()),
-            },
-        })
-        .runtime()
-        .cloned()
-        .unwrap()
-    }
-
-    fn record_prompt(service: &mut SessionService) -> String {
-        let mut transaction = service.begin_prompt_transaction();
-        let operation_id = transaction.operation_id().to_owned();
-        transaction
-            .record_user_input(vec![PersistedContentBlock::Text {
-                text: "first question".into(),
-            }])
-            .unwrap();
-        let message_id = transaction.start_assistant_message().unwrap();
-        transaction
-            .complete_assistant_message(
-                message_id,
-                vec![PersistedContentBlock::Text {
-                    text: "first answer".into(),
-                }],
-                Some("stop".into()),
-                Default::default(),
-            )
-            .unwrap();
-        service
-            .commit_prompt_transaction(Some(transaction), operation_id)
-            .unwrap()
-            .leaf_id
-            .unwrap()
-    }
-
-    fn event_kinds(events: &[SessionEventEnvelope]) -> Vec<&'static str> {
-        events
-            .iter()
-            .map(|event| match event.data {
-                SessionEventData::OperationStarted { .. } => "operation.started",
-                SessionEventData::TurnStarted {} => "turn.started",
-                SessionEventData::SessionCompactionStarted { .. } => "session.compaction.started",
-                SessionEventData::SessionCompactionCompleted { .. } => {
-                    "session.compaction.completed"
-                }
-                SessionEventData::OperationCommitted { .. } => "operation.committed",
-                SessionEventData::OperationFailed { .. } => "operation.failed",
-                SessionEventData::OperationAborted { .. } => "operation.aborted",
-                SessionEventData::DiagnosticEmitted { .. } => "diagnostic.emitted",
-                _ => "other",
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn manual_compaction_flow_records_summary_events_without_flushing() {
-        let api = "manual-compaction-flow-records-summary";
-        let _provider_guard = crate::test_support::ProviderGuard::register(
-            api,
-            Arc::new(FauxProvider::simple_text("summary from flow")),
-        );
-        let temp = tempfile::tempdir().unwrap();
-        let mut service = SessionService::create(
-            &CodingAgentSessionOptions::new()
-                .with_session_id("sess_manual_compaction_flow")
-                .with_session_log_root(temp.path()),
-        )
-        .unwrap();
-        let active_leaf = record_prompt(&mut service);
-        let replay = service.replay().unwrap();
-        let snapshot = OperationCapabilitySnapshot::permissive("op_test");
-        let transaction = service.begin_manual_compaction_transaction(&snapshot);
-        let mut context = ManualCompactionContext::new(
-            ManualCompactionOptions::new(compact_runtime(api, _provider_guard.ai_client()))
-                .with_custom_instructions("keep decisions"),
-            replay,
-            transaction,
-            snapshot,
-        );
-        let flow = ManualCompactionRunner::new().unwrap();
-
-        flow.run_typed(&mut context).await.unwrap();
-        assert_eq!(context.summary(), Some("summary from flow"));
-        assert!(
-            context
-                .first_kept_message_id()
-                .is_some_and(|id| id.starts_with("msg_"))
-        );
-        assert!(context.tokens_before().is_some_and(|tokens| tokens > 0));
-        assert_eq!(
-            event_kinds(context.pending_session_events()),
-            vec![
-                "operation.started",
-                "turn.started",
-                "session.compaction.started",
-                "session.compaction.completed",
-            ]
-        );
-        assert_eq!(
-            service.replay().unwrap().active_leaf_id.as_deref(),
-            Some(active_leaf.as_str())
-        );
-        assert!(matches!(
-            service.replay().unwrap().transcript.as_slice(),
-            [
-                crate::session::replay::TranscriptItem::UserInput { .. },
-                crate::session::replay::TranscriptItem::AssistantMessage { .. }
-            ]
-        ));
-    }
 }

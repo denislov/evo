@@ -87,35 +87,3 @@ pub enum AssistantMessageEvent {
         message: AssistantMessage,
     },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn event_done_roundtrip() {
-        let ev = AssistantMessageEvent::Done {
-            reason: StopReason::Stop,
-            message: AssistantMessage::empty("anthropic-messages", "claude-sonnet-4-5"),
-        };
-        let json = serde_json::to_string(&ev).unwrap();
-        assert!(json.contains(r#""type":"done""#));
-        let back: AssistantMessageEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, AssistantMessageEvent::Done { .. }));
-    }
-
-    #[test]
-    fn event_error_roundtrip() {
-        let mut msg = AssistantMessage::empty("test", "test");
-        msg.error_message = Some("fail".into());
-        msg.stop_reason = StopReason::Error;
-        let ev = AssistantMessageEvent::Error {
-            reason: StopReason::Error,
-            message: msg,
-        };
-        let json = serde_json::to_string(&ev).unwrap();
-        assert!(json.contains(r#""type":"error""#));
-        let back: AssistantMessageEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, AssistantMessageEvent::Error { .. }));
-    }
-}

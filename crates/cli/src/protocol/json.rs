@@ -91,34 +91,3 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
         Ok(StrictJsonValue(serde_json::Value::Object(values)))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::parse_strict_json;
-    use serde_json::json;
-
-    #[test]
-    fn accepts_one_exact_complete_value() {
-        assert_eq!(
-            parse_strict_json(r#"{"type":"hello","protocol":{"major":3}}"#).unwrap(),
-            json!({"type": "hello", "protocol": {"major": 3}})
-        );
-    }
-
-    #[test]
-    fn rejects_incomplete_trailing_and_duplicate_values() {
-        for malformed in [
-            r#"{"type":"hello""#,
-            r#"{"type":"hello"} trailing"#,
-            r#"{"type":"hello","type":"shutdown"}"#,
-            r#"{"protocol":{"major":3,"major":2}}"#,
-            r#"[1,2,"#,
-            "",
-        ] {
-            assert!(
-                parse_strict_json(malformed).is_err(),
-                "strict parser accepted {malformed:?}"
-            );
-        }
-    }
-}

@@ -496,6 +496,7 @@ fn runtime_update_command_id(update: &desktop::runtime::DesktopRuntimeUpdate) ->
         | DesktopRuntimeUpdate::PromptFinished { command_id, .. }
         | DesktopRuntimeUpdate::CommandRejected { command_id, .. } => Some(*command_id),
         DesktopRuntimeUpdate::ProductEvent { .. }
+        | DesktopRuntimeUpdate::SessionNameObserved { .. }
         | DesktopRuntimeUpdate::ResyncRequired { .. }
         | DesktopRuntimeUpdate::RuntimeFailed { .. }
         | DesktopRuntimeUpdate::Stopped => None,
@@ -1046,6 +1047,7 @@ impl NativeShell {
             }
             DesktopRuntimeUpdate::SessionsListed { .. }
             | DesktopRuntimeUpdate::SessionRenamed { .. }
+            | DesktopRuntimeUpdate::SessionNameObserved { .. }
             | DesktopRuntimeUpdate::SessionClosed { .. } => None,
             _ => runtime_update_command_id(update)
                 .and_then(|command_id| self.command_owner_session_id(command_id)),
@@ -2113,6 +2115,14 @@ impl NativeShell {
                 applied += 1;
                 continue;
             }
+            let completes_submitted_prompt = matches!(
+                &update,
+                desktop::runtime::DesktopRuntimeUpdate::PromptFinished { command_id, .. }
+                    if self
+                        .composer
+                        .submitted()
+                        .is_some_and(|submitted| submitted.command_id == *command_id)
+            );
             // The idle branch above already consumed this update, so the
             // remainder of the iteration owns a session projection. Every fact
             // it needs is read here so the borrow ends before the `&mut self`
@@ -2164,7 +2174,10 @@ impl NativeShell {
             }
             if outcome.is_replaced() {
                 let workspace = &mut self.active_workspace;
-                if !active_operation_after && workspace.composer.submitted().is_some() {
+                if completes_submitted_prompt
+                    && !active_operation_after
+                    && workspace.composer.submitted().is_some()
+                {
                     if let Some(projection) = workspace.projection.as_ref()
                         && let Some((live_id, durable_id)) = workspace
                             .composer
@@ -5856,6 +5869,35 @@ mod tests {
             [],
             "a successful explicit refresh must not schedule another load"
         );
+    }
+
+    #[gpui::test]
+    fn observed_automatic_name_updates_the_local_session_catalog(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+        shell.update(cx, |shell, cx| {
+            shell.project_catalog.replace_catalog(
+                vec![desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id: "auto-named-session".into(),
+                    name: None,
+                    ..Default::default()
+                }],
+                0,
+            );
+            shell.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::SessionNameObserved {
+                    session_id: "auto-named-session".into(),
+                    name: Some("询问助手名字".into()),
+                    updated_at: "2026-07-30T02:24:11Z".into(),
+                },
+            );
+
+            assert!(shell.poll_runtime(cx));
+            let session = &shell.project_catalog.catalog()[0];
+            assert_eq!(session.name.as_deref(), Some("询问助手名字"));
+            assert_eq!(session.updated_at, "2026-07-30T02:24:11Z");
+            assert!(shell.preference_notice.is_none());
+        });
     }
 
     #[gpui::test]
@@ -9751,6 +9793,16 @@ mod tests {
                 },
             );
             assert!(shell.poll_runtime(cx));
+            assert!(shell.composer.draft().is_empty());
+            assert_eq!(
+                shell
+                    .composer
+                    .submitted()
+                    .map(|submitted| submitted.command_id),
+                Some(command_id),
+                "the admission snapshot is not a completed durable transcript"
+            );
+            assert!(shell.composer.rejection().is_none());
             let directory = shell.composer_pane_view_model().project_directory;
             assert_eq!(
                 directory.value.as_ref(),
@@ -10078,6 +10130,196 @@ mod tests {
             )
         );
         assert!(narrow_expanded > expanded);
+    }
+
+    #[test]
+    fn interleaved_live_rows_keep_event_order_instead_of_sinking_tools_to_the_tail() {
+        // One agent loop alternates assistant message and tool: A1 → T1 → A2.
+        // Both fold onto independent queues, so rendering one queue after the
+        // other dropped every running tool below the newest message, and shifted
+        // it down again on each new message. The tool cards visibly jumped to the
+        // bottom mid-turn and only snapped back when the durable transcript
+        // replaced the live tail at the end of the operation.
+        let live_event = |sequence: u64, payload: serde_json::Value| {
+            serde_json::from_value::<coding_agent::api::event::CodingAgentProductEvent>(
+                serde_json::json!({
+                    "stream_id": "desktop-visual-test-stream",
+                    "sequence": sequence,
+                    "event": payload,
+                    "operation_id": "operation-1",
+                    "session_id": "desktop-visual-test",
+                    "terminal_status": null,
+                    "terminal_operation": null,
+                    "durability": {"state": "live_only"},
+                    "delivery_class": "data",
+                }),
+            )
+            .expect("the live overlay fixture must deserialize")
+        };
+        let message_started = |sequence: u64, turn_id: &str, message_id: &str| {
+            live_event(
+                sequence,
+                serde_json::json!({
+                    "family": "message",
+                    "payload": {
+                        "kind": "started",
+                        "operation_id": "operation-1",
+                        "turn_id": turn_id,
+                        "message_id": message_id,
+                    },
+                }),
+            )
+        };
+        let tool_started = |sequence: u64, tool_call_id: &str| {
+            live_event(
+                sequence,
+                serde_json::json!({
+                    "family": "tool",
+                    "payload": {
+                        "kind": "started",
+                        "operation_id": "operation-1",
+                        "turn_id": "turn-1",
+                        "tool_call_id": tool_call_id,
+                        "name": "read",
+                        "arguments_json": "{}",
+                    },
+                }),
+            )
+        };
+
+        let mut projection = visual_test_projection();
+        for event in [
+            message_started(1, "turn-1", "message-1"),
+            tool_started(2, "tool-1"),
+            message_started(3, "turn-2", "message-2"),
+        ] {
+            assert!(
+                projection
+                    .apply(crate::runtime::DesktopRuntimeUpdate::product_event(event))
+                    .is_applied()
+            );
+        }
+
+        let mut controller = ConversationController::default();
+        let source = ConversationSource::new(&projection, None);
+        controller.apply_delta(true, 3);
+        controller.prepare_rows(&source, 900);
+        let row_ids = |controller: &ConversationController| {
+            (0..controller.row_count())
+                .map(|index| {
+                    controller
+                        .row_at(index)
+                        .expect("every counted row is resolvable")
+                        .item_key
+                        .row_id()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = [
+            "assistant:message-1".to_owned(),
+            "tool:tool-1".to_owned(),
+            "assistant:message-2".to_owned(),
+        ];
+        assert_eq!(row_ids(&controller), expected);
+
+        // The incremental sequence path resolves the same order as the rebuild,
+        // so a streaming delta cannot reshuffle the tail behind the rebuild's back.
+        let mut streamed = projection.clone();
+        assert!(
+            streamed
+                .apply(crate::runtime::DesktopRuntimeUpdate::product_event(
+                    live_event(
+                        4,
+                        serde_json::json!({
+                            "family": "message",
+                            "payload": {
+                                "kind": "delta",
+                                "operation_id": "operation-1",
+                                "turn_id": "turn-2",
+                                "message_id": "message-2",
+                                "text": "streaming",
+                            },
+                        }),
+                    )
+                ))
+                .is_applied()
+        );
+        let streamed_source = ConversationSource::new(&streamed, None);
+        controller.apply_delta(false, 4);
+        controller.prepare_rows(&streamed_source, 900);
+        assert_eq!(row_ids(&controller), expected);
+    }
+
+    #[test]
+    fn a_metadata_reload_mid_turn_keeps_the_streaming_rows_mounted() {
+        // A metadata reload carries no transcript, so wiping the live tail here
+        // unmounted the streaming assistant and running tool rows with nothing to
+        // take their place until the operation finished and rehydrated.
+        let mut projection = visual_test_projection();
+        let started = serde_json::from_value::<coding_agent::api::event::CodingAgentProductEvent>(
+            serde_json::json!({
+                "stream_id": "desktop-visual-test-stream",
+                "sequence": 1,
+                "event": {
+                    "family": "tool",
+                    "payload": {
+                        "kind": "started",
+                        "operation_id": "operation-1",
+                        "turn_id": "turn-1",
+                        "tool_call_id": "tool-1",
+                        "name": "read",
+                        "arguments_json": "{}",
+                    },
+                },
+                "operation_id": "operation-1",
+                "session_id": "desktop-visual-test",
+                "terminal_status": null,
+                "terminal_operation": null,
+                "durability": {"state": "live_only"},
+                "delivery_class": "data",
+            }),
+        )
+        .expect("the live overlay fixture must deserialize");
+        assert!(
+            projection
+                .apply(crate::runtime::DesktopRuntimeUpdate::product_event(started))
+                .is_applied()
+        );
+        assert_eq!(projection.tools().len(), 1);
+
+        let fixture = visual_test_snapshot();
+        let mut session = projection.snapshot().clone();
+        session.cursor = projection.cursor().clone();
+        assert!(
+            projection
+                .apply(crate::runtime::DesktopRuntimeUpdate::Reloaded {
+                    command_id: 1,
+                    metadata: desktop::runtime::DesktopRuntimeMetadataSnapshot {
+                        project: fixture.project,
+                        session: Some(session),
+                    },
+                })
+                .is_replaced()
+        );
+
+        assert_eq!(
+            projection.tools().len(),
+            1,
+            "a transcript-less reload must not unmount the running tool row"
+        );
+        let source = ConversationSource::new(&projection, None);
+        let mut controller = ConversationController::default();
+        controller.apply_delta(true, 1);
+        controller.prepare_rows(&source, 900);
+        assert_eq!(
+            controller
+                .row_at(0)
+                .expect("the running tool row stays mounted")
+                .item_key
+                .row_id(),
+            "tool:tool-1"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod azure_openai_responses;
 pub mod common;
+pub mod faux;
 pub mod google;
 pub mod mistral;
 pub mod openai;

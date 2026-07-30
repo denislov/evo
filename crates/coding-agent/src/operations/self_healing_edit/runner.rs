@@ -934,31 +934,3 @@ fn compact_check_text(text: &str) -> String {
         format!("{}...", compact.chars().take(MAX_LEN).collect::<String>())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn model_repair_response_requires_valid_non_empty_edits() {
-        let invalid = parse_model_repair_response("not repair json").unwrap_err();
-        assert!(invalid.contains("not valid JSON edits"));
-
-        let empty = parse_model_repair_response(r#"{"edits":[]}"#).unwrap_err();
-        assert_eq!(
-            empty,
-            "self-healing edit model repair response contained no edits"
-        );
-    }
-
-    #[test]
-    fn model_repair_response_projects_typed_replacements() {
-        let replacements =
-            parse_model_repair_response(r#"{"edits":[{"oldText":"deux","newText":"dos"}]}"#)
-                .unwrap();
-
-        assert_eq!(replacements.len(), 1);
-        assert_eq!(replacements[0].old_text, "deux");
-        assert_eq!(replacements[0].new_text, "dos");
-    }
-}

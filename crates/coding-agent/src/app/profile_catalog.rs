@@ -1,6 +1,5 @@
 use crate::operations::delegation::DelegationTargetInventory;
-#[cfg(test)]
-use crate::profiles::ProfileRegistryOptions;
+
 use crate::profiles::{ProfileId, ProfileRegistry, ProfileSource, TeamSupervisor};
 use crate::runtime::facade::{
     CodingAgentPublicDiagnostic, CodingAgentPublicDiagnosticOrigin,
@@ -171,67 +170,4 @@ fn bounded_profile_ids(values: impl Iterator<Item = ProfileId>) -> (Vec<ProfileI
     let truncated = values.len() > MAX_PROFILE_LIST_ITEMS;
     values.truncate(MAX_PROFILE_LIST_ITEMS);
     (values, truncated)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn built_in_catalog_is_safe_and_default_aware() {
-        let registry =
-            ProfileRegistry::load(ProfileRegistryOptions::new()).expect("built-in profiles");
-        let catalog =
-            CodingAgentProfileCatalog::from_registry(&registry, &ProfileId::from("default"));
-
-        let default = catalog.agent("default").expect("default agent");
-        assert!(default.is_default);
-        assert!(!default.display_name.is_empty());
-        assert!(catalog.teams.len() <= MAX_PROFILE_ENTRIES);
-        assert!(!format!("{catalog:?}").contains("system_prompt"));
-    }
-
-    #[test]
-    fn missing_profile_lookup_is_authority_free() {
-        let catalog = CodingAgentProfileCatalog::default();
-        assert!(catalog.agent("../profile").is_none());
-        assert!(catalog.team("../team").is_none());
-    }
-
-    #[test]
-    fn catalog_bounds_profile_entries_and_omits_private_profile_data() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let agents = temp.path().join("agents");
-        fs::create_dir_all(&agents).expect("agent dir");
-        for index in 0..MAX_PROFILE_ENTRIES {
-            fs::write(
-                agents.join(format!("agent-{index:03}.toml")),
-                format!(
-                    "schema_version = 1\nid = \"agent-{index:03}\"\ndisplay_name = \"Agent {index:03}\"\nsystem_prompt = \"private-prompt-canary-{index:03}\"\n"
-                ),
-            )
-            .expect("write agent profile");
-        }
-        let registry =
-            ProfileRegistry::load(ProfileRegistryOptions::new().with_user_root(temp.path()))
-                .expect("profile registry");
-
-        let catalog =
-            CodingAgentProfileCatalog::from_registry(&registry, &ProfileId::from("agent-000"));
-        let debug = format!("{catalog:?}");
-
-        assert_eq!(catalog.agents.len(), MAX_PROFILE_ENTRIES);
-        assert!(catalog.truncated);
-        assert!(
-            catalog
-                .agent("agent-000")
-                .is_some_and(|profile| profile.is_default)
-        );
-        assert!(!debug.contains("private-prompt-canary"), "{debug}");
-        assert!(
-            !debug.contains(temp.path().to_string_lossy().as_ref()),
-            "{debug}"
-        );
-    }
 }

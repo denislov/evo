@@ -244,19 +244,3 @@ fn prompt_task_result(
         })
     })
 }
-
-#[cfg(test)]
-pub(crate) async fn run_prompt_text_for_tests(
-    options: PromptRuntimeOptions,
-) -> Result<String, CodingAgentPublicError> {
-    match CodingAgentPromptExecution::from_internal(options)
-        .run()
-        .await?
-    {
-        PromptTurnOutcome::Success { final_text, .. } => Ok(final_text),
-        PromptTurnOutcome::Aborted { .. } => Err(CodingAgentPublicError::from(
-            crate::runtime::facade::CodingSessionError::Cancelled,
-        )),
-        PromptTurnOutcome::Failed { error, .. } => Err(error),
-    }
-}
