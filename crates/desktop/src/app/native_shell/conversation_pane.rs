@@ -568,8 +568,6 @@ impl Render for ConversationPane {
                                                             "desktop-reasoning-toggle-header".into()
                                                         })
                                                         .rounded_token(DesignRadius::Md)
-                                                        .border_l_3()
-                                                        .border_color(rgb(theme.reasoning.value()))
                                                         .bg(rgb(theme.elevated.value()))
                                                         .px_token(DesignSpace::Md)
                                                         .py_token(DesignSpace::Sm)
@@ -577,7 +575,7 @@ impl Render for ConversationPane {
                                                         .items_center()
                                                         .justify_between()
                                                         .text_token(DesignText::Metadata)
-                                                        .text_color(rgb(theme.reasoning.value()))
+                                                        .text_color(rgb(theme.muted_text.value()))
                                                         .child(
                                                             div()
                                                                 .id(("reasoning-toggle-main", index))
@@ -586,7 +584,7 @@ impl Render for ConversationPane {
                                                                 .whitespace_normal()
                                                                 .role(Role::Button)
                                                                 .aria_label(
-                                                                    "Show reasoning details",
+                                                                    "Show thoughts",
                                                                 )
                                                                 .aria_expanded(false)
                                                                 .on_click(cx.listener(
@@ -598,23 +596,22 @@ impl Render for ConversationPane {
                                                                         );
                                                                     },
                                                                 ))
-                                                                .child(if let Some(duration) = &reasoning_duration_label {
-                                                                    SharedString::new(format!(
-                                                                        "◇ Reasoning · {duration} · collapsed"
-                                                                    ))
-                                                                } else if block.done {
-                                                                    SharedString::new("◇ Reasoning · collapsed")
+                                                                .child(if block.done {
+                                                                    match &reasoning_duration_label {
+                                                                        Some(duration) => SharedString::new(
+                                                                            format!("Thought for {duration}"),
+                                                                        ),
+                                                                        None => SharedString::new("Thought"),
+                                                                    }
                                                                 } else {
-                                                                    SharedString::new(
-                                                                        "◇ Reasoning · streaming · collapsed",
-                                                                    )
+                                                                    SharedString::new("Thinking")
                                                                 }),
                                                         )
                                                         .child(
                                                             DesktopIconButton::new(
                                                                 ("show-reasoning", index),
                                                                 DesktopIcon::ChevronDown,
-                                                                "Show reasoning details",
+                                                                "Show thoughts",
                                                             )
                                                             .build()
                                                             .debug_selector(|| {
@@ -642,8 +639,6 @@ impl Render for ConversationPane {
                                             card.child(
                                                 div()
                                                     .rounded_token(DesignRadius::Md)
-                                                    .border_l_3()
-                                                    .border_color(rgb(theme.reasoning.value()))
                                                     .bg(rgb(theme.elevated.value()))
                                                     .px_token(DesignSpace::Md)
                                                     .py_token(DesignSpace::Sm)
@@ -665,7 +660,7 @@ impl Render for ConversationPane {
                                                                 gpui::FontWeight::SEMIBOLD,
                                                             )
                                                             .text_color(rgb(
-                                                                theme.reasoning.value(),
+                                                                theme.muted_text.value(),
                                                             ))
                                                             .child(
                                                                 div()
@@ -677,7 +672,7 @@ impl Render for ConversationPane {
                                                                     .min_w_0()
                                                                     .role(Role::Button)
                                                                     .aria_label(
-                                                                        "Hide reasoning details",
+                                                                        "Hide thoughts",
                                                                     )
                                                                     .aria_expanded(true)
                                                                     .on_click(cx.listener(
@@ -689,20 +684,22 @@ impl Render for ConversationPane {
                                                                             );
                                                                         },
                                                                     ))
-                                                                    .child(match &reasoning_duration_label {
-                                                                        Some(duration) => SharedString::new(
-                                                                            format!("◇ REASONING · {duration}"),
-                                                                        ),
-                                                                        None => SharedString::new(
-                                                                            "◇ REASONING",
-                                                                        ),
+                                                                    .child(if block.done {
+                                                                        match &reasoning_duration_label {
+                                                                            Some(duration) => SharedString::new(
+                                                                                format!("Thought for {duration}"),
+                                                                            ),
+                                                                            None => SharedString::new("Thought"),
+                                                                        }
+                                                                    } else {
+                                                                        SharedString::new("Thinking")
                                                                     }),
                                                             )
                                                             .child(
                                                                 DesktopIconButton::new(
                                                                     ("hide-reasoning", index),
-                                                                    DesktopIcon::ChevronUp,
-                                                                    "Hide reasoning details",
+                                                                DesktopIcon::ChevronUp,
+                                                                "Hide thoughts",
                                                                 )
                                                                 .build()
                                                                 .debug_selector(|| {
@@ -868,8 +865,6 @@ impl Render for ConversationPane {
                                             card.child(
                                                 div()
                                                     .mt_token(DesignSpace::Xs)
-                                                    .border_l_1()
-                                                    .border_color(rgb(theme.divider.value()))
                                                     .pl_token(DesignSpace::Md)
                                                     .py_token(DesignSpace::Sm)
                                                     .when(is_tool, |detail| {
