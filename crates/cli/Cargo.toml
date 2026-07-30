@@ -23,6 +23,7 @@ uuid = { version = "1", features = ["v7"] }
 base64 = "0.22"
 tui = { path = "../tui", features = ["test-support"] }
 tempfile = "3"
+syn = { version = "2", features = ["full", "visit"] }
 
 [[bin]]
 name = "coding-agent"

@@ -1,6 +1,43 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use syn::visit::{self, Visit};
+
+#[derive(Default)]
+struct PathRootCollector {
+    roots: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for PathRootCollector {
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if let Some(root) = path.segments.first() {
+            self.roots.insert(root.ident.to_string());
+        }
+        visit::visit_path(self, path);
+    }
+}
+
+fn rust_fragment_path_roots(source: &str) -> BTreeSet<String> {
+    let mut collector = PathRootCollector::default();
+    if let Ok(file) = syn::parse_file(source) {
+        collector.visit_file(&file);
+    } else {
+        let block = syn::parse_str::<syn::Block>(source)
+            .expect("boundary source fragment must remain valid Rust");
+        collector.visit_block(&block);
+    }
+    collector.roots
+}
+
+fn assert_no_private_dependency_paths(source: &str, owner: &str) {
+    let roots = rust_fragment_path_roots(source);
+    for forbidden in ["ai", "agent_core"] {
+        assert!(
+            !roots.contains(forbidden),
+            "{owner} bypasses product ownership through Rust path root {forbidden}"
+        );
+    }
+}
 
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -167,9 +204,8 @@ fn process_contracts_execute_the_real_cli_binary_without_product_test_backdoors(
             "cli must retain real-process evidence for {required}"
         );
     }
+    assert_no_private_dependency_paths(&source, "CLI process tests");
     for forbidden in [
-        "ai",
-        "agent_core",
         "coding_agent::",
         "FauxProvider",
         "CliRunOptions",
@@ -242,9 +278,8 @@ fn cli_local_unit_tests_are_executable_without_product_test_support() {
             .split(test_marker)
             .nth(1)
             .expect("enabled CLI-local test module");
+        assert_no_private_dependency_paths(tests, &format!("CLI-local tests in {relative}"));
         for forbidden in [
-            "ai",
-            "agent_core",
             "coding_agent::test_support",
             "FauxProvider",
             "ProviderGuard",
@@ -327,9 +362,8 @@ fn interactive_app_and_loop_legacy_tests_are_classified() {
             "enabled loop owner must retain {required}"
         );
     }
+    assert_no_private_dependency_paths(&loop_tests, "enabled loop tests");
     for forbidden in [
-        "ai",
-        "agent_core",
         "coding_agent::test_support",
         "crate::runtime",
         "crate::events",
@@ -400,9 +434,11 @@ fn interactive_reducer_fixtures_execute_in_the_cli_without_private_runtime_seeds
                 "migrated CLI reducer fixture {relative} must retain {required}"
             );
         }
+        assert_no_private_dependency_paths(
+            &source,
+            &format!("migrated CLI reducer fixture {relative}"),
+        );
         for forbidden in [
-            "ai",
-            "agent_core",
             "coding_agent::test_support",
             "ProductEventDraft",
             "FauxProvider",
