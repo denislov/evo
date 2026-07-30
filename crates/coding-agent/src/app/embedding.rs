@@ -1030,7 +1030,6 @@ fn skill_resource_command(skill: &Skill) -> CodingAgentResourceCommand {
     clippy::items_after_test_module,
     reason = "embedding tests exercise private catalog helpers declared below"
 )]
-
 pub(crate) fn model_catalog_entry(model: &Model) -> CodingAgentModelCatalogEntry {
     CodingAgentModelCatalogEntry {
         id: model.id.clone(),

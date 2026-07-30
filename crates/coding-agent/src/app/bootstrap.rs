@@ -176,10 +176,6 @@ fn first_model_for_provider(provider: &str) -> Option<Model> {
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "public bootstrap compatibility keeps established configuration inputs explicit"
-)]
-#[allow(
-    clippy::too_many_arguments,
     reason = "bootstrap assembly keeps resolved authentication and runtime inputs explicit"
 )]
 pub(crate) fn build_agent_config_with_auth_diagnostics(

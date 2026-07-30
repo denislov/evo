@@ -868,7 +868,7 @@ impl Render for ConversationPane {
                                                                                     ))
                                                                                     .child(
                                                                                         SharedString::new(
-                                                                                            text.to_string(),
+                                                                                            &text,
                                                                                         ),
                                                                                     ),
                                                                             )
@@ -893,7 +893,7 @@ impl Render for ConversationPane {
                                                                             .whitespace_normal()
                                                                             .child(
                                                                                 SharedString::new(
-                                                                                    text.to_string(),
+                                                                                    &text,
                                                                                 ),
                                                                             ),
                                                                     )

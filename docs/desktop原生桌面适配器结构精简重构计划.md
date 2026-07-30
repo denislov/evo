@@ -1,10 +1,10 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：待执行
+> 状态：执行中（DSK-700 已完成，下一项 DSK-701）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
-> 基线状态：工作区存在未提交的 `coding-agent` 与 `desktop` 修改；正式执行以 DSK-700 冻结的基线为准
+> 正式执行基线：`01920b86761bec633d326493055f0658d29a3485`（开始执行时工作区干净）
 > 适用范围：`crates/desktop`、相关 Desktop gate 脚本、`docs/architecture.md`
 > 兼容策略：允许破坏 `desktop` 内部模块、类型、测试路径与私有协议；不保留长期兼容层
 > 总原则：先收敛状态权威，再移动文件；一个事实只有一个 owner；每个 Phase 可验证；最终清零迁移债务
@@ -1053,27 +1053,58 @@ Gate：Gate A + Gate B。
 
 ### DSK-700 实际基线
 
-> 待执行时填写。调研时 HEAD 为 `7766b06974b861565dcc31bf0aa011c7ba6643e6`，但工作区不干净，
-> 因此该 commit 不是正式执行基线。
+正式执行基线为 `01920b86761bec633d326493055f0658d29a3485`。开始执行时工作区干净，
+分支 `main` 相对 `origin/main` ahead 10；调研时的 dirty worktree 已由此前提交收敛，未混入本计划修改。
+
+环境：LMDE 7（Debian trixie）、Linux `6.12.95+deb13-amd64`、
+`x86_64-unknown-linux-gnu`、Rust/Cargo `1.96.0`、X11 `DISPLAY=:0`。
 
 | 项目 | 基线 | 最终 | 变化 |
 | --- | ---: | ---: | ---: |
-| desktop Rust 总行数 | 待复测（调研值 39,863） | — | — |
-| `native_shell.rs` 总行数 | 待复测（调研值 11,150） | — | — |
-| `native_shell.rs` 生产代码 | 待复测（调研值约 5,244） | — | — |
-| `native_shell.rs` 内嵌测试 | 待复测（调研值约 5,906） | — | — |
-| desktop tests passed | 待填写 | — | — |
-| ignored | 待填写 | — | — |
-| clippy warnings | 待填写 | — | — |
-| native frame P95/P99 | 待填写 | — | — |
-| input-to-post-render P95 | 待填写 | — | — |
-| RSS absolute/steady growth | 待填写 | — | — |
+| desktop Rust 总行数 | 39,863 | — | — |
+| `native_shell.rs` 总行数 | 11,150 | — | — |
+| `native_shell.rs` 生产代码 | 5,245 | — | — |
+| `native_shell.rs` 内嵌测试 | 5,905 | — | — |
+| desktop tests passed | 298（lib 289 + boundary 9） | — | — |
+| ignored | 5（均为显式 release performance gate） | — | — |
+| clippy warnings | 初始 1；清理后 0 | — | — |
+| native frame P95/P99 | 4,724 / 4,994 µs | — | — |
+| input-to-post-render P95 | 8,414 µs | — | — |
+| RSS absolute/steady growth | 152,715,264 / 163,840 bytes | — | — |
+
+Gate 与性能记录：
+
+- `cargo test -p desktop --all-targets`：通过，298 passed、5 ignored、0 failed；最慢 GPUI 用例约 68 秒。
+- `cargo clippy -p desktop --all-targets -- -D warnings`：通过。基线清理删除 1 个未使用样式 helper，
+  并修复 2 个 `coding-agent` attribute lint 与 2 个无谓字符串分配 lint；没有使用 warning 豁免。
+- `scripts/desktop-perf-gate.sh`：通过，日志 `target/desktop-perf/latest.log`。10k block headless
+  CPU frame P95 2,662 µs、input roundtrip P95 5,753 µs、input-change-to-render P95 352 µs；
+  window RSS growth 24,281,088 bytes。
+- `scripts/desktop-native-perf-gate.sh`：通过，日志 `target/desktop-perf/native-latest.log`。200 frame
+  GPU/present P95/P99 4,724/4,994 µs；50 input sample P95/P99 8,414/16,663 µs；最终 RSS
+  152,715,264 bytes、steady growth 163,840 bytes；production Markdown P95 135 µs。
+- `scripts/desktop-visual-golden.sh`：初次 compare 发现此前 4 个已提交 conversation UI commit 未同步 golden；
+  按 `--review` 检查全部 20 组 before/after/diff 后，用 manifest + review note 安装基线。12 组原本
+  pixel-identical，8 组变化均局限于已提交的 conversation presentation；安装后复跑 20 组 RMSE 全为 0。
+  review 说明保存在 `crates/desktop/tests/goldens/native/REVIEW.md`。
+
+关键行为测试映射：
+
+| 风险 | 主要基线测试 |
+| --- | --- |
+| workspace switch / owner 隔离 | `background_workspace_advances_silently_and_switching_restores_scoped_state`、`closing_a_background_workspace_removes_only_its_owner`、`typed_navigation_switches_skills_session_and_home_without_runtime_commands` |
+| command completion / stale identity | `terminal_and_projection_completion_are_identity_bound`、`stale_or_mismatched_completion_cannot_remove_another_intent`、`first_session_change_rekeys_the_home_workspace_and_completes_its_command` |
+| gap / resync / reconnect | `desktop_projection_rejects_gaps_and_association_mismatches_atomically`、`reconnect_state_machine_handles_gap_lag_and_exhaustion_deterministically`、`create_and_resync_update_local_state_without_loading_the_catalog` |
+| picker ownership / bounds | `composer_picker_attaches_bounded_paths_and_forwards_them_with_the_prompt`、`project_directory_picker_failures_are_bounded_and_do_not_replace_selection`、`project_directory_menu_chooses_replaces_cancels_and_clears` |
+| preferences storage / safety | `preferences_round_trip_and_normalize_untrusted_geometry`、`background_writer_coalesces_without_blocking_the_caller`、`symbolic_link_file_and_directory_are_rejected` |
+| focus / modal / responsive | `modal_traps_focus_and_restores_visible_owner`、`native_shell_authorization_smoke_traps_focus_and_submits_a_typed_decision`、`responsive_drawers_preserve_conversation_geometry_scroll_and_owner_focus` |
+| review / external editor | `unified_diff_is_bounded_and_marks_collapsed_unchanged_ranges`、`editor_configuration_rejects_shells_nuls_and_argument_pressure`、`native_shell_inspector_smoke_submits_recovery_and_file_review_commands` |
 
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
 | --- | --- | --- | --- |
-| DSK-700 | 待执行 | — | — |
+| DSK-700 | 已完成 | 待提交 | Gate B、clippy、headless/native perf、reviewed visual compare 全通过；同步 stale conversation goldens |
 | DSK-701 | 待执行 | — | — |
 | DSK-710 | 待执行 | — | — |
 | DSK-711 | 待执行 | — | — |

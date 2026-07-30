@@ -93,10 +93,6 @@ pub(super) trait DesktopStyledExt: Styled + Sized {
         self.mt(px(spacing.pixels()))
     }
 
-    fn mb_token(self, spacing: DesignSpace) -> Self {
-        self.mb(px(spacing.pixels()))
-    }
-
     fn rounded_token(self, radius: DesignRadius) -> Self {
         self.rounded(px(radius.pixels()))
     }
