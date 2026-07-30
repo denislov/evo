@@ -39,7 +39,7 @@ pub(super) fn reconcile_direct_update(
             let sessions_dirty = shell.complete_command(command_id, &owner, &intent);
             if sessions_dirty {
                 let cancelled = shell.remove_closed_workspace(&session_id);
-                shell.project_catalog.remove_session(&session_id);
+                shell.app.catalog.remove_session(&session_id);
                 shell
                     .update_workspace_mut()
                     .set_preference_notice(if cancelled == 0 {
@@ -56,7 +56,8 @@ pub(super) fn reconcile_direct_update(
         DesktopRuntimeUpdate::FileReviewed { command_id, review } => {
             let request = CodingAgentFileReviewRequest::new(review.change.clone(), review.revision);
             let owner = shell
-                .command_tracker
+                .app
+                .commands
                 .owner(command_id)
                 .cloned()
                 .unwrap_or_else(|| shell.update_workspace_key());
@@ -85,7 +86,8 @@ pub(super) fn reconcile_direct_update(
             project_relative_path,
         } => {
             let owner = shell
-                .command_tracker
+                .app
+                .commands
                 .owner(command_id)
                 .cloned()
                 .unwrap_or_else(|| shell.update_workspace_key());
@@ -112,15 +114,21 @@ pub(super) fn reconcile_direct_update(
             sessions,
             omitted,
         } => {
-            let sessions_dirty = shell
-                .command_tracker
-                .owner(command_id)
-                .cloned()
-                .is_some_and(|owner| {
-                    shell.complete_command(command_id, &owner, &DesktopCommandIntent::ListSessions)
-                });
+            let sessions_dirty =
+                shell
+                    .app
+                    .commands
+                    .owner(command_id)
+                    .cloned()
+                    .is_some_and(|owner| {
+                        shell.complete_command(
+                            command_id,
+                            &owner,
+                            &DesktopCommandIntent::ListSessions,
+                        )
+                    });
             if sessions_dirty {
-                shell.project_catalog.replace_catalog(sessions, omitted);
+                shell.app.catalog.replace_catalog(sessions, omitted);
             }
             DirectCommandUpdate::Consumed {
                 sessions_dirty,
@@ -140,7 +148,8 @@ pub(super) fn reconcile_direct_update(
             let sessions_dirty = shell.complete_command(command_id, &owner, &intent);
             if sessions_dirty {
                 shell
-                    .project_catalog
+                    .app
+                    .catalog
                     .rename_session(&session_id, name, updated_at);
                 shell
                     .update_workspace_mut()
@@ -157,7 +166,8 @@ pub(super) fn reconcile_direct_update(
             updated_at,
         } => DirectCommandUpdate::Consumed {
             sessions_dirty: shell
-                .project_catalog
+                .app
+                .catalog
                 .rename_session(&session_id, name, updated_at),
             inspector_dirty: false,
         },
@@ -185,11 +195,10 @@ impl ProjectionCommandCompletions {
             DesktopRuntimeUpdate::Reloaded {
                 command_id,
                 metadata,
-            } if shell.command_tracker.matches(
-                *command_id,
-                &owner,
-                &DesktopCommandIntent::Reload,
-            ) =>
+            } if shell
+                .app
+                .commands
+                .matches(*command_id, &owner, &DesktopCommandIntent::Reload) =>
             {
                 Some((
                     *command_id,
@@ -207,7 +216,7 @@ impl ProjectionCommandCompletions {
                 thinking_level,
                 thinking_fallback,
                 ..
-            } if shell.command_tracker.matches(
+            } if shell.app.commands.matches(
                 *command_id,
                 &owner,
                 &DesktopCommandIntent::Selection(*selection),
@@ -223,7 +232,7 @@ impl ProjectionCommandCompletions {
                 action,
                 recovery_id,
                 ..
-            } if shell.command_tracker.matches(
+            } if shell.app.commands.matches(
                 *command_id,
                 &owner,
                 &DesktopCommandIntent::Recovery {
@@ -238,7 +247,7 @@ impl ProjectionCommandCompletions {
         };
         let resync = match update {
             DesktopRuntimeUpdate::Resynced { command_id, .. }
-                if shell.command_tracker.matches(
+                if shell.app.commands.matches(
                     *command_id,
                     &owner,
                     &DesktopCommandIntent::Resync,
@@ -250,7 +259,8 @@ impl ProjectionCommandCompletions {
         };
         let session = match update {
             DesktopRuntimeUpdate::SessionChanged { command_id, .. } => shell
-                .command_tracker
+                .app
+                .commands
                 .intent(*command_id)
                 .filter(|intent| {
                     matches!(
@@ -262,7 +272,8 @@ impl ProjectionCommandCompletions {
                 .cloned()
                 .and_then(|intent| {
                     shell
-                        .command_tracker
+                        .app
+                        .commands
                         .owner(*command_id)
                         .cloned()
                         .map(|owner| (owner, *command_id, intent))
@@ -299,7 +310,8 @@ impl ProjectionCommandCompletions {
         }
         if let Some((owner, command_id, intent)) = self.session {
             let owner = shell
-                .command_tracker
+                .app
+                .commands
                 .owner(command_id)
                 .cloned()
                 .unwrap_or(owner);
@@ -424,7 +436,7 @@ pub(super) fn reserve_command(
     intent: DesktopCommandIntent,
 ) -> Option<u64> {
     let owner = shell.update_workspace_key();
-    match shell.command_tracker.reserve(owner, intent) {
+    match shell.app.commands.reserve(owner, intent) {
         Ok(command_id) => Some(command_id),
         Err(error) => {
             shell

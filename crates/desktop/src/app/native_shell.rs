@@ -49,8 +49,13 @@ use crate::actions::{
     PalettePrevious, SelectNextConversation, SelectPreviousConversation, SubmitComposer,
     ToggleInspectorPanel, ToggleSelectedConversationDetails, TrapOverlayFocus,
 };
-use crate::application::commands::{CommandCompletionError, CommandTracker, DesktopCommandIntent};
-use crate::application::workspace::{SessionId, WorkspaceKey, WorkspaceStore};
+use crate::application::{
+    change_set::UiRegion,
+    commands::{CommandCompletionError, CommandTracker, DesktopCommandIntent},
+    reducer::{DesktopController, DesktopEvent, Transition, UiIntent},
+    state::DesktopState,
+    workspace::{SessionId, WorkspaceKey, WorkspaceStore},
+};
 
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -493,12 +498,11 @@ pub(super) struct NativeShell {
     runtime_client: Option<RuntimeCommandClient>,
     runtime_updates: VecDeque<desktop::runtime::DesktopRuntimeUpdate>,
     runtime_update_target: Option<WorkspaceKey>,
-    command_tracker: CommandTracker,
+    controller: DesktopController,
+    app: DesktopState<SessionWorkspace, ProjectCatalogController>,
     home_project: CodingAgentEmbeddingSnapshot,
     projectless_workspace_selection: CodingAgentWorkspaceSelection,
-    workspace_store: WorkspaceStore<SessionWorkspace>,
     global_skills: Arc<[CodingAgentResourceCommand]>,
-    preferences: DesktopPreferences,
     preference_writer: Option<PreferenceWriter>,
     inspector_telemetry_last_refresh: Option<Instant>,
     inspector_telemetry_refresh_deadline: Option<Instant>,
@@ -528,7 +532,6 @@ pub(super) struct NativeShell {
     conversation_full_message: Option<ConversationFullMessageView>,
     conversation_announcement: Option<(u64, String)>,
     conversation_announcement_sequence: u64,
-    project_catalog: ProjectCatalogController,
     panel_resize: Option<PanelResizeState>,
     focus_input_modality: FocusInputModality,
     #[cfg(test)]
@@ -629,7 +632,7 @@ impl NativeShell {
                 |this, _, event: &ConversationPaneEvent, window, cx| match event {
                     ConversationPaneEvent::Select { block_id, durable } => {
                         this.record_focus(FocusTarget::CenterBody, window, cx);
-                        let workspace = &mut this.workspace_store.active_mut();
+                        let workspace = &mut this.app.workspaces.active_mut();
                         let Some(projection) = workspace.projection.as_ref() else {
                             return;
                         };
@@ -706,10 +709,28 @@ impl NativeShell {
                         group_id,
                         collapsed,
                     } => {
-                        if this
-                            .project_catalog
-                            .set_group_collapsed(group_id, *collapsed)
-                        {
+                        let transition = this.controller.reduce(
+                            &mut this.app,
+                            DesktopEvent::Ui(UiIntent::SetProjectCollapsed {
+                                group_id: group_id.clone(),
+                                collapsed: *collapsed,
+                            }),
+                            |state, event| {
+                                let DesktopEvent::Ui(UiIntent::SetProjectCollapsed {
+                                    group_id,
+                                    collapsed,
+                                }) = event
+                                else {
+                                    unreachable!("catalog disclosure receives one typed intent")
+                                };
+                                if state.catalog.set_group_collapsed(&group_id, collapsed) {
+                                    Transition::changed(UiRegion::Sessions)
+                                } else {
+                                    Transition::default()
+                                }
+                            },
+                        );
+                        if transition.changes().contains(UiRegion::Sessions) {
                             this.notify_sessions_pane(cx);
                             cx.notify();
                         }
@@ -730,7 +751,8 @@ impl NativeShell {
                 window,
                 |this, _, event: &ComposerPaneEvent, window, cx| match event {
                     ComposerPaneEvent::InputChanged(value) => {
-                        this.workspace_store
+                        this.app
+                            .workspaces
                             .active_mut()
                             .composer
                             .edit(value.clone());
@@ -785,7 +807,7 @@ impl NativeShell {
                         this.submit_recovery_action(identity.clone(), *action, cx);
                     }
                     InspectorPaneEvent::SelectSection(section) => {
-                        this.workspace_store.active_mut().inspector_section = *section;
+                        this.app.workspaces.active_mut().inspector_section = *section;
                         this.notify_inspector_pane(cx);
                     }
                 },
@@ -883,16 +905,21 @@ impl NativeShell {
             }
             None => WorkspaceStore::new(initial_workspace),
         };
+        let app = DesktopState::new(
+            workspace_store,
+            command_tracker,
+            ProjectCatalogController::default(),
+            preferences,
+        );
         let shell = Self {
             runtime_client: Some(runtime_client),
             runtime_updates: VecDeque::new(),
             runtime_update_target: None,
-            command_tracker,
+            controller: DesktopController::new(),
+            app,
             home_project,
             projectless_workspace_selection,
-            workspace_store,
             global_skills,
-            preferences,
             preference_writer,
             inspector_telemetry_last_refresh: None,
             inspector_telemetry_refresh_deadline: None,
@@ -922,7 +949,6 @@ impl NativeShell {
             conversation_full_message: None,
             conversation_announcement: None,
             conversation_announcement_sequence: 0,
-            project_catalog: ProjectCatalogController::default(),
             panel_resize: None,
             focus_input_modality: FocusInputModality::default(),
             #[cfg(test)]
@@ -972,16 +998,17 @@ impl NativeShell {
     pub(super) fn update_workspace(&self) -> &SessionWorkspace {
         self.runtime_update_target
             .as_ref()
-            .and_then(|key| self.workspace_store.get(key))
-            .unwrap_or_else(|| self.workspace_store.active())
+            .and_then(|key| self.app.workspaces.get(key))
+            .unwrap_or_else(|| self.app.workspaces.active())
     }
 
     pub(super) fn update_workspace_mut(&mut self) -> &mut SessionWorkspace {
         let key = self
             .runtime_update_target
             .clone()
-            .unwrap_or_else(|| self.workspace_store.active_key().clone());
-        self.workspace_store
+            .unwrap_or_else(|| self.app.workspaces.active_key().clone());
+        self.app
+            .workspaces
             .get_mut(&key)
             .expect("runtime update target must reference a workspace entry")
     }
@@ -989,24 +1016,26 @@ impl NativeShell {
     pub(super) fn update_workspace_key(&self) -> WorkspaceKey {
         self.runtime_update_target
             .clone()
-            .unwrap_or_else(|| self.workspace_store.active_key().clone())
+            .unwrap_or_else(|| self.app.workspaces.active_key().clone())
     }
 
     fn active_command_contains(&self, intent: &DesktopCommandIntent) -> bool {
-        self.command_tracker
-            .contains(self.workspace_store.active_key(), intent)
+        self.app
+            .commands
+            .contains(self.app.workspaces.active_key(), intent)
     }
 
     fn active_command_contains_where(
         &self,
         predicate: impl Fn(&DesktopCommandIntent) -> bool,
     ) -> bool {
-        self.command_tracker
-            .contains_where(self.workspace_store.active_key(), predicate)
+        self.app
+            .commands
+            .contains_where(self.app.workspaces.active_key(), predicate)
     }
 
     fn complete_active_command(&mut self, command_id: u64, intent: &DesktopCommandIntent) -> bool {
-        let owner = self.workspace_store.active_key().clone();
+        let owner = self.app.workspaces.active_key().clone();
         self.complete_command(command_id, &owner, intent)
     }
 
@@ -1016,9 +1045,10 @@ impl NativeShell {
         observed_owner: &WorkspaceKey,
         intent: &DesktopCommandIntent,
     ) -> bool {
-        let pending_owner = self.command_tracker.owner(command_id).cloned();
+        let pending_owner = self.app.commands.owner(command_id).cloned();
         match self
-            .command_tracker
+            .app
+            .commands
             .complete(command_id, observed_owner, intent)
         {
             Ok(_) => true,
@@ -1040,9 +1070,10 @@ impl NativeShell {
         observed_owner: &WorkspaceKey,
         command: desktop::runtime::DesktopRuntimeCommandKind,
     ) -> Option<DesktopCommandIntent> {
-        let pending_owner = self.command_tracker.owner(command_id).cloned();
+        let pending_owner = self.app.commands.owner(command_id).cloned();
         match self
-            .command_tracker
+            .app
+            .commands
             .reject(command_id, observed_owner, command)
         {
             Ok(pending) => Some(pending.into_intent()),
@@ -1063,7 +1094,7 @@ impl NativeShell {
         owner: &WorkspaceKey,
         predicate: impl Fn(&DesktopCommandIntent) -> bool,
     ) -> Option<DesktopCommandIntent> {
-        let (command_id, intent) = self.command_tracker.find(owner, predicate)?;
+        let (command_id, intent) = self.app.commands.find(owner, predicate)?;
         self.complete_command(command_id, owner, &intent)
             .then_some(intent)
     }
@@ -1075,7 +1106,7 @@ impl NativeShell {
     ) {
         let mut marked = false;
         for owner in [pending_owner, observed_owner] {
-            let Some(workspace) = self.workspace_store.get_mut(owner) else {
+            let Some(workspace) = self.app.workspaces.get_mut(owner) else {
                 continue;
             };
             marked = true;
@@ -1090,7 +1121,7 @@ impl NativeShell {
             );
         }
         if !marked {
-            let workspace = self.workspace_store.active_mut();
+            let workspace = self.app.workspaces.active_mut();
             if let Some(projection) = workspace.projection.as_mut() {
                 projection.require_command_resync(
                     "command_owner_mismatch",
@@ -1146,7 +1177,7 @@ impl NativeShell {
         let Some(command_id) = runtime_update_command_id(update) else {
             return true;
         };
-        let Some(pending_owner) = self.command_tracker.owner(command_id).cloned() else {
+        let Some(pending_owner) = self.app.commands.owner(command_id).cloned() else {
             return true;
         };
         let Some(observed_owner) = Self::runtime_update_observed_workspace_key(update) else {
@@ -1166,7 +1197,7 @@ impl NativeShell {
         Self::runtime_update_observed_workspace_key(update)
             .or_else(|| {
                 runtime_update_command_id(update)
-                    .and_then(|command_id| self.command_tracker.owner(command_id).cloned())
+                    .and_then(|command_id| self.app.commands.owner(command_id).cloned())
             })
             .unwrap_or_else(|| self.update_workspace_key())
     }
@@ -1186,7 +1217,7 @@ impl NativeShell {
         }
         Self::runtime_update_observed_workspace_key(update).or_else(|| {
             runtime_update_command_id(update)
-                .and_then(|command_id| self.command_tracker.owner(command_id).cloned())
+                .and_then(|command_id| self.app.commands.owner(command_id).cloned())
         })
     }
 
@@ -1210,7 +1241,8 @@ impl NativeShell {
                 self.dismiss_drawer(window, cx, false);
                 self.focus_target(FocusTarget::CenterBody, window, cx);
                 if self
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active_mut()
                     .projection
                     .as_ref()
@@ -1229,7 +1261,7 @@ impl NativeShell {
 
     fn show_home_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.center_surface = CenterSurface::Primary;
-        let activated = self.workspace_store.activate(&WorkspaceKey::Home);
+        let activated = self.app.workspaces.activate(&WorkspaceKey::Home);
         debug_assert!(activated, "Home must remain a stable workspace entry");
 
         self.dismiss_drawer(window, cx, true);
@@ -1251,14 +1283,15 @@ impl NativeShell {
     ) -> bool {
         let target_session_id = SessionId::from_dto(hydrated_session_id(snapshot));
         let target_key = WorkspaceKey::Session(target_session_id.clone());
-        if self.workspace_store.active_key() == &target_key {
+        if self.app.workspaces.active_key() == &target_key {
             return true;
         }
-        if self.workspace_store.contains(&target_key) {
-            return !activate || self.workspace_store.activate(&target_key);
+        if self.app.workspaces.contains(&target_key) {
+            return !activate || self.app.workspaces.activate(&target_key);
         }
         if self.open_workspace_count() >= MAX_SESSION_WORKSPACES {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice(format!(
                     "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
@@ -1268,7 +1301,8 @@ impl NativeShell {
         let projection = match DesktopProjection::new(snapshot.clone()) {
             Ok(projection) => projection,
             Err(issue) => {
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(format!(
                         "Session response failed projection validation ({}).",
@@ -1277,19 +1311,20 @@ impl NativeShell {
                 return false;
             }
         };
-        let promoting_home = activate && self.workspace_store.active_key() == &WorkspaceKey::Home;
+        let promoting_home = activate && self.app.workspaces.active_key() == &WorkspaceKey::Home;
         let thinking_selection = if inherit_home_thinking && promoting_home {
-            self.workspace_store.active_mut().thinking_selection
+            self.app.workspaces.active_mut().thinking_selection
         } else {
-            self.preferences
+            self.app
+                .preferences
                 .thinking_level_for_session(target_session_id.as_str())
         };
         if promoting_home {
-            self.workspace_store.active_mut().project = snapshot.project.clone();
-            self.workspace_store.active_mut().projection = Some(projection);
-            self.workspace_store.active_mut().thinking_selection = thinking_selection;
+            self.app.workspaces.active_mut().project = snapshot.project.clone();
+            self.app.workspaces.active_mut().projection = Some(projection);
+            self.app.workspaces.active_mut().thinking_selection = thinking_selection;
             self.reconcile_thinking_selection_with_project();
-            let admitted_selection = self.workspace_store.active().thinking_selection;
+            let admitted_selection = self.app.workspaces.active().thinking_selection;
             self.remember_thinking_selection(target_session_id.as_str(), admitted_selection);
             let fresh_home = SessionWorkspace::new_home_with_thinking(
                 self.home_project.clone(),
@@ -1298,12 +1333,13 @@ impl NativeShell {
                 thinking_selection,
                 self.projectless_workspace_selection.clone(),
             );
-            self.command_tracker.transfer_owner(
+            self.app.commands.transfer_owner(
                 &WorkspaceKey::Home,
                 &WorkspaceKey::Session(target_session_id.clone()),
             );
             let promoted = self
-                .workspace_store
+                .app
+                .workspaces
                 .promote_home(target_session_id, fresh_home);
             debug_assert!(
                 promoted.is_ok(),
@@ -1317,16 +1353,18 @@ impl NativeShell {
             None,
             thinking_selection,
         );
-        self.workspace_store
+        self.app
+            .workspaces
             .insert_session(target_session_id.clone(), target);
         !activate
             || self
-                .workspace_store
+                .app
+                .workspaces
                 .activate(&WorkspaceKey::Session(target_session_id))
     }
 
     fn open_workspace_count(&self) -> usize {
-        self.workspace_store.session_count()
+        self.app.workspaces.session_count()
     }
 
     fn reserve_session_command(
@@ -1335,10 +1373,11 @@ impl NativeShell {
         intent: DesktopCommandIntent,
     ) -> Result<u64, String> {
         let key = WorkspaceKey::session(session_id);
-        if !self.workspace_store.contains(&key) {
+        if !self.app.workspaces.contains(&key) {
             return Err("Cannot close an unavailable session.".to_owned());
         }
-        self.command_tracker
+        self.app
+            .commands
             .reserve(key, intent)
             .map_err(|error| error.to_string())
     }
@@ -1350,7 +1389,8 @@ impl NativeShell {
         let command_id = match self.reserve_session_command(session_id, intent.clone()) {
             Ok(command_id) => command_id,
             Err(error) => {
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(error);
                 self.notify_sessions_pane(cx);
@@ -1369,7 +1409,8 @@ impl NativeShell {
         if let Err(error) = admission {
             let owner = WorkspaceKey::session(session_id);
             let _ = self.complete_command(command_id, &owner, &intent);
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice(error);
         }
@@ -1378,8 +1419,9 @@ impl NativeShell {
 
     fn remove_closed_workspace(&mut self, session_id: &str) -> usize {
         let owner = WorkspaceKey::session(session_id);
-        let cancelled = self.command_tracker.cancel_owner(&owner).len();
-        self.workspace_store
+        let cancelled = self.app.commands.cancel_owner(&owner).len();
+        self.app
+            .workspaces
             .remove_session(&SessionId::from_dto(session_id));
         cancelled
     }
@@ -1389,12 +1431,12 @@ impl NativeShell {
         fixture: NativeVisualCatalogFixture,
         cx: &mut Context<Self>,
     ) {
-        self.project_catalog = ProjectCatalogController::default();
+        self.app.catalog = ProjectCatalogController::default();
         match fixture {
             NativeVisualCatalogFixture::NotLoaded => {}
-            NativeVisualCatalogFixture::Loading => self.project_catalog.begin_refresh(),
+            NativeVisualCatalogFixture::Loading => self.app.catalog.begin_refresh(),
             NativeVisualCatalogFixture::Ready => {
-                let Some(projection) = self.workspace_store.active_mut().projection.as_ref() else {
+                let Some(projection) = self.app.workspaces.active_mut().projection.as_ref() else {
                     return;
                 };
                 let session_id = projection.snapshot().session.session_id.clone();
@@ -1408,8 +1450,7 @@ impl NativeShell {
                     updated_at: "9999-12-31T23:59:59Z".into(),
                     ..Default::default()
                 };
-                if let Some(workspace) =
-                    self.workspace_store.active_mut().project.workspace.as_ref()
+                if let Some(workspace) = self.app.workspaces.active_mut().project.workspace.as_ref()
                 {
                     entry.workspace = workspace.overview.clone();
                     entry.workspace_migration =
@@ -1418,13 +1459,14 @@ impl NativeShell {
                             diagnostic: None,
                         };
                 }
-                self.project_catalog.replace_catalog(vec![entry], 0);
+                self.app.catalog.replace_catalog(vec![entry], 0);
             }
             NativeVisualCatalogFixture::Error => self
-                .project_catalog
+                .app
+                .catalog
                 .fail_refresh("The project catalog could not be loaded."),
             NativeVisualCatalogFixture::Empty => {
-                self.project_catalog.replace_catalog(Vec::new(), 0);
+                self.app.catalog.replace_catalog(Vec::new(), 0);
             }
         }
         self.notify_sessions_pane(cx);
@@ -1453,26 +1495,27 @@ impl NativeShell {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        debug_assert!(self.workspace_store.active_mut().projection.is_none());
-        self.workspace_store.active_mut().draft_workspace_selection =
+        debug_assert!(self.app.workspaces.active_mut().projection.is_none());
+        self.app.workspaces.active_mut().draft_workspace_selection =
             CodingAgentWorkspaceSelection::project(path);
         self.notify_composer_pane(cx);
         cx.notify();
     }
 
     pub(super) fn install_native_visual_non_reasoning_fixture(&mut self, cx: &mut Context<Self>) {
-        debug_assert!(self.workspace_store.active_mut().projection.is_none());
-        self.workspace_store.active_mut().project.selected_model_id = "review-fixture".into();
+        debug_assert!(self.app.workspaces.active_mut().projection.is_none());
+        self.app.workspaces.active_mut().project.selected_model_id = "review-fixture".into();
         let selected_model_id = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .project
             .selected_model_id
             .clone();
-        for model in &mut self.workspace_store.active_mut().project.models {
+        for model in &mut self.app.workspaces.active_mut().project.models {
             model.selected = model.id == selected_model_id;
         }
-        self.workspace_store.active_mut().thinking_selection = DesktopThinkingLevel::High;
+        self.app.workspaces.active_mut().thinking_selection = DesktopThinkingLevel::High;
         self.reconcile_thinking_selection_with_project();
         self.notify_conversation_header(cx);
         self.notify_composer_pane(cx);
@@ -1481,8 +1524,8 @@ impl NativeShell {
 
     fn visibility(&self) -> PanelVisibility {
         PanelVisibility {
-            sessions: self.preferences.sessions_panel_visible,
-            context: self.preferences.context_panel_visible,
+            sessions: self.app.preferences.sessions_panel_visible,
+            context: self.app.preferences.context_panel_visible,
         }
     }
 
@@ -1500,8 +1543,8 @@ impl NativeShell {
             width,
             height,
             visibility,
-            self.preferences.sessions_panel_width,
-            self.preferences.context_panel_width,
+            self.app.preferences.sessions_panel_width,
+            self.app.preferences.context_panel_width,
         )
     }
 
@@ -1515,12 +1558,12 @@ impl NativeShell {
             self.panel_resize = None;
             match panel {
                 ResizablePanel::Sessions => {
-                    self.preferences.sessions_panel_width = SESSION_PANEL_WIDTH;
+                    self.app.preferences.sessions_panel_width = SESSION_PANEL_WIDTH;
                     self.notify_sessions_pane(cx);
                     self.notify_conversation_header(cx);
                 }
                 ResizablePanel::Context => {
-                    self.preferences.context_panel_width = CONTEXT_PANEL_WIDTH;
+                    self.app.preferences.context_panel_width = CONTEXT_PANEL_WIDTH;
                     self.notify_inspector_pane(cx);
                     self.notify_conversation_header(cx);
                 }
@@ -1534,8 +1577,8 @@ impl NativeShell {
             panel,
             pointer_origin_x: f32::from(event.position.x),
             width_origin: match panel {
-                ResizablePanel::Sessions => self.preferences.sessions_panel_width,
-                ResizablePanel::Context => self.preferences.context_panel_width,
+                ResizablePanel::Sessions => self.app.preferences.sessions_panel_width,
+                ResizablePanel::Context => self.app.preferences.context_panel_width,
             },
         });
     }
@@ -1577,14 +1620,14 @@ impl NativeShell {
         let width = (desired.round() as i64).clamp(i64::from(minimum), i64::from(maximum)) as u32;
 
         match resize.panel {
-            ResizablePanel::Sessions if self.preferences.sessions_panel_width != width => {
-                self.preferences.sessions_panel_width = width;
+            ResizablePanel::Sessions if self.app.preferences.sessions_panel_width != width => {
+                self.app.preferences.sessions_panel_width = width;
                 self.notify_sessions_pane(cx);
                 self.notify_conversation_header(cx);
                 cx.notify();
             }
-            ResizablePanel::Context if self.preferences.context_panel_width != width => {
-                self.preferences.context_panel_width = width;
+            ResizablePanel::Context if self.app.preferences.context_panel_width != width => {
+                self.app.preferences.context_panel_width = width;
                 self.notify_inspector_pane(cx);
                 self.notify_conversation_header(cx);
                 cx.notify();
@@ -1650,11 +1693,11 @@ impl NativeShell {
     fn window_bounds_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let bounds = window.window_bounds();
         let restore = bounds.get_bounds();
-        self.preferences.window.x = f32::from(restore.origin.x).round() as i32;
-        self.preferences.window.y = f32::from(restore.origin.y).round() as i32;
-        self.preferences.window.width = u32::from(restore.size.width);
-        self.preferences.window.height = u32::from(restore.size.height);
-        self.preferences.window.maximized = matches!(bounds, WindowBounds::Maximized(_));
+        self.app.preferences.window.x = f32::from(restore.origin.x).round() as i32;
+        self.app.preferences.window.y = f32::from(restore.origin.y).round() as i32;
+        self.app.preferences.window.width = u32::from(restore.size.width);
+        self.app.preferences.window.height = u32::from(restore.size.height);
+        self.app.preferences.window.maximized = matches!(bounds, WindowBounds::Maximized(_));
 
         let viewport = window.viewport_size();
         let forced_layout = self.resolve_layout(
@@ -1664,11 +1707,11 @@ impl NativeShell {
         );
         let drawer_became_dockable = match self.active_drawer {
             Some(CenterDrawerKind::Sessions) if forced_layout.sidebar.is_some() => {
-                self.preferences.sessions_panel_visible = true;
+                self.app.preferences.sessions_panel_visible = true;
                 true
             }
             Some(CenterDrawerKind::Inspector) if forced_layout.inspector.is_some() => {
-                self.preferences.context_panel_visible = true;
+                self.app.preferences.context_panel_visible = true;
                 true
             }
             _ => false,
@@ -1706,7 +1749,7 @@ impl NativeShell {
             let Some(update) = self.runtime_updates.pop_front() else {
                 break;
             };
-            let foreground_key = self.workspace_store.active_key().clone();
+            let foreground_key = self.app.workspaces.active_key().clone();
             self.runtime_update_target = None;
             let dirty_before = (
                 sessions_pane_dirty,
@@ -1726,7 +1769,7 @@ impl NativeShell {
                 desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession { .. }
                 | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession { .. } => true,
                 desktop::runtime::DesktopRuntimeUpdate::SessionChanged { command_id, .. } => {
-                    self.command_tracker.matches(
+                    self.app.commands.matches(
                         *command_id,
                         &foreground_key,
                         &DesktopCommandIntent::CreateSession,
@@ -1740,7 +1783,7 @@ impl NativeShell {
                     snapshot,
                 } = &update
             {
-                let _ = self.command_tracker.transfer_command(
+                let _ = self.app.commands.transfer_command(
                     *command_id,
                     WorkspaceKey::session(hydrated_session_id(snapshot)),
                 );
@@ -1753,7 +1796,7 @@ impl NativeShell {
                 | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
                     command_id,
                     ..
-                } => self.command_tracker.matches(
+                } => self.app.commands.matches(
                     *command_id,
                     &foreground_key,
                     &DesktopCommandIntent::Prompt,
@@ -1767,8 +1810,8 @@ impl NativeShell {
             }
             if !self.validate_runtime_update_command_owner(&update) {
                 self.runtime_update_target = runtime_update_command_id(&update)
-                    .and_then(|command_id| self.command_tracker.owner(command_id).cloned())
-                    .filter(|owner| self.workspace_store.contains(owner));
+                    .and_then(|command_id| self.app.commands.owner(command_id).cloned())
+                    .filter(|owner| self.app.workspaces.contains(owner));
                 self.request_resync_if_needed();
                 self.runtime_update_target = None;
                 applied += 1;
@@ -1780,7 +1823,7 @@ impl NativeShell {
                 && let Some(target_key) = self.runtime_update_workspace_key(&update)
                 && target_key != foreground_key
             {
-                if self.workspace_store.contains(&target_key) {
+                if self.app.workspaces.contains(&target_key) {
                     self.runtime_update_target = Some(target_key);
                     background_update = true;
                 } else if let Some(snapshot) = runtime_update_hydrated_snapshot(&update)
@@ -1827,7 +1870,7 @@ impl NativeShell {
             let composer_pane_state_before = self.composer_pane_state();
             let projection_completions = ProjectionCommandCompletions::capture(self, &update);
             if let desktop::runtime::DesktopRuntimeUpdate::SessionChanged { snapshot, .. } = &update
-                && self.workspace_store.active_key()
+                && self.app.workspaces.active_key()
                     != &WorkspaceKey::session(hydrated_session_id(snapshot))
                 && !self.install_hydrated_workspace(snapshot, inherit_home_thinking, true)
             {
@@ -1972,7 +2015,8 @@ impl NativeShell {
                     authorization_id,
                     decision,
                 } if self
-                    .command_tracker
+                    .app
+                    .commands
                     .intent(*command_id)
                     .filter(|intent| {
                         matches!(
@@ -2141,7 +2185,7 @@ impl NativeShell {
                         desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
                         code,
                     );
-                    self.project_catalog.fail_refresh(notice.clone());
+                    self.app.catalog.fail_refresh(notice.clone());
                     self.update_workspace_mut().set_preference_notice(notice);
                     sessions_pane_dirty = true;
                 }
@@ -2225,13 +2269,13 @@ impl NativeShell {
                 }
                 desktop::runtime::DesktopRuntimeUpdate::RuntimeFailed { error } => {
                     sessions_pane_dirty = true;
-                    if self.project_catalog.state().is_loading() {
-                        self.project_catalog.fail_refresh(format!(
+                    if self.app.catalog.state().is_loading() {
+                        self.app.catalog.fail_refresh(format!(
                             "desktop runtime failed ({})",
                             truncate_label(&error.code, 28)
                         ));
                     }
-                    self.command_tracker.cancel_all();
+                    self.app.commands.cancel_all();
                     self.reject_pending_composer(format!(
                         "desktop runtime failed ({})",
                         truncate_label(&error.code, 28)
@@ -2239,10 +2283,10 @@ impl NativeShell {
                 }
                 desktop::runtime::DesktopRuntimeUpdate::Stopped => {
                     sessions_pane_dirty = true;
-                    if self.project_catalog.state().is_loading() {
-                        self.project_catalog.fail_refresh("desktop runtime stopped");
+                    if self.app.catalog.state().is_loading() {
+                        self.app.catalog.fail_refresh("desktop runtime stopped");
                     }
-                    self.command_tracker.cancel_all();
+                    self.app.commands.cancel_all();
                     self.reject_pending_composer("desktop runtime stopped".into());
                 }
                 _ => {}
@@ -2426,16 +2470,16 @@ impl NativeShell {
                     .reconcile_content(&source, event_sequence_after);
             }
             let update_owner = self.update_workspace_key();
-            if let Some((command_id, authorization_id, operation_id)) = self
-                .command_tracker
-                .authorization(&update_owner)
-                .map(|(command_id, authorization_id, operation_id)| {
-                    (
-                        command_id,
-                        authorization_id.to_owned(),
-                        operation_id.to_owned(),
-                    )
-                })
+            if let Some((command_id, authorization_id, operation_id)) =
+                self.app.commands.authorization(&update_owner).map(
+                    |(command_id, authorization_id, operation_id)| {
+                        (
+                            command_id,
+                            authorization_id.to_owned(),
+                            operation_id.to_owned(),
+                        )
+                    },
+                )
                 && !self
                     .update_workspace_mut()
                     .projection
@@ -2562,7 +2606,7 @@ impl NativeShell {
     }
 
     fn active_composer_running_mode(&self) -> ComposerRunningMode {
-        self.workspace_store.active().composer_running_mode
+        self.app.workspaces.active().composer_running_mode
     }
 
     fn set_active_composer_running_mode(
@@ -2570,7 +2614,7 @@ impl NativeShell {
         mode: ComposerRunningMode,
         cx: &mut Context<Self>,
     ) {
-        self.workspace_store.active_mut().composer_running_mode = mode;
+        self.app.workspaces.active_mut().composer_running_mode = mode;
         self.notify_composer_pane(cx);
     }
 
@@ -2629,20 +2673,21 @@ impl NativeShell {
     }
 
     fn notify_toast_host(&self, cx: &mut Context<Self>) {
-        let notice_owner: Arc<str> = match self.workspace_store.active_key() {
+        let notice_owner: Arc<str> = match self.app.workspaces.active_key() {
             WorkspaceKey::Home => Arc::from("workspace:home"),
             WorkspaceKey::Session(session_id) => {
                 Arc::from(format!("session:{}", session_id.as_str()))
             }
         };
         let notice = self
-            .workspace_store
+            .app
+            .workspaces
             .active()
             .preference_notice
             .as_ref()
             .map(|message| ToastNotice {
                 session_id: notice_owner,
-                revision: self.workspace_store.active().preference_notice_revision,
+                revision: self.app.workspaces.active().preference_notice_revision,
                 message: Arc::from(message.as_str()),
             });
         self.toast_host.update(cx, |host, cx| {
@@ -2677,12 +2722,13 @@ impl NativeShell {
 
     fn schedule_preferences(&mut self) {
         if let Some(writer) = &self.preference_writer {
-            writer.schedule(self.preferences.clone());
+            writer.schedule(self.app.preferences.clone());
         }
     }
 
     fn remember_thinking_selection(&mut self, session_id: &str, selection: DesktopThinkingLevel) {
         if self
+            .app
             .preferences
             .set_thinking_level_for_session(session_id, selection)
         {
@@ -2751,7 +2797,7 @@ impl NativeShell {
                 u32::from(viewport.height),
                 PanelVisibility {
                     sessions: true,
-                    context: self.preferences.context_panel_visible,
+                    context: self.app.preferences.context_panel_visible,
                 },
             )
             .sidebar
@@ -2764,7 +2810,7 @@ impl NativeShell {
             }
             return;
         }
-        self.preferences.sessions_panel_visible = !self.preferences.sessions_panel_visible;
+        self.app.preferences.sessions_panel_visible = !self.app.preferences.sessions_panel_visible;
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
         if self.focus.active() == FocusTarget::Composer {
@@ -2777,13 +2823,14 @@ impl NativeShell {
     }
 
     fn visible_conversation_count(&self) -> usize {
-        self.workspace_store
+        self.app
+            .workspaces
             .active()
             .projection
             .as_ref()
             .map_or(0, |projection| {
                 projection.conversation().blocks().len()
-                    + usize::from(self.workspace_store.active().composer.submitted().is_some())
+                    + usize::from(self.app.workspaces.active().composer.submitted().is_some())
                     + projection.messages().len()
                     + projection.tools().len()
             })
@@ -2796,7 +2843,7 @@ impl NativeShell {
                 u32::from(viewport.width),
                 u32::from(viewport.height),
                 PanelVisibility {
-                    sessions: self.preferences.sessions_panel_visible,
+                    sessions: self.app.preferences.sessions_panel_visible,
                     context: true,
                 },
             )
@@ -2810,7 +2857,7 @@ impl NativeShell {
             }
             return;
         }
-        self.preferences.context_panel_visible = !self.preferences.context_panel_visible;
+        self.app.preferences.context_panel_visible = !self.app.preferences.context_panel_visible;
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
         if self.focus.active() == FocusTarget::Composer {
@@ -2834,7 +2881,8 @@ impl NativeShell {
                 projection.lifecycle() == DesktopProjectionLifecycle::NeedsResync
             })
             || self
-                .command_tracker
+                .app
+                .commands
                 .contains(&self.update_workspace_key(), &DesktopCommandIntent::Resync)
         {
             return;
@@ -2860,7 +2908,7 @@ impl NativeShell {
 
     fn submit_composer(&mut self, cx: &mut Context<Self>) {
         let selected_model_supports_images = {
-            let workspace = self.workspace_store.active();
+            let workspace = self.app.workspaces.active();
             workspace
                 .project
                 .models
@@ -2868,14 +2916,10 @@ impl NativeShell {
                 .find(|model| model.id == workspace.project.selected_model_id)
                 .is_some_and(|model| model.supports_images)
         };
-        if !self
-            .workspace_store
-            .active()
-            .composer_attachments
-            .is_empty()
+        if !self.app.workspaces.active().composer_attachments.is_empty()
             && !selected_model_supports_images
         {
-            self.workspace_store.active_mut().set_preference_notice(
+            self.app.workspaces.active_mut().set_preference_notice(
                 "Selected model does not support image attachments; the draft was retained.".into(),
             );
             self.notify_composer_pane(cx);
@@ -2890,12 +2934,14 @@ impl NativeShell {
             return;
         };
         let has_attachments = !self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .composer_attachments
             .is_empty();
         let payload = match self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .composer
             .begin_submit_with_attachments(
@@ -2906,7 +2952,8 @@ impl NativeShell {
             Ok(payload) => payload.to_owned(),
             Err(error) => {
                 self.complete_active_command(command_id, &intent);
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(error.to_string());
                 self.notify_composer_pane(cx);
@@ -2916,11 +2963,12 @@ impl NativeShell {
             }
         };
         let thinking_level = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .thinking_selection
             .explicit();
-        let target = self.workspace_store.active_mut().prompt_target();
+        let target = self.app.workspaces.active_mut().prompt_target();
         let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
@@ -2929,7 +2977,7 @@ impl NativeShell {
                         command_id,
                         target,
                         &payload,
-                        &self.workspace_store.active_mut().composer_attachments,
+                        &self.app.workspaces.active_mut().composer_attachments,
                         thinking_level,
                     )
                     .map_err(|error| error.to_string())
@@ -2938,7 +2986,8 @@ impl NativeShell {
         if let Err(message) = admission {
             self.complete_active_command(command_id, &intent);
             let _ = self
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .rejected(command_id, message);
@@ -2951,7 +3000,8 @@ impl NativeShell {
 
     fn submit_primary_composer(&mut self, cx: &mut Context<Self>) {
         if self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
@@ -2965,7 +3015,8 @@ impl NativeShell {
 
     fn choose_composer_attachments(&mut self, cx: &mut Context<Self>) {
         if let Some(reason) = self.composer_attachment_disabled_reason() {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice(reason.to_string());
             self.notify_toast_host(cx);
@@ -2987,7 +3038,8 @@ impl NativeShell {
             Ok(Ok(None)) => {}
             Ok(Err(_)) | Err(_) => {
                 let _ = this.update(cx, |this, cx| {
-                    this.workspace_store
+                    this.app
+                        .workspaces
                         .active_mut()
                         .set_preference_notice("The file picker could not be opened.".into());
                     this.notify_toast_host(cx);
@@ -3000,7 +3052,8 @@ impl NativeShell {
 
     fn choose_project_directory(&mut self, cx: &mut Context<Self>) {
         if !self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .project_directory_editable()
         {
@@ -3031,7 +3084,8 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         if !self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .project_directory_editable()
         {
@@ -3041,7 +3095,7 @@ impl NativeShell {
             ProjectDirectoryPickerOutcome::Selected(paths) => {
                 let mut paths = paths.into_iter();
                 let Some(path) = paths.next() else {
-                    self.workspace_store.active_mut().set_preference_notice(
+                    self.app.workspaces.active_mut().set_preference_notice(
                         "The directory picker returned no project directory.".into(),
                     );
                     self.notify_toast_host(cx);
@@ -3049,7 +3103,7 @@ impl NativeShell {
                     return;
                 };
                 if paths.next().is_some() {
-                    self.workspace_store.active_mut().set_preference_notice(
+                    self.app.workspaces.active_mut().set_preference_notice(
                         "The directory picker returned more than one project directory.".into(),
                     );
                     self.notify_toast_host(cx);
@@ -3060,7 +3114,8 @@ impl NativeShell {
             }
             ProjectDirectoryPickerOutcome::Cancelled => {}
             ProjectDirectoryPickerOutcome::Failed => {
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice("The directory picker could not be opened.".into());
                 self.notify_toast_host(cx);
@@ -3071,13 +3126,14 @@ impl NativeShell {
 
     fn set_project_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) -> bool {
         if !self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .project_directory_editable()
         {
             return false;
         }
-        self.workspace_store.active_mut().draft_workspace_selection =
+        self.app.workspaces.active_mut().draft_workspace_selection =
             CodingAgentWorkspaceSelection::project(path);
         self.notify_composer_pane(cx);
         cx.notify();
@@ -3086,13 +3142,14 @@ impl NativeShell {
 
     fn clear_project_directory(&mut self, cx: &mut Context<Self>) -> bool {
         if !self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .project_directory_editable()
         {
             return false;
         }
-        self.workspace_store.active_mut().draft_workspace_selection =
+        self.app.workspaces.active_mut().draft_workspace_selection =
             self.projectless_workspace_selection.clone();
         self.notify_composer_pane(cx);
         cx.notify();
@@ -3101,7 +3158,8 @@ impl NativeShell {
 
     fn add_composer_attachments(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut candidate = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .composer_attachments
             .clone();
@@ -3111,21 +3169,23 @@ impl NativeShell {
             }
         }
         if let Err(error) = validate_prompt_attachments(&candidate) {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice(error.to_string());
             self.notify_toast_host(cx);
             cx.notify();
             return;
         }
-        self.workspace_store.active_mut().composer_attachments = candidate;
+        self.app.workspaces.active_mut().composer_attachments = candidate;
         self.notify_composer_pane(cx);
         cx.notify();
     }
 
     fn remove_composer_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.workspace_store.active_mut().composer_attachments.len() {
-            self.workspace_store
+        if index < self.app.workspaces.active_mut().composer_attachments.len() {
+            self.app
+                .workspaces
                 .active_mut()
                 .composer_attachments
                 .remove(index);
@@ -3136,18 +3196,20 @@ impl NativeShell {
 
     fn composer_attachment_disabled_reason(&self) -> Option<&'static str> {
         let supports_images = self
-            .workspace_store
+            .app
+            .workspaces
             .active()
             .project
             .models
             .iter()
-            .find(|model| model.id == self.workspace_store.active().project.selected_model_id)
+            .find(|model| model.id == self.app.workspaces.active().project.selected_model_id)
             .is_some_and(|model| model.supports_images);
         if !supports_images {
             return Some("Selected model does not support image attachments.");
         }
         let snapshot = self
-            .workspace_store
+            .app
+            .workspaces
             .active()
             .projection
             .as_ref()
@@ -3156,9 +3218,9 @@ impl NativeShell {
             return Some("Attachments are unavailable while an operation is running.");
         }
         if matches!(
-            self.workspace_store.active().composer.admission(),
+            self.app.workspaces.active().composer.admission(),
             ComposerAdmission::Pending { .. }
-        ) || self.workspace_store.active().composer.submitted().is_some()
+        ) || self.app.workspaces.active().composer.submitted().is_some()
         {
             return Some("Attachments are unavailable while a prompt is starting.");
         }
@@ -3182,12 +3244,13 @@ impl NativeShell {
 
     fn submit_active_control(&mut self, kind: ComposerSubmissionKind, cx: &mut Context<Self>) {
         if !self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .composer_attachments
             .is_empty()
         {
-            self.workspace_store.active_mut().set_preference_notice(
+            self.app.workspaces.active_mut().set_preference_notice(
                 "Attachments cannot be added to a running operation; the draft was retained."
                     .into(),
             );
@@ -3197,7 +3260,7 @@ impl NativeShell {
             return;
         }
         if kind == ComposerSubmissionKind::Prompt {
-            self.workspace_store.active_mut().set_preference_notice(
+            self.app.workspaces.active_mut().set_preference_notice(
                 "Prompt submissions must use the idle composer action.".into(),
             );
             self.notify_toast_host(cx);
@@ -3217,7 +3280,8 @@ impl NativeShell {
             return;
         };
         let payload = match self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .composer
             .begin_submit(command_id, kind)
@@ -3225,7 +3289,8 @@ impl NativeShell {
             Ok(payload) => payload.to_owned(),
             Err(error) => {
                 self.complete_active_command(command_id, &intent);
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(error.to_string());
                 self.notify_composer_pane(cx);
@@ -3235,7 +3300,8 @@ impl NativeShell {
             }
         };
         let session_id = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
@@ -3263,7 +3329,8 @@ impl NativeShell {
         if let Err(message) = admission {
             self.complete_active_command(command_id, &intent);
             let _ = self
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .rejected(command_id, message);
@@ -3281,13 +3348,15 @@ impl NativeShell {
             return;
         }
         let Some(operation_id) = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
             .and_then(|projection| projection.snapshot().active_operation.clone())
         else {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("No active operation is available to abort.".into());
             self.notify_toast_host(cx);
@@ -3295,7 +3364,8 @@ impl NativeShell {
             return;
         };
         let session_id = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
@@ -3320,13 +3390,15 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice("Abort requested…".into());
             }
             Err(message) => {
                 self.complete_active_command(command_id, &intent);
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(message);
             }
@@ -3342,19 +3414,21 @@ impl NativeShell {
             return;
         }
         if self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
             .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .submitted()
                 .is_some()
         {
-            self.workspace_store.active_mut().set_preference_notice(
+            self.app.workspaces.active_mut().set_preference_notice(
                 "Reload is available only while the runtime is idle.".into(),
             );
             self.notify_toast_host(cx);
@@ -3366,7 +3440,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let target = self.workspace_store.active_mut().runtime_owner_target();
+        let target = self.app.workspaces.active_mut().runtime_owner_target();
         let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
@@ -3377,13 +3451,15 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice("Reloading local resources…".into());
             }
             Err(message) => {
                 self.complete_active_command(command_id, &intent);
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(message);
             }
@@ -3405,19 +3481,21 @@ impl NativeShell {
             return;
         }
         if self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
             .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .submitted()
                 .is_some()
         {
-            self.workspace_store.active_mut().set_preference_notice(
+            self.app.workspaces.active_mut().set_preference_notice(
                 "Recovery actions are available only while the runtime is idle.".into(),
             );
             self.notify_toast_host(cx);
@@ -3455,7 +3533,8 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(format!(
                         "Submitting recovery {}…",
@@ -3464,7 +3543,8 @@ impl NativeShell {
             }
             Err(message) => {
                 self.complete_active_command(command_id, &intent);
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(message);
             }
@@ -3480,7 +3560,7 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         let selected_profile_id = {
-            let workspace = self.workspace_store.active();
+            let workspace = self.app.workspaces.active();
             workspace
                 .projection
                 .as_ref()
@@ -3496,7 +3576,7 @@ impl NativeShell {
         };
         let already_selected = match selection {
             DesktopRuntimeSelectionKind::Model => {
-                id == self.workspace_store.active_mut().project.selected_model_id
+                id == self.app.workspaces.active_mut().project.selected_model_id
             }
             DesktopRuntimeSelectionKind::SessionProfile => id == selected_profile_id,
         };
@@ -3509,19 +3589,21 @@ impl NativeShell {
             return;
         }
         if self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
             .is_some_and(|projection| projection.snapshot().active_operation.is_some())
             || self
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .submitted()
                 .is_some()
         {
-            self.workspace_store.active_mut().set_preference_notice(
+            self.app.workspaces.active_mut().set_preference_notice(
                 "Model and profile selection is available only while idle.".into(),
             );
             self.notify_toast_host(cx);
@@ -3534,7 +3616,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let target = self.workspace_store.active_mut().runtime_owner_target();
+        let target = self.app.workspaces.active_mut().runtime_owner_target();
         let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
@@ -3543,7 +3625,8 @@ impl NativeShell {
                         command_id,
                         target,
                         &id,
-                        self.workspace_store
+                        self.app
+                            .workspaces
                             .active_mut()
                             .thinking_selection
                             .explicit(),
@@ -3557,13 +3640,15 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice("Applying selection…".into());
             }
             Err(message) => {
                 self.complete_active_command(command_id, &intent);
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(message);
             }
@@ -3575,7 +3660,7 @@ impl NativeShell {
 
     fn select_thinking_level(&mut self, selection: DesktopThinkingLevel, cx: &mut Context<Self>) {
         let options = {
-            let workspace = self.workspace_store.active();
+            let workspace = self.app.workspaces.active();
             conversation_header_thinking_menu(
                 workspace
                     .project
@@ -3587,13 +3672,14 @@ impl NativeShell {
         if !options.iter().any(|option| option.selection == selection) {
             return;
         }
-        if self.workspace_store.active_mut().thinking_selection == selection {
+        if self.app.workspaces.active_mut().thinking_selection == selection {
             return;
         }
-        self.workspace_store.active_mut().thinking_selection = selection;
-        self.workspace_store.active_mut().thinking_hint = None;
+        self.app.workspaces.active_mut().thinking_selection = selection;
+        self.app.workspaces.active_mut().thinking_hint = None;
         let session_id = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
@@ -3601,15 +3687,17 @@ impl NativeShell {
         if let Some(session_id) = session_id.as_deref() {
             self.remember_thinking_selection(session_id, selection);
         }
-        let label = self.workspace_store.active_mut().thinking_selection.label(
-            self.workspace_store
+        let label = self.app.workspaces.active_mut().thinking_selection.label(
+            self.app
+                .workspaces
                 .active_mut()
                 .project
                 .settings
                 .default_thinking_level
                 .as_deref(),
         );
-        self.workspace_store
+        self.app
+            .workspaces
             .active_mut()
             .set_preference_notice(format!(
                 "{} will use thinking {label}.",
@@ -3627,7 +3715,7 @@ impl NativeShell {
 
     fn cycle_thinking_selection(&mut self, cx: &mut Context<Self>) {
         let options = {
-            let workspace = self.workspace_store.active();
+            let workspace = self.app.workspaces.active();
             conversation_header_thinking_menu(
                 workspace
                     .project
@@ -3639,7 +3727,7 @@ impl NativeShell {
         let Some(next) = options
             .iter()
             .position(|option| {
-                option.selection == self.workspace_store.active_mut().thinking_selection
+                option.selection == self.app.workspaces.active_mut().thinking_selection
             })
             .map(|index| options[(index + 1) % options.len()].selection)
             .or_else(|| options.first().map(|option| option.selection))
@@ -3679,13 +3767,15 @@ impl NativeShell {
         );
         match admission {
             Ok(()) => {
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice("Authorization decision pending…".into());
             }
             Err(message) => {
                 self.complete_active_command(command_id, &intent);
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(message);
             }
@@ -3696,7 +3786,7 @@ impl NativeShell {
     }
 
     fn copy_selected_conversation(&mut self, cx: &mut Context<Self>) {
-        let workspace = self.workspace_store.active_mut();
+        let workspace = self.app.workspaces.active_mut();
         let Some(projection) = workspace.projection.as_ref() else {
             return;
         };
@@ -3704,7 +3794,7 @@ impl NativeShell {
             .conversation_controller
             .copy_selected(projection.conversation())
         else {
-            self.workspace_store.active_mut().set_preference_notice(
+            self.app.workspaces.active_mut().set_preference_notice(
                 "Select a committed conversation block before copying.".into(),
             );
             self.notify_toast_host(cx);
@@ -3719,7 +3809,7 @@ impl NativeShell {
         &self,
         block_id: &str,
     ) -> Option<ConversationFullMessageView> {
-        let projection = self.workspace_store.active().projection.as_ref()?;
+        let projection = self.app.workspaces.active().projection.as_ref()?;
         if let Some(block) = projection.conversation().block(block_id) {
             return Some(ConversationFullMessageView {
                 block_id: block_id.to_owned(),
@@ -3730,7 +3820,8 @@ impl NativeShell {
             });
         }
         if let Some(message) = self
-            .workspace_store
+            .app
+            .workspaces
             .active()
             .projection
             .as_ref()?
@@ -3759,7 +3850,8 @@ impl NativeShell {
                     || tool.detail.len().saturating_add(tool.arguments.len()) > MAX_COPY_BYTES,
             });
         }
-        self.workspace_store
+        self.app
+            .workspaces
             .active()
             .conversation_controller
             .row_for_block(block_id)
@@ -3773,7 +3865,8 @@ impl NativeShell {
 
     fn copy_conversation_row(&mut self, block_id: &str, cx: &mut Context<Self>) {
         let Some(message) = self.conversation_full_message_view(block_id) else {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Message is no longer available to copy.".into());
             self.notify_toast_host(cx);
@@ -3785,12 +3878,14 @@ impl NativeShell {
 
     fn copy_tool_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
         let Some(row) = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .conversation_controller
             .row_for_block(block_id)
         else {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Tool details are no longer available to copy.".into());
             self.notify_toast_host(cx);
@@ -3833,7 +3928,8 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         let Some(message) = self.conversation_full_message_view(block_id) else {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Message is no longer available to open.".into());
             self.notify_toast_host(cx);
@@ -3855,7 +3951,8 @@ impl NativeShell {
     }
 
     fn toggle_conversation_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
-        self.workspace_store
+        self.app
+            .workspaces
             .active_mut()
             .conversation_controller
             .toggle_details(block_id);
@@ -3865,13 +3962,14 @@ impl NativeShell {
     }
 
     pub(super) fn select_adjacent_conversation(&mut self, reverse: bool, cx: &mut Context<Self>) {
-        let workspace = &mut self.workspace_store.active_mut();
+        let workspace = &mut self.app.workspaces.active_mut();
         let Some(projection) = workspace.projection.as_ref() else {
             return;
         };
         let row_count = workspace.conversation_controller.row_count();
         if row_count == 0 {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("The conversation is empty.".into());
             self.notify_toast_host(cx);
@@ -3907,13 +4005,15 @@ impl NativeShell {
 
     fn copy_keyboard_selected_conversation(&mut self, cx: &mut Context<Self>) {
         let Some(block_id) = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .conversation_controller
             .selected_block_id()
             .map(str::to_owned)
         else {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Select a conversation message before copying.".into());
             self.notify_toast_host(cx);
@@ -3924,7 +4024,8 @@ impl NativeShell {
 
     fn toggle_keyboard_selected_conversation_details(&mut self, cx: &mut Context<Self>) {
         let Some(block_id) = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .conversation_controller
             .selected_block_id()
@@ -3933,7 +4034,8 @@ impl NativeShell {
             return;
         };
         let has_details = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .conversation_controller
             .row_for_block(&block_id)
@@ -3954,7 +4056,8 @@ impl NativeShell {
         if self.active_command_contains_where(|pending| {
             matches!(pending, DesktopCommandIntent::FileReview { .. })
         }) {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Another file review is already pending.".into());
             self.notify_toast_host(cx);
@@ -3967,14 +4070,16 @@ impl NativeShell {
             return;
         };
         let Some(session_id) = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
             .map(|projection| projection.snapshot().session.session_id.clone())
         else {
             self.complete_active_command(command_id, &intent);
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("File review requires an open session.".into());
             self.notify_inspector_pane(cx);
@@ -3992,15 +4097,17 @@ impl NativeShell {
             });
         match admission {
             Ok(()) => {
-                self.workspace_store.active_mut().file_review =
+                self.app.workspaces.active_mut().file_review =
                     Arc::new(DesktopFileReviewState::Loading(request));
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice("Loading changed-file review…".into());
             }
             Err(message) => {
                 self.complete_active_command(command_id, &intent);
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(message);
             }
@@ -4011,9 +4118,9 @@ impl NativeShell {
 
     fn copy_review_path(&mut self, cx: &mut Context<Self>) {
         let DesktopFileReviewState::Ready(document) =
-            self.workspace_store.active_mut().file_review.as_ref()
+            self.app.workspaces.active_mut().file_review.as_ref()
         else {
-            self.workspace_store.active_mut().set_preference_notice(
+            self.app.workspaces.active_mut().set_preference_notice(
                 "Load a changed-file review before copying its path.".into(),
             );
             self.notify_toast_host(cx);
@@ -4022,7 +4129,8 @@ impl NativeShell {
         };
         let export = document.path_clipboard_export();
         cx.write_to_clipboard(ClipboardItem::new_string(export.text));
-        self.workspace_store
+        self.app
+            .workspaces
             .active_mut()
             .set_preference_notice(if export.truncated {
                 "Bounded changed-file path copied (truncated).".into()
@@ -4035,9 +4143,10 @@ impl NativeShell {
 
     fn copy_file_review(&mut self, cx: &mut Context<Self>) {
         let DesktopFileReviewState::Ready(document) =
-            self.workspace_store.active_mut().file_review.as_ref()
+            self.app.workspaces.active_mut().file_review.as_ref()
         else {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Load a changed-file review before copying it.".into());
             self.notify_toast_host(cx);
@@ -4046,7 +4155,8 @@ impl NativeShell {
         };
         let export = document.clipboard_export();
         cx.write_to_clipboard(ClipboardItem::new_string(export.text));
-        self.workspace_store
+        self.app
+            .workspaces
             .active_mut()
             .set_preference_notice(if export.truncated {
                 "Bounded file review copied (truncated at the clipboard limit).".into()
@@ -4058,8 +4168,8 @@ impl NativeShell {
     }
 
     fn open_review_in_external_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.preferences.external_editor.clone() else {
-            self.workspace_store.active_mut().set_preference_notice(
+        let Some(editor) = self.app.preferences.external_editor.clone() else {
+            self.app.workspaces.active_mut().set_preference_notice(
                 "Configure desktop.external_editor with a program and literal argv first.".into(),
             );
             self.notify_toast_host(cx);
@@ -4067,9 +4177,10 @@ impl NativeShell {
             return;
         };
         let DesktopFileReviewState::Ready(document) =
-            self.workspace_store.active_mut().file_review.as_ref()
+            self.app.workspaces.active_mut().file_review.as_ref()
         else {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Load a changed-file review before opening it.".into());
             self.notify_toast_host(cx);
@@ -4077,7 +4188,8 @@ impl NativeShell {
             return;
         };
         let Some(target) = document.external_editor_target.clone() else {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("This review has no external-editor target.".into());
             self.notify_toast_host(cx);
@@ -4094,14 +4206,16 @@ impl NativeShell {
             return;
         };
         let Some(session_id) = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
             .map(|projection| projection.snapshot().session.session_id.clone())
         else {
             self.complete_active_command(command_id, &intent);
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("External editor requires an open session.".into());
             self.notify_inspector_pane(cx);
@@ -4119,7 +4233,8 @@ impl NativeShell {
             });
         match admission {
             Ok(()) => {
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(format!(
                         "Validating {} before editor launch…",
@@ -4128,7 +4243,8 @@ impl NativeShell {
             }
             Err(message) => {
                 self.complete_active_command(command_id, &intent);
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(message);
             }
@@ -4246,7 +4362,8 @@ impl NativeShell {
             return;
         }
         if !self.focus.request(target, layout) {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice(format!(
                     "{} is unavailable at the current window width.",
@@ -4277,7 +4394,7 @@ impl NativeShell {
         let Some(modal) = self.active_modal else {
             return false;
         };
-        self.workspace_store.active_mut().set_preference_notice(
+        self.app.workspaces.active_mut().set_preference_notice(
             match modal {
                 DesktopModalKind::Authorization => {
                     "Resolve the authorization dialog before using workspace shortcuts."
@@ -4298,7 +4415,8 @@ impl NativeShell {
 
     fn follow_latest(&mut self, cx: &mut Context<Self>) {
         let visible_count = self.visible_conversation_count();
-        self.workspace_store
+        self.app
+            .workspaces
             .active_mut()
             .conversation_controller
             .follow_latest(visible_count);
@@ -4308,7 +4426,8 @@ impl NativeShell {
 
     fn reconcile_conversation_scroll(&mut self, cx: &mut Context<Self>) {
         if self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .conversation_controller
             .reconcile_scroll()
@@ -4319,8 +4438,9 @@ impl NativeShell {
     }
 
     fn review_next_file(&mut self, cx: &mut Context<Self>) {
-        let Some(projection) = self.workspace_store.active().projection.as_ref() else {
-            self.workspace_store
+        let Some(projection) = self.app.workspaces.active().projection.as_ref() else {
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("No session is open for file review.".into());
             cx.notify();
@@ -4328,13 +4448,14 @@ impl NativeShell {
         };
         let changes = &projection.snapshot().context.changes;
         if changes.is_empty() {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("No changed file is available for review.".into());
             cx.notify();
             return;
         }
-        let current = match self.workspace_store.active().file_review.as_ref() {
+        let current = match self.app.workspaces.active().file_review.as_ref() {
             DesktopFileReviewState::Empty => None,
             DesktopFileReviewState::Loading(request)
             | DesktopFileReviewState::Failed { request, .. } => Some(&request.change),
@@ -4355,7 +4476,8 @@ impl NativeShell {
 
     fn submit_latest_recovery(&mut self, action: DesktopRecoveryAction, cx: &mut Context<Self>) {
         let identity = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
@@ -4366,7 +4488,8 @@ impl NativeShell {
             })
             .and_then(|recovery| recovery.identity.clone());
         let Some(identity) = identity else {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("No authoritative pending recovery is available.".into());
             self.notify_toast_host(cx);
@@ -4401,7 +4524,8 @@ impl NativeShell {
             }
             DesktopPaletteCommand::SubmitPrompt => {
                 if self
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active_mut()
                     .projection
                     .as_ref()
@@ -4437,14 +4561,15 @@ impl NativeShell {
                 self.submit_latest_recovery(DesktopRecoveryAction::Abort, cx);
             }
             DesktopPaletteCommand::ToggleReducedMotion => {
-                self.preferences.reduced_motion = !self.preferences.reduced_motion;
+                self.app.preferences.reduced_motion = !self.app.preferences.reduced_motion;
                 self.schedule_preferences();
-                let notice = if self.preferences.reduced_motion {
+                let notice = if self.app.preferences.reduced_motion {
                     "Reduced motion enabled; desktop transitions remain static.".into()
                 } else {
                     "Reduced motion disabled; idle presentation remains static.".into()
                 };
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active_mut()
                     .set_preference_notice(notice);
                 self.notify_toast_host(cx);
@@ -4460,13 +4585,15 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         if self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
             .is_some_and(|projection| !projection.snapshot().pending_authorizations.is_empty())
         {
-            self.workspace_store
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Resolve authorization before opening commands.".into());
             self.authorization_focus.focus(window, cx);
@@ -4543,7 +4670,7 @@ impl NativeShell {
         if let Some(modal) = self.active_modal {
             match modal {
                 DesktopModalKind::Authorization => {
-                    self.workspace_store.active_mut().set_preference_notice(
+                    self.app.workspaces.active_mut().set_preference_notice(
                         "Authorization requires Deny, Allow once, or Allow for operation.".into(),
                     );
                     self.authorization_focus.focus(window, cx);
@@ -4562,11 +4689,12 @@ impl NativeShell {
         if self.active_drawer.is_some() {
             self.dismiss_drawer(window, cx, true);
         } else if !matches!(
-            self.workspace_store.active_mut().file_review.as_ref(),
+            self.app.workspaces.active_mut().file_review.as_ref(),
             DesktopFileReviewState::Empty
         ) {
-            self.workspace_store.active_mut().file_review = Arc::new(DesktopFileReviewState::Empty);
-            self.workspace_store
+            self.app.workspaces.active_mut().file_review = Arc::new(DesktopFileReviewState::Empty);
+            self.app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Closed the changed-file review.".into());
             cx.notify();
@@ -4699,7 +4827,8 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         let Some(request) = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
@@ -4757,7 +4886,7 @@ impl NativeShell {
         measurement: &ConversationRowMeasurement,
         cx: &mut Context<Self>,
     ) {
-        let workspace = &mut self.workspace_store.active_mut();
+        let workspace = &mut self.app.workspaces.active_mut();
         let Some(projection) = workspace.projection.as_ref() else {
             return;
         };
@@ -4772,7 +4901,7 @@ impl NativeShell {
     }
 
     fn refresh_conversation_rows_at_width(&mut self, layout_width: u32, cx: &mut Context<Self>) {
-        let workspace = &mut self.workspace_store.active_mut();
+        let workspace = &mut self.app.workspaces.active_mut();
         let Some(projection) = workspace.projection.as_ref() else {
             return;
         };
@@ -4790,7 +4919,8 @@ impl NativeShell {
 
     fn refresh_conversation_rows_at_current_width(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(layout_width) = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .conversation_controller
             .active_width_bucket()
@@ -4807,7 +4937,8 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         let Some((delay, deadline)) = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .conversation_controller
             .arm_height_refresh(refresh)
@@ -4818,7 +4949,8 @@ impl NativeShell {
             cx.background_executor().timer(delay).await;
             let _ = this.update(cx, |this, cx| {
                 if this
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active_mut()
                     .conversation_controller
                     .fire_height_refresh(deadline)
@@ -4855,14 +4987,16 @@ impl NativeShell {
 
     fn sessions_pane_view_model(&self) -> SessionsPaneViewModel {
         let snapshot = self
-            .workspace_store
+            .app
+            .workspaces
             .active()
             .projection
             .as_ref()
             .map(DesktopProjection::snapshot);
         let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
         let mut runtime_states = self
-            .workspace_store
+            .app
+            .workspaces
             .iter()
             .filter_map(|(key, workspace)| {
                 let WorkspaceKey::Session(session_id) = key else {
@@ -4877,10 +5011,10 @@ impl NativeShell {
             .collect::<Vec<_>>();
         runtime_states.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         SessionsPaneViewModel {
-            panel_width: self.preferences.sessions_panel_width,
-            project_groups: Arc::from(self.project_catalog.project_groups()),
-            omitted_sessions: self.project_catalog.omitted(),
-            catalog_state: self.project_catalog.state().clone(),
+            panel_width: self.app.preferences.sessions_panel_width,
+            project_groups: Arc::from(self.app.catalog.project_groups()),
+            omitted_sessions: self.app.catalog.omitted(),
+            catalog_state: self.app.catalog.state().clone(),
             active_session_id: Arc::from(
                 snapshot
                     .map(|snapshot| snapshot.session.session_id.as_str())
@@ -4889,9 +5023,9 @@ impl NativeShell {
             skills_active: self.center_surface == CenterSurface::Skills,
             runtime_states: Arc::from(runtime_states),
             composer_running,
-            awaiting_prompt_start: self.workspace_store.active().composer.submitted().is_some()
+            awaiting_prompt_start: self.app.workspaces.active().composer.submitted().is_some()
                 && !composer_running,
-            session_pending: self.command_tracker.contains_anywhere(|intent| {
+            session_pending: self.app.commands.contains_anywhere(|intent| {
                 matches!(
                     intent,
                     DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
@@ -4900,28 +5034,29 @@ impl NativeShell {
             active_status: self.semantic_status(),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Sessions),
-            reduced_motion: self.preferences.reduced_motion,
+            reduced_motion: self.app.preferences.reduced_motion,
         }
     }
 
     fn composer_pane_view_model(&self) -> ComposerPaneViewModel {
         let snapshot = self
-            .workspace_store
+            .app
+            .workspaces
             .active()
             .projection
             .as_ref()
             .map(DesktopProjection::snapshot);
         let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
         let composer_pending = matches!(
-            self.workspace_store.active().composer.admission(),
+            self.app.workspaces.active().composer.admission(),
             ComposerAdmission::Pending { .. }
         );
         let awaiting_prompt_start =
-            self.workspace_store.active().composer.submitted().is_some() && !composer_running;
+            self.app.workspaces.active().composer.submitted().is_some() && !composer_running;
         let attachment_disabled_reason = self.composer_attachment_disabled_reason();
-        let project_directory_state = if self.workspace_store.active().projection.is_some() {
+        let project_directory_state = if self.app.workspaces.active().projection.is_some() {
             desktop_controls::DesktopProjectDirectoryState::Locked
-        } else if !self.workspace_store.active().project_directory_editable()
+        } else if !self.app.workspaces.active().project_directory_editable()
             || composer_pending
             || awaiting_prompt_start
         {
@@ -4929,7 +5064,7 @@ impl NativeShell {
         } else {
             desktop_controls::DesktopProjectDirectoryState::Editable
         };
-        let project_directory_path = self.workspace_store.active().project_directory();
+        let project_directory_path = self.app.workspaces.active().project_directory();
         ComposerPaneViewModel {
             composer_pending,
             composer_running,
@@ -4947,7 +5082,8 @@ impl NativeShell {
                 is_projectless: project_directory_path.is_none(),
             },
             attachments: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .composer_attachments
                 .iter()
@@ -4962,11 +5098,11 @@ impl NativeShell {
                 .collect::<Vec<_>>()
                 .into(),
             attachments_enabled: attachment_disabled_reason.is_none()
-                && self.workspace_store.active().composer_attachments.len()
-                    < MAX_PROMPT_ATTACHMENTS,
+                && self.app.workspaces.active().composer_attachments.len() < MAX_PROMPT_ATTACHMENTS,
             attachment_disabled_reason: attachment_disabled_reason.map(Arc::from),
             rejection: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .composer
                 .rejection()
@@ -4981,40 +5117,42 @@ impl NativeShell {
     }
 
     fn inspector_pane_view_model(&self) -> InspectorPaneViewModel {
-        let Some(projection) = self.workspace_store.active().projection.as_ref() else {
+        let Some(projection) = self.app.workspaces.active().projection.as_ref() else {
             return InspectorPaneViewModel {
-                panel_width: self.preferences.context_panel_width,
+                panel_width: self.app.preferences.context_panel_width,
                 presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Inspector),
                 keyboard_focus_visible: self.keyboard_focus_visible(),
-                selected_section: self.workspace_store.active().inspector_section,
+                selected_section: self.app.workspaces.active().inspector_section,
                 composer_running: false,
-                awaiting_prompt_start: self.workspace_store.active().composer.submitted().is_some(),
+                awaiting_prompt_start: self.app.workspaces.active().composer.submitted().is_some(),
                 recovery_pending: false,
                 file_review_pending: false,
                 external_editor_pending: false,
-                external_editor_configured: self.preferences.external_editor.is_some(),
+                external_editor_configured: self.app.preferences.external_editor.is_some(),
                 changed_files: Vec::new(),
                 change_count: 0,
-                file_review: Arc::clone(&self.workspace_store.active().file_review),
-                runtime_attention_count: self.workspace_store.active().project.diagnostics.len(),
+                file_review: Arc::clone(&self.app.workspaces.active().file_review),
+                runtime_attention_count: self.app.workspaces.active().project.diagnostics.len(),
                 task_state: "ready".into(),
                 active_operation: "—".into(),
                 operation_count: 0,
                 delegation_count: 0,
                 selected_model: truncate_label(
-                    &self.workspace_store.active().project.selected_model_id,
+                    &self.app.workspaces.active().project.selected_model_id,
                     28,
                 ),
                 profile: truncate_label(
-                    self.workspace_store
+                    self.app
+                        .workspaces
                         .active()
                         .project
                         .default_agent_profile_id
                         .as_str(),
                     28,
                 ),
-                thinking: self.workspace_store.active().thinking_selection.label(
-                    self.workspace_store
+                thinking: self.app.workspaces.active().thinking_selection.label(
+                    self.app
+                        .workspaces
                         .active()
                         .project
                         .settings
@@ -5028,19 +5166,20 @@ impl NativeShell {
                 usage_tokens: "0".into(),
                 usage_context: "—".into(),
                 usage_cost: "—".into(),
-                reduced_motion: self.preferences.reduced_motion,
+                reduced_motion: self.app.preferences.reduced_motion,
                 stream_id: "—".into(),
                 sequence: "0".into(),
                 generation: "0".into(),
-                model_count: self.workspace_store.active().project.models.len(),
-                profile_count: self.workspace_store.active().project.profiles.len(),
+                model_count: self.app.workspaces.active().project.models.len(),
+                profile_count: self.app.workspaces.active().project.profiles.len(),
                 skill_count: self.global_skills.len(),
                 prompt_count: 0,
                 context_count: 0,
                 latest_recovery: None,
                 latest_diagnostic: None,
                 latest_config_diagnostic: self
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .project
                     .diagnostics
@@ -5054,7 +5193,8 @@ impl NativeShell {
                 latest_issue: None,
                 cwd: truncate_label(
                     &self
-                        .workspace_store
+                        .app
+                        .workspaces
                         .active()
                         .project
                         .cwd
@@ -5065,10 +5205,10 @@ impl NativeShell {
             };
         };
         let snapshot = projection.snapshot();
-        let project = &self.workspace_store.active().project;
+        let project = &self.app.workspaces.active().project;
         let composer_running = snapshot.active_operation.is_some();
         let awaiting_prompt_start =
-            self.workspace_store.active().composer.submitted().is_some() && !composer_running;
+            self.app.workspaces.active().composer.submitted().is_some() && !composer_running;
         let changed_files = snapshot
             .context
             .changes
@@ -5134,10 +5274,10 @@ impl NativeShell {
             .saturating_add(projection.issues().len());
         let usage = &snapshot.context.usage;
         InspectorPaneViewModel {
-            panel_width: self.preferences.context_panel_width,
+            panel_width: self.app.preferences.context_panel_width,
             presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Inspector),
             keyboard_focus_visible: self.keyboard_focus_visible(),
-            selected_section: self.workspace_store.active().inspector_section,
+            selected_section: self.app.workspaces.active().inspector_section,
             composer_running,
             awaiting_prompt_start,
             recovery_pending: self.active_command_contains_where(|intent| {
@@ -5149,10 +5289,10 @@ impl NativeShell {
             external_editor_pending: self.active_command_contains_where(|intent| {
                 matches!(intent, DesktopCommandIntent::ExternalEditor { .. })
             }),
-            external_editor_configured: self.preferences.external_editor.is_some(),
+            external_editor_configured: self.app.preferences.external_editor.is_some(),
             changed_files,
             change_count: snapshot.context.changes.len(),
-            file_review: Arc::clone(&self.workspace_store.active().file_review),
+            file_review: Arc::clone(&self.app.workspaces.active().file_review),
             runtime_attention_count,
             task_state: runtime_state_label(projection.lifecycle(), composer_running).to_owned(),
             active_operation: snapshot
@@ -5165,7 +5305,8 @@ impl NativeShell {
             selected_model: truncate_label(&project.selected_model_id, 28),
             profile: truncate_label(snapshot.session.default_agent_profile_id.as_str(), 28),
             thinking: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .thinking_selection
                 .label(project.settings.default_thinking_level.as_deref()),
@@ -5179,7 +5320,7 @@ impl NativeShell {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "—".into()),
             usage_cost: usage_cost_label(usage.cost),
-            reduced_motion: self.preferences.reduced_motion,
+            reduced_motion: self.app.preferences.reduced_motion,
             stream_id: truncate_label(&snapshot.cursor.stream_id, 18),
             sequence: snapshot.cursor.last_event_sequence.to_string(),
             generation: snapshot.cursor.capability_generation.to_string(),
@@ -5198,7 +5339,8 @@ impl NativeShell {
 
     fn root_modal_view_model(&self) -> RootModalViewModel {
         let authorization = self
-            .workspace_store
+            .app
+            .workspaces
             .active()
             .projection
             .as_ref()
@@ -5206,8 +5348,9 @@ impl NativeShell {
             .cloned()
             .map(|request| {
                 let decision_pending = self
-                    .command_tracker
-                    .authorization(self.workspace_store.active_key())
+                    .app
+                    .commands
+                    .authorization(self.app.workspaces.active_key())
                     .is_some_and(|(_, authorization_id, operation_id)| {
                         authorization_id == request.authorization_id
                             && operation_id == request.operation_id
@@ -5228,14 +5371,15 @@ impl NativeShell {
     fn center_drawer_view_model(&self) -> CenterDrawerViewModel {
         CenterDrawerViewModel {
             active: self.active_drawer,
-            sessions_width: self.preferences.sessions_panel_width,
-            inspector_width: self.preferences.context_panel_width,
+            sessions_width: self.app.preferences.sessions_panel_width,
+            inspector_width: self.app.preferences.context_panel_width,
         }
     }
 
     fn conversation_pane_view_model(&self) -> ConversationPaneViewModel {
         let diagnostic_recovery =
-            self.workspace_store
+            self.app
+                .workspaces
                 .active()
                 .projection
                 .as_ref()
@@ -5249,63 +5393,73 @@ impl NativeShell {
                 });
         ConversationPaneViewModel {
             render: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .render_reader(),
             scroll: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .scroll
                 .clone(),
             visible_count: self.visible_conversation_count(),
             event_count: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .projection
                 .as_ref()
                 .map(|projection| projection.recent_events().len())
                 .unwrap_or_default(),
             message_count: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .projection
                 .as_ref()
                 .map(|projection| projection.messages().len())
                 .unwrap_or_default(),
             tool_count: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .projection
                 .as_ref()
                 .map(|projection| projection.tools().len())
                 .unwrap_or_default(),
             omitted_count: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .projection
                 .as_ref()
                 .map(|projection| projection.conversation().omitted_blocks())
                 .unwrap_or_default(),
             follow_latest: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .follow_latest_enabled(),
             unseen_updates: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .unseen_updates(),
             selected_block_id: self
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .selected_block_id()
                 .map(str::to_owned),
             expanded_details: Rc::new(
-                self.workspace_store
+                self.app
+                    .workspaces
                     .active()
                     .conversation_controller
                     .expanded_details()
@@ -5329,15 +5483,16 @@ impl NativeShell {
 
     fn conversation_header_view_model(&self) -> ConversationHeaderViewModel {
         let snapshot = self
-            .workspace_store
+            .app
+            .workspaces
             .active()
             .projection
             .as_ref()
             .map(DesktopProjection::snapshot);
-        let project = &self.workspace_store.active().project;
+        let project = &self.app.workspaces.active().project;
         let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
         let awaiting_prompt_start =
-            self.workspace_store.active().composer.submitted().is_some() && !composer_running;
+            self.app.workspaces.active().composer.submitted().is_some() && !composer_running;
         let reload_pending = self.active_command_contains(&DesktopCommandIntent::Reload);
         let selection_pending = self.active_command_contains_where(|intent| {
             matches!(intent, DesktopCommandIntent::Selection(_))
@@ -5390,7 +5545,7 @@ impl NativeShell {
             .unwrap_or_else(|| "Project".into());
 
         ConversationHeaderViewModel {
-            idle: self.workspace_store.active().projection.is_none(),
+            idle: self.app.workspaces.active().projection.is_none(),
             status: self.semantic_status(),
             composer_running,
             abort_pending: self.active_command_contains_where(|intent| {
@@ -5404,19 +5559,19 @@ impl NativeShell {
             model: Arc::from(truncate_label(model, 10)),
             profile: Arc::from(truncate_label(profile, 9)),
             thinking: Arc::from(
-                if self.workspace_store.active().thinking_selection == DesktopThinkingLevel::Default
+                if self.app.workspaces.active().thinking_selection == DesktopThinkingLevel::Default
                 {
                     "Auto".to_owned()
                 } else {
                     truncate_label(
-                        &self.workspace_store.active().thinking_selection.label(None),
+                        &self.app.workspaces.active().thinking_selection.label(None),
                         12,
                     )
                 },
             ),
-            thinking_selection: self.workspace_store.active().thinking_selection,
+            thinking_selection: self.app.workspaces.active().thinking_selection,
             thinking_options: conversation_header_thinking_menu(current_model).into(),
-            thinking_hint: self.workspace_store.active().thinking_hint.clone(),
+            thinking_hint: self.app.workspaces.active().thinking_hint.clone(),
             current_model_id: Arc::from(current_model_id),
             current_profile_id: Arc::from(current_profile_id),
             model_groups: model_groups.into(),
@@ -5427,13 +5582,13 @@ impl NativeShell {
             panel_visibility: self.visibility(),
             sessions_drawer_open: self.active_drawer == Some(CenterDrawerKind::Sessions),
             inspector_drawer_open: self.active_drawer == Some(CenterDrawerKind::Inspector),
-            sessions_panel_width: self.preferences.sessions_panel_width,
-            context_panel_width: self.preferences.context_panel_width,
+            sessions_panel_width: self.app.preferences.sessions_panel_width,
+            context_panel_width: self.app.preferences.context_panel_width,
         }
     }
 
     fn semantic_status(&self) -> SemanticStatus {
-        workspace_semantic_status(self.workspace_store.active())
+        workspace_semantic_status(self.app.workspaces.active())
     }
 }
 
@@ -5565,26 +5720,22 @@ fn conversation_header_model_menu(
 impl Render for NativeShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _span = tracing::trace_span!("desktop.render").entered();
-        if self.workspace_store.active_mut().composer_needs_sync {
-            let draft = self
-                .workspace_store
-                .active_mut()
-                .composer
-                .draft()
-                .to_owned();
+        if self.app.workspaces.active_mut().composer_needs_sync {
+            let draft = self.app.workspaces.active_mut().composer.draft().to_owned();
             self.composer_pane.update(cx, |pane, cx| {
                 pane.set_input_value(draft, window, cx);
             });
-            self.workspace_store.active_mut().composer_needs_sync = false;
+            self.app.workspaces.active_mut().composer_needs_sync = false;
         }
         let theme = SemanticTheme::GEEK_DARK;
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
-        if self.workspace_store.active_mut().projection.is_some() {
+        if self.app.workspaces.active_mut().projection.is_some() {
             let requested_layout_width =
                 conversation_width_bucket(layout.center.width.min(CONVERSATION_CONTENT_MAX_WIDTH));
             let (layout_width, width_refresh) = self
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .conversation_controller
                 .width_for_render(requested_layout_width);
@@ -5595,7 +5746,8 @@ impl Render for NativeShell {
                         .await;
                     let _ = this.update(cx, |this, cx| {
                         if this
-                            .workspace_store
+                            .app
+                            .workspaces
                             .active_mut()
                             .conversation_controller
                             .commit_pending_width(requested, deadline)
@@ -5609,7 +5761,8 @@ impl Render for NativeShell {
             self.refresh_conversation_rows_at_width(layout_width, cx);
         }
         let authorization_present = self
-            .workspace_store
+            .app
+            .workspaces
             .active_mut()
             .projection
             .as_ref()
@@ -5692,7 +5845,7 @@ impl Render for NativeShell {
                         .child(self.skills_pane.clone())
                         .child(self.center_drawer_host.clone()),
                 )
-        } else if self.workspace_store.active_mut().projection.is_some() {
+        } else if self.app.workspaces.active_mut().projection.is_some() {
             div()
                 .id("conversation-panel")
                 .role(Role::Main)
@@ -5952,7 +6105,8 @@ mod tests {
 
     fn active_session_id(shell: &NativeShell) -> Option<&str> {
         shell
-            .workspace_store
+            .app
+            .workspaces
             .active_key()
             .session_id()
             .map(SessionId::as_str)
@@ -5965,7 +6119,8 @@ mod tests {
     ) {
         assert!(
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .insert_session(SessionId::from_dto(session_id), workspace)
                 .is_none(),
             "test session IDs must be unique"
@@ -5976,16 +6131,17 @@ mod tests {
         shell: &'a NativeShell,
         session_id: &str,
     ) -> Option<&'a SessionWorkspace> {
-        shell.workspace_store.get(&session_key(session_id))
+        shell.app.workspaces.get(&session_key(session_id))
     }
 
     fn activate_session(shell: &mut NativeShell, session_id: &str) -> bool {
-        shell.workspace_store.activate(&session_key(session_id))
+        shell.app.workspaces.activate(&session_key(session_id))
     }
 
     fn session_workspace_ids(shell: &NativeShell) -> HashSet<String> {
         shell
-            .workspace_store
+            .app
+            .workspaces
             .iter()
             .filter_map(|(key, _)| key.session_id().map(|id| id.as_str().to_owned()))
             .collect()
@@ -6407,7 +6563,7 @@ mod tests {
 
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.project_catalog.state().clone()),
+            shell.read_with(cx, |shell, _| shell.app.catalog.state().clone()),
             project_catalog_controller::ProjectCatalogState::NotLoaded
         );
         assert_eq!(
@@ -6451,7 +6607,7 @@ mod tests {
             [desktop::runtime::DesktopRuntimeCommandKind::ListSessions]
         );
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.project_catalog.state().clone()),
+            shell.read_with(cx, |shell, _| shell.app.catalog.state().clone()),
             project_catalog_controller::ProjectCatalogState::Loading
         );
         assert!(
@@ -6466,9 +6622,10 @@ mod tests {
         );
         shell.update(cx, |shell, cx| {
             let command_id = shell
-                .command_tracker
+                .app
+                .commands
                 .command_id_for(
-                    shell.workspace_store.active_key(),
+                    shell.app.workspaces.active_key(),
                     &DesktopCommandIntent::ListSessions,
                 )
                 .expect("the explicit refresh remains pending");
@@ -6484,14 +6641,14 @@ mod tests {
             );
             assert!(shell.poll_runtime(cx));
             assert_eq!(
-                shell.project_catalog.catalog()[0].session_id,
+                shell.app.catalog.catalog()[0].session_id,
                 "explicit-refresh-session"
             );
             assert_eq!(
-                shell.project_catalog.state(),
+                shell.app.catalog.state(),
                 &project_catalog_controller::ProjectCatalogState::Ready
             );
-            assert!(shell.workspace_store.active().preference_notice.is_none());
+            assert!(shell.app.workspaces.active().preference_notice.is_none());
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("desktop-projects-tree").is_some());
@@ -6510,7 +6667,7 @@ mod tests {
         initialize_visual_test(cx);
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
-            shell.project_catalog.replace_catalog(
+            shell.app.catalog.replace_catalog(
                 vec![desktop::runtime::DesktopSessionCatalogEntry {
                     session_id: "auto-named-session".into(),
                     name: None,
@@ -6527,10 +6684,10 @@ mod tests {
             );
 
             assert!(shell.poll_runtime(cx));
-            let session = &shell.project_catalog.catalog()[0];
+            let session = &shell.app.catalog.catalog()[0];
             assert_eq!(session.name.as_deref(), Some("询问助手名字"));
             assert_eq!(session.updated_at, "2026-07-30T02:24:11Z");
-            assert!(shell.workspace_store.active().preference_notice.is_none());
+            assert!(shell.app.workspaces.active().preference_notice.is_none());
         });
     }
 
@@ -6544,11 +6701,11 @@ mod tests {
         shell.update(cx, |shell, cx| {
             shell.request_session_catalog(cx);
             assert_eq!(
-                shell.workspace_store.active().preference_notice.as_deref(),
+                shell.app.workspaces.active().preference_notice.as_deref(),
                 Some("desktop runtime command queue is closed")
             );
             assert_eq!(
-                shell.project_catalog.state(),
+                shell.app.catalog.state(),
                 &project_catalog_controller::ProjectCatalogState::Error {
                     message: "desktop runtime command queue is closed".into()
                 }
@@ -6562,11 +6719,11 @@ mod tests {
         cx.run_until_parked();
         shell.update(cx, |shell, _cx| {
             assert_eq!(
-                shell.workspace_store.active().preference_notice.as_deref(),
+                shell.app.workspaces.active().preference_notice.as_deref(),
                 Some("desktop runtime command queue is closed")
             );
             assert!(matches!(
-                shell.project_catalog.state(),
+                shell.app.catalog.state(),
                 project_catalog_controller::ProjectCatalogState::Error { .. }
             ));
             assert!(
@@ -6592,9 +6749,10 @@ mod tests {
         );
         shell.update(cx, |shell, cx| {
             let command_id = shell
-                .command_tracker
+                .app
+                .commands
                 .command_id_for(
-                    shell.workspace_store.active_key(),
+                    shell.app.workspaces.active_key(),
                     &DesktopCommandIntent::ListSessions,
                 )
                 .expect("refresh is pending before rejection");
@@ -6608,14 +6766,15 @@ mod tests {
             );
             assert!(shell.poll_runtime(cx));
             assert_eq!(
-                shell.project_catalog.state(),
+                shell.app.catalog.state(),
                 &project_catalog_controller::ProjectCatalogState::Error {
                     message: "ListSessions rejected (catalog_unavailable)".into()
                 }
             );
             assert!(
                 !shell
-                    .project_catalog
+                    .app
+                    .catalog
                     .state()
                     .error_message()
                     .unwrap()
@@ -6632,7 +6791,7 @@ mod tests {
         cx.run_until_parked();
 
         shell.update(cx, |shell, cx| {
-            shell.project_catalog.replace_catalog(Vec::new(), 0);
+            shell.app.catalog.replace_catalog(Vec::new(), 0);
             shell.notify_sessions_pane(cx);
         });
         cx.run_until_parked();
@@ -6640,7 +6799,7 @@ mod tests {
         assert!(cx.debug_bounds("desktop-projects-tree").is_none());
 
         shell.update(cx, |shell, cx| {
-            shell.project_catalog.replace_catalog(
+            shell.app.catalog.replace_catalog(
                 vec![desktop::runtime::DesktopSessionCatalogEntry {
                     session_id: "legacy-visible-session".into(),
                     name: Some("Legacy visible session".into()),
@@ -6658,7 +6817,7 @@ mod tests {
         assert!(cx.debug_bounds("desktop-session-row-0").is_some());
         assert!(cx.debug_bounds("desktop-projects-state-omitted").is_some());
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.project_catalog.project_groups()[0]
+            shell.read_with(cx, |shell, _| shell.app.catalog.project_groups()[0]
                 .workspace
                 .kind),
             coding_agent::api::view::CodingAgentWorkspaceKind::Legacy
@@ -6680,7 +6839,7 @@ mod tests {
             preferences,
         );
         shell.update(cx, |shell, cx| {
-            shell.project_catalog.replace_catalog(
+            shell.app.catalog.replace_catalog(
                 vec![
                     desktop::runtime::DesktopSessionCatalogEntry {
                         session_id: "stable-first-session".into(),
@@ -6738,7 +6897,7 @@ mod tests {
         assert!(cx.debug_bounds("desktop-project-sessions-0").is_none());
         assert!(cx.debug_bounds("desktop-session-row-0").is_none());
         assert!(shell.read_with(cx, |shell, _| {
-            shell.project_catalog.project_groups()[0].collapsed
+            shell.app.catalog.project_groups()[0].collapsed
         }));
 
         let collapsed_project = cx.debug_bounds("desktop-project-row-0").unwrap();
@@ -6747,7 +6906,7 @@ mod tests {
         assert!(cx.debug_bounds("desktop-project-sessions-0").is_some());
         assert!(cx.debug_bounds("desktop-session-row-0").is_some());
         assert!(!shell.read_with(cx, |shell, _| {
-            shell.project_catalog.project_groups()[0].collapsed
+            shell.app.catalog.project_groups()[0].collapsed
         }));
 
         cx.simulate_resize(size(px(700.), px(900.)));
@@ -6771,7 +6930,7 @@ mod tests {
         initialize_visual_test(cx);
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
-            assert!(shell.workspace_store.active().projection.is_none());
+            assert!(shell.app.workspaces.active().projection.is_none());
             assert!(
                 shell
                     .sessions_pane_view_model()
@@ -6886,7 +7045,7 @@ mod tests {
         });
 
         shell.update(cx, |shell, cx| {
-            shell.project_catalog.begin_refresh();
+            shell.app.catalog.begin_refresh();
             shell.notify_sessions_pane(cx);
             cx.notify();
         });
@@ -6896,7 +7055,7 @@ mod tests {
         assert_eq!(loading, initial);
 
         shell.update(cx, |shell, cx| {
-            shell.project_catalog.replace_catalog(
+            shell.app.catalog.replace_catalog(
                 vec![desktop::runtime::DesktopSessionCatalogEntry {
                     session_id: "catalog-layout-probe".into(),
                     name: Some("Catalog layout probe".into()),
@@ -6936,7 +7095,9 @@ mod tests {
             ),
             740.
         );
-        assert!(shell.read_with(cx, |shell, _| shell.preferences.context_panel_visible));
+        assert!(shell.read_with(cx, |shell, _| {
+            shell.app.preferences.context_panel_visible
+        }));
     }
 
     #[gpui::test]
@@ -6944,7 +7105,7 @@ mod tests {
         initialize_visual_test(cx);
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
-            shell.project_catalog.replace_catalog(
+            shell.app.catalog.replace_catalog(
                 vec![desktop::runtime::DesktopSessionCatalogEntry {
                     session_id: "idle-recent-session".into(),
                     name: Some("Idle recent session".into()),
@@ -6990,7 +7151,7 @@ mod tests {
         cx.run_until_parked();
         runtime_harness.drain_command_kinds();
         shell.update(cx, |shell, cx| {
-            shell.project_catalog.replace_catalog(
+            shell.app.catalog.replace_catalog(
                 vec![desktop::runtime::DesktopSessionCatalogEntry {
                     session_id: "desktop-visual-test".into(),
                     name: Some("Active visual session".into()),
@@ -7052,7 +7213,7 @@ mod tests {
         cx.run_until_parked();
 
         assert!(shell.read_with(cx, |shell, _| {
-            shell.workspace_store.active().projection.is_none()
+            shell.app.workspaces.active().projection.is_none()
         }));
         assert!(shell.read_with(cx, |shell, _| {
             session_workspace(shell, "desktop-visual-test").is_some()
@@ -7073,12 +7234,14 @@ mod tests {
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Repeated notice".into());
             shell.notify_toast_host(cx);
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Repeated notice".into());
             shell.notify_toast_host(cx);
@@ -7095,12 +7258,14 @@ mod tests {
             );
 
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Third notice".into());
             shell.notify_toast_host(cx);
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .set_preference_notice("Fourth notice".into());
             shell.notify_toast_host(cx);
@@ -7120,19 +7285,21 @@ mod tests {
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, _| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("keep this home draft");
             assert!(shell.install_hydrated_workspace(&visual_test_snapshot(), true, true));
             assert_eq!(
-                shell.workspace_store.active().composer.draft(),
+                shell.app.workspaces.active().composer.draft(),
                 "keep this home draft"
             );
             assert_eq!(active_session_id(shell), Some("desktop-visual-test"));
             assert!(
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .get(&WorkspaceKey::Home)
                     .is_some_and(|home| home.composer.draft().is_empty())
             );
@@ -7150,7 +7317,8 @@ mod tests {
         assert_eq!(runtime_harness.drain_command_kinds(), []);
         shell.update(cx, |shell, cx| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("home draft");
@@ -7158,7 +7326,8 @@ mod tests {
                 session_id: "session-first".into(),
             };
             let command_id = shell
-                .command_tracker
+                .app
+                .commands
                 .reserve(WorkspaceKey::session("session-first"), intent.clone())
                 .expect("the first open command fits the global tracker");
             shell.runtime_ui_notification_count = 0;
@@ -7171,11 +7340,8 @@ mod tests {
 
             assert!(shell.poll_runtime(cx));
             assert_eq!(active_session_id(shell), Some("session-first"));
-            assert_eq!(
-                shell.workspace_store.active().composer.draft(),
-                "home draft"
-            );
-            assert!(shell.command_tracker.pending(command_id).is_none());
+            assert_eq!(shell.app.workspaces.active().composer.draft(), "home draft");
+            assert!(shell.app.commands.pending(command_id).is_none());
             assert!(shell.runtime_ui_notification_count > 0);
         });
         assert_eq!(
@@ -7199,7 +7365,8 @@ mod tests {
         shell.update(cx, |shell, cx| {
             let owner = WorkspaceKey::session("owner-session-a");
             let command_id = shell
-                .command_tracker
+                .app
+                .commands
                 .reserve(owner.clone(), DesktopCommandIntent::Reload)
                 .expect("reload command fits the global tracker");
             let mut foreign = visual_test_snapshot_for("owner-session-b");
@@ -7215,17 +7382,19 @@ mod tests {
                 });
 
             assert!(shell.poll_runtime(cx));
-            assert!(shell.command_tracker.matches(
-                command_id,
-                &owner,
-                &DesktopCommandIntent::Reload,
-            ));
+            assert!(
+                shell
+                    .app
+                    .commands
+                    .matches(command_id, &owner, &DesktopCommandIntent::Reload,)
+            );
             assert_ne!(
-                shell.workspace_store.active().project.selected_model_id,
+                shell.app.workspaces.active().project.selected_model_id,
                 "foreign-model-must-not-apply"
             );
             let projection = shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .projection
                 .as_ref()
@@ -7263,7 +7432,7 @@ mod tests {
             );
             assert!(shell.poll_runtime(cx));
             assert_eq!(
-                shell.project_catalog.catalog()[0].session_id,
+                shell.app.catalog.catalog()[0].session_id,
                 "session-created-locally"
             );
 
@@ -7304,7 +7473,7 @@ mod tests {
                     None,
                 ),
             );
-            shell.project_catalog.replace_catalog(
+            shell.app.catalog.replace_catalog(
                 vec![desktop::runtime::DesktopSessionCatalogEntry {
                     session_id: "close-session-b".into(),
                     ..Default::default()
@@ -7312,12 +7481,14 @@ mod tests {
                 0,
             );
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("retain this exact Home draft");
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer_attachments
                 .push(PathBuf::from("/tmp/retained-home-attachment.txt"));
@@ -7325,7 +7496,8 @@ mod tests {
                 .reserve_command(DesktopCommandIntent::Prompt)
                 .expect("the Home prompt command fits the ledger");
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .begin_submit(command_id, ComposerSubmissionKind::Prompt)
@@ -7344,31 +7516,25 @@ mod tests {
             assert!(shell.poll_runtime(cx));
             assert_eq!(active_session_id(shell), Some("session-created"));
             assert!(session_workspace(shell, "session-background").is_some());
-            assert!(shell.workspace_store.get(&WorkspaceKey::Home).is_some());
+            assert!(shell.app.workspaces.get(&WorkspaceKey::Home).is_some());
             assert_eq!(
-                shell.workspace_store.active().composer.draft(),
+                shell.app.workspaces.active().composer.draft(),
                 "retain this exact Home draft"
             );
             assert_eq!(
-                shell.workspace_store.active().composer_attachments,
+                shell.app.workspaces.active().composer_attachments,
                 [PathBuf::from("/tmp/retained-home-attachment.txt")]
             );
             assert_eq!(
-                shell.workspace_store.active().composer.admission(),
+                shell.app.workspaces.active().composer.admission(),
                 &ComposerAdmission::Idle
             );
+            assert!(shell.app.workspaces.active().composer.rejection().is_some());
+            assert!(shell.app.commands.pending(command_id).is_none());
             assert!(
                 shell
-                    .workspace_store
-                    .active()
-                    .composer
-                    .rejection()
-                    .is_some()
-            );
-            assert!(shell.command_tracker.pending(command_id).is_none());
-            assert!(
-                shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .projection
                     .as_ref()
@@ -7378,7 +7544,7 @@ mod tests {
                     .any(|issue| issue.code == "prompt_prepare")
             );
             assert_eq!(
-                shell.project_catalog.catalog()[0].session_id,
+                shell.app.catalog.catalog()[0].session_id,
                 "session-created",
                 "the first prompt must add its newly-created session locally"
             );
@@ -7425,14 +7591,15 @@ mod tests {
             session_b.file_review =
                 Arc::new(DesktopFileReviewState::Loading(review_request.clone()));
 
-            shell.workspace_store.active_mut().composer.edit("draft a");
-            shell.workspace_store.active_mut().inspector_section = InspectorSection::Runtime;
+            shell.app.workspaces.active_mut().composer.edit("draft a");
+            shell.app.workspaces.active_mut().inspector_section = InspectorSection::Runtime;
             insert_session_workspace(shell, "session-b", session_b);
             let review_intent = DesktopCommandIntent::FileReview {
                 request: review_request.clone(),
             };
             let review_command_id = shell
-                .command_tracker
+                .app
+                .commands
                 .reserve(WorkspaceKey::session("session-b"), review_intent.clone())
                 .expect("session B test command fits the global tracker");
             let sessions = shell.sessions_pane_view_model();
@@ -7463,19 +7630,20 @@ mod tests {
 
             assert_eq!(active_session_id(shell), Some("session-a"));
             assert_eq!(shell.runtime_ui_notification_count, 0);
-            assert_eq!(shell.workspace_store.active().composer.draft(), "draft a");
+            assert_eq!(shell.app.workspaces.active().composer.draft(), "draft a");
             assert_eq!(
-                shell.workspace_store.active().inspector_section,
+                shell.app.workspaces.active().inspector_section,
                 InspectorSection::Runtime
             );
             assert!(matches!(
-                shell.workspace_store.active().file_review.as_ref(),
+                shell.app.workspaces.active().file_review.as_ref(),
                 DesktopFileReviewState::Empty
             ));
             assert!(
                 !shell
-                    .command_tracker
-                    .contains(shell.workspace_store.active_key(), &review_intent,)
+                    .app
+                    .commands
+                    .contains(shell.app.workspaces.active_key(), &review_intent,)
             );
 
             let background = session_workspace(shell, "session-b")
@@ -7495,22 +7663,22 @@ mod tests {
                 background.file_review.as_ref(),
                 DesktopFileReviewState::Loading(request) if *request == review_request
             ));
-            assert!(shell.command_tracker.matches(
+            assert!(shell.app.commands.matches(
                 review_command_id,
                 &WorkspaceKey::session("session-b"),
                 &review_intent,
             ));
 
             assert!(activate_session(shell, "session-b"));
-            assert_eq!(shell.workspace_store.active().composer.draft(), "draft b");
+            assert_eq!(shell.app.workspaces.active().composer.draft(), "draft b");
             assert_eq!(
-                shell.workspace_store.active().inspector_section,
+                shell.app.workspaces.active().inspector_section,
                 InspectorSection::Task
             );
             assert!(activate_session(shell, "session-a"));
-            assert_eq!(shell.workspace_store.active().composer.draft(), "draft a");
+            assert_eq!(shell.app.workspaces.active().composer.draft(), "draft a");
             assert_eq!(
-                shell.workspace_store.active().inspector_section,
+                shell.app.workspaces.active().inspector_section,
                 InspectorSection::Runtime
             );
 
@@ -7524,10 +7692,7 @@ mod tests {
                     SessionWorkspace::new(snapshot.project, Some(projection), None),
                 );
             }
-            assert_eq!(
-                shell.workspace_store.session_count(),
-                MAX_SESSION_WORKSPACES
-            );
+            assert_eq!(shell.app.workspaces.session_count(), MAX_SESSION_WORKSPACES);
             let session_e = visual_test_snapshot_for("session-e");
             assert!(!shell.install_hydrated_workspace(&session_e, false, true));
             assert!(session_workspace(shell, "session-e").is_none());
@@ -7536,7 +7701,8 @@ mod tests {
             assert_eq!(session_workspace_ids(shell), workspace_ids_before);
             assert!(
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .preference_notice
                     .as_deref()
@@ -7572,7 +7738,8 @@ mod tests {
             );
             let owner = WorkspaceKey::session("close-session-b");
             let abandoned_command_id = shell
-                .command_tracker
+                .app
+                .commands
                 .reserve(owner.clone(), DesktopCommandIntent::Reload)
                 .expect("background pending command fits the global tracker");
             let intent = DesktopCommandIntent::CloseSession {
@@ -7580,7 +7747,8 @@ mod tests {
             };
             shell.close_session("close-session-b", cx);
             let command_id = shell
-                .command_tracker
+                .app
+                .commands
                 .command_id_for(&owner, &intent)
                 .expect("close command is owned by the target workspace");
             shell.runtime_updates.push_back(
@@ -7592,17 +7760,12 @@ mod tests {
             assert!(shell.poll_runtime(cx));
             assert_eq!(active_session_id(shell), Some("close-session-a"));
             assert!(session_workspace(shell, "close-session-b").is_none());
-            assert!(
-                shell
-                    .command_tracker
-                    .pending(abandoned_command_id)
-                    .is_none()
-            );
+            assert!(shell.app.commands.pending(abandoned_command_id).is_none());
             assert_eq!(
-                shell.workspace_store.active().preference_notice.as_deref(),
+                shell.app.workspaces.active().preference_notice.as_deref(),
                 Some("Session closed; 1 pending command(s) cancelled.")
             );
-            assert!(shell.project_catalog.catalog().is_empty());
+            assert!(shell.app.catalog.catalog().is_empty());
         });
         assert_eq!(
             runtime_harness.drain_command_kinds(),
@@ -7624,7 +7787,8 @@ mod tests {
 
         shell.update(cx, |shell, cx| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .get_mut(&WorkspaceKey::Home)
                 .expect("Home remains in the store")
                 .composer
@@ -7634,7 +7798,8 @@ mod tests {
                 session_id: "close-active-session".into(),
             };
             let command_id = shell
-                .command_tracker
+                .app
+                .commands
                 .command_id_for(&WorkspaceKey::session("close-active-session"), &intent)
                 .expect("close command remains owned by the active session");
             shell.runtime_updates.push_back(
@@ -7645,9 +7810,9 @@ mod tests {
             );
 
             assert!(shell.poll_runtime(cx));
-            assert_eq!(shell.workspace_store.active_key(), &WorkspaceKey::Home);
+            assert_eq!(shell.app.workspaces.active_key(), &WorkspaceKey::Home);
             assert_eq!(
-                shell.workspace_store.active().composer.draft(),
+                shell.app.workspaces.active().composer.draft(),
                 "deterministic fallback draft"
             );
             assert!(session_workspace(shell, "close-active-session").is_none());
@@ -7975,7 +8140,7 @@ mod tests {
             assert!(tab_bounds[0].left() >= tabs.left());
 
             shell.update(cx, |shell, cx| {
-                shell.workspace_store.active_mut().inspector_section = InspectorSection::Runtime;
+                shell.app.workspaces.active_mut().inspector_section = InspectorSection::Runtime;
                 shell.notify_inspector_pane(cx);
             });
             cx.run_until_parked();
@@ -7999,7 +8164,8 @@ mod tests {
             cx.run_until_parked();
             assert_eq!(
                 shell.read_with(cx, |shell, _| shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .inspector_section),
                 InspectorSection::Usage
@@ -8034,7 +8200,8 @@ mod tests {
             .expect("medium conversation row remains mounted");
         let medium_scroll = shell.read_with(cx, |shell, _| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .scroll
@@ -8070,7 +8237,8 @@ mod tests {
         assert_eq!(cx.debug_bounds("conversation-last-row"), Some(medium_row));
         assert_eq!(
             shell.read_with(cx, |shell, _| shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .scroll
@@ -8112,7 +8280,8 @@ mod tests {
             .expect("narrow conversation row remains mounted");
         let narrow_scroll = shell.read_with(cx, |shell, _| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .scroll
@@ -8148,7 +8317,8 @@ mod tests {
         assert_eq!(cx.debug_bounds("conversation-last-row"), Some(narrow_row));
         assert_eq!(
             shell.read_with(cx, |shell, _| shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .scroll
@@ -8286,17 +8456,20 @@ mod tests {
                 let shell = shell.read(app);
                 (
                     shell
-                        .workspace_store
+                        .app
+                        .workspaces
                         .active()
                         .conversation_controller
                         .row_count(),
                     shell
-                        .workspace_store
+                        .app
+                        .workspaces
                         .active()
                         .conversation_controller
                         .render_heights_for_tests(),
                     shell
-                        .workspace_store
+                        .app
+                        .workspaces
                         .active()
                         .conversation_controller
                         .scroll
@@ -8423,7 +8596,8 @@ mod tests {
 
         let block_id = shell.read_with(cx, |shell, _| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .last_row_id_for_tests()
@@ -8439,7 +8613,8 @@ mod tests {
         assert_eq!(
             shell.read_with(cx, |shell, _| {
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .conversation_controller
                     .selected_block_id()
@@ -8487,7 +8662,8 @@ mod tests {
         );
         let block_id = shell.read_with(cx, |shell, _| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .last_row_id_for_tests()
@@ -8502,7 +8678,8 @@ mod tests {
         assert_eq!(
             shell.read_with(cx, |shell, _| {
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .conversation_controller
                     .selected_block_id()
@@ -8737,7 +8914,8 @@ mod tests {
         settle_visual_measurements(cx);
         assert!(shell.read_with(cx, |shell, _| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .toggle_anchor_active_for_tests()
@@ -8794,7 +8972,8 @@ mod tests {
         settle_visual_measurements(cx);
         let block_id = shell.read_with(cx, |shell, _| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .last_row_id_for_tests()
@@ -8815,7 +8994,8 @@ mod tests {
         settle_visual_measurements(cx);
         assert!(shell.read_with(cx, |shell, _| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .expanded_details()
@@ -8848,7 +9028,8 @@ mod tests {
         assert!(
             !shell.read_with(cx, |shell, _| {
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .conversation_controller
                     .expanded_details()
@@ -8889,7 +9070,8 @@ mod tests {
         assert_eq!(
             shell.read_with(cx, |shell, _| {
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .conversation_controller
                     .selected_block_id()
@@ -8967,7 +9149,8 @@ mod tests {
                 && open.bottom() <= composer.top(),
             "full-message action must be reachable inside its row and above the Composer: open={open:?}, row={row:?}, composer={composer:?}, offset={:?}",
             shell.read_with(cx, |shell, _| shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .scroll
@@ -9026,7 +9209,8 @@ mod tests {
         );
         shell.update(cx, |shell, cx| {
             let active_session_id = shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .projection
                 .as_ref()
@@ -9035,7 +9219,7 @@ mod tests {
                 .session
                 .session_id
                 .clone();
-            shell.project_catalog.replace_catalog(
+            shell.app.catalog.replace_catalog(
                 vec![
                     desktop::runtime::DesktopSessionCatalogEntry {
                         session_id: active_session_id,
@@ -9085,7 +9269,7 @@ mod tests {
         cx.run_until_parked();
         runtime_harness.drain_command_kinds();
         shell.update(cx, |shell, cx| {
-            shell.project_catalog.replace_catalog(
+            shell.app.catalog.replace_catalog(
                 vec![
                     desktop::runtime::DesktopSessionCatalogEntry {
                         session_id: "named-session-id".into(),
@@ -9166,7 +9350,7 @@ mod tests {
         let view_model = shell.read_with(cx, |shell, _| shell.conversation_header_view_model());
         assert!(view_model.idle);
         assert!(shell.read_with(cx, |shell, _| {
-            shell.workspace_store.active().projection.is_none()
+            shell.app.workspaces.active().projection.is_none()
         }));
         assert_eq!(
             view_model
@@ -9405,11 +9589,12 @@ mod tests {
 
         shell.update(cx, |shell, cx| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("one compact line");
-            shell.workspace_store.active_mut().composer_needs_sync = true;
+            shell.app.workspaces.active_mut().composer_needs_sync = true;
             cx.notify();
         });
         settle_visual_measurements(cx);
@@ -9431,13 +9616,13 @@ mod tests {
         );
 
         shell.update(cx, |shell, cx| {
-            shell.workspace_store.active_mut().composer.edit(
+            shell.app.workspaces.active_mut().composer.edit(
                 (1..=20)
                     .map(|line| format!("composer line {line} 中文 🙂"))
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
-            shell.workspace_store.active_mut().composer_needs_sync = true;
+            shell.app.workspaces.active_mut().composer_needs_sync = true;
             cx.notify();
         });
         settle_visual_measurements(cx);
@@ -9449,13 +9634,13 @@ mod tests {
         );
 
         shell.update(cx, |shell, cx| {
-            shell.workspace_store.active_mut().composer.edit(
+            shell.app.workspaces.active_mut().composer.edit(
                 (1..=40)
                     .map(|line| format!("saturation line {line}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
-            shell.workspace_store.active_mut().composer_needs_sync = true;
+            shell.app.workspaces.active_mut().composer_needs_sync = true;
             cx.notify();
         });
         settle_visual_measurements(cx);
@@ -9551,12 +9736,14 @@ mod tests {
         let (pending_shell, cx) = add_idle_visual_shell(cx);
         pending_shell.update(cx, |shell, cx| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("submit against the frozen project target");
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .begin_submit(401, ComposerSubmissionKind::Prompt)
@@ -9647,18 +9834,21 @@ mod tests {
         );
         rejection_shell.update(cx, |shell, cx| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("retry this exact draft");
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .begin_submit(91, ComposerSubmissionKind::Prompt)
                 .expect("test draft starts a pending submission");
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .rejected(
@@ -9887,7 +10077,7 @@ mod tests {
             .expect("final Markdown renders in the first refreshed frame");
         cx.run_until_parked();
         let notice_before_copy = shell.read_with(cx, |shell, _| {
-            shell.workspace_store.active().preference_notice.clone()
+            shell.app.workspaces.active().preference_notice.clone()
         });
 
         let bounds = cx
@@ -9908,7 +10098,8 @@ mod tests {
         );
         assert_eq!(
             shell.read_with(cx, |shell, _| shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .preference_notice
                 .clone()),
@@ -10008,7 +10199,7 @@ mod tests {
         let authorization_projection = DesktopProjection::new(authorization_snapshot)
             .expect("authorization drawer fixture is a valid product projection");
         shell.update(cx, |shell, cx| {
-            shell.workspace_store.active_mut().projection = Some(authorization_projection);
+            shell.app.workspaces.active_mut().projection = Some(authorization_projection);
             cx.notify();
         });
         cx.run_until_parked();
@@ -10027,7 +10218,7 @@ mod tests {
         );
 
         shell.update(cx, |shell, cx| {
-            shell.workspace_store.active_mut().projection = Some(visual_test_projection());
+            shell.app.workspaces.active_mut().projection = Some(visual_test_projection());
             cx.notify();
         });
         cx.run_until_parked();
@@ -10248,13 +10439,13 @@ mod tests {
         );
         assert!(shell.read_with(cx, |shell, _| {
             matches!(
-                shell.workspace_store.active().file_review.as_ref(),
+                shell.app.workspaces.active().file_review.as_ref(),
                 DesktopFileReviewState::Loading(request) if request == &review_request
             )
         }));
 
         shell.update(cx, |shell, cx| {
-            shell.workspace_store.active_mut().file_review =
+            shell.app.workspaces.active_mut().file_review =
                 Arc::new(DesktopFileReviewState::Ready(
                     DesktopFileReviewDocument::from_product(CodingAgentFileReview {
                         change: review_request.change.clone(),
@@ -10289,7 +10480,8 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             shell.read_with(cx, |shell, _| shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .preference_notice
                 .clone()),
@@ -10465,13 +10657,15 @@ mod tests {
         );
         shell.update(cx, |shell, cx| {
             let selected_model_id = shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .project
                 .selected_model_id
                 .clone();
             let selected = shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .project
                 .models
@@ -10486,17 +10680,17 @@ mod tests {
 
             shell.select_thinking_level(DesktopThinkingLevel::High, cx);
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::Default
             );
             shell.select_thinking_level(DesktopThinkingLevel::Off, cx);
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::Default
             );
             shell.select_thinking_level(DesktopThinkingLevel::Low, cx);
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::Low
             );
         });
@@ -10549,22 +10743,24 @@ mod tests {
             shell.poll_runtime(cx);
 
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::Default
             );
             assert_eq!(
                 shell
+                    .app
                     .preferences
                     .thinking_level_for_session("desktop-visual-test"),
                 DesktopThinkingLevel::Default
             );
             assert_eq!(
-                shell.workspace_store.active().thinking_hint.as_deref(),
+                shell.app.workspaces.active().thinking_hint.as_deref(),
                 Some("Thinking reset to Auto for the selected model.")
             );
             assert!(
                 !shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .preference_notice
                     .as_deref()
@@ -10589,7 +10785,8 @@ mod tests {
 
         assert_eq!(
             shell.read_with(cx, |shell, _| shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .thinking_selection),
             DesktopThinkingLevel::Default
@@ -10605,7 +10802,8 @@ mod tests {
 
         assert_eq!(
             shell.read_with(cx, |shell, _| shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .thinking_selection),
             DesktopThinkingLevel::High
@@ -10613,12 +10811,14 @@ mod tests {
         shell.update(cx, |shell, cx| {
             assert_eq!(
                 shell
+                    .app
                     .preferences
                     .thinking_level_for_session("desktop-visual-test"),
                 DesktopThinkingLevel::High
             );
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("use the session thinking level");
@@ -10663,15 +10863,12 @@ mod tests {
 
         shell.update(cx, |shell, cx| {
             assert_eq!(
-                shell
-                    .workspace_store
-                    .active_mut()
-                    .composer_attachments
-                    .len(),
+                shell.app.workspaces.active_mut().composer_attachments.len(),
                 2
             );
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("inspect the selected files");
@@ -10729,7 +10926,8 @@ mod tests {
         assert_eq!(
             shell.read_with(cx, |shell, _| {
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .draft_workspace_selection
                     .clone()
@@ -10748,7 +10946,8 @@ mod tests {
         assert_eq!(
             shell.read_with(cx, |shell, _| {
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .draft_workspace_selection
                     .clone()
@@ -10765,7 +10964,8 @@ mod tests {
         assert!(matches!(
             shell.read_with(cx, |shell, _| {
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .draft_workspace_selection
                     .clone()
@@ -10802,12 +11002,13 @@ mod tests {
                 cx,
             );
             assert_eq!(
-                shell.workspace_store.active().draft_workspace_selection,
+                shell.app.workspaces.active().draft_workspace_selection,
                 CodingAgentWorkspaceSelection::project(original.clone())
             );
             assert!(
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .preference_notice
                     .as_deref()
@@ -10816,11 +11017,11 @@ mod tests {
 
             shell.apply_project_directory_picker_outcome(ProjectDirectoryPickerOutcome::Failed, cx);
             assert_eq!(
-                shell.workspace_store.active().draft_workspace_selection,
+                shell.app.workspaces.active().draft_workspace_selection,
                 CodingAgentWorkspaceSelection::project(original)
             );
             assert_eq!(
-                shell.workspace_store.active().preference_notice.as_deref(),
+                shell.app.workspaces.active().preference_notice.as_deref(),
                 Some("The directory picker could not be opened.")
             );
         });
@@ -10841,7 +11042,8 @@ mod tests {
         shell.update(cx, |shell, cx| {
             assert!(shell.set_project_directory(selected_path.clone(), cx));
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("freeze this project target");
@@ -10865,7 +11067,8 @@ mod tests {
         assert_eq!(
             shell.read_with(cx, |shell, _| {
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .draft_workspace_selection
                     .clone()
@@ -10889,7 +11092,8 @@ mod tests {
         shell.update(cx, |shell, cx| {
             assert!(shell.set_project_directory(selected_path.clone(), cx));
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("retain after project deletion");
@@ -10900,23 +11104,16 @@ mod tests {
         assert!(runtime_harness.drain_prompts().is_empty());
         shell.read_with(cx, |shell, _| {
             assert_eq!(
-                shell.workspace_store.active().composer.draft(),
+                shell.app.workspaces.active().composer.draft(),
                 "retain after project deletion"
             );
             assert!(matches!(
-                shell.workspace_store.active().composer.admission(),
+                shell.app.workspaces.active().composer.admission(),
                 ComposerAdmission::Idle
             ));
-            assert!(
-                shell
-                    .workspace_store
-                    .active()
-                    .composer
-                    .rejection()
-                    .is_some()
-            );
+            assert!(shell.app.workspaces.active().composer.rejection().is_some());
             assert_eq!(
-                shell.workspace_store.active().draft_workspace_selection,
+                shell.app.workspaces.active().draft_workspace_selection,
                 CodingAgentWorkspaceSelection::project(selected_path)
             );
         });
@@ -10933,7 +11130,8 @@ mod tests {
         shell.update(cx, |shell, cx| {
             assert!(shell.set_project_directory(selected_path.clone(), cx));
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("create the selected project session");
@@ -10942,7 +11140,8 @@ mod tests {
                 .reserve_command(intent)
                 .expect("the Home prompt fits the command ledger");
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .begin_submit(command_id, ComposerSubmissionKind::Prompt)
@@ -10961,10 +11160,11 @@ mod tests {
                 },
             );
             assert!(shell.poll_runtime(cx));
-            assert!(shell.workspace_store.active().composer.draft().is_empty());
+            assert!(shell.app.workspaces.active().composer.draft().is_empty());
             assert_eq!(
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .composer
                     .submitted()
@@ -10972,14 +11172,7 @@ mod tests {
                 Some(command_id),
                 "the admission snapshot is not a completed durable transcript"
             );
-            assert!(
-                shell
-                    .workspace_store
-                    .active()
-                    .composer
-                    .rejection()
-                    .is_none()
-            );
+            assert!(shell.app.workspaces.active().composer.rejection().is_none());
             let directory = shell.composer_pane_view_model().project_directory;
             assert_eq!(
                 directory.value.as_ref(),
@@ -10998,9 +11191,9 @@ mod tests {
         cx.simulate_click(new_conversation.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         shell.read_with(cx, |shell, _| {
-            assert!(shell.workspace_store.active().projection.is_none());
+            assert!(shell.app.workspaces.active().projection.is_none());
             assert!(matches!(
-                shell.workspace_store.active().draft_workspace_selection,
+                shell.app.workspaces.active().draft_workspace_selection,
                 CodingAgentWorkspaceSelection::Projectless { .. }
             ));
             assert_eq!(
@@ -11018,17 +11211,20 @@ mod tests {
         shell.update(cx, |shell, cx| {
             assert!(shell.set_project_directory(selected.clone(), cx));
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("keep the scoped Home draft");
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer_attachments
                 .push(PathBuf::from("/tmp/home-owner.txt"));
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .set_scroll_top_for_tests(17.0);
@@ -11039,36 +11235,40 @@ mod tests {
             insert_session_workspace(shell, "temporary-history-session", history);
             assert!(activate_session(shell, "temporary-history-session"));
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("history draft");
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer_attachments
                 .push(PathBuf::from("/tmp/history-owner.txt"));
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active()
                 .conversation_controller
                 .set_scroll_top_for_tests(42.0);
-            assert!(shell.workspace_store.activate(&WorkspaceKey::Home));
+            assert!(shell.app.workspaces.activate(&WorkspaceKey::Home));
             assert_eq!(
-                shell.workspace_store.active().composer.draft(),
+                shell.app.workspaces.active().composer.draft(),
                 "keep the scoped Home draft"
             );
             assert_eq!(
-                shell.workspace_store.active().draft_workspace_selection,
+                shell.app.workspaces.active().draft_workspace_selection,
                 CodingAgentWorkspaceSelection::project(selected)
             );
             assert_eq!(
-                shell.workspace_store.active().composer_attachments,
+                shell.app.workspaces.active().composer_attachments,
                 [PathBuf::from("/tmp/home-owner.txt")]
             );
             assert_eq!(
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .conversation_controller
                     .scroll_top_for_tests(),
@@ -11076,16 +11276,17 @@ mod tests {
             );
             assert!(activate_session(shell, "temporary-history-session"));
             assert_eq!(
-                shell.workspace_store.active().composer.draft(),
+                shell.app.workspaces.active().composer.draft(),
                 "history draft"
             );
             assert_eq!(
-                shell.workspace_store.active().composer_attachments,
+                shell.app.workspaces.active().composer_attachments,
                 [PathBuf::from("/tmp/history-owner.txt")]
             );
             assert_eq!(
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .conversation_controller
                     .scroll_top_for_tests(),
@@ -11100,7 +11301,8 @@ mod tests {
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
             shell
-                .workspace_store
+                .app
+                .workspaces
                 .active_mut()
                 .composer
                 .edit("retain this exact draft");
@@ -11112,18 +11314,20 @@ mod tests {
             );
             assert!(
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .composer_attachments
                     .is_empty()
             );
             assert_eq!(
-                shell.workspace_store.active().composer.draft(),
+                shell.app.workspaces.active().composer.draft(),
                 "retain this exact draft"
             );
             assert!(
                 shell
-                    .workspace_store
+                    .app
+                    .workspaces
                     .active()
                     .preference_notice
                     .as_deref()
@@ -11139,7 +11343,7 @@ mod tests {
         initialize_visual_test(cx);
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
-            shell.workspace_store.active_mut().project.selected_model_id = "adjacent-model".into();
+            shell.app.workspaces.active_mut().project.selected_model_id = "adjacent-model".into();
             shell.notify_composer_pane(cx);
         });
         cx.run_until_parked();
@@ -11180,13 +11384,14 @@ mod tests {
 
         shell.update(cx, |shell, cx| {
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::High
             );
             let snapshot_b = visual_test_snapshot_for("thinking-session-b");
             let projection_b = DesktopProjection::new(snapshot_b.clone())
                 .expect("thinking session B fixture is a valid projection");
             let thinking_b = shell
+                .app
                 .preferences
                 .thinking_level_for_session("thinking-session-b");
             insert_session_workspace(
@@ -11202,12 +11407,13 @@ mod tests {
 
             assert!(activate_session(shell, "thinking-session-b"));
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::Low
             );
             shell.select_thinking_level(DesktopThinkingLevel::XHigh, cx);
             assert_eq!(
                 shell
+                    .app
                     .preferences
                     .thinking_level_for_session("thinking-session-b"),
                 DesktopThinkingLevel::XHigh
@@ -11215,12 +11421,12 @@ mod tests {
 
             assert!(activate_session(shell, "thinking-session-a"));
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::High
             );
             assert!(activate_session(shell, "thinking-session-b"));
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::XHigh
             );
         });
@@ -11232,36 +11438,38 @@ mod tests {
         let (shell, cx) = add_idle_visual_shell(cx);
 
         shell.update(cx, |shell, _| {
-            assert!(shell.preferences.set_thinking_level_for_session(
+            assert!(shell.app.preferences.set_thinking_level_for_session(
                 "existing-thinking-session",
                 DesktopThinkingLevel::Low,
             ));
-            shell.workspace_store.active_mut().thinking_selection = DesktopThinkingLevel::XHigh;
+            shell.app.workspaces.active_mut().thinking_selection = DesktopThinkingLevel::XHigh;
             let existing = visual_test_snapshot_for("existing-thinking-session");
 
             assert!(shell.install_hydrated_workspace(&existing, false, true));
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::Low
             );
             assert_eq!(
                 shell
+                    .app
                     .preferences
                     .thinking_level_for_session("existing-thinking-session"),
                 DesktopThinkingLevel::Low
             );
 
-            assert!(shell.workspace_store.activate(&WorkspaceKey::Home));
-            shell.workspace_store.active_mut().thinking_selection = DesktopThinkingLevel::Medium;
+            assert!(shell.app.workspaces.activate(&WorkspaceKey::Home));
+            shell.app.workspaces.active_mut().thinking_selection = DesktopThinkingLevel::Medium;
             let created = visual_test_snapshot_for("created-thinking-session");
 
             assert!(shell.install_hydrated_workspace(&created, true, true));
             assert_eq!(
-                shell.workspace_store.active().thinking_selection,
+                shell.app.workspaces.active().thinking_selection,
                 DesktopThinkingLevel::Medium
             );
             assert_eq!(
                 shell
+                    .app
                     .preferences
                     .thinking_level_for_session("created-thinking-session"),
                 DesktopThinkingLevel::Medium
