@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（Phase 2 进行中，DSK-720 已完成，下一项 DSK-721）
+> 状态：执行中（Phase 2 已完成，下一项 DSK-730）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1159,6 +1159,30 @@ Gate 与性能记录：
   format 与 diff check 全部通过。
 - 额外运行 `scripts/desktop-visual-golden.sh`，全部 20 个 fixture 均 `RMSE=0`，未更新 golden。
 
+### DSK-721 实际结果
+
+- 将生产 command side 统一命名并收敛为可 clone 的 `RuntimeCommandClient`，由它唯一持有 bounded
+  `Sender<DesktopRuntimeCommand>`、执行 protocol validation，并通过私有 `try_send` 将 channel full/closed
+  映射为 typed `QueueFull` / `RuntimeClosed`。`NativeShell` 只持有该 client，不再使用含混的 runtime
+  handle 字段。
+- `DesktopRuntimeBridge` 只在 bootstrap/连接阶段拥有 command client、event stream 与 shutdown guard；
+  `into_parts` 直接拆分这三个正式 owner。bootstrap open-session 也委托同一个 client，不再重复 validation、
+  command construction 与 channel error mapping。
+- 删除 Bridge 上全部 test-only command `try_*`、Bridge 私有 command `try_send` 以及原
+  `DesktopRuntimeCommandHandle`。结构审计确认 Bridge 不再是第二个 command façade；旧 handle 名和
+  `bridge.try_*` 调用均为零结果。保留的 test-only accessor 只暴露正式 client，不复制任何 forwarding
+  或 validation 逻辑。
+- `DesktopRuntimeTestHarness` 将 receiver 明确命名为 `protocol_commands`，所有 drain helper 直接观察
+  protocol command；不再依赖 Bridge 镜像生产 API。补齐 external-editor admission 的 session ID 校验，
+  因而每种 command 的 admission validation 都只发生在 `RuntimeCommandClient` 路径。
+- 新增单一 validation/admission surface 测试，验证无效命令在入队前被 typed 拒绝、clone client 仍进入
+  同一 protocol queue；强化 queue 测试，验证原 client 填满队列后 clone 观察到 `QueueFull`，receiver
+  关闭后原 client 观察到 `RuntimeClosed`。既有 prompt target/command Debug redaction、owner split、
+  sender loss/shutdown/join、attachment 与 rename bounded-path 测试全部通过。
+- Gate A 通过：desktop lib `297 passed / 5 ignored / 0 failed`，dependency boundary `10 passed`，
+  all-target check、严格 clippy、format 与 diff check 全部通过。本任务只改变内部 command ownership 与
+  admission 结构，没有 UI/render 语义变更，未更新 visual golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1168,7 +1192,7 @@ Gate 与性能记录：
 | DSK-710 | 已完成 | `3c689e0` | 删除 `NativeShell` 的 `Deref/DerefMut`，workspace 字段显式归属 `active_workspace`；Gate A、5 项 workspace/session 定向测试与 8 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-711 | 已完成 | `7953d88` | typed `WorkspaceKey/WorkspaceStore` 替代 Home sentinel 与 swap；Gate A/B、owner/lifecycle 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-720 | 已完成 | `9c9cbc4` | global `CommandTracker` 成为唯一 ID/owner/intent authority；Gate A、8 项纯 tracker 测试、owner mismatch/queue/rejection/resync 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
-| DSK-721 | 待执行 | — | — |
+| DSK-721 | 已完成 | `4ddde38` | 单一 cloneable `RuntimeCommandClient` 成为 validation/admission/send authority；Bridge 仅负责 bootstrap 与 owner split；Gate A、queue closed/full、redaction、shutdown/join 定向测试通过；未更新 golden |
 | DSK-730 | 待执行 | — | — |
 | DSK-731 | 待执行 | — | — |
 | DSK-732 | 待执行 | — | — |
