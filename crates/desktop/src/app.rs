@@ -146,7 +146,7 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                     }
                 };
                 if scratch_id_was_missing && let Some(writer) = writer.as_ref() {
-                    writer.schedule(loaded.preferences.clone());
+                    drop(writer.schedule(loaded.preferences.clone()));
                 }
 
                 let bootstrap = DesktopRuntimeBridge::spawn(embedding_options);

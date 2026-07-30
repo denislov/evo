@@ -37,6 +37,18 @@ struct ToastEntry {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToastExpiryTimer {
+    generation: u64,
+    deadline: Instant,
+}
+
+impl ToastExpiryTimer {
+    fn matches(self, generation: u64, deadline: Option<Instant>) -> bool {
+        self.generation == generation && deadline == Some(self.deadline)
+    }
+}
+
 pub(super) struct ToastHost {
     focus: FocusHandle,
     toasts: VecDeque<ToastEntry>,
@@ -182,24 +194,34 @@ impl ToastHost {
             return;
         }
         self.expiry_generation = self.expiry_generation.wrapping_add(1);
-        let generation = self.expiry_generation;
         self.scheduled_deadline = Some(deadline);
+        let timer = ToastExpiryTimer {
+            generation: self.expiry_generation,
+            deadline,
+        };
         let delay = deadline.saturating_duration_since(Instant::now());
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             let _ = this.update(cx, |this, cx| {
-                if this.expiry_generation != generation || this.scheduled_deadline != Some(deadline)
-                {
-                    return;
-                }
-                let now = Instant::now();
-                this.scheduled_deadline = None;
-                this.toasts.retain(|toast| toast.expires_at > now);
-                this.arm_expiry(cx);
-                cx.notify();
+                this.reduce_expiry_timer(timer, Instant::now(), cx);
             });
         })
         .detach();
+    }
+
+    fn reduce_expiry_timer(
+        &mut self,
+        timer: ToastExpiryTimer,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        if !timer.matches(self.expiry_generation, self.scheduled_deadline) {
+            return;
+        }
+        self.scheduled_deadline = None;
+        self.toasts.retain(|toast| toast.expires_at > now);
+        self.arm_expiry(cx);
+        cx.notify();
     }
 
     #[cfg(test)]
@@ -290,5 +312,17 @@ mod tests {
     fn policy_is_bounded_and_transient() {
         assert_eq!(MAX_VISIBLE_TOASTS, 3);
         assert_eq!(TOAST_LIFETIME, Duration::from_secs(6));
+    }
+
+    #[test]
+    fn stale_expiry_timer_identity_cannot_match_the_current_deadline() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let stale = ToastExpiryTimer {
+            generation: 4,
+            deadline,
+        };
+        assert!(!stale.matches(5, Some(deadline)));
+        assert!(!stale.matches(4, Some(deadline + Duration::from_millis(1))));
+        assert!(stale.matches(4, Some(deadline)));
     }
 }

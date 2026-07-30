@@ -78,6 +78,11 @@ pub struct DesktopRuntimeShutdownGuard {
     pub(super) runtime_thread: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct DesktopRuntimeShutdownSignal {
+    shutdown: watch::Sender<bool>,
+}
+
 /// Cloneable, non-blocking command side of the desktop runtime bridge.
 #[derive(Clone)]
 pub struct RuntimeCommandClient {
@@ -578,6 +583,12 @@ impl DesktopRuntimeEventStream {
 }
 
 impl DesktopRuntimeShutdownGuard {
+    pub(crate) fn signal_handle(&self) -> DesktopRuntimeShutdownSignal {
+        DesktopRuntimeShutdownSignal {
+            shutdown: self.shutdown.clone(),
+        }
+    }
+
     fn signal(&self) {
         let _ = self.shutdown.send(true);
     }
@@ -601,6 +612,12 @@ impl DesktopRuntimeShutdownGuard {
                 .join()
                 .map_err(|_| DesktopRuntimeShutdownError::RuntimePanicked)
         })
+    }
+}
+
+impl DesktopRuntimeShutdownSignal {
+    pub(crate) fn signal(&self) {
+        let _ = self.shutdown.send(true);
     }
 }
 

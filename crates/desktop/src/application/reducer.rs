@@ -1,13 +1,11 @@
-#![allow(
-    dead_code,
-    reason = "DSK-730 root event branches are consumed incrementally by DSK-731 and DSK-733"
-)]
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use coding_agent::api::{
     authorization::ToolAuthorizationDecision,
     embedding::CodingAgentThinkingLevel,
     review::{CodingAgentFileReview, CodingAgentFileReviewRequest},
 };
+use desktop::preferences::DesktopPreferences;
 use desktop::runtime::{
     DesktopRecoveryAction, DesktopRuntimeCommandKind, DesktopRuntimeError,
     DesktopRuntimeHydratedSnapshot, DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind,
@@ -19,7 +17,10 @@ use thiserror::Error;
 use super::{
     change_set::{UiChangeSet, UiRegion},
     commands::DesktopCommandIntent,
-    effect::{DesktopEffect, DesktopTimer, EffectIdentity, EffectRequestId, PlatformResult},
+    effect::{
+        ClipboardFeedback, DesktopEffect, DesktopPickerKind, DesktopTimer, DesktopTimerKind,
+        EffectIdentity, EffectRequestId, PlatformOutcome, PlatformResult,
+    },
     state::DesktopState,
     workspace::WorkspaceKey,
 };
@@ -60,6 +61,7 @@ pub(crate) enum RuntimeUpdateKind {
 }
 
 impl RuntimeUpdateKind {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 23] = [
         Self::Reloaded,
         Self::Resynced,
@@ -86,6 +88,7 @@ impl RuntimeUpdateKind {
         Self::Stopped,
     ];
 
+    #[cfg(test)]
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Reloaded => "reloaded",
@@ -269,12 +272,17 @@ pub(crate) fn runtime_update_observed_workspace_key(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProjectionUpdateResult {
     replaced: bool,
+    needs_resync: bool,
     changes: UiChangeSet,
 }
 
 impl ProjectionUpdateResult {
-    pub(crate) const fn new(replaced: bool, changes: UiChangeSet) -> Self {
-        Self { replaced, changes }
+    pub(crate) const fn new(replaced: bool, needs_resync: bool, changes: UiChangeSet) -> Self {
+        Self {
+            replaced,
+            needs_resync,
+            changes,
+        }
     }
 
     pub(crate) const fn replaced(self) -> bool {
@@ -283,6 +291,10 @@ impl ProjectionUpdateResult {
 
     pub(crate) const fn changes(self) -> UiChangeSet {
         self.changes
+    }
+
+    pub(crate) const fn needs_resync(self) -> bool {
+        self.needs_resync
     }
 }
 
@@ -371,8 +383,33 @@ pub(crate) trait RuntimeUpdatePort {
         creates_session_from_prompt: bool,
         completed_prompt_command: Option<u64>,
     ) -> ProjectionUpdateResult;
-    fn request_resync_if_needed(&mut self, owner: &WorkspaceKey);
+    fn reserve_resync_command(&mut self, owner: &WorkspaceKey) -> Option<u64>;
+    fn abandon_resync_command(&mut self, owner: &WorkspaceKey, command_id: u64, message: String);
     fn active_runtime_is_running(&self) -> bool;
+}
+
+pub(crate) trait PlatformUpdatePort {
+    fn active_workspace_key(&self) -> WorkspaceKey;
+    fn workspace_exists(&self, owner: &WorkspaceKey) -> bool;
+    fn project_directory_editable(&self, owner: &WorkspaceKey) -> bool;
+    fn set_project_directory(&mut self, owner: &WorkspaceKey, path: PathBuf) -> bool;
+    fn add_composer_attachments(
+        &mut self,
+        owner: &WorkspaceKey,
+        paths: Vec<PathBuf>,
+    ) -> Result<bool, String>;
+    fn set_notice(&mut self, owner: &WorkspaceKey, notice: String);
+    fn show_conversation_announcement(&mut self, owner: &WorkspaceKey, message: String);
+    fn clear_conversation_announcement(&mut self, owner: &WorkspaceKey) -> bool;
+    fn fire_conversation_height_refresh(&mut self, owner: &WorkspaceKey) -> bool;
+    fn commit_conversation_width(&mut self, owner: &WorkspaceKey) -> bool;
+    fn refresh_inspector_telemetry(&mut self, owner: &WorkspaceKey) -> bool;
+    fn complete_resync_admission(
+        &mut self,
+        owner: &WorkspaceKey,
+        command_id: u64,
+        failure: Option<String>,
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -406,6 +443,7 @@ enum ProjectionCompletion {
 }
 
 fn reduce_runtime_update(
+    controller: &mut DesktopController,
     port: &mut impl RuntimeUpdatePort,
     update: DesktopRuntimeUpdate,
 ) -> Transition {
@@ -460,13 +498,11 @@ fn reduce_runtime_update(
         } else {
             port.active_workspace_key()
         };
-        port.request_resync_if_needed(&resync_owner);
         let foreground = port.active_workspace_key();
-        return workspace_update_transition(
-            &foreground,
-            &resync_owner,
-            runtime_base_changes(&update),
-        );
+        let mut transition =
+            workspace_update_transition(&foreground, &resync_owner, runtime_base_changes(&update));
+        transition.merge(reserve_resync_effect(controller, port, &resync_owner));
+        return transition;
     }
 
     if let DesktopRuntimeUpdate::SessionChanged { snapshot, .. } = &update {
@@ -628,12 +664,34 @@ fn reduce_runtime_update(
             );
             changes.merge(projection.changes());
             reconcile_projection_completion(port, &target, completion, projection, &mut changes);
-            port.request_resync_if_needed(&target);
+            if projection.needs_resync() {
+                let mut transition = reserve_resync_effect(controller, port, &target);
+                let foreground = port.active_workspace_key();
+                transition.merge(workspace_update_transition(&foreground, &target, changes));
+                return transition;
+            }
         }
     }
 
     let foreground = port.active_workspace_key();
     workspace_update_transition(&foreground, &target, changes)
+}
+
+fn reserve_resync_effect(
+    controller: &mut DesktopController,
+    port: &mut impl RuntimeUpdatePort,
+    owner: &WorkspaceKey,
+) -> Transition {
+    let Some(command_id) = port.reserve_resync_command(owner) else {
+        return Transition::default();
+    };
+    match controller.request_resync(owner.clone(), command_id) {
+        Ok(transition) => transition,
+        Err(error) => {
+            port.abandon_resync_command(owner, command_id, error.to_string());
+            Transition::changed(UiRegion::Toast)
+        }
+    }
 }
 
 pub(crate) fn projection_event(update: DesktopRuntimeUpdate) -> Option<ProjectionEvent> {
@@ -1244,7 +1302,6 @@ pub(crate) enum UiIntent {
 #[derive(Debug, Clone)]
 pub(crate) enum DesktopEvent {
     Ui(UiIntent),
-    Runtime(Box<DesktopRuntimeUpdate>),
     Platform(PlatformResult),
     Timer(DesktopTimer),
 }
@@ -1279,8 +1336,13 @@ impl Transition {
         self.changes
     }
 
+    #[cfg(test)]
     pub(crate) fn effects(&self) -> &[DesktopEffect] {
         &self.effects
+    }
+
+    pub(crate) fn into_parts(self) -> (UiChangeSet, Vec<DesktopEffect>) {
+        (self.changes, self.effects)
     }
 
     pub(crate) fn merge(&mut self, other: Self) {
@@ -1297,20 +1359,23 @@ pub(crate) enum EffectIdentityError {
 
 pub(crate) struct DesktopController {
     next_effect_request_id: u64,
+    pending_effects: HashMap<EffectRequestId, DesktopEffect>,
 }
 
 impl DesktopController {
-    pub(crate) const fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             next_effect_request_id: 0,
+            pending_effects: HashMap::new(),
         }
     }
 
     pub(crate) fn reduce_runtime(
+        &mut self,
         port: &mut impl RuntimeUpdatePort,
         update: DesktopRuntimeUpdate,
     ) -> Transition {
-        reduce_runtime_update(port, update)
+        reduce_runtime_update(self, port, update)
     }
 
     /// Route an event through one mutable application-state authority while
@@ -1335,21 +1400,364 @@ impl DesktopController {
             .ok_or(EffectIdentityError::Exhausted)?;
         Ok(EffectIdentity::new(EffectRequestId::new(request_id), owner))
     }
+
+    pub(crate) fn pick_paths(
+        &mut self,
+        owner: WorkspaceKey,
+        picker: DesktopPickerKind,
+    ) -> Result<Transition, EffectIdentityError> {
+        let identity = self.reserve_effect_identity(owner)?;
+        Ok(self.register_effect(DesktopEffect::PickPaths { identity, picker }))
+    }
+
+    pub(crate) fn write_clipboard(
+        &mut self,
+        owner: WorkspaceKey,
+        text: Option<String>,
+        feedback: ClipboardFeedback,
+    ) -> Result<Transition, EffectIdentityError> {
+        let identity = self.reserve_effect_identity(owner)?;
+        Ok(self.register_effect(DesktopEffect::WriteClipboard {
+            identity,
+            text,
+            feedback,
+        }))
+    }
+
+    pub(crate) fn write_preferences(
+        &mut self,
+        owner: WorkspaceKey,
+        preferences: DesktopPreferences,
+    ) -> Result<Transition, EffectIdentityError> {
+        let identity = self.reserve_effect_identity(owner)?;
+        Ok(self.register_effect(DesktopEffect::WritePreferences {
+            identity,
+            preferences,
+        }))
+    }
+
+    pub(crate) fn request_resync(
+        &mut self,
+        owner: WorkspaceKey,
+        command_id: u64,
+    ) -> Result<Transition, EffectIdentityError> {
+        let identity = self.reserve_effect_identity(owner)?;
+        Ok(self.register_effect(DesktopEffect::RequestResync {
+            identity,
+            command_id,
+        }))
+    }
+
+    pub(crate) fn schedule_timer(
+        &mut self,
+        owner: WorkspaceKey,
+        kind: DesktopTimerKind,
+        delay: Duration,
+    ) -> Result<Transition, EffectIdentityError> {
+        let identity = self.reserve_effect_identity(owner)?;
+        Ok(self.register_effect(DesktopEffect::ScheduleTimer {
+            timer: DesktopTimer::new(identity, kind),
+            delay,
+        }))
+    }
+
+    pub(crate) fn reduce_platform(
+        &mut self,
+        port: &mut impl PlatformUpdatePort,
+        result: PlatformResult,
+    ) -> Transition {
+        let request_id = result.identity().request_id();
+        let Some(effect) = self.pending_effects.get(&request_id) else {
+            return Transition::default();
+        };
+        if !effect.matches_platform_result(&result) {
+            return Transition::default();
+        }
+        let effect = self
+            .pending_effects
+            .remove(&request_id)
+            .expect("a matching pending effect must still exist");
+        reduce_platform_result(self, port, effect, result)
+    }
+
+    pub(crate) fn reduce_async(
+        &mut self,
+        port: &mut impl PlatformUpdatePort,
+        event: DesktopEvent,
+    ) -> Transition {
+        match event {
+            DesktopEvent::Platform(result) => self.reduce_platform(port, result),
+            DesktopEvent::Timer(timer) => self.reduce_timer(port, timer),
+            DesktopEvent::Ui(_) => {
+                debug_assert!(false, "UI intents use their typed feature reducer");
+                Transition::default()
+            }
+        }
+    }
+
+    pub(crate) fn reduce_timer(
+        &mut self,
+        port: &mut impl PlatformUpdatePort,
+        timer: DesktopTimer,
+    ) -> Transition {
+        let request_id = timer.identity().request_id();
+        let Some(DesktopEffect::ScheduleTimer {
+            timer: expected, ..
+        }) = self.pending_effects.get(&request_id)
+        else {
+            return Transition::default();
+        };
+        if expected != &timer {
+            return Transition::default();
+        }
+        self.pending_effects.remove(&request_id);
+        reduce_timer_result(port, timer)
+    }
+
+    fn register_effect(&mut self, effect: DesktopEffect) -> Transition {
+        self.pending_effects
+            .retain(|_, pending| !effect_supersedes(&effect, pending));
+        self.pending_effects
+            .insert(effect.identity().request_id(), effect.clone());
+        Transition::default().with_effect(effect)
+    }
+}
+
+impl Default for DesktopController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn effect_supersedes(next: &DesktopEffect, pending: &DesktopEffect) -> bool {
+    match (next, pending) {
+        (
+            DesktopEffect::PickPaths {
+                identity: next_identity,
+                picker: next_picker,
+            },
+            DesktopEffect::PickPaths {
+                identity: pending_identity,
+                picker: pending_picker,
+            },
+        ) => next_identity.owner() == pending_identity.owner() && next_picker == pending_picker,
+        (DesktopEffect::WritePreferences { .. }, DesktopEffect::WritePreferences { .. }) => true,
+        (
+            DesktopEffect::RequestResync {
+                identity: next_identity,
+                ..
+            },
+            DesktopEffect::RequestResync {
+                identity: pending_identity,
+                ..
+            },
+        ) => next_identity.owner() == pending_identity.owner(),
+        (
+            DesktopEffect::ScheduleTimer {
+                timer: next_timer, ..
+            },
+            DesktopEffect::ScheduleTimer {
+                timer: pending_timer,
+                ..
+            },
+        ) => next_timer.kind() == pending_timer.kind(),
+        _ => false,
+    }
+}
+
+fn reduce_platform_result(
+    controller: &mut DesktopController,
+    port: &mut impl PlatformUpdatePort,
+    effect: DesktopEffect,
+    result: PlatformResult,
+) -> Transition {
+    let owner = effect.identity().owner().clone();
+    if !port.workspace_exists(&owner) {
+        return Transition::default();
+    }
+    match (effect, result) {
+        (DesktopEffect::PickPaths { picker, .. }, PlatformResult::PathsPicked { outcome, .. }) => {
+            reduce_paths_picked(port, &owner, picker, outcome)
+        }
+        (
+            DesktopEffect::WriteClipboard { feedback, .. },
+            PlatformResult::ClipboardWritten { outcome, .. },
+        ) => match outcome {
+            PlatformOutcome::Completed(()) => match feedback {
+                ClipboardFeedback::ConversationAnnouncement(message) => {
+                    port.show_conversation_announcement(&owner, message);
+                    let mut transition = foreground_transition(port, &owner, UiRegion::Root);
+                    if let Ok(timer) = controller.schedule_timer(
+                        owner,
+                        DesktopTimerKind::ConversationAnnouncement,
+                        Duration::from_secs(2),
+                    ) {
+                        transition.merge(timer);
+                    }
+                    transition
+                }
+                ClipboardFeedback::Notice(message) => {
+                    port.set_notice(&owner, message);
+                    foreground_notice_transition(port, &owner)
+                }
+            },
+            PlatformOutcome::Cancelled => Transition::default(),
+            PlatformOutcome::Failed(message) => {
+                port.set_notice(&owner, message);
+                foreground_notice_transition(port, &owner)
+            }
+        },
+        (
+            DesktopEffect::WritePreferences { .. },
+            PlatformResult::PreferencesWritten { outcome, .. },
+        ) => match outcome {
+            PlatformOutcome::Completed(()) | PlatformOutcome::Cancelled => Transition::default(),
+            PlatformOutcome::Failed(message) => {
+                port.set_notice(&owner, message);
+                foreground_notice_transition(port, &owner)
+            }
+        },
+        (
+            DesktopEffect::RequestResync { command_id, .. },
+            PlatformResult::ResyncRequested { outcome, .. },
+        ) => {
+            let failure = match outcome {
+                PlatformOutcome::Completed(()) => None,
+                PlatformOutcome::Cancelled => Some("desktop resync request was cancelled".into()),
+                PlatformOutcome::Failed(message) => Some(message),
+            };
+            let failed = failure.is_some();
+            port.complete_resync_admission(&owner, command_id, failure);
+            if failed {
+                foreground_notice_transition(port, &owner)
+            } else {
+                Transition::default()
+            }
+        }
+        _ => unreachable!("platform result was matched to its exact pending effect"),
+    }
+}
+
+fn reduce_paths_picked(
+    port: &mut impl PlatformUpdatePort,
+    owner: &WorkspaceKey,
+    picker: DesktopPickerKind,
+    outcome: PlatformOutcome<Vec<PathBuf>>,
+) -> Transition {
+    let paths = match outcome {
+        PlatformOutcome::Completed(paths) => paths,
+        PlatformOutcome::Cancelled => return Transition::default(),
+        PlatformOutcome::Failed(message) => {
+            port.set_notice(owner, message);
+            return foreground_notice_transition(port, owner);
+        }
+    };
+    match picker {
+        DesktopPickerKind::ProjectDirectory => {
+            if !port.project_directory_editable(owner) {
+                return Transition::default();
+            }
+            let mut paths = paths.into_iter();
+            let Some(path) = paths.next() else {
+                port.set_notice(
+                    owner,
+                    "The directory picker returned no project directory.".into(),
+                );
+                return foreground_notice_transition(port, owner);
+            };
+            if paths.next().is_some() {
+                port.set_notice(
+                    owner,
+                    "The directory picker returned more than one project directory.".into(),
+                );
+                return foreground_notice_transition(port, owner);
+            }
+            if port.set_project_directory(owner, path) {
+                foreground_changes(port, owner, &[UiRegion::Root, UiRegion::Composer])
+            } else {
+                Transition::default()
+            }
+        }
+        DesktopPickerKind::Attachments => match port.add_composer_attachments(owner, paths) {
+            Ok(true) => foreground_changes(port, owner, &[UiRegion::Root, UiRegion::Composer]),
+            Ok(false) => Transition::default(),
+            Err(message) => {
+                port.set_notice(owner, message);
+                foreground_notice_transition(port, owner)
+            }
+        },
+    }
+}
+
+fn reduce_timer_result(port: &mut impl PlatformUpdatePort, timer: DesktopTimer) -> Transition {
+    let owner = timer.identity().owner();
+    let (changed, region) = match timer.kind() {
+        DesktopTimerKind::ConversationAnnouncement => {
+            (port.clear_conversation_announcement(owner), UiRegion::Root)
+        }
+        DesktopTimerKind::ConversationHeightRefresh => {
+            (port.fire_conversation_height_refresh(owner), UiRegion::Root)
+        }
+        DesktopTimerKind::ConversationWidthCommit => {
+            (port.commit_conversation_width(owner), UiRegion::Root)
+        }
+        DesktopTimerKind::InspectorTelemetryRefresh => {
+            (port.refresh_inspector_telemetry(owner), UiRegion::Inspector)
+        }
+    };
+    if changed {
+        foreground_transition(port, owner, region)
+    } else {
+        Transition::default()
+    }
+}
+
+fn foreground_notice_transition(
+    port: &impl PlatformUpdatePort,
+    owner: &WorkspaceKey,
+) -> Transition {
+    foreground_changes(port, owner, &[UiRegion::Root, UiRegion::Toast])
+}
+
+fn foreground_transition(
+    port: &impl PlatformUpdatePort,
+    owner: &WorkspaceKey,
+    region: UiRegion,
+) -> Transition {
+    foreground_changes(port, owner, &[region])
+}
+
+fn foreground_changes(
+    port: &impl PlatformUpdatePort,
+    owner: &WorkspaceKey,
+    regions: &[UiRegion],
+) -> Transition {
+    if &port.active_workspace_key() != owner {
+        return Transition::default();
+    }
+    let mut changes = UiChangeSet::default();
+    for region in regions {
+        changes.insert(*region);
+    }
+    Transition::from_changes(changes)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{collections::HashMap, path::PathBuf, time::Duration};
 
     use desktop::preferences::DesktopPreferences;
 
-    use super::{DesktopController, DesktopEvent, RuntimeUpdateKind, Transition, UiIntent};
+    use super::{
+        DesktopController, DesktopEvent, PlatformUpdatePort, RuntimeUpdateKind, Transition,
+        UiIntent,
+    };
     use crate::application::{
         change_set::UiRegion,
         commands::CommandTracker,
         effect::{
-            DesktopEffect, DesktopPickerKind, DesktopTimer, DesktopTimerKind, EffectIdentity,
-            PlatformOutcome, PlatformResult,
+            ClipboardFeedback, DesktopEffect, DesktopPickerKind, DesktopTimer, DesktopTimerKind,
+            EffectIdentity, PlatformOutcome, PlatformResult,
         },
         state::DesktopState,
         workspace::{WorkspaceKey, WorkspaceStore},
@@ -1362,6 +1770,114 @@ mod tests {
             Vec::new(),
             DesktopPreferences::default(),
         )
+    }
+
+    struct TestPlatformPort {
+        active: WorkspaceKey,
+        projects: HashMap<WorkspaceKey, PathBuf>,
+        attachments: HashMap<WorkspaceKey, Vec<PathBuf>>,
+        notices: HashMap<WorkspaceKey, String>,
+        announcement: Option<(WorkspaceKey, String)>,
+        timer_fires: HashMap<DesktopTimerKind, usize>,
+    }
+
+    impl TestPlatformPort {
+        fn new(active: WorkspaceKey) -> Self {
+            Self {
+                active,
+                projects: HashMap::new(),
+                attachments: HashMap::new(),
+                notices: HashMap::new(),
+                announcement: None,
+                timer_fires: HashMap::new(),
+            }
+        }
+
+        fn record_timer(&mut self, kind: DesktopTimerKind) -> bool {
+            *self.timer_fires.entry(kind).or_default() += 1;
+            true
+        }
+    }
+
+    impl PlatformUpdatePort for TestPlatformPort {
+        fn active_workspace_key(&self) -> WorkspaceKey {
+            self.active.clone()
+        }
+
+        fn workspace_exists(&self, _owner: &WorkspaceKey) -> bool {
+            true
+        }
+
+        fn project_directory_editable(&self, _owner: &WorkspaceKey) -> bool {
+            true
+        }
+
+        fn set_project_directory(&mut self, owner: &WorkspaceKey, path: PathBuf) -> bool {
+            self.projects.insert(owner.clone(), path);
+            true
+        }
+
+        fn add_composer_attachments(
+            &mut self,
+            owner: &WorkspaceKey,
+            paths: Vec<PathBuf>,
+        ) -> Result<bool, String> {
+            self.attachments.insert(owner.clone(), paths);
+            Ok(true)
+        }
+
+        fn set_notice(&mut self, owner: &WorkspaceKey, notice: String) {
+            self.notices.insert(owner.clone(), notice);
+        }
+
+        fn show_conversation_announcement(&mut self, owner: &WorkspaceKey, message: String) {
+            self.announcement = Some((owner.clone(), message));
+        }
+
+        fn clear_conversation_announcement(&mut self, owner: &WorkspaceKey) -> bool {
+            if self
+                .announcement
+                .as_ref()
+                .is_some_and(|(current, _)| current == owner)
+            {
+                self.announcement = None;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn fire_conversation_height_refresh(&mut self, _owner: &WorkspaceKey) -> bool {
+            self.record_timer(DesktopTimerKind::ConversationHeightRefresh)
+        }
+
+        fn commit_conversation_width(&mut self, _owner: &WorkspaceKey) -> bool {
+            self.record_timer(DesktopTimerKind::ConversationWidthCommit)
+        }
+
+        fn refresh_inspector_telemetry(&mut self, _owner: &WorkspaceKey) -> bool {
+            self.record_timer(DesktopTimerKind::InspectorTelemetryRefresh)
+        }
+
+        fn complete_resync_admission(
+            &mut self,
+            owner: &WorkspaceKey,
+            _command_id: u64,
+            failure: Option<String>,
+        ) {
+            if let Some(message) = failure {
+                self.set_notice(owner, message);
+            }
+        }
+    }
+
+    fn emitted_identity(transition: &Transition) -> EffectIdentity {
+        transition
+            .effects()
+            .first()
+            .expect("request emits one effect")
+            .identity()
+            .clone()
     }
 
     #[test]
@@ -1454,18 +1970,20 @@ mod tests {
         let wrong_owner = PlatformResult::PathsPicked {
             identity: different_owner,
             picker: DesktopPickerKind::Attachments,
-            outcome: PlatformOutcome::Failed,
+            outcome: PlatformOutcome::Failed("picker failed".into()),
         };
         assert!(!same_kind.matches_platform_result(&wrong_owner));
 
-        let editor = DesktopEffect::OpenExternalEditor {
+        let clipboard = DesktopEffect::WriteClipboard {
             identity: identity.clone(),
+            text: Some("copy".into()),
+            feedback: ClipboardFeedback::Notice("copied".into()),
         };
-        let editor_result = PlatformResult::ExternalEditorOpened {
+        let clipboard_result = PlatformResult::ClipboardWritten {
             identity: identity.clone(),
             outcome: PlatformOutcome::Completed(()),
         };
-        assert!(editor.matches_platform_result(&editor_result));
+        assert!(clipboard.matches_platform_result(&clipboard_result));
 
         let timer = DesktopTimer::new(
             identity.clone(),
@@ -1477,5 +1995,127 @@ mod tests {
         };
         assert_eq!(timer_effect.identity(), &identity);
         assert_eq!(timer_effect.identity().owner(), &WorkspaceKey::Home);
+    }
+
+    #[test]
+    fn newer_picker_request_rejects_the_stale_result() {
+        let mut controller = DesktopController::new();
+        let owner = WorkspaceKey::Home;
+        let first = controller
+            .pick_paths(owner.clone(), DesktopPickerKind::Attachments)
+            .unwrap();
+        let first_identity = emitted_identity(&first);
+        let second = controller
+            .pick_paths(owner.clone(), DesktopPickerKind::Attachments)
+            .unwrap();
+        let second_identity = emitted_identity(&second);
+        let mut port = TestPlatformPort::new(owner.clone());
+
+        let stale = controller.reduce_async(
+            &mut port,
+            DesktopEvent::Platform(PlatformResult::PathsPicked {
+                identity: first_identity,
+                picker: DesktopPickerKind::Attachments,
+                outcome: PlatformOutcome::Completed(vec![PathBuf::from("stale.png")]),
+            }),
+        );
+        assert!(stale.changes().is_empty());
+        assert!(!port.attachments.contains_key(&owner));
+
+        let current = controller.reduce_async(
+            &mut port,
+            DesktopEvent::Platform(PlatformResult::PathsPicked {
+                identity: second_identity,
+                picker: DesktopPickerKind::Attachments,
+                outcome: PlatformOutcome::Completed(vec![PathBuf::from("current.png")]),
+            }),
+        );
+        assert!(current.changes().contains(UiRegion::Composer));
+        assert_eq!(port.attachments[&owner], [PathBuf::from("current.png")]);
+    }
+
+    #[test]
+    fn picker_result_mutates_its_owner_without_refreshing_a_switched_workspace() {
+        let mut controller = DesktopController::new();
+        let owner = WorkspaceKey::Home;
+        let requested = controller
+            .pick_paths(owner.clone(), DesktopPickerKind::ProjectDirectory)
+            .unwrap();
+        let identity = emitted_identity(&requested);
+        let mut port = TestPlatformPort::new(WorkspaceKey::session("session-b"));
+
+        let transition = controller.reduce_async(
+            &mut port,
+            DesktopEvent::Platform(PlatformResult::PathsPicked {
+                identity,
+                picker: DesktopPickerKind::ProjectDirectory,
+                outcome: PlatformOutcome::Completed(vec![PathBuf::from("/owner/home")]),
+            }),
+        );
+
+        assert!(transition.changes().is_empty());
+        assert_eq!(port.projects[&owner], PathBuf::from("/owner/home"));
+    }
+
+    #[test]
+    fn preference_writer_failure_returns_to_the_request_owner_as_a_typed_notice() {
+        let mut controller = DesktopController::new();
+        let owner = WorkspaceKey::Home;
+        let requested = controller
+            .write_preferences(owner.clone(), DesktopPreferences::default())
+            .unwrap();
+        let identity = emitted_identity(&requested);
+        let mut port = TestPlatformPort::new(owner.clone());
+
+        let transition = controller.reduce_async(
+            &mut port,
+            DesktopEvent::Platform(PlatformResult::PreferencesWritten {
+                identity,
+                outcome: PlatformOutcome::Failed("preference disk failed".into()),
+            }),
+        );
+
+        assert!(transition.changes().contains(UiRegion::Toast));
+        assert_eq!(port.notices[&owner], "preference disk failed");
+    }
+
+    #[test]
+    fn superseded_timer_identity_cannot_fire_current_state() {
+        let mut controller = DesktopController::new();
+        let owner = WorkspaceKey::Home;
+        let first = controller
+            .schedule_timer(
+                owner.clone(),
+                DesktopTimerKind::ConversationHeightRefresh,
+                Duration::from_millis(10),
+            )
+            .unwrap();
+        let first_timer = match first.effects().first() {
+            Some(DesktopEffect::ScheduleTimer { timer, .. }) => timer.clone(),
+            _ => panic!("timer request emits one typed timer"),
+        };
+        let second = controller
+            .schedule_timer(
+                owner.clone(),
+                DesktopTimerKind::ConversationHeightRefresh,
+                Duration::from_millis(10),
+            )
+            .unwrap();
+        let second_timer = match second.effects().first() {
+            Some(DesktopEffect::ScheduleTimer { timer, .. }) => timer.clone(),
+            _ => panic!("timer request emits one typed timer"),
+        };
+        let mut port = TestPlatformPort::new(owner);
+
+        let stale = controller.reduce_async(&mut port, DesktopEvent::Timer(first_timer));
+        assert!(stale.changes().is_empty());
+        assert!(port.timer_fires.is_empty());
+
+        let current = controller.reduce_async(&mut port, DesktopEvent::Timer(second_timer));
+        assert!(current.changes().contains(UiRegion::Root));
+        assert_eq!(
+            port.timer_fires[&DesktopTimerKind::ConversationHeightRefresh],
+            1
+        );
     }
 }

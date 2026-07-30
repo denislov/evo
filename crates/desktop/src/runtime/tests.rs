@@ -3324,6 +3324,31 @@ async fn split_runtime_owners_deliver_commands_then_shutdown_and_join() {
 }
 
 #[tokio::test]
+async fn explicit_shutdown_signal_stops_the_runtime_before_guard_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, options) = isolated_options(&temp);
+    let (bridge, _) = start_runtime(options).await;
+    let (_commands, mut events, shutdown) = bridge.into_parts();
+    let signal = shutdown.signal_handle();
+
+    signal.signal();
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(update) = events.next_update().await {
+            if matches!(update, DesktopRuntimeUpdate::Stopped) {
+                return;
+            }
+        }
+        panic!("explicit shutdown signal closed without publishing Stopped");
+    })
+    .await;
+    assert!(
+        stopped.is_ok(),
+        "explicit shutdown signal did not stop runtime"
+    );
+    shutdown.shutdown(&mut events).await.unwrap();
+}
+
+#[tokio::test]
 async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, options) = isolated_options(&temp);

@@ -1,9 +1,6 @@
-#![allow(
-    dead_code,
-    reason = "DSK-730 platform effect contract is consumed by the DSK-733 executor migration"
-)]
-
 use std::{path::PathBuf, time::Duration};
+
+use desktop::preferences::DesktopPreferences;
 
 use super::workspace::WorkspaceKey;
 
@@ -42,12 +39,18 @@ pub(crate) enum DesktopPickerKind {
     ProjectDirectory,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DesktopTimerKind {
     ConversationAnnouncement,
     ConversationHeightRefresh,
     ConversationWidthCommit,
     InspectorTelemetryRefresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClipboardFeedback {
+    ConversationAnnouncement(String),
+    Notice(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +77,7 @@ impl DesktopTimer {
 pub(crate) enum PlatformOutcome<T> {
     Completed(T),
     Cancelled,
-    Failed,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,11 +87,15 @@ pub(crate) enum PlatformResult {
         picker: DesktopPickerKind,
         outcome: PlatformOutcome<Vec<PathBuf>>,
     },
-    ExternalEditorOpened {
+    ClipboardWritten {
         identity: EffectIdentity,
         outcome: PlatformOutcome<()>,
     },
     PreferencesWritten {
+        identity: EffectIdentity,
+        outcome: PlatformOutcome<()>,
+    },
+    ResyncRequested {
         identity: EffectIdentity,
         outcome: PlatformOutcome<()>,
     },
@@ -98,23 +105,31 @@ impl PlatformResult {
     pub(crate) const fn identity(&self) -> &EffectIdentity {
         match self {
             Self::PathsPicked { identity, .. }
-            | Self::ExternalEditorOpened { identity, .. }
-            | Self::PreferencesWritten { identity, .. } => identity,
+            | Self::ClipboardWritten { identity, .. }
+            | Self::PreferencesWritten { identity, .. }
+            | Self::ResyncRequested { identity, .. } => identity,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DesktopEffect {
     PickPaths {
         identity: EffectIdentity,
         picker: DesktopPickerKind,
     },
-    OpenExternalEditor {
+    WriteClipboard {
         identity: EffectIdentity,
+        text: Option<String>,
+        feedback: ClipboardFeedback,
     },
     WritePreferences {
         identity: EffectIdentity,
+        preferences: DesktopPreferences,
+    },
+    RequestResync {
+        identity: EffectIdentity,
+        command_id: u64,
     },
     ScheduleTimer {
         timer: DesktopTimer,
@@ -126,8 +141,9 @@ impl DesktopEffect {
     pub(crate) const fn identity(&self) -> &EffectIdentity {
         match self {
             Self::PickPaths { identity, .. }
-            | Self::OpenExternalEditor { identity }
-            | Self::WritePreferences { identity } => identity,
+            | Self::WriteClipboard { identity, .. }
+            | Self::WritePreferences { identity, .. }
+            | Self::RequestResync { identity, .. } => identity,
             Self::ScheduleTimer { timer, .. } => timer.identity(),
         }
     }
@@ -145,11 +161,14 @@ impl DesktopEffect {
         ) || matches!(
             (self, result),
             (
-                Self::OpenExternalEditor { .. },
-                PlatformResult::ExternalEditorOpened { .. }
+                Self::WriteClipboard { .. },
+                PlatformResult::ClipboardWritten { .. }
             ) | (
                 Self::WritePreferences { .. },
                 PlatformResult::PreferencesWritten { .. }
+            ) | (
+                Self::RequestResync { .. },
+                PlatformResult::ResyncRequested { .. }
             )
         )
     }

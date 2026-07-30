@@ -15,7 +15,9 @@ use desktop::conversation::{
 #[cfg(test)]
 use desktop::conversation::{TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, conversation_block_height};
 use desktop::file_review::{DesktopFileReviewDocument, MAX_VISIBLE_FILE_CHANGES};
-use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel, PreferenceWriter};
+use desktop::preferences::{
+    DesktopPreferences, DesktopThinkingLevel, PreferenceWriteResult, PreferenceWriter,
+};
 use desktop::projection::{
     DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus, ProjectionEvent,
 };
@@ -56,9 +58,13 @@ use crate::application::reducer::safe_runtime_rejection_notice;
 use crate::application::{
     change_set::{UiChangeSet, UiRegion},
     commands::{CommandCompletionError, CommandTracker, DesktopCommandIntent},
+    effect::{
+        ClipboardFeedback, DesktopEffect, DesktopPickerKind, DesktopTimer, DesktopTimerKind,
+        PlatformOutcome, PlatformResult,
+    },
     reducer::{
-        DesktopController, DesktopEvent, ProjectionUpdateResult, RuntimeUpdatePort, Transition,
-        UiIntent,
+        DesktopController, DesktopEvent, PlatformUpdatePort, ProjectionUpdateResult,
+        RuntimeUpdatePort, Transition, UiIntent,
     },
     state::DesktopState,
     workspace::{SessionId, WorkspaceKey, WorkspaceStore},
@@ -67,7 +73,6 @@ use crate::application::{
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_SESSION_WORKSPACES: usize = 4;
-const CONVERSATION_ANNOUNCEMENT_DURATION: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 struct ConversationBlockVisual {
@@ -197,13 +202,6 @@ enum FocusInputModality {
     Keyboard,
     #[default]
     Pointer,
-}
-
-#[derive(Debug)]
-enum ProjectDirectoryPickerOutcome {
-    Selected(Vec<PathBuf>),
-    Cancelled,
-    Failed,
 }
 
 impl ComposerRunningMode {
@@ -460,6 +458,7 @@ pub(super) struct NativeShell {
     runtime_client: Option<RuntimeCommandClient>,
     runtime_updates: VecDeque<desktop::runtime::DesktopRuntimeUpdate>,
     controller: DesktopController,
+    queued_effects: VecDeque<DesktopEffect>,
     app: DesktopState<SessionWorkspace, ProjectCatalogController>,
     home_project: CodingAgentEmbeddingSnapshot,
     projectless_workspace_selection: CodingAgentWorkspaceSelection,
@@ -491,7 +490,7 @@ pub(super) struct NativeShell {
     center_surface: CenterSurface,
     drawer_restore_focus: Option<FocusTarget>,
     conversation_full_message: Option<ConversationFullMessageView>,
-    conversation_announcement: Option<(u64, String)>,
+    conversation_announcement: Option<(WorkspaceKey, u64, String)>,
     conversation_announcement_sequence: u64,
     panel_resize: Option<PanelResizeState>,
     focus_input_modality: FocusInputModality,
@@ -538,6 +537,7 @@ impl NativeShell {
             "the desktop Home clear target must be a managed Projectless workspace"
         );
         let (runtime_client, mut runtime_events, runtime_shutdown) = runtime.into_parts();
+        let runtime_shutdown_signal = runtime_shutdown.signal_handle();
         let mut command_tracker = CommandTracker::default();
         if let Some(session_id) = initial_session_id {
             let intent = DesktopCommandIntent::OpenSession {
@@ -792,10 +792,14 @@ impl NativeShell {
                     }
                     RootModalHostEvent::CopyFullMessage => {
                         if let Some(message) = &this.conversation_full_message {
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                message.text.to_string(),
-                            ));
-                            this.announce_conversation_copy("Full message copied.", cx);
+                            let text = message.text.to_string();
+                            this.write_clipboard(
+                                Some(text),
+                                ClipboardFeedback::ConversationAnnouncement(
+                                    "Full message copied.".into(),
+                                ),
+                                cx,
+                            );
                         }
                     }
                     RootModalHostEvent::CloseFullMessage => {
@@ -811,6 +815,7 @@ impl NativeShell {
                 },
             ),
             cx.observe_window_bounds(window, Self::window_bounds_changed),
+            cx.on_release(move |_, _| runtime_shutdown_signal.signal()),
         ];
 
         let composer_focus = composer_pane.read(cx).focus_handle().clone();
@@ -882,6 +887,7 @@ impl NativeShell {
             runtime_client: Some(runtime_client),
             runtime_updates: VecDeque::new(),
             controller: DesktopController::new(),
+            queued_effects: VecDeque::new(),
             app,
             home_project,
             projectless_workspace_selection,
@@ -1491,9 +1497,10 @@ impl NativeShell {
         }
     }
 
-    fn finish_panel_resize(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn finish_panel_resize(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.panel_resize.take().is_some() {
             self.schedule_preferences();
+            self.flush_queued_effects(cx);
         }
     }
 
@@ -1595,7 +1602,7 @@ impl NativeShell {
         completed_prompt_command: Option<u64>,
     ) -> ProjectionUpdateResult {
         let Some(event) = event else {
-            return ProjectionUpdateResult::new(false, Default::default());
+            return ProjectionUpdateResult::new(false, false, Default::default());
         };
         let composer_state_before = self.composer_pane_state_for(owner);
         let projection_was_none = self
@@ -1647,12 +1654,12 @@ impl NativeShell {
         }
 
         let Some(workspace) = self.app.workspaces.get(owner) else {
-            return ProjectionUpdateResult::new(false, Default::default());
+            return ProjectionUpdateResult::new(false, false, Default::default());
         };
         if workspace.projection.is_none() {
             // Metadata-only updates are valid application updates even when
             // the Home workspace has no session projection.
-            return ProjectionUpdateResult::new(true, Default::default());
+            return ProjectionUpdateResult::new(true, false, Default::default());
         }
 
         let completes_submitted_prompt = completed_prompt_command.is_some_and(|command_id| {
@@ -1780,7 +1787,14 @@ impl NativeShell {
             changes.insert(UiRegion::ConversationHeader);
             changes.insert(UiRegion::Modal);
         }
-        ProjectionUpdateResult::new(outcome.is_replaced(), changes)
+        ProjectionUpdateResult::new(
+            outcome.is_replaced(),
+            matches!(
+                outcome,
+                crate::projection::DesktopProjectionApply::NeedsResync
+            ),
+            changes,
+        )
     }
 
     fn composer_pane_state_for(&self, owner: &WorkspaceKey) -> (bool, bool, bool, bool) {
@@ -1855,41 +1869,170 @@ impl NativeShell {
         }
     }
 
-    fn request_resync_for(&mut self, owner: &WorkspaceKey) {
-        if !self
-            .app
-            .workspaces
-            .get(owner)
-            .and_then(|workspace| workspace.projection.as_ref())
-            .is_some_and(|projection| {
-                projection.lifecycle() == DesktopProjectionLifecycle::NeedsResync
-            })
-            || self
-                .app
-                .commands
-                .contains(owner, &DesktopCommandIntent::Resync)
-        {
-            return;
-        }
-        let intent = DesktopCommandIntent::Resync;
-        let command_id = match self.app.commands.reserve(owner.clone(), intent.clone()) {
-            Ok(command_id) => command_id,
-            Err(error) => {
-                RuntimeUpdatePort::set_notice(self, owner, error.to_string());
-                return;
-            }
-        };
-        let admission = self.runtime_client.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                runtime
-                    .try_resync(command_id)
-                    .map_err(|error| error.to_string())
-            },
+    fn with_controller<T>(
+        &mut self,
+        reduce: impl FnOnce(&mut DesktopController, &mut Self) -> T,
+    ) -> T {
+        let mut controller = std::mem::take(&mut self.controller);
+        let result = reduce(&mut controller, self);
+        self.controller = controller;
+        result
+    }
+
+    fn dispatch_platform_result(&mut self, result: PlatformResult, cx: &mut Context<Self>) {
+        let transition = self.with_controller(|controller, this| {
+            controller.reduce_async(this, DesktopEvent::Platform(result))
+        });
+        self.apply_transition(transition, cx);
+    }
+
+    fn dispatch_timer(&mut self, timer: DesktopTimer, cx: &mut Context<Self>) {
+        let transition = self.with_controller(|controller, this| {
+            controller.reduce_async(this, DesktopEvent::Timer(timer))
+        });
+        self.apply_transition(transition, cx);
+    }
+
+    fn queue_transition(&mut self, transition: Transition) {
+        let (changes, effects) = transition.into_parts();
+        assert!(
+            changes.is_empty(),
+            "queued transitions cannot hide UI changes"
         );
-        if let Err(message) = admission {
-            let _ = self.complete_command(command_id, owner, &intent);
-            RuntimeUpdatePort::set_notice(self, owner, message);
+        self.queued_effects.extend(effects);
+    }
+
+    fn apply_transition(&mut self, transition: Transition, cx: &mut Context<Self>) {
+        let (changes, effects) = transition.into_parts();
+        self.refresh_runtime_changes(changes, cx);
+        self.queued_effects.extend(effects);
+        self.flush_queued_effects(cx);
+    }
+
+    fn flush_queued_effects(&mut self, cx: &mut Context<Self>) {
+        while let Some(effect) = self.queued_effects.pop_front() {
+            self.execute_effect(effect, cx);
+        }
+    }
+
+    fn execute_effect(&mut self, effect: DesktopEffect, cx: &mut Context<Self>) {
+        match effect {
+            DesktopEffect::PickPaths { identity, picker } => {
+                let options = match picker {
+                    DesktopPickerKind::Attachments => PathPromptOptions {
+                        files: true,
+                        directories: false,
+                        multiple: true,
+                        prompt: Some("Attach files or images".into()),
+                    },
+                    DesktopPickerKind::ProjectDirectory => PathPromptOptions {
+                        files: false,
+                        directories: true,
+                        multiple: false,
+                        prompt: Some("Choose a project directory".into()),
+                    },
+                };
+                let selection = cx.prompt_for_paths(options);
+                cx.spawn(async move |this, cx| {
+                    let outcome = match selection.await {
+                        Ok(Ok(Some(paths))) => PlatformOutcome::Completed(paths),
+                        Ok(Ok(None)) => PlatformOutcome::Cancelled,
+                        Ok(Err(_)) | Err(_) => PlatformOutcome::Failed(match picker {
+                            DesktopPickerKind::Attachments => {
+                                "The file picker could not be opened.".into()
+                            }
+                            DesktopPickerKind::ProjectDirectory => {
+                                "The directory picker could not be opened.".into()
+                            }
+                        }),
+                    };
+                    let _ = this.update(cx, |this, cx| {
+                        this.dispatch_platform_result(
+                            PlatformResult::PathsPicked {
+                                identity,
+                                picker,
+                                outcome,
+                            },
+                            cx,
+                        );
+                    });
+                })
+                .detach();
+            }
+            DesktopEffect::WriteClipboard { identity, text, .. } => {
+                if let Some(text) = text {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+                self.dispatch_platform_result(
+                    PlatformResult::ClipboardWritten {
+                        identity,
+                        outcome: PlatformOutcome::Completed(()),
+                    },
+                    cx,
+                );
+            }
+            DesktopEffect::WritePreferences {
+                identity,
+                preferences,
+            } => {
+                let Some(writer) = self.preference_writer.as_ref() else {
+                    self.dispatch_platform_result(
+                        PlatformResult::PreferencesWritten {
+                            identity,
+                            outcome: PlatformOutcome::Failed(
+                                "Desktop preference writer is unavailable.".into(),
+                            ),
+                        },
+                        cx,
+                    );
+                    return;
+                };
+                let completion = writer.schedule(preferences);
+                cx.spawn(async move |this, cx| {
+                    let outcome = match completion.await {
+                        Ok(PreferenceWriteResult::Written) => PlatformOutcome::Completed(()),
+                        Ok(PreferenceWriteResult::Superseded) => PlatformOutcome::Cancelled,
+                        Ok(PreferenceWriteResult::Failed(message)) => {
+                            PlatformOutcome::Failed(message)
+                        }
+                        Err(_) => PlatformOutcome::Failed(
+                            "Desktop preference writer stopped before completion.".into(),
+                        ),
+                    };
+                    let _ = this.update(cx, |this, cx| {
+                        this.dispatch_platform_result(
+                            PlatformResult::PreferencesWritten { identity, outcome },
+                            cx,
+                        );
+                    });
+                })
+                .detach();
+            }
+            DesktopEffect::RequestResync {
+                identity,
+                command_id,
+            } => {
+                let outcome = self.runtime_client.as_ref().map_or_else(
+                    || PlatformOutcome::Failed("desktop runtime is stopped".into()),
+                    |runtime| match runtime.try_resync(command_id) {
+                        Ok(()) => PlatformOutcome::Completed(()),
+                        Err(error) => PlatformOutcome::Failed(error.to_string()),
+                    },
+                );
+                self.dispatch_platform_result(
+                    PlatformResult::ResyncRequested { identity, outcome },
+                    cx,
+                );
+            }
+            DesktopEffect::ScheduleTimer { timer, delay } => {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.dispatch_timer(timer, cx);
+                    });
+                })
+                .detach();
+            }
         }
     }
 
@@ -1906,13 +2049,11 @@ impl NativeShell {
             let Some(update) = self.runtime_updates.pop_front() else {
                 break;
             };
-            transition.merge(DesktopController::reduce_runtime(self, update));
+            let reduced =
+                self.with_controller(|controller, this| controller.reduce_runtime(this, update));
+            transition.merge(reduced);
             applied += 1;
         }
-        debug_assert!(
-            transition.effects().is_empty(),
-            "DSK-731 runtime updates do not emit platform effects"
-        );
         RuntimePoll {
             transition,
             running: RuntimeUpdatePort::active_runtime_is_running(self),
@@ -1920,13 +2061,6 @@ impl NativeShell {
     }
 
     fn apply_runtime_poll(&mut self, mut poll: RuntimePoll, cx: &mut Context<Self>) -> bool {
-        if let Some(writer) = &self.preference_writer
-            && let Some(error) = writer.take_error()
-        {
-            let owner = self.app.workspaces.active_key().clone();
-            RuntimeUpdatePort::set_notice(self, &owner, error);
-            poll.transition.merge(Transition::changed(UiRegion::Toast));
-        }
         let conversation_needs_refresh = self
             .app
             .workspaces
@@ -1936,7 +2070,7 @@ impl NativeShell {
         if conversation_needs_refresh && !self.refresh_conversation_rows_at_current_width(cx) {
             poll.transition.merge(Transition::changed(UiRegion::Root));
         }
-        self.refresh_runtime_changes(poll.transition.changes(), cx);
+        self.apply_transition(poll.transition, cx);
         poll.running
     }
 
@@ -2047,17 +2181,22 @@ impl NativeShell {
             return;
         }
         self.inspector_telemetry_refresh_deadline = Some(deadline);
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.inspector_telemetry_refresh_deadline == Some(deadline) {
-                    this.inspector_telemetry_refresh_deadline = None;
-                    this.inspector_telemetry_last_refresh = Some(Instant::now());
-                    this.push_inspector_pane_view_model(cx);
-                }
-            });
-        })
-        .detach();
+        let owner = self.app.workspaces.active_key().clone();
+        match self.controller.schedule_timer(
+            owner,
+            DesktopTimerKind::InspectorTelemetryRefresh,
+            delay,
+        ) {
+            Ok(transition) => self.apply_transition(transition, cx),
+            Err(error) => {
+                self.inspector_telemetry_refresh_deadline = None;
+                self.app
+                    .workspaces
+                    .active_mut()
+                    .set_preference_notice(error.to_string());
+                self.notify_toast_host(cx);
+            }
+        }
     }
 
     fn notify_toast_host(&self, cx: &mut Context<Self>) {
@@ -2109,8 +2248,20 @@ impl NativeShell {
     }
 
     fn schedule_preferences(&mut self) {
-        if let Some(writer) = &self.preference_writer {
-            writer.schedule(self.app.preferences.clone());
+        if self.preference_writer.is_none() {
+            return;
+        }
+        let owner = self.app.workspaces.active_key().clone();
+        match self
+            .controller
+            .write_preferences(owner, self.app.preferences.clone())
+        {
+            Ok(transition) => self.queue_transition(transition),
+            Err(error) => self
+                .app
+                .workspaces
+                .active_mut()
+                .set_preference_notice(error.to_string()),
         }
     }
 
@@ -2329,31 +2480,20 @@ impl NativeShell {
             cx.notify();
             return;
         }
-        let selection = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("Attach files or images".into()),
-        });
-        cx.spawn(async move |this, cx| match selection.await {
-            Ok(Ok(Some(paths))) => {
-                let _ = this.update(cx, |this, cx| {
-                    this.add_composer_attachments(paths, cx);
-                });
+        let owner = self.app.workspaces.active_key().clone();
+        match self
+            .controller
+            .pick_paths(owner, DesktopPickerKind::Attachments)
+        {
+            Ok(transition) => self.apply_transition(transition, cx),
+            Err(error) => {
+                self.app
+                    .workspaces
+                    .active_mut()
+                    .set_preference_notice(error.to_string());
+                self.notify_toast_host(cx);
             }
-            Ok(Ok(None)) => {}
-            Ok(Err(_)) | Err(_) => {
-                let _ = this.update(cx, |this, cx| {
-                    this.app
-                        .workspaces
-                        .active_mut()
-                        .set_preference_notice("The file picker could not be opened.".into());
-                    this.notify_toast_host(cx);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        }
     }
 
     fn choose_project_directory(&mut self, cx: &mut Context<Self>) {
@@ -2365,85 +2505,20 @@ impl NativeShell {
         {
             return;
         }
-        let selection = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose a project directory".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            let outcome = match selection.await {
-                Ok(Ok(Some(paths))) => ProjectDirectoryPickerOutcome::Selected(paths),
-                Ok(Ok(None)) => ProjectDirectoryPickerOutcome::Cancelled,
-                Ok(Err(_)) | Err(_) => ProjectDirectoryPickerOutcome::Failed,
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.apply_project_directory_picker_outcome(outcome, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn apply_project_directory_picker_outcome(
-        &mut self,
-        outcome: ProjectDirectoryPickerOutcome,
-        cx: &mut Context<Self>,
-    ) {
-        if !self
-            .app
-            .workspaces
-            .active_mut()
-            .project_directory_editable()
+        let owner = self.app.workspaces.active_key().clone();
+        match self
+            .controller
+            .pick_paths(owner, DesktopPickerKind::ProjectDirectory)
         {
-            return;
-        }
-        match outcome {
-            ProjectDirectoryPickerOutcome::Selected(paths) => {
-                let mut paths = paths.into_iter();
-                let Some(path) = paths.next() else {
-                    self.app.workspaces.active_mut().set_preference_notice(
-                        "The directory picker returned no project directory.".into(),
-                    );
-                    self.notify_toast_host(cx);
-                    cx.notify();
-                    return;
-                };
-                if paths.next().is_some() {
-                    self.app.workspaces.active_mut().set_preference_notice(
-                        "The directory picker returned more than one project directory.".into(),
-                    );
-                    self.notify_toast_host(cx);
-                    cx.notify();
-                    return;
-                }
-                let _ = self.set_project_directory(path, cx);
-            }
-            ProjectDirectoryPickerOutcome::Cancelled => {}
-            ProjectDirectoryPickerOutcome::Failed => {
+            Ok(transition) => self.apply_transition(transition, cx),
+            Err(error) => {
                 self.app
                     .workspaces
                     .active_mut()
-                    .set_preference_notice("The directory picker could not be opened.".into());
+                    .set_preference_notice(error.to_string());
                 self.notify_toast_host(cx);
-                cx.notify();
             }
         }
-    }
-
-    fn set_project_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) -> bool {
-        if !self
-            .app
-            .workspaces
-            .active_mut()
-            .project_directory_editable()
-        {
-            return false;
-        }
-        self.app.workspaces.active_mut().draft_workspace_selection =
-            CodingAgentWorkspaceSelection::project(path);
-        self.notify_composer_pane(cx);
-        cx.notify();
-        true
     }
 
     fn clear_project_directory(&mut self, cx: &mut Context<Self>) -> bool {
@@ -2460,32 +2535,6 @@ impl NativeShell {
         self.notify_composer_pane(cx);
         cx.notify();
         true
-    }
-
-    fn add_composer_attachments(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let mut candidate = self
-            .app
-            .workspaces
-            .active_mut()
-            .composer_attachments
-            .clone();
-        for path in paths {
-            if !candidate.contains(&path) {
-                candidate.push(path);
-            }
-        }
-        if let Err(error) = validate_prompt_attachments(&candidate) {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice(error.to_string());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        self.app.workspaces.active_mut().composer_attachments = candidate;
-        self.notify_composer_pane(cx);
-        cx.notify();
     }
 
     fn remove_composer_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -3092,8 +3141,11 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.announce_conversation_copy("Selected message copied.", cx);
+        self.write_clipboard(
+            Some(text),
+            ClipboardFeedback::ConversationAnnouncement("Selected message copied.".into()),
+            cx,
+        );
     }
 
     fn conversation_full_message_view(
@@ -3163,8 +3215,11 @@ impl NativeShell {
             self.notify_toast_host(cx);
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(message.text.to_string()));
-        self.announce_conversation_copy("Message copied.", cx);
+        self.write_clipboard(
+            Some(message.text.to_string()),
+            ClipboardFeedback::ConversationAnnouncement("Message copied.".into()),
+            cx,
+        );
     }
 
     fn copy_tool_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
@@ -3182,34 +3237,42 @@ impl NativeShell {
             self.notify_toast_host(cx);
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            conversation_pane::tool_detail_copy_text(&row.title, &row.detail, &row.text),
-        ));
-        self.announce_conversation_copy("Tool details copied.", cx);
+        self.write_clipboard(
+            Some(conversation_pane::tool_detail_copy_text(
+                &row.title,
+                &row.detail,
+                &row.text,
+            )),
+            ClipboardFeedback::ConversationAnnouncement("Tool details copied.".into()),
+            cx,
+        );
     }
 
     fn announce_conversation_copy(&mut self, message: &str, cx: &mut Context<Self>) {
-        self.conversation_announcement_sequence =
-            self.conversation_announcement_sequence.wrapping_add(1);
-        let sequence = self.conversation_announcement_sequence;
-        self.conversation_announcement = Some((sequence, message.to_owned()));
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(CONVERSATION_ANNOUNCEMENT_DURATION)
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this
-                    .conversation_announcement
-                    .as_ref()
-                    .is_some_and(|(current, _)| *current == sequence)
-                {
-                    this.conversation_announcement = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.write_clipboard(
+            None,
+            ClipboardFeedback::ConversationAnnouncement(message.into()),
+            cx,
+        );
+    }
+
+    fn write_clipboard(
+        &mut self,
+        text: Option<String>,
+        feedback: ClipboardFeedback,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = self.app.workspaces.active_key().clone();
+        match self.controller.write_clipboard(owner, text, feedback) {
+            Ok(transition) => self.apply_transition(transition, cx),
+            Err(error) => {
+                self.app
+                    .workspaces
+                    .active_mut()
+                    .set_preference_notice(error.to_string());
+                self.notify_toast_host(cx);
+            }
+        }
     }
 
     fn open_full_conversation_message(
@@ -3419,17 +3482,12 @@ impl NativeShell {
             return;
         };
         let export = document.path_clipboard_export();
-        cx.write_to_clipboard(ClipboardItem::new_string(export.text));
-        self.app
-            .workspaces
-            .active_mut()
-            .set_preference_notice(if export.truncated {
-                "Bounded changed-file path copied (truncated).".into()
-            } else {
-                "Changed-file path copied.".into()
-            });
-        self.notify_toast_host(cx);
-        cx.notify();
+        let notice = if export.truncated {
+            "Bounded changed-file path copied (truncated).".into()
+        } else {
+            "Changed-file path copied.".into()
+        };
+        self.write_clipboard(Some(export.text), ClipboardFeedback::Notice(notice), cx);
     }
 
     fn copy_file_review(&mut self, cx: &mut Context<Self>) {
@@ -3445,17 +3503,12 @@ impl NativeShell {
             return;
         };
         let export = document.clipboard_export();
-        cx.write_to_clipboard(ClipboardItem::new_string(export.text));
-        self.app
-            .workspaces
-            .active_mut()
-            .set_preference_notice(if export.truncated {
-                "Bounded file review copied (truncated at the clipboard limit).".into()
-            } else {
-                "File review copied.".into()
-            });
-        self.notify_toast_host(cx);
-        cx.notify();
+        let notice = if export.truncated {
+            "Bounded file review copied (truncated at the clipboard limit).".into()
+        } else {
+            "File review copied.".into()
+        };
+        self.write_clipboard(Some(export.text), ClipboardFeedback::Notice(notice), cx);
     }
 
     fn open_review_in_external_editor(&mut self, cx: &mut Context<Self>) {
@@ -4227,7 +4280,7 @@ impl NativeShell {
         refresh: ConversationRefresh,
         cx: &mut Context<Self>,
     ) {
-        let Some((delay, deadline)) = self
+        let Some((delay, _deadline)) = self
             .app
             .workspaces
             .active_mut()
@@ -4236,21 +4289,21 @@ impl NativeShell {
         else {
             return;
         };
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            let _ = this.update(cx, |this, cx| {
-                if this
-                    .app
+        let owner = self.app.workspaces.active_key().clone();
+        match self.controller.schedule_timer(
+            owner,
+            DesktopTimerKind::ConversationHeightRefresh,
+            delay,
+        ) {
+            Ok(transition) => self.apply_transition(transition, cx),
+            Err(error) => {
+                self.app
                     .workspaces
                     .active_mut()
-                    .conversation_controller
-                    .fire_height_refresh(deadline)
-                {
-                    let _ = this.refresh_conversation_rows_at_current_width(cx);
-                }
-            });
-        })
-        .detach();
+                    .set_preference_notice(error.to_string());
+                self.notify_toast_host(cx);
+            }
+        }
     }
 
     pub(super) fn focus_composer_input(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5008,6 +5061,128 @@ fn conversation_header_model_menu(
     (groups, unavailable_current_model)
 }
 
+impl PlatformUpdatePort for NativeShell {
+    fn active_workspace_key(&self) -> WorkspaceKey {
+        self.app.workspaces.active_key().clone()
+    }
+
+    fn workspace_exists(&self, owner: &WorkspaceKey) -> bool {
+        self.app.workspaces.contains(owner)
+    }
+
+    fn project_directory_editable(&self, owner: &WorkspaceKey) -> bool {
+        self.app
+            .workspaces
+            .get(owner)
+            .is_some_and(SessionWorkspace::project_directory_editable)
+    }
+
+    fn set_project_directory(&mut self, owner: &WorkspaceKey, path: PathBuf) -> bool {
+        let Some(workspace) = self.app.workspaces.get_mut(owner) else {
+            return false;
+        };
+        if !workspace.project_directory_editable() {
+            return false;
+        }
+        workspace.draft_workspace_selection = CodingAgentWorkspaceSelection::project(path);
+        true
+    }
+
+    fn add_composer_attachments(
+        &mut self,
+        owner: &WorkspaceKey,
+        paths: Vec<PathBuf>,
+    ) -> Result<bool, String> {
+        let Some(workspace) = self.app.workspaces.get_mut(owner) else {
+            return Ok(false);
+        };
+        let mut candidate = workspace.composer_attachments.clone();
+        for path in paths {
+            if !candidate.contains(&path) {
+                candidate.push(path);
+            }
+        }
+        validate_prompt_attachments(&candidate).map_err(|error| error.to_string())?;
+        if candidate == workspace.composer_attachments {
+            return Ok(false);
+        }
+        workspace.composer_attachments = candidate;
+        Ok(true)
+    }
+
+    fn set_notice(&mut self, owner: &WorkspaceKey, notice: String) {
+        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
+            workspace.set_preference_notice(notice);
+        }
+    }
+
+    fn show_conversation_announcement(&mut self, owner: &WorkspaceKey, message: String) {
+        self.conversation_announcement_sequence =
+            self.conversation_announcement_sequence.wrapping_add(1);
+        self.conversation_announcement = Some((
+            owner.clone(),
+            self.conversation_announcement_sequence,
+            message,
+        ));
+    }
+
+    fn clear_conversation_announcement(&mut self, owner: &WorkspaceKey) -> bool {
+        if self
+            .conversation_announcement
+            .as_ref()
+            .is_some_and(|(current_owner, _, _)| current_owner == owner)
+        {
+            self.conversation_announcement = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn fire_conversation_height_refresh(&mut self, owner: &WorkspaceKey) -> bool {
+        self.app.workspaces.get_mut(owner).is_some_and(|workspace| {
+            workspace
+                .conversation_controller
+                .fire_current_height_refresh()
+        })
+    }
+
+    fn commit_conversation_width(&mut self, owner: &WorkspaceKey) -> bool {
+        self.app.workspaces.get_mut(owner).is_some_and(|workspace| {
+            workspace
+                .conversation_controller
+                .commit_current_pending_width()
+        })
+    }
+
+    fn refresh_inspector_telemetry(&mut self, owner: &WorkspaceKey) -> bool {
+        if self.app.workspaces.active_key() != owner
+            || self.inspector_telemetry_refresh_deadline.is_none()
+        {
+            return false;
+        }
+        self.inspector_telemetry_refresh_deadline = None;
+        self.inspector_telemetry_last_refresh = Some(Instant::now());
+        true
+    }
+
+    fn complete_resync_admission(
+        &mut self,
+        owner: &WorkspaceKey,
+        command_id: u64,
+        failure: Option<String>,
+    ) {
+        let Some(message) = failure else {
+            return;
+        };
+        let intent = DesktopCommandIntent::Resync;
+        let _ = self.app.commands.complete(command_id, owner, &intent);
+        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
+            workspace.set_preference_notice(message);
+        }
+    }
+}
+
 impl RuntimeUpdatePort for NativeShell {
     fn active_workspace_key(&self) -> WorkspaceKey {
         self.app.workspaces.active_key().clone()
@@ -5283,8 +5458,41 @@ impl RuntimeUpdatePort for NativeShell {
         )
     }
 
-    fn request_resync_if_needed(&mut self, owner: &WorkspaceKey) {
-        self.request_resync_for(owner);
+    fn reserve_resync_command(&mut self, owner: &WorkspaceKey) -> Option<u64> {
+        if !self
+            .app
+            .workspaces
+            .get(owner)
+            .and_then(|workspace| workspace.projection.as_ref())
+            .is_some_and(|projection| {
+                projection.lifecycle() == DesktopProjectionLifecycle::NeedsResync
+            })
+            || self
+                .app
+                .commands
+                .contains(owner, &DesktopCommandIntent::Resync)
+        {
+            return None;
+        }
+        match self
+            .app
+            .commands
+            .reserve(owner.clone(), DesktopCommandIntent::Resync)
+        {
+            Ok(command_id) => Some(command_id),
+            Err(error) => {
+                RuntimeUpdatePort::set_notice(self, owner, error.to_string());
+                None
+            }
+        }
+    }
+
+    fn abandon_resync_command(&mut self, owner: &WorkspaceKey, command_id: u64, message: String) {
+        let _ = self
+            .app
+            .commands
+            .complete(command_id, owner, &DesktopCommandIntent::Resync);
+        RuntimeUpdatePort::set_notice(self, owner, message);
     }
 
     fn active_runtime_is_running(&self) -> bool {
@@ -5301,6 +5509,7 @@ impl RuntimeUpdatePort for NativeShell {
 impl Render for NativeShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _span = tracing::trace_span!("desktop.render").entered();
+        self.flush_queued_effects(cx);
         if self.app.workspaces.active_mut().composer_needs_sync {
             let draft = self.app.workspaces.active_mut().composer.draft().to_owned();
             self.composer_pane.update(cx, |pane, cx| {
@@ -5320,24 +5529,15 @@ impl Render for NativeShell {
                 .active_mut()
                 .conversation_controller
                 .width_for_render(requested_layout_width);
-            if let Some((requested, deadline)) = width_refresh {
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(CONVERSATION_RESIZE_DEBOUNCE)
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this
-                            .app
-                            .workspaces
-                            .active_mut()
-                            .conversation_controller
-                            .commit_pending_width(requested, deadline)
-                        {
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
+            if width_refresh.is_some() {
+                let owner = self.app.workspaces.active_key().clone();
+                if let Ok(transition) = self.controller.schedule_timer(
+                    owner,
+                    DesktopTimerKind::ConversationWidthCommit,
+                    CONVERSATION_RESIZE_DEBOUNCE,
+                ) {
+                    self.apply_transition(transition, cx);
+                }
             }
             self.refresh_conversation_rows_at_width(layout_width, cx);
         }
@@ -5501,7 +5701,7 @@ impl Render for NativeShell {
         let conversation_announcement = self
             .conversation_announcement
             .as_ref()
-            .map(|(_, message)| message.clone());
+            .map(|(_, _, message)| message.clone());
 
         div()
             .id("desktop-application")
@@ -5710,6 +5910,36 @@ mod tests {
 
     fn activate_session(shell: &mut NativeShell, session_id: &str) -> bool {
         shell.app.workspaces.activate(&session_key(session_id))
+    }
+
+    fn set_project_directory_for_test(shell: &mut NativeShell, path: PathBuf) -> bool {
+        let owner = shell.app.workspaces.active_key().clone();
+        PlatformUpdatePort::set_project_directory(shell, &owner, path)
+    }
+
+    fn apply_picker_result_for_test(
+        shell: &mut NativeShell,
+        picker: DesktopPickerKind,
+        outcome: PlatformOutcome<Vec<PathBuf>>,
+        cx: &mut Context<NativeShell>,
+    ) {
+        let owner = shell.app.workspaces.active_key().clone();
+        let transition = shell
+            .controller
+            .pick_paths(owner, picker)
+            .expect("test picker effect identity is available");
+        let identity = match transition.effects().first() {
+            Some(DesktopEffect::PickPaths { identity, .. }) => identity.clone(),
+            _ => panic!("picker request must emit one typed picker effect"),
+        };
+        shell.dispatch_platform_result(
+            PlatformResult::PathsPicked {
+                identity,
+                picker,
+                outcome,
+            },
+            cx,
+        );
     }
 
     fn session_workspace_ids(shell: &NativeShell) -> HashSet<String> {
@@ -9681,7 +9911,7 @@ mod tests {
             "Copy feedback must not replace a persistent runtime or preference notice"
         );
         cx.executor()
-            .advance_clock(CONVERSATION_ANNOUNCEMENT_DURATION + Duration::from_millis(1));
+            .advance_clock(Duration::from_secs(2) + Duration::from_millis(1));
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("desktop-conversation-copy-announcement")
@@ -10567,9 +10797,11 @@ mod tests {
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
             let original = PathBuf::from("/kept/project");
-            assert!(shell.set_project_directory(original.clone(), cx));
-            shell.apply_project_directory_picker_outcome(
-                ProjectDirectoryPickerOutcome::Selected(vec![
+            assert!(set_project_directory_for_test(shell, original.clone()));
+            apply_picker_result_for_test(
+                shell,
+                DesktopPickerKind::ProjectDirectory,
+                PlatformOutcome::Completed(vec![
                     PathBuf::from("/unexpected/one"),
                     PathBuf::from("/unexpected/two"),
                 ]),
@@ -10589,7 +10821,12 @@ mod tests {
                     .is_some_and(|notice| notice.contains("more than one"))
             );
 
-            shell.apply_project_directory_picker_outcome(ProjectDirectoryPickerOutcome::Failed, cx);
+            apply_picker_result_for_test(
+                shell,
+                DesktopPickerKind::ProjectDirectory,
+                PlatformOutcome::Failed("The directory picker could not be opened.".into()),
+                cx,
+            );
             assert_eq!(
                 shell.app.workspaces.active().draft_workspace_selection,
                 CodingAgentWorkspaceSelection::project(original)
@@ -10614,7 +10851,7 @@ mod tests {
         runtime_harness.drain_command_kinds();
 
         shell.update(cx, |shell, cx| {
-            assert!(shell.set_project_directory(selected_path.clone(), cx));
+            assert!(set_project_directory_for_test(shell, selected_path.clone()));
             shell
                 .app
                 .workspaces
@@ -10622,7 +10859,7 @@ mod tests {
                 .composer
                 .edit("freeze this project target");
             shell.submit_composer(cx);
-            assert!(!shell.set_project_directory(replacement_path, cx));
+            assert!(!set_project_directory_for_test(shell, replacement_path));
             assert!(!shell.clear_project_directory(cx));
         });
 
@@ -10663,8 +10900,8 @@ mod tests {
         cx.run_until_parked();
         runtime_harness.drain_command_kinds();
 
-        shell.update(cx, |shell, cx| {
-            assert!(shell.set_project_directory(selected_path.clone(), cx));
+        shell.update(cx, |shell, _cx| {
+            assert!(set_project_directory_for_test(shell, selected_path.clone()));
             shell
                 .app
                 .workspaces
@@ -10702,7 +10939,7 @@ mod tests {
         let selected_path = selected.path().to_path_buf();
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
-            assert!(shell.set_project_directory(selected_path.clone(), cx));
+            assert!(set_project_directory_for_test(shell, selected_path.clone()));
             shell
                 .app
                 .workspaces
@@ -10782,8 +11019,8 @@ mod tests {
         initialize_visual_test(cx);
         let (shell, cx) = add_idle_visual_shell(cx);
         let selected = PathBuf::from("/home/draft/project");
-        shell.update(cx, |shell, cx| {
-            assert!(shell.set_project_directory(selected.clone(), cx));
+        shell.update(cx, |shell, _cx| {
+            assert!(set_project_directory_for_test(shell, selected.clone()));
             shell
                 .app
                 .workspaces
@@ -10880,10 +11117,14 @@ mod tests {
                 .active_mut()
                 .composer
                 .edit("retain this exact draft");
-            shell.add_composer_attachments(
-                (0..=MAX_PROMPT_ATTACHMENTS)
-                    .map(|index| PathBuf::from(format!("/tmp/attachment-{index}.png")))
-                    .collect(),
+            apply_picker_result_for_test(
+                shell,
+                DesktopPickerKind::Attachments,
+                PlatformOutcome::Completed(
+                    (0..=MAX_PROMPT_ATTACHMENTS)
+                        .map(|index| PathBuf::from(format!("/tmp/attachment-{index}.png")))
+                        .collect(),
+                ),
                 cx,
             );
             assert!(

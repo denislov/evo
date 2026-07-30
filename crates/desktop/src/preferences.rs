@@ -9,6 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures::channel::oneshot;
 use serde::{Deserialize, Serialize};
 
 use crate::file_review::DesktopExternalEditorConfig;
@@ -366,10 +367,21 @@ pub struct PreferenceWriter {
 }
 
 struct PreferenceWriterShared {
-    pending: Mutex<Option<DesktopPreferences>>,
+    pending: Mutex<Option<PreferenceWriteRequest>>,
     wake: Condvar,
     stopping: AtomicBool,
-    latest_error: Mutex<Option<String>>,
+}
+
+struct PreferenceWriteRequest {
+    preferences: DesktopPreferences,
+    completion: oneshot::Sender<PreferenceWriteResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreferenceWriteResult {
+    Written,
+    Superseded,
+    Failed(String),
 }
 
 impl PreferenceWriter {
@@ -378,7 +390,6 @@ impl PreferenceWriter {
             pending: Mutex::new(None),
             wake: Condvar::new(),
             stopping: AtomicBool::new(false),
-            latest_error: Mutex::new(None),
         });
         let worker_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
@@ -390,21 +401,25 @@ impl PreferenceWriter {
         })
     }
 
-    pub fn schedule(&self, preferences: DesktopPreferences) {
-        *self
+    pub fn schedule(
+        &self,
+        preferences: DesktopPreferences,
+    ) -> oneshot::Receiver<PreferenceWriteResult> {
+        let (completion, receiver) = oneshot::channel();
+        let replaced = self
             .shared
             .pending
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(preferences.normalized());
-        self.shared.wake.notify_one();
-    }
-
-    pub fn take_error(&self) -> Option<String> {
-        self.shared
-            .latest_error
-            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+            .replace(PreferenceWriteRequest {
+                preferences: preferences.normalized(),
+                completion,
+            });
+        if let Some(replaced) = replaced {
+            let _ = replaced.completion.send(PreferenceWriteResult::Superseded);
+        }
+        self.shared.wake.notify_one();
+        receiver
     }
 }
 
@@ -641,13 +656,12 @@ fn preference_writer_loop(store: PreferenceStore, shared: &PreferenceWriterShare
         let stopping = shared.stopping.load(Ordering::Acquire);
         drop(pending);
 
-        if let Some(preferences) = next {
-            if let Err(error) = store.save(&preferences) {
-                *shared
-                    .latest_error
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
-            }
+        if let Some(request) = next {
+            let result = match store.save(&request.preferences) {
+                Ok(_) => PreferenceWriteResult::Written,
+                Err(error) => PreferenceWriteResult::Failed(error.to_string()),
+            };
+            let _ = request.completion.send(result);
             continue;
         }
         if stopping {
@@ -956,11 +970,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = PreferenceStore::new(temp.path());
         let writer = PreferenceWriter::spawn(store.clone()).unwrap();
+        let mut latest = None;
         for width in 640..700 {
             let mut preferences = DesktopPreferences::default();
             preferences.window.width = width;
-            writer.schedule(preferences);
+            latest = Some(writer.schedule(preferences));
         }
+
+        assert_eq!(
+            futures::executor::block_on(latest.expect("the final write is scheduled")).unwrap(),
+            PreferenceWriteResult::Written
+        );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -976,6 +996,19 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert_eq!(writer.take_error(), None);
+    }
+
+    #[test]
+    fn background_writer_reports_failure_on_the_scheduled_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join(DESKTOP_DIRECTORY), b"not a directory").unwrap();
+        let writer = PreferenceWriter::spawn(PreferenceStore::new(temp.path())).unwrap();
+
+        let result = futures::executor::block_on(writer.schedule(DesktopPreferences::default()))
+            .expect("the writer thread returns one typed completion");
+
+        assert!(
+            matches!(result, PreferenceWriteResult::Failed(message) if message.contains("not a directory"))
+        );
     }
 }

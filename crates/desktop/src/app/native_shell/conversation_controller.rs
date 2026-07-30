@@ -606,6 +606,13 @@ impl ConversationController {
         }
     }
 
+    pub(super) fn commit_current_pending_width(&mut self) -> bool {
+        let Some((requested, deadline)) = self.width_pending else {
+            return false;
+        };
+        self.commit_pending_width(requested, deadline)
+    }
+
     // ---- height refresh deadline ------------------------------------------
 
     /// Arm the earliest pending height refresh. Returns the delay the Root has
@@ -644,6 +651,13 @@ impl ConversationController {
         }
         self.height_refresh_full = false;
         true
+    }
+
+    pub(super) fn fire_current_height_refresh(&mut self) -> bool {
+        let Some(deadline) = self.height_refresh_deadline else {
+            return false;
+        };
+        self.fire_height_refresh(deadline)
     }
 
     // ---- row construction --------------------------------------------------
