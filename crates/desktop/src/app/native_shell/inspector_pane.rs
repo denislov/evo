@@ -106,7 +106,7 @@ pub(super) struct InspectorPaneViewModel {
     pub(super) cwd: String,
 }
 
-pub(super) struct InspectorPane {
+pub(crate) struct InspectorPane {
     focus: FocusHandle,
     tab_focus: [FocusHandle; 4],
     tab_scroll: ScrollHandle,

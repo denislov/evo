@@ -59,7 +59,7 @@ pub(super) struct SessionsPaneViewModel {
     pub(super) reduced_motion: bool,
 }
 
-pub(super) struct SessionsPane {
+pub(crate) struct SessionsPane {
     focus: FocusHandle,
     search_input: gpui::Entity<InputState>,
     rename_input: gpui::Entity<InputState>,

@@ -49,7 +49,7 @@ impl ToastExpiryTimer {
     }
 }
 
-pub(super) struct ToastHost {
+pub(crate) struct ToastHost {
     focus: FocusHandle,
     toasts: VecDeque<ToastEntry>,
     seen_sources: VecDeque<(Arc<str>, u64)>,

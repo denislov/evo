@@ -135,7 +135,7 @@ impl InputRenderLatencyProbe {
     }
 }
 
-pub(super) struct ComposerPane {
+pub(crate) struct ComposerPane {
     input: gpui::Entity<InputState>,
     focus: FocusHandle,
     latency: InputRenderLatencyProbe,

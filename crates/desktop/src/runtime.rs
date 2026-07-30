@@ -3,6 +3,7 @@ mod dispatch;
 mod driver;
 mod protocol;
 
+pub(crate) use bridge::DesktopRuntimeShutdownSignal;
 #[allow(unused_imports)]
 pub use bridge::{
     DesktopRuntimeBootstrap, DesktopRuntimeBridge, DesktopRuntimeEventStream,

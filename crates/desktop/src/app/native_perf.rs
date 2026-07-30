@@ -29,8 +29,8 @@ use gpui::{
 use gpui_component::Root;
 
 use super::native_shell::{
-    EvoBrandFixture, EvoBrandMode, NativeShell, NativeShellInit, NativeVisualCatalogFixture,
-    NativeVisualDrawerFixture,
+    EvoBrandFixture, EvoBrandMode, NativeShell, NativeShellInit, NativeShellWorkspaceInit,
+    NativeVisualCatalogFixture, NativeVisualDrawerFixture,
 };
 use crate::preferences::DesktopPreferences;
 use crate::projection::DesktopProjection;
@@ -440,8 +440,11 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             ..
         })
     );
-    let project = projection.project().clone();
-    let projection = (!idle_replay).then_some(projection);
+    let workspace = if idle_replay {
+        NativeShellWorkspaceInit::Home(Box::new(projection.project().clone()))
+    } else {
+        NativeShellWorkspaceInit::Session(Box::new(projection))
+    };
     let global_skills: Arc<[CodingAgentResourceCommand]> =
         Arc::from([CodingAgentResourceCommand {
             name: "review-plan".into(),
@@ -460,8 +463,7 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             let mut shell = NativeShell::new(
                 NativeShellInit {
                     runtime: DesktopRuntimeBridge::disconnected_for_replay(),
-                    project,
-                    projection,
+                    workspace,
                     projectless_workspace_selection:
                         coding_agent::api::embedding::CodingAgentWorkspaceSelection::projectless(
                             "workspace-native-replay",
@@ -472,7 +474,6 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
                     preference_notice: toast_replay.then(|| {
                         "Desktop notification paths now appear as transient toasts.".into()
                     }),
-                    initial_session_id: None,
                 },
                 window,
                 cx,

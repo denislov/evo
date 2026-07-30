@@ -10,7 +10,7 @@ pub(super) struct SkillsPaneViewModel {
     pub(super) skills: Arc<[CodingAgentResourceCommand]>,
 }
 
-pub(super) struct SkillsPane {
+pub(crate) struct SkillsPane {
     view_model: SkillsPaneViewModel,
 }
 

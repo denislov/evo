@@ -6,7 +6,7 @@ pub(super) enum CenterNavigationTarget {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum CenterSurface {
+pub(crate) enum CenterSurface {
     #[default]
     Primary,
     Skills,

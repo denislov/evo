@@ -41,7 +41,7 @@ pub(super) struct RootModalViewModel {
     pub(super) full_message: Option<ConversationFullMessageView>,
 }
 
-pub(super) struct RootModalHost {
+pub(crate) struct RootModalHost {
     authorization_focus: FocusHandle,
     command_palette_focus: FocusHandle,
     full_message_focus: FocusHandle,

@@ -17,6 +17,7 @@ mod preferences;
 mod projection;
 mod runtime;
 mod shell;
+mod ui;
 
 #[cfg(test)]
 mod allocation_probe {

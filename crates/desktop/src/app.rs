@@ -1,5 +1,5 @@
 mod native_perf;
-mod native_shell;
+pub(crate) mod native_shell;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,7 @@ use gpui::{
 use gpui_component::{Root, Theme, ThemeMode};
 use gpui_platform::application;
 
-use self::native_shell::{NativeShell, NativeShellInit};
+use self::native_shell::{NativeShell, NativeShellInit, NativeShellWorkspaceInit};
 use crate::preferences::{
     DesktopPreferences, PreferenceLoad, PreferenceRecovery, PreferenceStore, PreferenceWriter,
     resolve_scratch_workspace,
@@ -203,8 +203,12 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                         NativeShell::new(
                             NativeShellInit {
                                 runtime,
-                                project: snapshot.project,
-                                projection: requested,
+                                workspace: requested.map_or_else(
+                                    || NativeShellWorkspaceInit::Home(Box::new(snapshot.project)),
+                                    |projection| {
+                                        NativeShellWorkspaceInit::Session(Box::new(projection))
+                                    },
+                                ),
                                 projectless_workspace_selection,
                                 global_skills: Arc::from(
                                     coding_agent::api::embedding::global_skill_catalog(),
@@ -212,7 +216,6 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                                 preferences: loaded.preferences,
                                 preference_writer: writer,
                                 preference_notice: notice,
-                                initial_session_id: None,
                             },
                             window,
                             cx,

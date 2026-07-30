@@ -47,7 +47,7 @@ impl HomeHeroLayout {
     }
 }
 
-pub(super) struct HomePane;
+pub(crate) struct HomePane;
 
 impl HomePane {
     pub(super) fn new() -> Self {

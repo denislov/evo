@@ -109,7 +109,7 @@ struct MarkdownParseState {
     touched: u64,
 }
 
-pub(super) struct ConversationPane {
+pub(crate) struct ConversationPane {
     view_model: Option<ConversationPaneViewModel>,
     markdown_states: HashMap<Arc<str>, MarkdownParseState>,
     markdown_generation: u64,

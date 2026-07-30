@@ -7,7 +7,7 @@ use gpui::{
 use super::{InspectorPane, SessionsPane, actions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CenterDrawerKind {
+pub(crate) enum CenterDrawerKind {
     Sessions,
     Inspector,
 }
@@ -24,7 +24,7 @@ pub(super) struct CenterDrawerViewModel {
     pub(super) inspector_width: u32,
 }
 
-pub(super) struct CenterDrawerHost {
+pub(crate) struct CenterDrawerHost {
     sessions_pane: Entity<SessionsPane>,
     inspector_pane: Entity<InspectorPane>,
     view_model: Option<CenterDrawerViewModel>,

@@ -114,7 +114,7 @@ pub(super) struct ConversationHeaderViewModel {
     pub(super) context_panel_width: u32,
 }
 
-pub(super) struct ConversationHeader {
+pub(crate) struct ConversationHeader {
     focus: FocusHandle,
     view_model: Option<ConversationHeaderViewModel>,
 }

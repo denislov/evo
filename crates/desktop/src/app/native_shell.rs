@@ -24,20 +24,20 @@ use desktop::projection::{
 use desktop::runtime::{
     DesktopPromptTarget, DesktopRecoveryAction, DesktopRecoveryIdentity, DesktopRuntimeBridge,
     DesktopRuntimeOwnerTarget, DesktopRuntimeSelectionKind, MAX_PROMPT_ATTACHMENTS,
-    RuntimeCommandClient, validate_prompt_attachments,
+    validate_prompt_attachments,
 };
 use desktop::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH,
-    CONVERSATION_CONTENT_MAX_WIDTH, FocusState, FocusTarget, MIN_CONVERSATION_WIDTH,
-    PanelVisibility, SESSION_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_WIDTH,
-    SemanticColor, SemanticStatus, SemanticTheme, ShellLayout, UI_FONT_FAMILY, truncate_label,
+    CONVERSATION_CONTENT_MAX_WIDTH, FocusTarget, MIN_CONVERSATION_WIDTH, PanelVisibility,
+    SESSION_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_WIDTH, SemanticColor,
+    SemanticStatus, SemanticTheme, ShellLayout, UI_FONT_FAMILY, truncate_label,
 };
 use gpui::{
-    ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, PathPromptOptions, Render, Role,
-    ScrollStrategy, Styled as _, Subscription, Window, WindowBounds, div, prelude::*, px, rgb,
+    ClipboardItem, Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, PathPromptOptions, Render, Role, ScrollStrategy, Styled as _,
+    Window, WindowBounds, div, prelude::*, px, rgb,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -47,9 +47,9 @@ use self::desktop_style::{DesignText, DesktopStyledExt as _};
 pub(super) use self::evo_brand::{EvoBrandFixture, EvoBrandMode};
 use crate::actions::{
     self, AbortActiveOperation, AuthorizationAllowForOperation, AuthorizationAllowOnce,
-    AuthorizationDeny, CopySelectedConversation, DesktopCommandPalette, DesktopPaletteCommand,
-    EscapeHierarchy, FocusComposer, FocusNextRegion, FocusPreviousRegion, FollowLatestOutput,
-    NewSession, OpenCommandPalette, OpenFileSurface, PALETTE_ENTRIES, PaletteConfirm, PaletteNext,
+    AuthorizationDeny, CopySelectedConversation, DesktopPaletteCommand, EscapeHierarchy,
+    FocusComposer, FocusNextRegion, FocusPreviousRegion, FollowLatestOutput, NewSession,
+    OpenCommandPalette, OpenFileSurface, PALETTE_ENTRIES, PaletteConfirm, PaletteNext,
     PalettePrevious, SelectNextConversation, SelectPreviousConversation, SubmitComposer,
     ToggleInspectorPanel, ToggleSelectedConversationDetails, TrapOverlayFocus,
 };
@@ -69,6 +69,7 @@ use crate::application::{
     state::DesktopState,
     workspace::{SessionId, WorkspaceKey, WorkspaceStore},
 };
+use crate::ui::shell::{ShellConnection, ShellUiState, ShellViews};
 
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -185,20 +186,20 @@ pub(super) enum NativeVisualDrawerFixture {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResizablePanel {
+pub(crate) enum ResizablePanel {
     Sessions,
     Context,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PanelResizeState {
-    panel: ResizablePanel,
-    pointer_origin_x: f32,
-    width_origin: u32,
+pub(crate) struct PanelResizeState {
+    pub(crate) panel: ResizablePanel,
+    pub(crate) pointer_origin_x: f32,
+    pub(crate) width_origin: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum FocusInputModality {
+pub(crate) enum FocusInputModality {
     Keyboard,
     #[default]
     Pointer,
@@ -266,18 +267,18 @@ enum DesktopFileReviewState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DesktopModalKind {
+pub(crate) enum DesktopModalKind {
     Authorization,
     CommandPalette,
     FullMessage,
 }
 
 #[derive(Debug, Clone)]
-struct ConversationFullMessageView {
-    block_id: String,
-    title: Arc<str>,
-    text: Arc<str>,
-    source_truncated: bool,
+pub(crate) struct ConversationFullMessageView {
+    pub(crate) block_id: String,
+    pub(crate) title: Arc<str>,
+    pub(crate) text: Arc<str>,
+    pub(crate) source_truncated: bool,
 }
 
 pub(super) struct SessionWorkspace {
@@ -455,48 +456,13 @@ fn hydrated_session_id(snapshot: &desktop::runtime::DesktopRuntimeHydratedSnapsh
 }
 
 pub(super) struct NativeShell {
-    runtime_client: Option<RuntimeCommandClient>,
-    runtime_updates: VecDeque<desktop::runtime::DesktopRuntimeUpdate>,
-    controller: DesktopController,
-    queued_effects: VecDeque<DesktopEffect>,
+    connection: ShellConnection,
     app: DesktopState<SessionWorkspace, ProjectCatalogController>,
     home_project: CodingAgentEmbeddingSnapshot,
     projectless_workspace_selection: CodingAgentWorkspaceSelection,
     global_skills: Arc<[CodingAgentResourceCommand]>,
-    preference_writer: Option<PreferenceWriter>,
-    inspector_telemetry_last_refresh: Option<Instant>,
-    inspector_telemetry_refresh_deadline: Option<Instant>,
-    conversation_pane: gpui::Entity<ConversationPane>,
-    conversation_header: gpui::Entity<ConversationHeader>,
-    sessions_pane: gpui::Entity<SessionsPane>,
-    composer_pane: gpui::Entity<ComposerPane>,
-    home_pane: gpui::Entity<HomePane>,
-    skills_pane: gpui::Entity<SkillsPane>,
-    inspector_pane: gpui::Entity<InspectorPane>,
-    toast_host: gpui::Entity<ToastHost>,
-    root_modal_host: gpui::Entity<RootModalHost>,
-    center_drawer_host: gpui::Entity<CenterDrawerHost>,
-    focus: FocusState,
-    center_header_focus: FocusHandle,
-    sidebar_focus: FocusHandle,
-    center_body_focus: FocusHandle,
-    inspector_focus: FocusHandle,
-    authorization_focus: FocusHandle,
-    command_palette_focus: FocusHandle,
-    full_message_focus: FocusHandle,
-    command_palette: DesktopCommandPalette,
-    active_modal: Option<DesktopModalKind>,
-    active_drawer: Option<CenterDrawerKind>,
-    center_surface: CenterSurface,
-    drawer_restore_focus: Option<FocusTarget>,
-    conversation_full_message: Option<ConversationFullMessageView>,
-    conversation_announcement: Option<(WorkspaceKey, u64, String)>,
-    conversation_announcement_sequence: u64,
-    panel_resize: Option<PanelResizeState>,
-    focus_input_modality: FocusInputModality,
-    #[cfg(test)]
-    runtime_ui_notification_count: usize,
-    _subscriptions: Vec<Subscription>,
+    views: ShellViews,
+    ui: ShellUiState,
 }
 
 struct RuntimePoll {
@@ -506,29 +472,36 @@ struct RuntimePoll {
 
 pub(super) struct NativeShellInit {
     pub(super) runtime: DesktopRuntimeBridge,
-    pub(super) project: CodingAgentEmbeddingSnapshot,
-    pub(super) projection: Option<DesktopProjection>,
+    pub(super) workspace: NativeShellWorkspaceInit,
     pub(super) projectless_workspace_selection: CodingAgentWorkspaceSelection,
     pub(super) global_skills: Arc<[CodingAgentResourceCommand]>,
     pub(super) preferences: DesktopPreferences,
     pub(super) preference_writer: Option<PreferenceWriter>,
     pub(super) preference_notice: Option<String>,
-    pub(super) initial_session_id: Option<String>,
+}
+
+pub(super) enum NativeShellWorkspaceInit {
+    Home(Box<CodingAgentEmbeddingSnapshot>),
+    Session(Box<DesktopProjection>),
 }
 
 impl NativeShell {
     pub(super) fn new(init: NativeShellInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let NativeShellInit {
             runtime,
-            project,
-            projection,
+            workspace,
             projectless_workspace_selection,
             global_skills,
             preferences,
             preference_writer,
-            mut preference_notice,
-            initial_session_id,
+            preference_notice,
         } = init;
+        let (project, projection) = match workspace {
+            NativeShellWorkspaceInit::Home(project) => (*project, None),
+            NativeShellWorkspaceInit::Session(projection) => {
+                (projection.project().clone(), Some(*projection))
+            }
+        };
         assert!(
             matches!(
                 &projectless_workspace_selection,
@@ -536,24 +509,10 @@ impl NativeShell {
             ),
             "the desktop Home clear target must be a managed Projectless workspace"
         );
-        let (runtime_client, mut runtime_events, runtime_shutdown) = runtime.into_parts();
-        let runtime_shutdown_signal = runtime_shutdown.signal_handle();
-        let mut command_tracker = CommandTracker::default();
-        if let Some(session_id) = initial_session_id {
-            let intent = DesktopCommandIntent::OpenSession {
-                session_id: session_id.clone(),
-            };
-            let owner = WorkspaceKey::session(session_id.clone());
-            match command_tracker.reserve(owner.clone(), intent.clone()) {
-                Ok(command_id) => {
-                    if let Err(error) = runtime_client.try_open_session(command_id, &session_id) {
-                        let _ = command_tracker.complete(command_id, &owner, &intent);
-                        preference_notice = Some(error.to_string());
-                    }
-                }
-                Err(error) => preference_notice = Some(error.to_string()),
-            }
-        }
+        let (connection, mut runtime_executor) =
+            ShellConnection::connect(runtime, preference_writer);
+        let runtime_shutdown_signal = runtime_executor.shutdown_signal();
+        let command_tracker = CommandTracker::default();
         let center_header_focus = cx.focus_handle().tab_stop(true).tab_index(1);
         let sidebar_focus = cx.focus_handle().tab_stop(true).tab_index(2);
         let center_body_focus = cx.focus_handle().tab_stop(true).tab_index(3);
@@ -675,7 +634,7 @@ impl NativeShell {
                         group_id,
                         collapsed,
                     } => {
-                        let transition = this.controller.reduce(
+                        let transition = this.connection.controller.reduce(
                             &mut this.app,
                             DesktopEvent::Ui(UiIntent::SetProjectCollapsed {
                                 group_id: group_id.clone(),
@@ -783,7 +742,7 @@ impl NativeShell {
                 window,
                 |this, _, event: &RootModalHostEvent, window, cx| match event {
                     RootModalHostEvent::ExecutePalette(command) => {
-                        this.command_palette.close();
+                        this.ui.command_palette.close();
                         this.dismiss_modal(window, cx);
                         this.execute_palette_command(*command, window, cx);
                     }
@@ -791,7 +750,7 @@ impl NativeShell {
                         this.decide_tool_authorization(identity.clone(), decision.clone(), cx);
                     }
                     RootModalHostEvent::CopyFullMessage => {
-                        if let Some(message) = &this.conversation_full_message {
+                        if let Some(message) = &this.ui.conversation_full_message {
                             let text = message.text.to_string();
                             this.write_clipboard(
                                 Some(text),
@@ -821,18 +780,17 @@ impl NativeShell {
         let composer_focus = composer_pane.read(cx).focus_handle().clone();
         composer_focus.focus(window, cx);
         cx.spawn(async move |this, cx| {
-            let runtime_shutdown = runtime_shutdown;
-            while let Some(updates) = runtime_events.next_update_batch().await {
+            while let Some(updates) = runtime_executor.next_update_batch().await {
                 let Some(this) = this.upgrade() else {
                     break;
                 };
                 this.update(cx, |this, cx| {
-                    this.runtime_updates.extend(updates);
+                    this.connection.enqueue_runtime_updates(updates);
                     let poll = this.poll_runtime();
                     this.apply_runtime_poll(poll, cx)
                 });
             }
-            let _ = runtime_shutdown.shutdown(&mut runtime_events).await;
+            let _ = runtime_executor.shutdown().await;
         })
         .detach();
 
@@ -884,82 +842,76 @@ impl NativeShell {
             preferences,
         );
         let shell = Self {
-            runtime_client: Some(runtime_client),
-            runtime_updates: VecDeque::new(),
-            controller: DesktopController::new(),
-            queued_effects: VecDeque::new(),
+            connection,
             app,
             home_project,
             projectless_workspace_selection,
             global_skills,
-            preference_writer,
-            inspector_telemetry_last_refresh: None,
-            inspector_telemetry_refresh_deadline: None,
-            conversation_pane,
-            conversation_header,
-            sessions_pane,
-            composer_pane,
-            home_pane,
-            skills_pane,
-            inspector_pane,
-            toast_host,
-            root_modal_host,
-            center_drawer_host,
-            focus: FocusState::default(),
-            center_header_focus,
-            sidebar_focus,
-            center_body_focus,
-            inspector_focus,
-            authorization_focus,
-            command_palette_focus,
-            full_message_focus,
-            command_palette: DesktopCommandPalette::default(),
-            active_modal: None,
-            active_drawer: None,
-            center_surface: CenterSurface::Primary,
-            drawer_restore_focus: None,
-            conversation_full_message: None,
-            conversation_announcement: None,
-            conversation_announcement_sequence: 0,
-            panel_resize: None,
-            focus_input_modality: FocusInputModality::default(),
-            #[cfg(test)]
-            runtime_ui_notification_count: 0,
-            _subscriptions: subscriptions,
+            views: ShellViews::new(
+                conversation_pane,
+                conversation_header,
+                sessions_pane,
+                composer_pane,
+                home_pane,
+                skills_pane,
+                inspector_pane,
+                toast_host,
+                root_modal_host,
+                center_drawer_host,
+                subscriptions,
+            ),
+            ui: ShellUiState::new(
+                center_header_focus,
+                sidebar_focus,
+                center_body_focus,
+                inspector_focus,
+                authorization_focus,
+                command_palette_focus,
+                full_message_focus,
+            ),
         };
+        debug_assert!(shell.views.subscription_count() > 0);
         shell.notify_toast_host(cx);
         let conversation_header_view_model = shell.conversation_header_view_model();
         shell
+            .views
             .conversation_header
             .update(cx, |conversation_header, _| {
                 conversation_header.set_view_model(conversation_header_view_model);
             });
         let sessions_pane_view_model = shell.sessions_pane_view_model();
-        shell.sessions_pane.update(cx, |sessions_pane, _| {
+        shell.views.sessions_pane.update(cx, |sessions_pane, _| {
             sessions_pane.set_view_model(sessions_pane_view_model);
         });
         let composer_pane_view_model = shell.composer_pane_view_model();
-        shell.composer_pane.update(cx, |composer_pane, _| {
+        shell.views.composer_pane.update(cx, |composer_pane, _| {
             composer_pane.set_view_model(composer_pane_view_model);
         });
         let skills_pane_view_model = shell.skills_pane_view_model();
-        shell.skills_pane.update(cx, |skills_pane, _| {
+        shell.views.skills_pane.update(cx, |skills_pane, _| {
             skills_pane.set_view_model(skills_pane_view_model);
         });
         let conversation_pane_view_model = shell.conversation_pane_view_model();
-        shell.conversation_pane.update(cx, |conversation_pane, _| {
-            conversation_pane.set_view_model(conversation_pane_view_model);
-        });
+        shell
+            .views
+            .conversation_pane
+            .update(cx, |conversation_pane, _| {
+                conversation_pane.set_view_model(conversation_pane_view_model);
+            });
         let inspector_pane_view_model = shell.inspector_pane_view_model();
-        shell.inspector_pane.update(cx, |inspector_pane, _| {
+        shell.views.inspector_pane.update(cx, |inspector_pane, _| {
             inspector_pane.set_view_model(inspector_pane_view_model);
         });
         let root_modal_view_model = shell.root_modal_view_model();
-        shell.root_modal_host.update(cx, |root_modal_host, _| {
-            root_modal_host.set_view_model(root_modal_view_model);
-        });
+        shell
+            .views
+            .root_modal_host
+            .update(cx, |root_modal_host, _| {
+                root_modal_host.set_view_model(root_modal_view_model);
+            });
         let center_drawer_view_model = shell.center_drawer_view_model();
         shell
+            .views
             .center_drawer_host
             .update(cx, |center_drawer_host, _| {
                 center_drawer_host.set_view_model(center_drawer_view_model);
@@ -1091,14 +1043,14 @@ impl NativeShell {
         match target {
             CenterNavigationTarget::NewConversation => self.show_home_workspace(window, cx),
             CenterNavigationTarget::Skills => {
-                self.center_surface = CenterSurface::Skills;
+                self.ui.center_surface = CenterSurface::Skills;
                 self.dismiss_drawer(window, cx, false);
                 self.focus_target(FocusTarget::CenterBody, window, cx);
                 self.notify_sessions_pane(cx);
                 cx.notify();
             }
             CenterNavigationTarget::Session(session_id) => {
-                self.center_surface = CenterSurface::Primary;
+                self.ui.center_surface = CenterSurface::Primary;
                 self.dismiss_drawer(window, cx, false);
                 self.focus_target(FocusTarget::CenterBody, window, cx);
                 if self
@@ -1121,7 +1073,7 @@ impl NativeShell {
     }
 
     fn show_home_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.center_surface = CenterSurface::Primary;
+        self.ui.center_surface = CenterSurface::Primary;
         let activated = self.app.workspaces.activate(&WorkspaceKey::Home);
         debug_assert!(activated, "Home must remain a stable workspace entry");
 
@@ -1259,6 +1211,7 @@ impl NativeShell {
             }
         };
         let admission = self
+            .connection
             .runtime_client
             .as_ref()
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
@@ -1339,11 +1292,11 @@ impl NativeShell {
         fixture: NativeVisualDrawerFixture,
         cx: &mut Context<Self>,
     ) {
-        self.active_drawer = Some(match fixture {
+        self.ui.active_drawer = Some(match fixture {
             NativeVisualDrawerFixture::Sessions => CenterDrawerKind::Sessions,
             NativeVisualDrawerFixture::Inspector => CenterDrawerKind::Inspector,
         });
-        self.drawer_restore_focus = Some(self.focus.active());
+        self.ui.drawer_restore_focus = Some(self.ui.focus.active());
         self.notify_sessions_pane(cx);
         self.notify_inspector_pane(cx);
         self.notify_conversation_header(cx);
@@ -1416,7 +1369,7 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         if event.click_count >= 2 {
-            self.panel_resize = None;
+            self.ui.panel_resize = None;
             match panel {
                 ResizablePanel::Sessions => {
                     self.app.preferences.sessions_panel_width = SESSION_PANEL_WIDTH;
@@ -1434,7 +1387,7 @@ impl NativeShell {
             return;
         }
 
-        self.panel_resize = Some(PanelResizeState {
+        self.ui.panel_resize = Some(PanelResizeState {
             panel,
             pointer_origin_x: f32::from(event.position.x),
             width_origin: match panel {
@@ -1450,7 +1403,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(resize) = self.panel_resize else {
+        let Some(resize) = self.ui.panel_resize else {
             return;
         };
         let delta = f32::from(event.position.x) - resize.pointer_origin_x;
@@ -1498,17 +1451,17 @@ impl NativeShell {
     }
 
     fn finish_panel_resize(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.panel_resize.take().is_some() {
+        if self.ui.panel_resize.take().is_some() {
             self.schedule_preferences();
             self.flush_queued_effects(cx);
         }
     }
 
     fn set_focus_input_modality(&mut self, modality: FocusInputModality, cx: &mut Context<Self>) {
-        if self.focus_input_modality == modality {
+        if self.ui.focus_input_modality == modality {
             return;
         }
-        self.focus_input_modality = modality;
+        self.ui.focus_input_modality = modality;
         self.notify_sessions_pane(cx);
         self.notify_conversation_header(cx);
         self.notify_composer_pane(cx);
@@ -1526,15 +1479,15 @@ impl NativeShell {
     }
 
     pub(super) fn keyboard_focus_visible(&self) -> bool {
-        self.focus_input_modality == FocusInputModality::Keyboard
+        self.ui.focus_input_modality == FocusInputModality::Keyboard
     }
 
     fn record_focus(&mut self, target: FocusTarget, window: &mut Window, cx: &mut Context<Self>) {
         let layout = self.layout(window);
-        let previous = self.focus.active();
-        if self.focus.request(target, layout) {
-            if self.active_drawer.is_some() {
-                self.drawer_restore_focus = Some(target);
+        let previous = self.ui.focus.active();
+        if self.ui.focus.request(target, layout) {
+            if self.ui.active_drawer.is_some() {
+                self.ui.drawer_restore_focus = Some(target);
             }
             cx.notify();
         }
@@ -1567,7 +1520,7 @@ impl NativeShell {
             u32::from(viewport.height),
             PanelVisibility::default(),
         );
-        let drawer_became_dockable = match self.active_drawer {
+        let drawer_became_dockable = match self.ui.active_drawer {
             Some(CenterDrawerKind::Sessions) if forced_layout.sidebar.is_some() => {
                 self.app.preferences.sessions_panel_visible = true;
                 true
@@ -1582,9 +1535,9 @@ impl NativeShell {
             self.dismiss_drawer(window, cx, true);
         }
         let layout = self.layout(window);
-        let previous_focus = self.focus.active();
-        self.focus.reconcile_layout(layout);
-        if self.focus.active() != previous_focus {
+        let previous_focus = self.ui.focus.active();
+        self.ui.focus.reconcile_layout(layout);
+        if self.ui.focus.active() != previous_focus {
             self.focus_composer_input(window, cx);
         }
         self.schedule_preferences();
@@ -1873,9 +1826,9 @@ impl NativeShell {
         &mut self,
         reduce: impl FnOnce(&mut DesktopController, &mut Self) -> T,
     ) -> T {
-        let mut controller = std::mem::take(&mut self.controller);
+        let mut controller = std::mem::take(&mut self.connection.controller);
         let result = reduce(&mut controller, self);
-        self.controller = controller;
+        self.connection.controller = controller;
         result
     }
 
@@ -1899,18 +1852,18 @@ impl NativeShell {
             changes.is_empty(),
             "queued transitions cannot hide UI changes"
         );
-        self.queued_effects.extend(effects);
+        self.connection.queued_effects.extend(effects);
     }
 
     fn apply_transition(&mut self, transition: Transition, cx: &mut Context<Self>) {
         let (changes, effects) = transition.into_parts();
         self.refresh_runtime_changes(changes, cx);
-        self.queued_effects.extend(effects);
+        self.connection.queued_effects.extend(effects);
         self.flush_queued_effects(cx);
     }
 
     fn flush_queued_effects(&mut self, cx: &mut Context<Self>) {
-        while let Some(effect) = self.queued_effects.pop_front() {
+        while let Some(effect) = self.connection.queued_effects.pop_front() {
             self.execute_effect(effect, cx);
         }
     }
@@ -1975,7 +1928,7 @@ impl NativeShell {
                 identity,
                 preferences,
             } => {
-                let Some(writer) = self.preference_writer.as_ref() else {
+                let Some(writer) = self.connection.preference_writer.as_ref() else {
                     self.dispatch_platform_result(
                         PlatformResult::PreferencesWritten {
                             identity,
@@ -2012,7 +1965,7 @@ impl NativeShell {
                 identity,
                 command_id,
             } => {
-                let outcome = self.runtime_client.as_ref().map_or_else(
+                let outcome = self.connection.runtime_client.as_ref().map_or_else(
                     || PlatformOutcome::Failed("desktop runtime is stopped".into()),
                     |runtime| match runtime.try_resync(command_id) {
                         Ok(()) => PlatformOutcome::Completed(()),
@@ -2037,7 +1990,7 @@ impl NativeShell {
     }
 
     fn poll_runtime(&mut self) -> RuntimePoll {
-        if self.runtime_client.is_none() {
+        if self.connection.runtime_client.is_none() {
             return RuntimePoll {
                 transition: Transition::default(),
                 running: false,
@@ -2046,7 +1999,7 @@ impl NativeShell {
         let mut transition = Transition::default();
         let mut applied = 0;
         while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
-            let Some(update) = self.runtime_updates.pop_front() else {
+            let Some(update) = self.connection.runtime_updates.pop_front() else {
                 break;
             };
             let reduced =
@@ -2087,7 +2040,7 @@ impl NativeShell {
     ) {
         #[cfg(test)]
         if !changes.is_empty() {
-            self.runtime_ui_notification_count += 1;
+            self.ui.runtime_ui_notification_count += 1;
         }
         if changes.contains(UiRegion::Root) {
             cx.notify();
@@ -2119,7 +2072,7 @@ impl NativeShell {
 
     fn notify_sessions_pane(&self, cx: &mut Context<Self>) {
         let view_model = self.sessions_pane_view_model();
-        self.sessions_pane.update(cx, |pane, cx| {
+        self.views.sessions_pane.update(cx, |pane, cx| {
             pane.set_view_model(view_model);
             cx.notify();
         });
@@ -2142,22 +2095,22 @@ impl NativeShell {
 
     fn notify_composer_pane(&self, cx: &mut Context<Self>) {
         let view_model = self.composer_pane_view_model();
-        self.composer_pane.update(cx, |pane, cx| {
+        self.views.composer_pane.update(cx, |pane, cx| {
             pane.set_view_model(view_model);
             cx.notify();
         });
     }
 
     fn notify_inspector_pane(&mut self, cx: &mut Context<Self>) {
-        self.inspector_telemetry_last_refresh = Some(Instant::now());
-        self.inspector_telemetry_refresh_deadline = None;
+        self.ui.inspector_telemetry_last_refresh = Some(Instant::now());
+        self.ui.inspector_telemetry_refresh_deadline = None;
         self.push_inspector_pane_view_model(cx);
         self.notify_toast_host(cx);
     }
 
     fn push_inspector_pane_view_model(&self, cx: &mut Context<Self>) {
         let view_model = self.inspector_pane_view_model();
-        self.inspector_pane.update(cx, |pane, cx| {
+        self.views.inspector_pane.update(cx, |pane, cx| {
             pane.set_view_model(view_model);
             cx.notify();
         });
@@ -2165,31 +2118,33 @@ impl NativeShell {
 
     fn schedule_inspector_telemetry_refresh(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
-        let delay = inspector_telemetry_refresh_delay(self.inspector_telemetry_last_refresh, now);
+        let delay =
+            inspector_telemetry_refresh_delay(self.ui.inspector_telemetry_last_refresh, now);
         if delay.is_zero() {
-            self.inspector_telemetry_last_refresh = Some(now);
-            self.inspector_telemetry_refresh_deadline = None;
+            self.ui.inspector_telemetry_last_refresh = Some(now);
+            self.ui.inspector_telemetry_refresh_deadline = None;
             self.push_inspector_pane_view_model(cx);
             return;
         }
 
         let deadline = now + delay;
         if self
+            .ui
             .inspector_telemetry_refresh_deadline
             .is_some_and(|scheduled| scheduled <= deadline)
         {
             return;
         }
-        self.inspector_telemetry_refresh_deadline = Some(deadline);
+        self.ui.inspector_telemetry_refresh_deadline = Some(deadline);
         let owner = self.app.workspaces.active_key().clone();
-        match self.controller.schedule_timer(
+        match self.connection.controller.schedule_timer(
             owner,
             DesktopTimerKind::InspectorTelemetryRefresh,
             delay,
         ) {
             Ok(transition) => self.apply_transition(transition, cx),
             Err(error) => {
-                self.inspector_telemetry_refresh_deadline = None;
+                self.ui.inspector_telemetry_refresh_deadline = None;
                 self.app
                     .workspaces
                     .active_mut()
@@ -2217,14 +2172,15 @@ impl NativeShell {
                 revision: self.app.workspaces.active().preference_notice_revision,
                 message: Arc::from(message.as_str()),
             });
-        self.toast_host.update(cx, |host, cx| {
+        self.views.toast_host.update(cx, |host, cx| {
             host.observe_notice(notice, cx);
         });
     }
 
     fn notify_conversation_header(&self, cx: &mut Context<Self>) {
         let view_model = self.conversation_header_view_model();
-        self.conversation_header
+        self.views
+            .conversation_header
             .update(cx, |conversation_header, cx| {
                 conversation_header.set_view_model(view_model);
                 cx.notify();
@@ -2233,7 +2189,7 @@ impl NativeShell {
 
     fn notify_root_modal_host(&self, cx: &mut Context<Self>) {
         let view_model = self.root_modal_view_model();
-        self.root_modal_host.update(cx, |host, cx| {
+        self.views.root_modal_host.update(cx, |host, cx| {
             host.set_view_model(view_model);
             cx.notify();
         });
@@ -2241,18 +2197,19 @@ impl NativeShell {
 
     fn notify_center_drawer_host(&self, cx: &mut Context<Self>) {
         let view_model = self.center_drawer_view_model();
-        self.center_drawer_host.update(cx, |host, cx| {
+        self.views.center_drawer_host.update(cx, |host, cx| {
             host.set_view_model(view_model);
             cx.notify();
         });
     }
 
     fn schedule_preferences(&mut self) {
-        if self.preference_writer.is_none() {
+        if self.connection.preference_writer.is_none() {
             return;
         }
         let owner = self.app.workspaces.active_key().clone();
         match self
+            .connection
             .controller
             .write_preferences(owner, self.app.preferences.clone())
         {
@@ -2294,7 +2251,7 @@ impl NativeShell {
             .sidebar
             .is_some();
         if !dockable {
-            if self.active_drawer == Some(CenterDrawerKind::Sessions) {
+            if self.ui.active_drawer == Some(CenterDrawerKind::Sessions) {
                 self.dismiss_drawer(window, cx, true);
             } else {
                 self.activate_drawer(CenterDrawerKind::Sessions, window, cx);
@@ -2303,8 +2260,8 @@ impl NativeShell {
         }
         self.app.preferences.sessions_panel_visible = !self.app.preferences.sessions_panel_visible;
         let layout = self.layout(window);
-        self.focus.reconcile_layout(layout);
-        if self.focus.active() == FocusTarget::Composer {
+        self.ui.focus.reconcile_layout(layout);
+        if self.ui.focus.active() == FocusTarget::Composer {
             self.focus_composer_input(window, cx);
         }
         self.schedule_preferences();
@@ -2341,7 +2298,7 @@ impl NativeShell {
             .inspector
             .is_some();
         if !dockable {
-            if self.active_drawer == Some(CenterDrawerKind::Inspector) {
+            if self.ui.active_drawer == Some(CenterDrawerKind::Inspector) {
                 self.dismiss_drawer(window, cx, true);
             } else {
                 self.activate_drawer(CenterDrawerKind::Inspector, window, cx);
@@ -2350,8 +2307,8 @@ impl NativeShell {
         }
         self.app.preferences.context_panel_visible = !self.app.preferences.context_panel_visible;
         let layout = self.layout(window);
-        self.focus.reconcile_layout(layout);
-        if self.focus.active() == FocusTarget::Composer {
+        self.ui.focus.reconcile_layout(layout);
+        if self.ui.focus.active() == FocusTarget::Composer {
             self.focus_composer_input(window, cx);
         }
         self.schedule_preferences();
@@ -2426,7 +2383,7 @@ impl NativeShell {
             .thinking_selection
             .explicit();
         let target = self.app.workspaces.active_mut().prompt_target();
-        let admission = self.runtime_client.as_ref().map_or_else(
+        let admission = self.connection.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -2482,6 +2439,7 @@ impl NativeShell {
         }
         let owner = self.app.workspaces.active_key().clone();
         match self
+            .connection
             .controller
             .pick_paths(owner, DesktopPickerKind::Attachments)
         {
@@ -2507,6 +2465,7 @@ impl NativeShell {
         }
         let owner = self.app.workspaces.active_key().clone();
         match self
+            .connection
             .controller
             .pick_paths(owner, DesktopPickerKind::ProjectDirectory)
         {
@@ -2646,7 +2605,7 @@ impl NativeShell {
             .projection
             .as_ref()
             .map(|projection| projection.snapshot().session.session_id.clone());
-        let admission = self.runtime_client.as_ref().map_or_else(
+        let admission = self.connection.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 let Some(session_id) = session_id.as_deref() else {
@@ -2720,7 +2679,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let admission = self.runtime_client.as_ref().map_or_else(
+        let admission = self.connection.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -2781,7 +2740,7 @@ impl NativeShell {
             return;
         };
         let target = self.app.workspaces.active_mut().runtime_owner_target();
-        let admission = self.runtime_client.as_ref().map_or_else(
+        let admission = self.connection.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -2850,7 +2809,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let admission = self.runtime_client.as_ref().map_or_else(
+        let admission = self.connection.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 let result = match action {
@@ -2957,7 +2916,7 @@ impl NativeShell {
             return;
         };
         let target = self.app.workspaces.active_mut().runtime_owner_target();
-        let admission = self.runtime_client.as_ref().map_or_else(
+        let admission = self.connection.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 let result = match selection {
@@ -3097,7 +3056,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let admission = self.runtime_client.as_ref().map_or_else(
+        let admission = self.connection.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -3263,7 +3222,11 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         let owner = self.app.workspaces.active_key().clone();
-        match self.controller.write_clipboard(owner, text, feedback) {
+        match self
+            .connection
+            .controller
+            .write_clipboard(owner, text, feedback)
+        {
             Ok(transition) => self.apply_transition(transition, cx),
             Err(error) => {
                 self.app
@@ -3295,12 +3258,12 @@ impl NativeShell {
             block_id = message.block_id,
             bytes = message.text.len(),
         );
-        self.conversation_full_message = Some(message);
+        self.ui.conversation_full_message = Some(message);
         self.activate_modal(DesktopModalKind::FullMessage, window, cx);
     }
 
     fn close_full_conversation_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.conversation_full_message = None;
+        self.ui.conversation_full_message = None;
         self.dismiss_modal(window, cx);
     }
 
@@ -3441,6 +3404,7 @@ impl NativeShell {
             return;
         };
         let admission = self
+            .connection
             .runtime_client
             .as_ref()
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
@@ -3567,6 +3531,7 @@ impl NativeShell {
             return;
         };
         let admission = self
+            .connection
             .runtime_client
             .as_ref()
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
@@ -3604,14 +3569,14 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         self.dismiss_drawer(window, cx, false);
-        if self.active_modal.is_none() {
-            self.focus.open_modal();
+        if self.ui.active_modal.is_none() {
+            self.ui.focus.open_modal();
         }
-        self.active_modal = Some(modal);
+        self.ui.active_modal = Some(modal);
         match modal {
-            DesktopModalKind::Authorization => self.authorization_focus.focus(window, cx),
-            DesktopModalKind::CommandPalette => self.command_palette_focus.focus(window, cx),
-            DesktopModalKind::FullMessage => self.full_message_focus.focus(window, cx),
+            DesktopModalKind::Authorization => self.ui.authorization_focus.focus(window, cx),
+            DesktopModalKind::CommandPalette => self.ui.command_palette_focus.focus(window, cx),
+            DesktopModalKind::FullMessage => self.ui.full_message_focus.focus(window, cx),
         }
         self.notify_conversation_header(cx);
         self.notify_root_modal_host(cx);
@@ -3619,8 +3584,8 @@ impl NativeShell {
     }
 
     fn dismiss_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_modal = None;
-        self.focus.close_modal(self.layout(window));
+        self.ui.active_modal = None;
+        self.ui.focus.close_modal(self.layout(window));
         self.focus_active_target(window, cx);
         self.notify_conversation_header(cx);
         self.notify_root_modal_host(cx);
@@ -3633,17 +3598,17 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_modal.is_some() {
+        if self.ui.active_modal.is_some() {
             self.focus_active_target(window, cx);
             return;
         }
-        if self.active_drawer.is_none() {
-            self.drawer_restore_focus = Some(self.focus.active());
+        if self.ui.active_drawer.is_none() {
+            self.ui.drawer_restore_focus = Some(self.ui.focus.active());
         }
-        self.active_drawer = Some(drawer);
+        self.ui.active_drawer = Some(drawer);
         match drawer {
-            CenterDrawerKind::Sessions => self.sidebar_focus.focus(window, cx),
-            CenterDrawerKind::Inspector => self.inspector_focus.focus(window, cx),
+            CenterDrawerKind::Sessions => self.ui.sidebar_focus.focus(window, cx),
+            CenterDrawerKind::Inspector => self.ui.inspector_focus.focus(window, cx),
         }
         self.notify_sessions_pane(cx);
         self.notify_inspector_pane(cx);
@@ -3653,18 +3618,19 @@ impl NativeShell {
     }
 
     fn dismiss_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>, restore_focus: bool) {
-        if self.active_drawer.take().is_none() {
+        if self.ui.active_drawer.take().is_none() {
             if !restore_focus {
-                self.drawer_restore_focus = None;
+                self.ui.drawer_restore_focus = None;
             }
             return;
         }
-        let restore_target = self.drawer_restore_focus.take();
+        let restore_target = self.ui.drawer_restore_focus.take();
         if restore_focus {
             let layout = self.layout(window);
-            let restored = restore_target.is_some_and(|target| self.focus.request(target, layout));
+            let restored =
+                restore_target.is_some_and(|target| self.ui.focus.request(target, layout));
             if !restored {
-                let _ = self.focus.request(FocusTarget::Composer, layout);
+                let _ = self.ui.focus.request(FocusTarget::Composer, layout);
             }
             self.focus_active_target(window, cx);
         }
@@ -3682,18 +3648,18 @@ impl NativeShell {
         cx: &mut Context<Self>,
     ) {
         if authorization_present {
-            self.command_palette.close();
-            self.conversation_full_message = None;
-            if self.active_modal != Some(DesktopModalKind::Authorization) {
+            self.ui.command_palette.close();
+            self.ui.conversation_full_message = None;
+            if self.ui.active_modal != Some(DesktopModalKind::Authorization) {
                 self.activate_modal(DesktopModalKind::Authorization, window, cx);
             }
-        } else if self.active_modal == Some(DesktopModalKind::Authorization) {
+        } else if self.ui.active_modal == Some(DesktopModalKind::Authorization) {
             self.dismiss_modal(window, cx);
         }
     }
 
     fn focus_target(&mut self, target: FocusTarget, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_modal.is_some() {
+        if self.ui.active_modal.is_some() {
             return;
         }
         let layout = self.layout(window);
@@ -3705,7 +3671,7 @@ impl NativeShell {
             self.activate_drawer(CenterDrawerKind::Inspector, window, cx);
             return;
         }
-        if !self.focus.request(target, layout) {
+        if !self.ui.focus.request(target, layout) {
             self.app
                 .workspaces
                 .active_mut()
@@ -3721,11 +3687,11 @@ impl NativeShell {
     }
 
     fn cycle_focus(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_modal.is_some() {
+        if self.ui.active_modal.is_some() {
             self.focus_active_target(window, cx);
             return;
         }
-        self.focus.cycle(self.layout(window), reverse);
+        self.ui.focus.cycle(self.layout(window), reverse);
         self.focus_active_target(window, cx);
         cx.notify();
     }
@@ -3735,7 +3701,7 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(modal) = self.active_modal else {
+        let Some(modal) = self.ui.active_modal else {
             return false;
         };
         self.app.workspaces.active_mut().set_preference_notice(
@@ -3940,12 +3906,12 @@ impl NativeShell {
                 .workspaces
                 .active_mut()
                 .set_preference_notice("Resolve authorization before opening commands.".into());
-            self.authorization_focus.focus(window, cx);
+            self.ui.authorization_focus.focus(window, cx);
             self.notify_toast_host(cx);
             cx.notify();
             return;
         }
-        self.command_palette.open();
+        self.ui.command_palette.open();
         self.activate_modal(DesktopModalKind::CommandPalette, window, cx);
     }
 
@@ -4011,17 +3977,17 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(modal) = self.active_modal {
+        if let Some(modal) = self.ui.active_modal {
             match modal {
                 DesktopModalKind::Authorization => {
                     self.app.workspaces.active_mut().set_preference_notice(
                         "Authorization requires Deny, Allow once, or Allow for operation.".into(),
                     );
-                    self.authorization_focus.focus(window, cx);
+                    self.ui.authorization_focus.focus(window, cx);
                     cx.notify();
                 }
                 DesktopModalKind::CommandPalette => {
-                    self.command_palette.close();
+                    self.ui.command_palette.close();
                     self.dismiss_modal(window, cx);
                 }
                 DesktopModalKind::FullMessage => {
@@ -4030,7 +3996,7 @@ impl NativeShell {
             }
             return;
         }
-        if self.active_drawer.is_some() {
+        if self.ui.active_drawer.is_some() {
             self.dismiss_drawer(window, cx, true);
         } else if !matches!(
             self.app.workspaces.active_mut().file_review.as_ref(),
@@ -4140,13 +4106,13 @@ impl NativeShell {
     }
 
     fn on_palette_previous(&mut self, _: &PalettePrevious, _: &mut Window, cx: &mut Context<Self>) {
-        self.command_palette.move_selection(true);
+        self.ui.command_palette.move_selection(true);
         self.notify_root_modal_host(cx);
         cx.notify();
     }
 
     fn on_palette_next(&mut self, _: &PaletteNext, _: &mut Window, cx: &mut Context<Self>) {
-        self.command_palette.move_selection(false);
+        self.ui.command_palette.move_selection(false);
         self.notify_root_modal_host(cx);
         cx.notify();
     }
@@ -4157,10 +4123,10 @@ impl NativeShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(command) = self.command_palette.selected_command() else {
+        let Some(command) = self.ui.command_palette.selected_command() else {
             return;
         };
-        self.command_palette.close();
+        self.ui.command_palette.close();
         self.dismiss_modal(window, cx);
         self.execute_palette_command(command, window, cx);
     }
@@ -4290,7 +4256,7 @@ impl NativeShell {
             return;
         };
         let owner = self.app.workspaces.active_key().clone();
-        match self.controller.schedule_timer(
+        match self.connection.controller.schedule_timer(
             owner,
             DesktopTimerKind::ConversationHeightRefresh,
             delay,
@@ -4307,23 +4273,25 @@ impl NativeShell {
     }
 
     pub(super) fn focus_composer_input(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = self.composer_pane.read(cx).focus_handle().clone();
+        let focus = self.views.composer_pane.read(cx).focus_handle().clone();
         focus.focus(window, cx);
     }
 
     fn focus_active_target(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.focus.active() {
-            FocusTarget::CenterHeader => self.center_header_focus.focus(window, cx),
-            FocusTarget::Sidebar => self.sidebar_focus.focus(window, cx),
-            FocusTarget::CenterBody => self.center_body_focus.focus(window, cx),
+        match self.ui.focus.active() {
+            FocusTarget::CenterHeader => self.ui.center_header_focus.focus(window, cx),
+            FocusTarget::Sidebar => self.ui.sidebar_focus.focus(window, cx),
+            FocusTarget::CenterBody => self.ui.center_body_focus.focus(window, cx),
             FocusTarget::Composer => self.focus_composer_input(window, cx),
-            FocusTarget::Inspector => self.inspector_focus.focus(window, cx),
-            FocusTarget::Modal => match self.active_modal {
-                Some(DesktopModalKind::Authorization) => self.authorization_focus.focus(window, cx),
-                Some(DesktopModalKind::CommandPalette) => {
-                    self.command_palette_focus.focus(window, cx);
+            FocusTarget::Inspector => self.ui.inspector_focus.focus(window, cx),
+            FocusTarget::Modal => match self.ui.active_modal {
+                Some(DesktopModalKind::Authorization) => {
+                    self.ui.authorization_focus.focus(window, cx)
                 }
-                Some(DesktopModalKind::FullMessage) => self.full_message_focus.focus(window, cx),
+                Some(DesktopModalKind::CommandPalette) => {
+                    self.ui.command_palette_focus.focus(window, cx);
+                }
+                Some(DesktopModalKind::FullMessage) => self.ui.full_message_focus.focus(window, cx),
                 None => self.focus_composer_input(window, cx),
             },
         }
@@ -4364,7 +4332,7 @@ impl NativeShell {
                     .map(|snapshot| snapshot.session.session_id.as_str())
                     .unwrap_or_default(),
             ),
-            skills_active: self.center_surface == CenterSurface::Skills,
+            skills_active: self.ui.center_surface == CenterSurface::Skills,
             runtime_states: Arc::from(runtime_states),
             composer_running,
             awaiting_prompt_start: self.app.workspaces.active().composer.submitted().is_some()
@@ -4377,7 +4345,7 @@ impl NativeShell {
             }),
             active_status: self.semantic_status(),
             keyboard_focus_visible: self.keyboard_focus_visible(),
-            presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Sessions),
+            presented_as_drawer: self.ui.active_drawer == Some(CenterDrawerKind::Sessions),
             reduced_motion: self.app.preferences.reduced_motion,
         }
     }
@@ -4464,7 +4432,7 @@ impl NativeShell {
         let Some(projection) = self.app.workspaces.active().projection.as_ref() else {
             return InspectorPaneViewModel {
                 panel_width: self.app.preferences.context_panel_width,
-                presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Inspector),
+                presented_as_drawer: self.ui.active_drawer == Some(CenterDrawerKind::Inspector),
                 keyboard_focus_visible: self.keyboard_focus_visible(),
                 selected_section: self.app.workspaces.active().inspector_section,
                 composer_running: false,
@@ -4619,7 +4587,7 @@ impl NativeShell {
         let usage = &snapshot.context.usage;
         InspectorPaneViewModel {
             panel_width: self.app.preferences.context_panel_width,
-            presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Inspector),
+            presented_as_drawer: self.ui.active_drawer == Some(CenterDrawerKind::Inspector),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             selected_section: self.app.workspaces.active().inspector_section,
             composer_running,
@@ -4705,16 +4673,16 @@ impl NativeShell {
                 }
             });
         RootModalViewModel {
-            palette_open: self.command_palette.is_open(),
-            palette_selected: self.command_palette.selected(),
+            palette_open: self.ui.command_palette.is_open(),
+            palette_selected: self.ui.command_palette.selected(),
             authorization,
-            full_message: self.conversation_full_message.clone(),
+            full_message: self.ui.conversation_full_message.clone(),
         }
     }
 
     fn center_drawer_view_model(&self) -> CenterDrawerViewModel {
         CenterDrawerViewModel {
-            active: self.active_drawer,
+            active: self.ui.active_drawer,
             sessions_width: self.app.preferences.sessions_panel_width,
             inspector_width: self.app.preferences.context_panel_width,
         }
@@ -4810,6 +4778,7 @@ impl NativeShell {
                     .clone(),
             ),
             full_view_block_id: self
+                .ui
                 .conversation_full_message
                 .as_ref()
                 .map(|message| message.block_id.clone()),
@@ -4819,7 +4788,7 @@ impl NativeShell {
 
     fn notify_conversation_pane(&self, cx: &mut Context<Self>) {
         let view_model = self.conversation_pane_view_model();
-        self.conversation_pane.update(cx, |pane, cx| {
+        self.views.conversation_pane.update(cx, |pane, cx| {
             pane.set_view_model(view_model);
             cx.notify();
         });
@@ -4924,8 +4893,8 @@ impl NativeShell {
             project_name: Arc::from(project_name),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             panel_visibility: self.visibility(),
-            sessions_drawer_open: self.active_drawer == Some(CenterDrawerKind::Sessions),
-            inspector_drawer_open: self.active_drawer == Some(CenterDrawerKind::Inspector),
+            sessions_drawer_open: self.ui.active_drawer == Some(CenterDrawerKind::Sessions),
+            inspector_drawer_open: self.ui.active_drawer == Some(CenterDrawerKind::Inspector),
             sessions_panel_width: self.app.preferences.sessions_panel_width,
             context_panel_width: self.app.preferences.context_panel_width,
         }
@@ -5117,26 +5086,11 @@ impl PlatformUpdatePort for NativeShell {
     }
 
     fn show_conversation_announcement(&mut self, owner: &WorkspaceKey, message: String) {
-        self.conversation_announcement_sequence =
-            self.conversation_announcement_sequence.wrapping_add(1);
-        self.conversation_announcement = Some((
-            owner.clone(),
-            self.conversation_announcement_sequence,
-            message,
-        ));
+        self.ui.announce_conversation(owner.clone(), message);
     }
 
     fn clear_conversation_announcement(&mut self, owner: &WorkspaceKey) -> bool {
-        if self
-            .conversation_announcement
-            .as_ref()
-            .is_some_and(|(current_owner, _, _)| current_owner == owner)
-        {
-            self.conversation_announcement = None;
-            true
-        } else {
-            false
-        }
+        self.ui.clear_conversation_announcement(owner)
     }
 
     fn fire_conversation_height_refresh(&mut self, owner: &WorkspaceKey) -> bool {
@@ -5157,12 +5111,12 @@ impl PlatformUpdatePort for NativeShell {
 
     fn refresh_inspector_telemetry(&mut self, owner: &WorkspaceKey) -> bool {
         if self.app.workspaces.active_key() != owner
-            || self.inspector_telemetry_refresh_deadline.is_none()
+            || self.ui.inspector_telemetry_refresh_deadline.is_none()
         {
             return false;
         }
-        self.inspector_telemetry_refresh_deadline = None;
-        self.inspector_telemetry_last_refresh = Some(Instant::now());
+        self.ui.inspector_telemetry_refresh_deadline = None;
+        self.ui.inspector_telemetry_last_refresh = Some(Instant::now());
         true
     }
 
@@ -5512,14 +5466,14 @@ impl Render for NativeShell {
         self.flush_queued_effects(cx);
         if self.app.workspaces.active_mut().composer_needs_sync {
             let draft = self.app.workspaces.active_mut().composer.draft().to_owned();
-            self.composer_pane.update(cx, |pane, cx| {
+            self.views.composer_pane.update(cx, |pane, cx| {
                 pane.set_input_value(draft, window, cx);
             });
             self.app.workspaces.active_mut().composer_needs_sync = false;
         }
         let theme = SemanticTheme::GEEK_DARK;
         let layout = self.layout(window);
-        self.focus.reconcile_layout(layout);
+        self.ui.focus.reconcile_layout(layout);
         if self.app.workspaces.active_mut().projection.is_some() {
             let requested_layout_width =
                 conversation_width_bucket(layout.center.width.min(CONVERSATION_CONTENT_MAX_WIDTH));
@@ -5531,7 +5485,7 @@ impl Render for NativeShell {
                 .width_for_render(requested_layout_width);
             if width_refresh.is_some() {
                 let owner = self.app.workspaces.active_key().clone();
-                if let Ok(transition) = self.controller.schedule_timer(
+                if let Ok(transition) = self.connection.controller.schedule_timer(
                     owner,
                     DesktopTimerKind::ConversationWidthCommit,
                     CONVERSATION_RESIZE_DEBOUNCE,
@@ -5555,7 +5509,7 @@ impl Render for NativeShell {
                 .flex_none()
                 .w(px(bounds.width as f32))
                 .h_full()
-                .child(self.sessions_pane.clone())
+                .child(self.views.sessions_pane.clone())
                 .child(
                     div()
                         .id("sessions-resize-handle")
@@ -5580,7 +5534,7 @@ impl Render for NativeShell {
                 .flex_none()
                 .w(px(bounds.width as f32))
                 .h_full()
-                .child(self.inspector_pane.clone())
+                .child(self.views.inspector_pane.clone())
                 .child(
                     div()
                         .id("inspector-resize-handle")
@@ -5599,7 +5553,7 @@ impl Render for NativeShell {
                 )
         });
 
-        let center = if self.center_surface == CenterSurface::Skills {
+        let center = if self.ui.center_surface == CenterSurface::Skills {
             div()
                 .id("skills-workspace")
                 .role(Role::Main)
@@ -5612,19 +5566,19 @@ impl Render for NativeShell {
                 .flex()
                 .flex_col()
                 .bg(rgb(theme.canvas.value()))
-                .child(self.conversation_header.clone())
+                .child(self.views.conversation_header.clone())
                 .child(
                     div()
                         .id("center-body")
                         .debug_selector(|| "desktop-center-body".into())
                         .relative()
-                        .track_focus(&self.center_body_focus)
+                        .track_focus(&self.ui.center_body_focus)
                         .flex_1()
                         .min_h_0()
                         .flex()
                         .flex_col()
-                        .child(self.skills_pane.clone())
-                        .child(self.center_drawer_host.clone()),
+                        .child(self.views.skills_pane.clone())
+                        .child(self.views.center_drawer_host.clone()),
                 )
         } else if self.app.workspaces.active_mut().projection.is_some() {
             div()
@@ -5642,21 +5596,21 @@ impl Render for NativeShell {
                 .flex()
                 .flex_col()
                 .bg(rgb(theme.canvas.value()))
-                .child(self.conversation_header.clone())
+                .child(self.views.conversation_header.clone())
                 .child(
                     div()
                         .id("center-body")
                         .debug_selector(|| "desktop-center-body".into())
                         .relative()
                         .key_context(actions::CONVERSATION_KEY_CONTEXT)
-                        .track_focus(&self.center_body_focus)
+                        .track_focus(&self.ui.center_body_focus)
                         .flex_1()
                         .min_h_0()
                         .flex()
                         .flex_col()
-                        .child(self.conversation_pane.clone())
-                        .child(self.composer_pane.clone())
-                        .child(self.center_drawer_host.clone()),
+                        .child(self.views.conversation_pane.clone())
+                        .child(self.views.composer_pane.clone())
+                        .child(self.views.center_drawer_host.clone()),
                 )
         } else {
             div()
@@ -5671,18 +5625,18 @@ impl Render for NativeShell {
                 .flex()
                 .flex_col()
                 .bg(rgb(theme.canvas.value()))
-                .child(self.conversation_header.clone())
+                .child(self.views.conversation_header.clone())
                 .child(
                     div()
                         .id("center-body")
                         .debug_selector(|| "desktop-center-body".into())
                         .relative()
-                        .track_focus(&self.center_body_focus)
+                        .track_focus(&self.ui.center_body_focus)
                         .flex_1()
                         .min_h_0()
                         .flex()
                         .flex_col()
-                        .child(self.home_pane.clone())
+                        .child(self.views.home_pane.clone())
                         .child(
                             div()
                                 .w_full()
@@ -5690,15 +5644,16 @@ impl Render for NativeShell {
                                 .mx_auto()
                                 .px_6()
                                 .pb_8()
-                                .child(self.composer_pane.clone()),
+                                .child(self.views.composer_pane.clone()),
                         )
-                        .child(self.center_drawer_host.clone()),
+                        .child(self.views.center_drawer_host.clone()),
                 )
         };
 
-        let root_modal_host = self.root_modal_host.clone();
-        let toast_host = self.toast_host.clone();
+        let root_modal_host = self.views.root_modal_host.clone();
+        let toast_host = self.views.toast_host.clone();
         let conversation_announcement = self
+            .ui
             .conversation_announcement
             .as_ref()
             .map(|(_, _, message)| message.clone());
@@ -5925,6 +5880,7 @@ mod tests {
     ) {
         let owner = shell.app.workspaces.active_key().clone();
         let transition = shell
+            .connection
             .controller
             .pick_paths(owner, picker)
             .expect("test picker effect identity is available");
@@ -6279,8 +6235,7 @@ mod tests {
                 NativeShell::new(
                     NativeShellInit {
                         runtime,
-                        project: projection.project().clone(),
-                        projection: Some(projection),
+                        workspace: NativeShellWorkspaceInit::Session(Box::new(projection)),
                         projectless_workspace_selection: CodingAgentWorkspaceSelection::projectless(
                             "workspace-native-fixture",
                         ),
@@ -6288,7 +6243,6 @@ mod tests {
                         preferences,
                         preference_writer: None,
                         preference_notice: None,
-                        initial_session_id: None,
                     },
                     window,
                     cx,
@@ -6334,8 +6288,7 @@ mod tests {
                 NativeShell::new(
                     NativeShellInit {
                         runtime,
-                        project,
-                        projection: None,
+                        workspace: NativeShellWorkspaceInit::Home(Box::new(project)),
                         projectless_workspace_selection: CodingAgentWorkspaceSelection::projectless(
                             "workspace-native-fixture",
                         ),
@@ -6343,7 +6296,6 @@ mod tests {
                         preferences,
                         preference_writer: None,
                         preference_notice: None,
-                        initial_session_id: None,
                     },
                     window,
                     cx,
@@ -6433,7 +6385,7 @@ mod tests {
                     &DesktopCommandIntent::ListSessions,
                 )
                 .expect("the explicit refresh remains pending");
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionsListed {
                     command_id,
                     sessions: vec![desktop::runtime::DesktopSessionCatalogEntry {
@@ -6479,7 +6431,7 @@ mod tests {
                 }],
                 0,
             );
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionNameObserved {
                     session_id: "auto-named-session".into(),
                     name: Some("询问助手名字".into()),
@@ -6560,7 +6512,7 @@ mod tests {
                     &DesktopCommandIntent::ListSessions,
                 )
                 .expect("refresh is pending before rejection");
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
                     command_id,
                     command: desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
@@ -6746,7 +6698,7 @@ mod tests {
             assert_eq!(inspector.active_operation, "—");
             assert_eq!(inspector.stream_id, "—");
             assert!(shell.root_modal_view_model().authorization.is_none());
-            assert!(shell.toast_host.read(cx).messages().len() <= 3);
+            assert!(shell.views.toast_host.read(cx).messages().len() <= 3);
             assert_eq!(shell.conversation_pane_view_model().visible_count, 0);
             let header = shell.conversation_header_view_model();
             assert_eq!(header.profile.as_ref(), "Default");
@@ -6940,7 +6892,7 @@ mod tests {
         assert!(cx.debug_bounds("desktop-session-row-0").is_some());
         assert!(cx.debug_bounds("sessions-search").is_some());
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_drawer),
+            shell.read_with(cx, |shell, _| shell.ui.active_drawer),
             Some(CenterDrawerKind::Sessions)
         );
     }
@@ -6989,7 +6941,7 @@ mod tests {
         assert!(cx.debug_bounds("desktop-conversation-panel").is_none());
         assert!(cx.debug_bounds("desktop-composer-panel").is_none());
         assert!(shell.read_with(cx, |shell, _| {
-            shell.center_surface == CenterSurface::Skills
+            shell.ui.center_surface == CenterSurface::Skills
                 && shell.sessions_pane_view_model().skills_active
         }));
         assert_eq!(runtime_harness.drain_command_kinds(), []);
@@ -7050,7 +7002,7 @@ mod tests {
                 .set_preference_notice("Repeated notice".into());
             shell.notify_toast_host(cx);
 
-            let repeated = shell.toast_host.read(cx).messages();
+            let repeated = shell.views.toast_host.read(cx).messages();
             assert_eq!(
                 repeated
                     .iter()
@@ -7074,7 +7026,7 @@ mod tests {
                 .set_preference_notice("Fourth notice".into());
             shell.notify_toast_host(cx);
 
-            let bounded = shell.toast_host.read(cx).messages();
+            let bounded = shell.views.toast_host.read(cx).messages();
             assert_eq!(bounded.len(), 3);
             assert_eq!(
                 bounded.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
@@ -7134,8 +7086,8 @@ mod tests {
                 .commands
                 .reserve(WorkspaceKey::session("session-first"), intent.clone())
                 .expect("the first open command fits the global tracker");
-            shell.runtime_ui_notification_count = 0;
-            shell.runtime_updates.push_back(
+            shell.ui.runtime_ui_notification_count = 0;
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionChanged {
                     command_id,
                     snapshot: visual_test_snapshot_for("session-first"),
@@ -7146,7 +7098,7 @@ mod tests {
             assert_eq!(active_session_id(shell), Some("session-first"));
             assert_eq!(shell.app.workspaces.active().composer.draft(), "home draft");
             assert!(shell.app.commands.pending(command_id).is_none());
-            assert!(shell.runtime_ui_notification_count > 0);
+            assert!(shell.ui.runtime_ui_notification_count > 0);
         });
         assert_eq!(
             runtime_harness.drain_command_kinds(),
@@ -7175,15 +7127,15 @@ mod tests {
                 .expect("reload command fits the global tracker");
             let mut foreign = visual_test_snapshot_for("owner-session-b");
             foreign.project.selected_model_id = "foreign-model-must-not-apply".into();
-            shell
-                .runtime_updates
-                .push_back(desktop::runtime::DesktopRuntimeUpdate::Reloaded {
+            shell.connection.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::Reloaded {
                     command_id,
                     metadata: desktop::runtime::DesktopRuntimeMetadataSnapshot {
                         project: foreign.project,
                         session: Some(foreign.session),
                     },
-                });
+                },
+            );
 
             assert!(shell.poll_runtime_for_test(cx));
             assert!(
@@ -7228,7 +7180,7 @@ mod tests {
             let create_id = shell
                 .reserve_command(DesktopCommandIntent::CreateSession)
                 .expect("create command fits the Home ledger");
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionChanged {
                     command_id: create_id,
                     snapshot: visual_test_snapshot_for("session-created-locally"),
@@ -7243,14 +7195,14 @@ mod tests {
             let resync_id = shell
                 .reserve_command(DesktopCommandIntent::Resync)
                 .expect("resync command fits the session ledger");
-            shell
-                .runtime_updates
-                .push_back(desktop::runtime::DesktopRuntimeUpdate::Resynced {
+            shell.connection.runtime_updates.push_back(
+                desktop::runtime::DesktopRuntimeUpdate::Resynced {
                     command_id: resync_id,
                     replacement: desktop::runtime::DesktopRuntimeResyncSnapshot::Hydrated(
                         visual_test_snapshot_for("session-created-locally"),
                     ),
-                });
+                },
+            );
             assert!(shell.poll_runtime_for_test(cx));
         });
         assert_eq!(
@@ -7306,7 +7258,7 @@ mod tests {
                 .composer
                 .begin_submit(command_id, ComposerSubmissionKind::Prompt)
                 .expect("the Home draft enters pending admission");
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
                     command_id,
                     snapshot: visual_test_snapshot_for("session-created"),
@@ -7416,13 +7368,13 @@ mod tests {
                 Some(SemanticStatus::Running)
             );
             shell.refresh_conversation_rows_at_width(800, cx);
-            shell.runtime_ui_notification_count = 0;
+            shell.ui.runtime_ui_notification_count = 0;
 
             let mut finished_snapshot = visual_test_snapshot_for("session-b");
             finished_snapshot.session.cursor.last_event_sequence = 7;
             finished_snapshot.session.cursor.last_session_sequence = 7;
             finished_snapshot.session.context.changes.push(change);
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::PromptFinished {
                     command_id: 9_002,
                     operation_id: "operation-session-b".into(),
@@ -7433,7 +7385,7 @@ mod tests {
             assert!(shell.poll_runtime_for_test(cx));
 
             assert_eq!(active_session_id(shell), Some("session-a"));
-            assert_eq!(shell.runtime_ui_notification_count, 0);
+            assert_eq!(shell.ui.runtime_ui_notification_count, 0);
             assert_eq!(shell.app.workspaces.active().composer.draft(), "draft a");
             assert_eq!(
                 shell.app.workspaces.active().inspector_section,
@@ -7555,7 +7507,7 @@ mod tests {
                 .commands
                 .command_id_for(&owner, &intent)
                 .expect("close command is owned by the target workspace");
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionClosed {
                     command_id,
                     session_id: "close-session-b".into(),
@@ -7606,7 +7558,7 @@ mod tests {
                 .commands
                 .command_id_for(&WorkspaceKey::session("close-active-session"), &intent)
                 .expect("close command remains owned by the active session");
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionClosed {
                     command_id,
                     session_id: "close-active-session".into(),
@@ -7680,19 +7632,19 @@ mod tests {
         let wide_before_focus = desktop_region_bounds(cx);
         assert!(wide_before_focus.iter().all(Option::is_some));
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Composer
         );
         cx.dispatch_action(FocusNextRegion);
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Inspector
         );
         cx.dispatch_action(FocusNextRegion);
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::CenterHeader
         );
         assert_eq!(desktop_region_bounds(cx), wide_before_focus);
@@ -7834,7 +7786,7 @@ mod tests {
             shell.update(cx, |shell, cx| {
                 let mut view_model = shell.conversation_header_view_model();
                 view_model.status = SemanticStatus::Idle;
-                shell.conversation_header.update(cx, |header, cx| {
+                shell.views.conversation_header.update(cx, |header, cx| {
                     header.set_view_model(view_model);
                     cx.notify();
                 });
@@ -7863,7 +7815,7 @@ mod tests {
                     // conditional Abort action so this regression measures only
                     // the attention indicator's geometry contract.
                     view_model.composer_running = false;
-                    shell.conversation_header.update(cx, |header, cx| {
+                    shell.views.conversation_header.update(cx, |header, cx| {
                         header.set_view_model(view_model);
                         cx.notify();
                     });
@@ -7953,12 +7905,12 @@ mod tests {
                 .expect("selected Runtime tab remains mounted");
             assert!(runtime.left() >= tabs.left() && runtime.right() <= tabs.right());
             assert!(shell.read_with(cx, |shell, cx| {
-                shell.inspector_pane.read(cx).tab_scroll_offset().x <= px(0.)
+                shell.views.inspector_pane.read(cx).tab_scroll_offset().x <= px(0.)
             }));
 
             cx.update(|window, app| {
                 shell.update(app, |shell, app| {
-                    shell.inspector_pane.update(app, |pane, app| {
+                    shell.views.inspector_pane.update(app, |pane, app| {
                         pane.focus_tab(InspectorSection::Runtime, window, app)
                     });
                 });
@@ -8015,10 +7967,10 @@ mod tests {
         cx.dispatch_action(ToggleInspectorPanel);
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_drawer),
+            shell.read_with(cx, |shell, _| shell.ui.active_drawer),
             Some(CenterDrawerKind::Inspector)
         );
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_modal), None);
         assert!(cx.debug_bounds("desktop-inspector-panel").is_some());
         assert_minimum_hit_target(cx, "desktop-hit-close-inspector");
         let center_header = cx
@@ -8061,16 +8013,16 @@ mod tests {
         assert!(cx.update(|window, app| window.dispatch_keystroke(escape, app)));
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_drawer),
+            shell.read_with(cx, |shell, _| shell.ui.active_drawer),
             Some(CenterDrawerKind::Inspector),
             "selector interaction must not implicitly close the non-modal drawer"
         );
 
         cx.simulate_click(center_body.center(), gpui::Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_drawer), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_drawer), None);
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Composer
         );
 
@@ -8098,10 +8050,10 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_drawer),
+            shell.read_with(cx, |shell, _| shell.ui.active_drawer),
             Some(CenterDrawerKind::Sessions)
         );
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_modal), None);
         assert!(cx.debug_bounds("desktop-sessions-drawer").is_some());
         assert_minimum_hit_target(cx, "desktop-hit-refresh-projects");
         assert_minimum_hit_target(cx, "desktop-hit-close-narrow-sessions");
@@ -8136,7 +8088,7 @@ mod tests {
         cx.simulate_click(inspector_toggle.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_drawer),
+            shell.read_with(cx, |shell, _| shell.ui.active_drawer),
             Some(CenterDrawerKind::Inspector)
         );
         assert!(cx.debug_bounds("desktop-sessions-drawer").is_none());
@@ -8145,7 +8097,7 @@ mod tests {
         cx.simulate_click(sessions_toggle.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_drawer),
+            shell.read_with(cx, |shell, _| shell.ui.active_drawer),
             Some(CenterDrawerKind::Sessions)
         );
         assert!(cx.debug_bounds("desktop-inspector-drawer").is_none());
@@ -8153,9 +8105,9 @@ mod tests {
 
         cx.dispatch_action(EscapeHierarchy);
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_drawer), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_drawer), None);
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Composer
         );
     }
@@ -8180,7 +8132,7 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_drawer),
+            shell.read_with(cx, |shell, _| shell.ui.active_drawer),
             Some(CenterDrawerKind::Inspector)
         );
         let center_header = cx
@@ -8211,7 +8163,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_drawer),
+            shell.read_with(cx, |shell, _| shell.ui.active_drawer),
             Some(CenterDrawerKind::Inspector),
             "Profile selection must not implicitly close the non-modal drawer"
         );
@@ -8221,9 +8173,9 @@ mod tests {
             .expect("the drawer exposes its auxiliary close control");
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_drawer), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_drawer), None);
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Composer,
             "the auxiliary close control restores the pre-drawer focus owner"
         );
@@ -8963,7 +8915,7 @@ mod tests {
         cx.simulate_click(open.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_modal),
+            shell.read_with(cx, |shell, _| shell.ui.active_modal),
             Some(DesktopModalKind::FullMessage)
         );
         let dialog = cx
@@ -8975,6 +8927,7 @@ mod tests {
         assert!(scroll.size.height < dialog.size.height);
         assert!(shell.read_with(cx, |shell, _| {
             shell
+                .ui
                 .conversation_full_message
                 .as_ref()
                 .is_some_and(|message| {
@@ -8999,8 +8952,8 @@ mod tests {
             .expect("full viewer exposes a close action");
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
-        assert!(shell.read_with(cx, |shell, _| shell.conversation_full_message.is_none()));
+        assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_modal), None);
+        assert!(shell.read_with(cx, |shell, _| shell.ui.conversation_full_message.is_none()));
     }
 
     #[gpui::test]
@@ -9098,7 +9051,7 @@ mod tests {
 
         cx.update(|window, app| {
             shell.update(app, |shell, app| {
-                shell.sessions_pane.update(app, |pane, app| {
+                shell.views.sessions_pane.update(app, |pane, app| {
                     pane.set_search_value("Release", window, app)
                 });
             });
@@ -9110,6 +9063,7 @@ mod tests {
         cx.update(|window, app| {
             shell.update(app, |shell, app| {
                 shell
+                    .views
                     .sessions_pane
                     .update(app, |pane, app| pane.set_search_value("", window, app));
             });
@@ -9124,7 +9078,7 @@ mod tests {
         assert!(cx.debug_bounds("desktop-session-rename-1").is_some());
         cx.update(|window, app| {
             shell.update(app, |shell, app| {
-                shell.sessions_pane.update(app, |pane, app| {
+                shell.views.sessions_pane.update(app, |pane, app| {
                     pane.set_rename_value("Recovered name", window, app)
                 });
             });
@@ -9363,7 +9317,7 @@ mod tests {
 
         let changed_at = Instant::now();
         shell.update(cx, |shell, cx| {
-            shell.composer_pane.update(cx, |pane, cx| {
+            shell.views.composer_pane.update(cx, |pane, cx| {
                 pane.latency_probe().mark_changed_at(changed_at);
                 cx.notify();
             });
@@ -9371,7 +9325,7 @@ mod tests {
         cx.run_until_parked();
 
         assert!(shell.read_with(cx, |shell, cx| {
-            let pane = shell.composer_pane.read(cx);
+            let pane = shell.views.composer_pane.read(cx);
             pane.latency_probe().pending_is_empty()
                 && pane
                     .latency_probe()
@@ -9733,6 +9687,7 @@ mod tests {
         for _ in 0..SAMPLE_COUNT {
             shell.read_with(cx, |shell, cx| {
                 shell
+                    .views
                     .composer_pane
                     .read(cx)
                     .latency_probe()
@@ -9751,7 +9706,12 @@ mod tests {
             input_roundtrip_samples.push(started.elapsed().as_micros());
             let observed = shell
                 .read_with(cx, |shell, cx| {
-                    shell.composer_pane.read(cx).latency_probe().last_observed()
+                    shell
+                        .views
+                        .composer_pane
+                        .read(cx)
+                        .latency_probe()
+                        .last_observed()
                 })
                 .expect("InputEvent::Change reaches the next ComposerPane render");
             input_to_render_samples.push(observed.as_micros());
@@ -9933,19 +9893,19 @@ mod tests {
         cx.dispatch_action(OpenCommandPalette);
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_modal),
+            shell.read_with(cx, |shell, _| shell.ui.active_modal),
             Some(DesktopModalKind::CommandPalette)
         );
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Modal
         );
         cx.dispatch_action(EscapeHierarchy);
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_modal), None);
         assert!(cx.debug_bounds("desktop-authorization-actions").is_none());
         assert_ne!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Modal
         );
     }
@@ -9966,11 +9926,11 @@ mod tests {
         cx.dispatch_action(ToggleInspectorPanel);
         cx.run_until_parked();
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_drawer),
+            shell.read_with(cx, |shell, _| shell.ui.active_drawer),
             Some(CenterDrawerKind::Inspector)
         );
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Composer,
             "drawer focus remains independent from the logical root focus owner"
         );
@@ -10007,13 +9967,13 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_drawer), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_drawer), None);
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_modal),
+            shell.read_with(cx, |shell, _| shell.ui.active_modal),
             Some(DesktopModalKind::Authorization)
         );
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Modal
         );
         assert!(
@@ -10026,10 +9986,10 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert_eq!(shell.read_with(cx, |shell, _| shell.active_modal), None);
+        assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_modal), None);
         assert!(cx.debug_bounds("desktop-authorization-actions").is_none());
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Composer
         );
     }
@@ -10072,11 +10032,11 @@ mod tests {
         runtime_harness.drain_command_kinds();
 
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_modal),
+            shell.read_with(cx, |shell, _| shell.ui.active_modal),
             Some(DesktopModalKind::Authorization)
         );
         assert_eq!(
-            shell.read_with(cx, |shell, _| shell.focus.active()),
+            shell.read_with(cx, |shell, _| shell.ui.focus.active()),
             FocusTarget::Modal
         );
         let term_left = f32::from(
@@ -10201,7 +10161,7 @@ mod tests {
         );
         cx.run_until_parked();
         runtime_harness.drain_command_kinds();
-        let inspector = shell.read_with(cx, |shell, _| shell.inspector_pane.clone());
+        let inspector = shell.read_with(cx, |shell, _| shell.views.inspector_pane.clone());
 
         inspector.update(cx, |_, cx| {
             cx.emit(InspectorPaneEvent::Recovery {
@@ -10532,7 +10492,7 @@ mod tests {
             for model in &mut snapshot.project.models {
                 model.selected = model.id == "adjacent-model";
             }
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SelectionChanged {
                     command_id: 1,
                     selection: DesktopRuntimeSelectionKind::Model,
@@ -10964,7 +10924,7 @@ mod tests {
                     .resolve(&snapshot.project.global_config_dir)
                     .expect("the selected project resolves for the session fixture"),
             );
-            shell.runtime_updates.push_back(
+            shell.connection.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
                     command_id,
                     snapshot,
@@ -12263,24 +12223,24 @@ mod tests {
         assert!(!notice.contains(SECRET));
     }
 }
-mod center_drawer_host;
-mod center_navigation;
+pub(crate) mod center_drawer_host;
+pub(crate) mod center_navigation;
 mod commands;
-mod composer_pane;
+pub(crate) mod composer_pane;
 mod conversation_controller;
-mod conversation_header;
-mod conversation_pane;
+pub(crate) mod conversation_header;
+pub(crate) mod conversation_pane;
 mod desktop_controls;
 mod desktop_style;
 mod evo_brand;
-mod home_pane;
-mod inspector_pane;
+pub(crate) mod home_pane;
+pub(crate) mod inspector_pane;
 mod project_catalog_controller;
-mod root_modal_host;
-mod sessions_pane;
-mod skills_pane;
+pub(crate) mod root_modal_host;
+pub(crate) mod sessions_pane;
+pub(crate) mod skills_pane;
 mod streaming_text;
-mod toast_host;
+pub(crate) mod toast_host;
 
 use center_drawer_host::{
     CenterDrawerHost, CenterDrawerHostEvent, CenterDrawerKind, CenterDrawerViewModel,
