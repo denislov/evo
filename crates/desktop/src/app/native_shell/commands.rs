@@ -1,5 +1,17 @@
-use super::*;
-use desktop::runtime::DesktopRuntimeUpdate;
+use std::sync::Arc;
+
+use coding_agent::api::{
+    embedding::CodingAgentThinkingLevel, review::CodingAgentFileReviewRequest,
+};
+use desktop::{
+    file_review::DesktopFileReviewDocument,
+    runtime::{DesktopRecoveryAction, DesktopRuntimeSelectionKind, DesktopRuntimeUpdate},
+    shell::truncate_label,
+};
+use gpui::Context;
+
+use super::{DesktopFileReviewState, DesktopThinkingLevel, NativeShell, recovery_action_label};
+use crate::command_ledger::DesktopCommandIntent;
 
 pub(super) enum DirectCommandUpdate {
     Continue(Box<DesktopRuntimeUpdate>),

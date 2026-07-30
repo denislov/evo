@@ -5,9 +5,12 @@ use coding_agent::api::view::{
     CodingAgentWorkspaceOverview,
 };
 use desktop::runtime::{DesktopSessionCatalogEntry, MAX_DESKTOP_SESSION_CATALOG};
+use desktop::shell::truncate_label;
+use gpui::Context;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::*;
+use super::{HOME_COMPOSER_SESSION_KEY, MAX_SESSION_WORKSPACES, NativeShell};
+use crate::command_ledger::DesktopCommandIntent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProjectCatalogState {

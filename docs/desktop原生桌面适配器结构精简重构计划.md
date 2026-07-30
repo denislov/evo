@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-700 已完成，下一项 DSK-701）
+> 状态：执行中（Phase 0 已完成，下一项 DSK-710）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1104,8 +1104,8 @@ Gate 与性能记录：
 
 | 任务 | 状态 | commit | Gate/偏差 |
 | --- | --- | --- | --- |
-| DSK-700 | 已完成 | 待提交 | Gate B、clippy、headless/native perf、reviewed visual compare 全通过；同步 stale conversation goldens |
-| DSK-701 | 待执行 | — | — |
+| DSK-700 | 已完成 | `87c941a` | Gate B、clippy、headless/native perf、reviewed visual compare 全通过；同步 stale conversation goldens |
+| DSK-701 | 已完成 | 待提交 | 删除 exact child inventory；10 项 boundary tests 通过；临时 `runtime/protocol.rs -> gpui` 变异被精确拒绝并已撤销 |
 | DSK-710 | 待执行 | — | — |
 | DSK-711 | 待执行 | — | — |
 | DSK-720 | 待执行 | — | — |

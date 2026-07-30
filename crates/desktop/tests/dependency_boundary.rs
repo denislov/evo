@@ -5,7 +5,7 @@ use std::{
 };
 
 use syn::{
-    File, Ident, Item, Visibility,
+    Attribute, File, Ident, Item, ItemUse, UseTree, Visibility,
     visit::{self, Visit},
 };
 
@@ -94,40 +94,195 @@ fn public_surface(file: &File) -> BTreeSet<String> {
         .collect()
 }
 
-fn external_modules(file: &File) -> BTreeSet<String> {
-    file.items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Mod(module) if module.content.is_none() => Some(module.ident.to_string()),
-            _ => None,
-        })
-        .collect()
+fn rust_files(root: impl AsRef<Path>) -> Vec<PathBuf> {
+    fn collect(root: &Path, files: &mut Vec<PathBuf>) {
+        let mut entries = fs::read_dir(root)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", root.display()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_else(|error| panic!("failed to enumerate {}: {error}", root.display()));
+        entries.sort_by_key(fs::DirEntry::path);
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    let root = root.as_ref();
+    if !root.exists() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    collect(root, &mut files);
+    files
+}
+
+fn layer_rust_files(layer: &str) -> Vec<PathBuf> {
+    let source_root = manifest_dir().join("src");
+    let mut files = rust_files(source_root.join(layer));
+    let flat_module = source_root.join(format!("{layer}.rs"));
+    if flat_module.is_file() {
+        files.push(flat_module);
+    }
+    files.sort();
+    files
+}
+
+fn is_test_only_source(path: &Path) -> bool {
+    path.file_stem().is_some_and(|stem| stem == "tests")
+        || path
+            .components()
+            .any(|component| component.as_os_str() == "tests")
+}
+
+fn item_attributes(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        Item::Verbatim(_) | _ => &[],
+    }
+}
+
+fn has_test_cfg(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        if !attribute.path().is_ident("cfg") {
+            return false;
+        }
+        attribute
+            .meta
+            .require_list()
+            .is_ok_and(|list| list.tokens.to_string() == "test")
+    })
+}
+
+fn collect_use_paths(tree: &UseTree, prefix: &mut Vec<String>, paths: &mut BTreeSet<String>) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_paths(&path.tree, prefix, paths);
+            prefix.pop();
+        }
+        UseTree::Name(name) => {
+            prefix.push(name.ident.to_string());
+            paths.insert(prefix.join("::"));
+            prefix.pop();
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(rename.ident.to_string());
+            paths.insert(prefix.join("::"));
+            prefix.pop();
+        }
+        UseTree::Glob(_) => {
+            prefix.push("*".into());
+            paths.insert(prefix.join("::"));
+            prefix.pop();
+        }
+        UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_use_paths(tree, prefix, paths);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
-struct IdentifierCollector {
+struct ProductionFacts {
     identifiers: BTreeSet<String>,
+    paths: BTreeSet<String>,
+    imports: BTreeSet<String>,
 }
 
-impl<'ast> Visit<'ast> for IdentifierCollector {
+impl ProductionFacts {
+    fn all_paths(&self) -> impl Iterator<Item = &str> {
+        self.paths.iter().chain(&self.imports).map(String::as_str)
+    }
+}
+
+impl<'ast> Visit<'ast> for ProductionFacts {
+    fn visit_item(&mut self, item: &'ast Item) {
+        if has_test_cfg(item_attributes(item)) {
+            return;
+        }
+        visit::visit_item(self, item);
+    }
+
     fn visit_ident(&mut self, ident: &'ast Ident) {
         self.identifiers.insert(ident.to_string());
         visit::visit_ident(self, ident);
     }
 
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
-        if module.ident == "tests" {
+        if module.ident == "tests" || has_test_cfg(&module.attrs) {
             return;
         }
         visit::visit_item_mod(self, module);
     }
+
+    fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        let mut prefix = Vec::new();
+        collect_use_paths(&item.tree, &mut prefix, &mut self.imports);
+        visit::visit_item_use(self, item);
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        let joined = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !joined.is_empty() {
+            self.paths.insert(joined);
+        }
+        visit::visit_path(self, path);
+    }
+}
+
+fn production_facts(path: impl AsRef<Path>) -> ProductionFacts {
+    let file = parse_rust(path);
+    let mut facts = ProductionFacts::default();
+    facts.visit_file(&file);
+    facts
 }
 
 fn rust_identifiers(path: impl AsRef<Path>) -> BTreeSet<String> {
-    let file = parse_rust(path);
-    let mut collector = IdentifierCollector::default();
-    collector.visit_file(&file);
-    collector.identifiers
+    production_facts(path).identifiers
+}
+
+fn path_has_segments(path: &str, expected: &[&str]) -> bool {
+    let segments = path.split("::").collect::<Vec<_>>();
+    segments
+        .windows(expected.len())
+        .any(|window| window == expected)
+}
+
+fn assert_paths_exclude(path: &Path, facts: &ProductionFacts, forbidden: &[&[&str]]) {
+    for dependency in forbidden {
+        assert!(
+            !facts
+                .all_paths()
+                .any(|candidate| path_has_segments(candidate, dependency)),
+            "{} must not depend on {}",
+            path.display(),
+            dependency.join("::")
+        );
+    }
 }
 
 #[test]
@@ -334,129 +489,140 @@ fn desktop_public_api_is_one_typed_application_surface() {
 }
 
 #[test]
-fn native_shell_has_one_explicit_child_module_graph() {
-    let native_root = manifest_dir().join("src/app/native_shell");
-    let shell = parse_rust(manifest_dir().join("src/app/native_shell.rs"));
-    let modules = external_modules(&shell);
-    assert_eq!(
-        modules,
-        BTreeSet::from([
-            "center_drawer_host".into(),
-            "center_navigation".into(),
-            "commands".into(),
-            "composer_pane".into(),
-            "conversation_controller".into(),
-            "conversation_header".into(),
-            "conversation_pane".into(),
-            "desktop_controls".into(),
-            "desktop_style".into(),
-            "evo_brand".into(),
-            "home_pane".into(),
-            "inspector_pane".into(),
-            "project_catalog_controller".into(),
-            "root_modal_host".into(),
-            "sessions_pane".into(),
-            "skills_pane".into(),
-            "streaming_text".into(),
-            "toast_host".into(),
-            "update".into(),
-        ])
-    );
-    for module in modules {
-        assert!(native_root.join(format!("{module}.rs")).is_file());
-    }
-
-    for removed in [
-        "home_recent.rs",
-        "home_skills.rs",
-        "overlay_host.rs",
-        "context_overlay.rs",
-        "narrow_context.rs",
-        "session_refresh_timer.rs",
-        "thinking_menu.rs",
-    ] {
+fn production_sources_use_explicit_imports() {
+    for path in rust_files(manifest_dir().join("src")) {
+        if is_test_only_source(&path) {
+            continue;
+        }
+        let facts = production_facts(&path);
         assert!(
-            !native_root.join(removed).exists(),
-            "legacy module must stay deleted: {removed}"
+            !facts.imports.contains("super::*"),
+            "production module must not hide its authority dependencies behind use super::*: {}",
+            path.display()
         );
     }
 }
 
 #[test]
-fn child_views_do_not_import_root_or_product_authority() {
-    let root = manifest_dir().join("src/app/native_shell");
-    let policies: &[(&str, &[&str])] = &[
-        (
-            "desktop_controls.rs",
-            &[
-                "NativeShell",
-                "DesktopProjection",
-                "DesktopCommandLedger",
-                "ConversationController",
-            ],
-        ),
-        (
-            "conversation_header.rs",
-            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
-        ),
-        (
-            "sessions_pane.rs",
-            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
-        ),
-        (
-            "composer_pane.rs",
-            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
-        ),
-        (
-            "inspector_pane.rs",
-            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
-        ),
-        (
-            "toast_host.rs",
-            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
-        ),
-        (
-            "root_modal_host.rs",
-            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
-        ),
-        (
-            "center_drawer_host.rs",
-            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
-        ),
-        (
-            "evo_brand.rs",
-            &["NativeShell", "DesktopProjection", "DesktopCommandLedger"],
-        ),
-    ];
-
-    for (relative, forbidden) in policies {
-        let identifiers = rust_identifiers(root.join(relative));
-        for identifier in *forbidden {
-            assert!(
-                !identifiers.contains(*identifier),
-                "{relative} must not depend on {identifier}"
-            );
+fn application_layer_has_no_ui_or_effect_executor_dependencies() {
+    for path in layer_rust_files("application") {
+        if is_test_only_source(&path) {
+            continue;
         }
+        let facts = production_facts(&path);
+        assert_paths_exclude(
+            &path,
+            &facts,
+            &[
+                &["gpui"],
+                &["std", "fs"],
+                &["std", "process"],
+                &["std", "thread"],
+                &["tokio"],
+            ],
+        );
+    }
+}
+
+fn assert_leaf_ui_dependencies(path: &Path) {
+    let identifiers = rust_identifiers(path);
+    for forbidden in [
+        "NativeShell",
+        "DesktopProjection",
+        "RuntimeCommandClient",
+        "DesktopRuntimeCommandHandle",
+        "DesktopRuntimeBridge",
+        "CommandTracker",
+        "DesktopCommandLedger",
+        "PreferenceStore",
+        "PreferenceWriter",
+    ] {
+        assert!(
+            !identifiers.contains(forbidden),
+            "{} leaf UI must not depend on {forbidden}",
+            path.display()
+        );
     }
 }
 
 #[test]
-fn runtime_modules_do_not_depend_on_native_presentation() {
-    let runtime_root = manifest_dir().join("src/runtime");
-    for relative in ["bridge.rs", "dispatch.rs", "driver.rs", "protocol.rs"] {
-        let identifiers = rust_identifiers(runtime_root.join(relative));
+fn leaf_ui_does_not_import_root_runtime_command_or_preference_authority() {
+    let root = manifest_dir().join("src/app/native_shell");
+    for relative in [
+        "center_drawer_host.rs",
+        "composer_pane.rs",
+        "conversation_header.rs",
+        "conversation_pane.rs",
+        "desktop_controls.rs",
+        "desktop_style.rs",
+        "evo_brand.rs",
+        "home_pane.rs",
+        "inspector_pane.rs",
+        "root_modal_host.rs",
+        "sessions_pane.rs",
+        "skills_pane.rs",
+        "streaming_text.rs",
+        "toast_host.rs",
+    ] {
+        assert_leaf_ui_dependencies(&root.join(relative));
+    }
+
+    let ui_root = manifest_dir().join("src/ui");
+    for path in rust_files(&ui_root) {
+        let relative = path
+            .strip_prefix(&ui_root)
+            .expect("UI path is under UI root");
+        if is_test_only_source(&path)
+            || relative == Path::new("mod.rs")
+            || relative
+                .components()
+                .next()
+                .is_some_and(|component| component.as_os_str() == "shell")
+        {
+            continue;
+        }
+        assert_leaf_ui_dependencies(&path);
+    }
+}
+
+#[test]
+fn runtime_and_platform_layers_do_not_depend_on_presentation() {
+    for path in layer_rust_files("runtime") {
+        if is_test_only_source(&path) {
+            continue;
+        }
+        let facts = production_facts(&path);
+        assert_paths_exclude(&path, &facts, &[&["gpui"], &["ui"]]);
         for forbidden in [
-            "gpui",
             "NativeShell",
             "ConversationPane",
             "ComposerPane",
             "InspectorPane",
             "SessionsPane",
+            "UiChangeSet",
+            "ShellUiState",
+            "ViewModel",
         ] {
             assert!(
-                !identifiers.contains(forbidden),
-                "runtime/{relative} must not depend on presentation identifier {forbidden}"
+                !facts.identifiers.contains(forbidden),
+                "{} runtime module must not depend on presentation identifier {forbidden}",
+                path.display()
             );
         }
+        for identifier in &facts.identifiers {
+            assert!(
+                !identifier.ends_with("Pane") && !identifier.ends_with("ViewModel"),
+                "{} runtime module must not depend on presentation identifier {identifier}",
+                path.display()
+            );
+        }
+    }
+
+    for path in layer_rust_files("platform") {
+        if is_test_only_source(&path) {
+            continue;
+        }
+        let facts = production_facts(&path);
+        assert_paths_exclude(&path, &facts, &[&["ui"]]);
     }
 }
