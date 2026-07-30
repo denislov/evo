@@ -5,8 +5,8 @@ mod protocol;
 
 #[allow(unused_imports)]
 pub use bridge::{
-    DesktopRuntimeBootstrap, DesktopRuntimeBridge, DesktopRuntimeCommandHandle,
-    DesktopRuntimeEventStream, DesktopRuntimeShutdownGuard,
+    DesktopRuntimeBootstrap, DesktopRuntimeBridge, DesktopRuntimeEventStream,
+    DesktopRuntimeShutdownGuard, RuntimeCommandClient,
 };
 use driver::run_runtime;
 #[allow(unused_imports)]

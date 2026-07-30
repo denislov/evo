@@ -60,7 +60,7 @@ pub(super) fn build_desktop_runtime() -> std::io::Result<runtime::Runtime> {
 
 pub struct DesktopRuntimeBridge {
     pub(super) shutdown: DesktopRuntimeShutdownGuard,
-    pub(super) commands: Option<mpsc::Sender<DesktopRuntimeCommand>>,
+    pub(super) command_client: Option<RuntimeCommandClient>,
     pub(super) events: DesktopRuntimeEventStream,
 }
 
@@ -80,8 +80,8 @@ pub struct DesktopRuntimeShutdownGuard {
 
 /// Cloneable, non-blocking command side of the desktop runtime bridge.
 #[derive(Clone)]
-pub struct DesktopRuntimeCommandHandle {
-    commands: mpsc::Sender<DesktopRuntimeCommand>,
+pub struct RuntimeCommandClient {
+    pub(super) commands: mpsc::Sender<DesktopRuntimeCommand>,
 }
 
 /// Non-blocking startup handle for a desktop runtime.
@@ -182,7 +182,7 @@ impl DesktopRuntimeBridge {
                 shutdown,
                 runtime_thread: None,
             },
-            commands: Some(commands),
+            command_client: Some(RuntimeCommandClient { commands }),
             events: DesktopRuntimeEventStream {
                 priority_updates,
                 data_updates,
@@ -210,7 +210,7 @@ impl DesktopRuntimeBridge {
                     shutdown,
                     runtime_thread: None,
                 },
-                commands: Some(commands),
+                command_client: Some(RuntimeCommandClient { commands }),
                 events: DesktopRuntimeEventStream {
                     priority_updates,
                     data_updates,
@@ -219,11 +219,18 @@ impl DesktopRuntimeBridge {
                 },
             },
             DesktopRuntimeTestHarness {
-                commands: command_rx,
+                protocol_commands: command_rx,
                 _priority_update_tx: priority_update_tx,
                 _data_update_tx: data_update_tx,
             },
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn command_client_for_test(&self) -> &RuntimeCommandClient {
+        self.command_client
+            .as_ref()
+            .expect("test bridge must retain its command client before splitting")
     }
 
     /// Spawn runtime initialization without waiting for configuration/session I/O.
@@ -264,7 +271,7 @@ impl DesktopRuntimeBridge {
         Ok(DesktopRuntimeBootstrap {
             ready: ready_rx,
             bridge: Some(Self {
-                commands: Some(commands),
+                command_client: Some(RuntimeCommandClient { commands }),
                 events: DesktopRuntimeEventStream {
                     priority_updates,
                     data_updates,
@@ -279,246 +286,18 @@ impl DesktopRuntimeBridge {
         })
     }
 
-    #[cfg(test)]
-    pub fn try_reload(
-        &self,
-        command_id: u64,
-        target: DesktopRuntimeOwnerTarget,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_runtime_owner_target(&target)?;
-        self.try_send(DesktopRuntimeCommand::Reload { command_id, target })
-    }
-
-    #[cfg(test)]
-    pub fn try_resync(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::Resync {
-            command_id,
-            session_id: None,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_create_session(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::CreateSession { command_id })
-    }
-
-    #[cfg(test)]
-    pub fn try_open_session(
-        &self,
-        command_id: u64,
-        session_id: &str,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_session_id(session_id)?;
-        self.try_send(DesktopRuntimeCommand::OpenSession {
-            command_id,
-            session_id: session_id.to_owned(),
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_close_session(
-        &self,
-        command_id: u64,
-        session_id: &str,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_session_id(session_id)?;
-        self.try_send(DesktopRuntimeCommand::CloseSession {
-            command_id,
-            session_id: session_id.to_owned(),
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_list_sessions(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::ListSessions { command_id })
-    }
-
-    #[cfg(test)]
-    pub fn try_rename_session(
-        &self,
-        command_id: u64,
-        session_id: &str,
-        name: Option<&str>,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_session_id(session_id)?;
-        validate_session_name(name)?;
-        self.try_send(DesktopRuntimeCommand::RenameSession {
-            command_id,
-            session_id: session_id.to_owned(),
-            name: name
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned),
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_select_model(
-        &self,
-        command_id: u64,
-        target: DesktopRuntimeOwnerTarget,
-        model_id: &str,
-        thinking_level: Option<CodingAgentThinkingLevel>,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_runtime_owner_target(&target)?;
-        validate_selection_id("model", model_id)?;
-        self.try_send(DesktopRuntimeCommand::SelectModel {
-            command_id,
-            target,
-            model_id: model_id.to_owned(),
-            thinking_level,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_select_session_profile(
-        &self,
-        command_id: u64,
-        target: DesktopRuntimeOwnerTarget,
-        profile_id: &str,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_runtime_owner_target(&target)?;
-        validate_selection_id("profile", profile_id)?;
-        self.try_send(DesktopRuntimeCommand::SelectSessionProfile {
-            command_id,
-            target,
-            profile_id: profile_id.to_owned(),
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_submit_prompt(
-        &self,
-        command_id: u64,
-        target: DesktopPromptTarget,
-        prompt: &str,
-        thinking_level: Option<CodingAgentThinkingLevel>,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(admitted_prompt_command(
-            command_id,
-            target,
-            prompt,
-            &[],
-            thinking_level,
-        )?)
-    }
-
-    #[cfg(test)]
-    pub fn try_submit_prompt_with_attachments(
-        &self,
-        command_id: u64,
-        target: DesktopPromptTarget,
-        prompt: &str,
-        attachments: &[PathBuf],
-        thinking_level: Option<CodingAgentThinkingLevel>,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(admitted_prompt_command(
-            command_id,
-            target,
-            prompt,
-            attachments,
-            thinking_level,
-        )?)
-    }
-
-    #[cfg(test)]
-    pub fn try_abort(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::Abort {
-            command_id,
-            session_id: None,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_steer(
-        &self,
-        command_id: u64,
-        text: &str,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_control_text(text)?;
-        self.try_send(DesktopRuntimeCommand::Steer {
-            command_id,
-            session_id: None,
-            text: text.to_owned(),
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_follow_up(
-        &self,
-        command_id: u64,
-        text: &str,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_control_text(text)?;
-        self.try_send(DesktopRuntimeCommand::FollowUp {
-            command_id,
-            session_id: None,
-            text: text.to_owned(),
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_decide_tool_authorization(
-        &self,
-        command_id: u64,
-        identity: &ToolAuthorizationIdentity,
-        decision: ToolAuthorizationDecision,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_authorization_identity(identity)?;
-        self.try_send(DesktopRuntimeCommand::DecideToolAuthorization {
-            command_id,
-            session_id: None,
-            identity: identity.clone(),
-            decision,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_retry_recovery(
-        &self,
-        command_id: u64,
-        identity: &DesktopRecoveryIdentity,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_recovery_identity(identity)?;
-        self.try_send(DesktopRuntimeCommand::RetryRecovery {
-            command_id,
-            session_id: None,
-            identity: identity.clone(),
-        })
-    }
-
-    #[cfg(test)]
-    pub fn try_resolve_recovery(
-        &self,
-        command_id: u64,
-        identity: &DesktopRecoveryIdentity,
-        resolution: CodingAgentRecoveryResolution,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_recovery_identity(identity)?;
-        self.try_send(DesktopRuntimeCommand::ResolveRecovery {
-            command_id,
-            session_id: None,
-            identity: identity.clone(),
-            resolution,
-        })
-    }
-
     pub fn into_parts(
         mut self,
     ) -> (
-        DesktopRuntimeCommandHandle,
+        RuntimeCommandClient,
         DesktopRuntimeEventStream,
         DesktopRuntimeShutdownGuard,
     ) {
-        let commands = self
-            .commands
+        let command_client = self
+            .command_client
             .take()
-            .expect("live desktop bridge must retain its command sender");
-        (
-            DesktopRuntimeCommandHandle { commands },
-            self.events,
-            self.shutdown,
-        )
+            .expect("live desktop bridge must retain its command client");
+        (command_client, self.events, self.shutdown)
     }
 
     pub(crate) async fn open_session_for_bootstrap(
@@ -526,22 +305,11 @@ impl DesktopRuntimeBridge {
         command_id: u64,
         session_id: &str,
     ) -> Result<DesktopRuntimeHydratedSnapshot, String> {
-        validate_session_id(session_id).map_err(|error| error.to_string())?;
-        self.commands
+        self.command_client
             .as_ref()
             .ok_or_else(|| DesktopCommandAdmissionError::RuntimeClosed.to_string())?
-            .try_send(DesktopRuntimeCommand::OpenSession {
-                command_id,
-                session_id: session_id.to_owned(),
-            })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => {
-                    DesktopCommandAdmissionError::QueueFull.to_string()
-                }
-                mpsc::error::TrySendError::Closed(_) => {
-                    DesktopCommandAdmissionError::RuntimeClosed.to_string()
-                }
-            })?;
+            .try_open_session(command_id, session_id)
+            .map_err(|error| error.to_string())?;
         while let Some(update) = self.events.next_update().await {
             match update {
                 DesktopRuntimeUpdate::SessionChanged {
@@ -578,25 +346,13 @@ impl DesktopRuntimeBridge {
     #[cfg(test)]
     pub async fn shutdown(mut self) -> Result<(), DesktopRuntimeShutdownError> {
         self.shutdown.signal();
-        drop(self.commands.take());
+        drop(self.command_client.take());
         while let Some(update) = self.events.next_update().await {
             if matches!(update, DesktopRuntimeUpdate::Stopped) {
                 break;
             }
         }
         self.shutdown.join()
-    }
-
-    #[cfg(test)]
-    fn try_send(&self, command: DesktopRuntimeCommand) -> Result<(), DesktopCommandAdmissionError> {
-        self.commands
-            .as_ref()
-            .ok_or(DesktopCommandAdmissionError::RuntimeClosed)?
-            .try_send(command)
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => DesktopCommandAdmissionError::QueueFull,
-                mpsc::error::TrySendError::Closed(_) => DesktopCommandAdmissionError::RuntimeClosed,
-            })
     }
 
     pub(super) fn join_runtime_thread(&mut self) -> Result<(), DesktopRuntimeShutdownError> {
@@ -606,7 +362,7 @@ impl DesktopRuntimeBridge {
 
 #[cfg(test)]
 pub(crate) struct DesktopRuntimeTestHarness {
-    commands: mpsc::Receiver<DesktopRuntimeCommand>,
+    protocol_commands: mpsc::Receiver<DesktopRuntimeCommand>,
     _priority_update_tx: mpsc::Sender<DesktopRuntimeUpdate>,
     _data_update_tx: mpsc::Sender<DesktopRuntimeUpdate>,
 }
@@ -615,7 +371,7 @@ pub(crate) struct DesktopRuntimeTestHarness {
 impl DesktopRuntimeTestHarness {
     pub(crate) fn drain_command_kinds(&mut self) -> Vec<DesktopRuntimeCommandKind> {
         let mut kinds = Vec::new();
-        while let Ok(command) = self.commands.try_recv() {
+        while let Ok(command) = self.protocol_commands.try_recv() {
             kinds.push(command.kind());
         }
         kinds
@@ -630,7 +386,7 @@ impl DesktopRuntimeTestHarness {
         Option<CodingAgentThinkingLevel>,
     )> {
         let mut selections = Vec::new();
-        while let Ok(command) = self.commands.try_recv() {
+        while let Ok(command) = self.protocol_commands.try_recv() {
             match command {
                 DesktopRuntimeCommand::SelectModel {
                     target,
@@ -669,7 +425,7 @@ impl DesktopRuntimeTestHarness {
         Option<CodingAgentThinkingLevel>,
     )> {
         let mut prompts = Vec::new();
-        while let Ok(command) = self.commands.try_recv() {
+        while let Ok(command) = self.protocol_commands.try_recv() {
             if let DesktopRuntimeCommand::SubmitPrompt {
                 target,
                 prompt,
@@ -687,7 +443,7 @@ impl DesktopRuntimeTestHarness {
         &mut self,
     ) -> Vec<(DesktopPromptTarget, String, Vec<PathBuf>)> {
         let mut prompts = Vec::new();
-        while let Ok(command) = self.commands.try_recv() {
+        while let Ok(command) = self.protocol_commands.try_recv() {
             if let DesktopRuntimeCommand::SubmitPrompt {
                 target,
                 prompt,
@@ -703,7 +459,7 @@ impl DesktopRuntimeTestHarness {
 
     pub(crate) fn drain_session_renames(&mut self) -> Vec<(String, Option<String>)> {
         let mut renames = Vec::new();
-        while let Ok(command) = self.commands.try_recv() {
+        while let Ok(command) = self.protocol_commands.try_recv() {
             if let DesktopRuntimeCommand::RenameSession {
                 session_id, name, ..
             } = command
@@ -848,7 +604,7 @@ impl DesktopRuntimeShutdownGuard {
     }
 }
 
-impl DesktopRuntimeCommandHandle {
+impl RuntimeCommandClient {
     pub fn try_reload(
         &self,
         command_id: u64,
@@ -1124,6 +880,7 @@ impl DesktopRuntimeCommandHandle {
         target: &CodingAgentExternalEditorTarget,
         editor: &DesktopExternalEditorConfig,
     ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
         editor.validate().map_err(
             |error| DesktopCommandAdmissionError::InvalidExternalEditor {
                 message: error.to_string(),

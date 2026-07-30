@@ -314,7 +314,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -349,7 +349,7 @@ impl NativeShell {
             return;
         };
         self.project_catalog.begin_refresh();
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -389,7 +389,7 @@ impl NativeShell {
                 return;
             }
         };
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -515,7 +515,7 @@ impl NativeShell {
                 return;
             }
         };
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime

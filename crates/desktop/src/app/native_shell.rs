@@ -19,8 +19,8 @@ use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel, PreferenceW
 use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
 use desktop::runtime::{
     DesktopPromptTarget, DesktopRecoveryAction, DesktopRecoveryIdentity, DesktopRuntimeBridge,
-    DesktopRuntimeCommandHandle, DesktopRuntimeOwnerTarget, DesktopRuntimeSelectionKind,
-    MAX_PROMPT_ATTACHMENTS, validate_prompt_attachments,
+    DesktopRuntimeOwnerTarget, DesktopRuntimeSelectionKind, MAX_PROMPT_ATTACHMENTS,
+    RuntimeCommandClient, validate_prompt_attachments,
 };
 use desktop::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH,
@@ -490,7 +490,7 @@ fn runtime_update_command_id(update: &desktop::runtime::DesktopRuntimeUpdate) ->
 }
 
 pub(super) struct NativeShell {
-    runtime: Option<DesktopRuntimeCommandHandle>,
+    runtime_client: Option<RuntimeCommandClient>,
     runtime_updates: VecDeque<desktop::runtime::DesktopRuntimeUpdate>,
     runtime_update_target: Option<WorkspaceKey>,
     command_tracker: CommandTracker,
@@ -568,7 +568,7 @@ impl NativeShell {
             ),
             "the desktop Home clear target must be a managed Projectless workspace"
         );
-        let (runtime_commands, mut runtime_events, runtime_shutdown) = runtime.into_parts();
+        let (runtime_client, mut runtime_events, runtime_shutdown) = runtime.into_parts();
         let mut command_tracker = CommandTracker::default();
         if let Some(session_id) = initial_session_id {
             let intent = DesktopCommandIntent::OpenSession {
@@ -577,7 +577,7 @@ impl NativeShell {
             let owner = WorkspaceKey::session(session_id.clone());
             match command_tracker.reserve(owner.clone(), intent.clone()) {
                 Ok(command_id) => {
-                    if let Err(error) = runtime_commands.try_open_session(command_id, &session_id) {
+                    if let Err(error) = runtime_client.try_open_session(command_id, &session_id) {
                         let _ = command_tracker.complete(command_id, &owner, &intent);
                         preference_notice = Some(error.to_string());
                     }
@@ -884,7 +884,7 @@ impl NativeShell {
             None => WorkspaceStore::new(initial_workspace),
         };
         let shell = Self {
-            runtime: Some(runtime_commands),
+            runtime_client: Some(runtime_client),
             runtime_updates: VecDeque::new(),
             runtime_update_target: None,
             command_tracker,
@@ -1358,7 +1358,7 @@ impl NativeShell {
             }
         };
         let admission = self
-            .runtime
+            .runtime_client
             .as_ref()
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
             .and_then(|runtime| {
@@ -1690,7 +1690,7 @@ impl NativeShell {
     }
 
     fn poll_runtime(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.runtime.is_none() {
+        if self.runtime_client.is_none() {
             return false;
         }
         let mut applied = 0;
@@ -2843,7 +2843,7 @@ impl NativeShell {
         let Some(command_id) = self.reserve_command(intent.clone()) else {
             return;
         };
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -2921,7 +2921,7 @@ impl NativeShell {
             .thinking_selection
             .explicit();
         let target = self.workspace_store.active_mut().prompt_target();
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -3240,7 +3240,7 @@ impl NativeShell {
             .projection
             .as_ref()
             .map(|projection| projection.snapshot().session.session_id.clone());
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 let Some(session_id) = session_id.as_deref() else {
@@ -3310,7 +3310,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -3367,7 +3367,7 @@ impl NativeShell {
             return;
         };
         let target = self.workspace_store.active_mut().runtime_owner_target();
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -3432,7 +3432,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 let result = match action {
@@ -3535,7 +3535,7 @@ impl NativeShell {
             return;
         };
         let target = self.workspace_store.active_mut().runtime_owner_target();
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 let result = match selection {
@@ -3669,7 +3669,7 @@ impl NativeShell {
             cx.notify();
             return;
         };
-        let admission = self.runtime.as_ref().map_or_else(
+        let admission = self.runtime_client.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
             |runtime| {
                 runtime
@@ -3982,7 +3982,7 @@ impl NativeShell {
             return;
         };
         let admission = self
-            .runtime
+            .runtime_client
             .as_ref()
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
             .and_then(|runtime| {
@@ -4109,7 +4109,7 @@ impl NativeShell {
             return;
         };
         let admission = self
-            .runtime
+            .runtime_client
             .as_ref()
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
             .and_then(|runtime| {
