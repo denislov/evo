@@ -1140,7 +1140,7 @@ Gate 与性能记录：
 | DSK-700 | 已完成 | `87c941a` | Gate B、clippy、headless/native perf、reviewed visual compare 全通过；同步 stale conversation goldens |
 | DSK-701 | 已完成 | `e0aabab` | 删除 exact child inventory；10 项 boundary tests 通过；临时 `runtime/protocol.rs -> gpui` 变异被精确拒绝并已撤销 |
 | DSK-710 | 已完成 | `3c689e0` | 删除 `NativeShell` 的 `Deref/DerefMut`，workspace 字段显式归属 `active_workspace`；Gate A、5 项 workspace/session 定向测试与 8 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
-| DSK-711 | 已完成 | 待提交 | typed `WorkspaceKey/WorkspaceStore` 替代 Home sentinel 与 swap；Gate A/B、owner/lifecycle 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
+| DSK-711 | 已完成 | `7953d88` | typed `WorkspaceKey/WorkspaceStore` 替代 Home sentinel 与 swap；Gate A/B、owner/lifecycle 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-720 | 待执行 | — | — |
 | DSK-721 | 待执行 | — | — |
 | DSK-730 | 待执行 | — | — |
