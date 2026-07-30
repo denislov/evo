@@ -1242,13 +1242,13 @@ const fn recovery_action_label(action: DesktopRecoveryAction) -> &'static str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UiIntent {
+pub(crate) enum CatalogIntent {
     SetProjectCollapsed { group_id: String, collapsed: bool },
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum DesktopEvent {
-    Ui(UiIntent),
+    Ui(CatalogIntent),
     Platform(PlatformResult),
     Timer(DesktopTimer),
 }
@@ -1703,8 +1703,8 @@ mod tests {
     use desktop::preferences::DesktopPreferences;
 
     use super::{
-        DesktopController, DesktopEvent, PlatformUpdatePort, RuntimeUpdateKind, Transition,
-        UiIntent,
+        CatalogIntent, DesktopController, DesktopEvent, PlatformUpdatePort, RuntimeUpdateKind,
+        Transition,
     };
     use crate::application::{
         change_set::UiRegion,
@@ -1873,12 +1873,13 @@ mod tests {
         let mut state = state();
         let transition = controller.reduce(
             &mut state,
-            DesktopEvent::Ui(UiIntent::SetProjectCollapsed {
+            DesktopEvent::Ui(CatalogIntent::SetProjectCollapsed {
                 group_id: "project:alpha".into(),
                 collapsed: true,
             }),
             |state, event| {
-                let DesktopEvent::Ui(UiIntent::SetProjectCollapsed { group_id, .. }) = event else {
+                let DesktopEvent::Ui(CatalogIntent::SetProjectCollapsed { group_id, .. }) = event
+                else {
                     panic!("test event must remain typed");
                 };
                 state.catalog.push(group_id);

@@ -69,7 +69,7 @@ use crate::application::{
         ClipboardFeedback, DesktopEffect, DesktopPickerKind, DesktopTimer, DesktopTimerKind,
         PlatformOutcome, PlatformResult,
     },
-    reducer::{DesktopController, DesktopEvent, PlatformUpdatePort, Transition, UiIntent},
+    reducer::{CatalogIntent, DesktopController, DesktopEvent, PlatformUpdatePort, Transition},
     runtime_state::{RuntimeProjectionPresentation, RuntimeWorkspacePresentation},
     state::DesktopState,
     workspace::{SessionId, WorkspaceKey, WorkspaceStore},
@@ -447,227 +447,50 @@ impl NativeShell {
             cx.subscribe_in(
                 &conversation_pane,
                 window,
-                |this, _, event: &ConversationPaneEvent, window, cx| match event {
-                    ConversationPaneEvent::Select { block_id, durable } => {
-                        this.record_focus(FocusTarget::CenterBody, window, cx);
-                        let workspace = &mut this.app.workspaces.active_mut();
-                        let Some(projection) = workspace.projection.as_ref() else {
-                            return;
-                        };
-                        workspace.presentation.conversation_controller.select_row(
-                            block_id.clone(),
-                            *durable,
-                            projection.conversation(),
-                        );
-                        this.notify_conversation_pane(cx);
-                        this.notify_conversation_header(cx);
-                    }
-                    ConversationPaneEvent::Scrolled => {
-                        cx.defer_in(window, |this, _, cx| {
-                            this.reconcile_conversation_scroll(cx);
-                        });
-                    }
-                    ConversationPaneEvent::Copy { block_id } => {
-                        this.copy_conversation_row(block_id, cx);
-                    }
-                    ConversationPaneEvent::CopyToolDetails { block_id } => {
-                        this.copy_tool_details(block_id, cx);
-                    }
-                    ConversationPaneEvent::CopyCodeCompleted => {
-                        this.announce_conversation_copy("Code copied.", cx);
-                    }
-                    ConversationPaneEvent::ToggleDetails { block_id } => {
-                        this.toggle_conversation_details(block_id, cx);
-                    }
-                    ConversationPaneEvent::OpenFull { block_id } => {
-                        this.open_full_conversation_message(block_id, window, cx);
-                    }
-                    ConversationPaneEvent::Recovery { identity, action } => {
-                        this.submit_recovery_action(identity.clone(), *action, cx);
-                    }
-                    ConversationPaneEvent::Measured(measurement) => {
-                        this.submit_conversation_row_measurement(measurement, cx);
-                    }
-                    ConversationPaneEvent::FollowLatest => this.follow_latest(cx),
+                |this, _, event: &ConversationPaneEvent, window, cx| {
+                    this.dispatch_ui_intent(event.into(), window, cx);
                 },
             ),
             cx.subscribe_in(
                 &conversation_header,
                 window,
-                |this, _, event: &ConversationHeaderEvent, window, cx| match event {
-                    ConversationHeaderEvent::ToggleSessions => this.toggle_sessions(window, cx),
-                    ConversationHeaderEvent::ToggleInspector => this.toggle_context(window, cx),
-                    ConversationHeaderEvent::Reload => this.reload_local_resources(cx),
-                    ConversationHeaderEvent::SelectModel(model_id) => this.submit_selection(
-                        DesktopRuntimeSelectionKind::Model,
-                        model_id.to_string(),
-                        cx,
-                    ),
-                    ConversationHeaderEvent::SelectSessionProfile(profile_id) => this
-                        .submit_selection(
-                            DesktopRuntimeSelectionKind::SessionProfile,
-                            profile_id.to_string(),
-                            cx,
-                        ),
-                    ConversationHeaderEvent::SelectThinking(level) => {
-                        this.select_thinking_level(*level, cx);
-                    }
-                    ConversationHeaderEvent::Abort => this.abort_active_operation(cx),
+                |this, _, event: &ConversationHeaderEvent, window, cx| {
+                    this.dispatch_ui_intent(event.into(), window, cx);
                 },
             ),
             cx.subscribe_in(
                 &sessions_pane,
                 window,
-                |this, _, event: &SessionsPaneEvent, window, cx| match event {
-                    SessionsPaneEvent::Navigate(target) => {
-                        this.navigate_center(target.clone(), window, cx);
-                    }
-                    SessionsPaneEvent::Refresh => this.request_session_catalog(cx),
-                    SessionsPaneEvent::SetProjectCollapsed {
-                        group_id,
-                        collapsed,
-                    } => {
-                        let transition = this.connection.controller.reduce(
-                            &mut this.app,
-                            DesktopEvent::Ui(UiIntent::SetProjectCollapsed {
-                                group_id: group_id.clone(),
-                                collapsed: *collapsed,
-                            }),
-                            |state, event| {
-                                let DesktopEvent::Ui(UiIntent::SetProjectCollapsed {
-                                    group_id,
-                                    collapsed,
-                                }) = event
-                                else {
-                                    unreachable!("catalog disclosure receives one typed intent")
-                                };
-                                if state.catalog.set_group_collapsed(&group_id, collapsed) {
-                                    Transition::changed(UiRegion::Sessions)
-                                } else {
-                                    Transition::default()
-                                }
-                            },
-                        );
-                        if transition.changes().contains(UiRegion::Sessions) {
-                            this.notify_sessions_pane(cx);
-                            cx.notify();
-                        }
-                    }
-                    SessionsPaneEvent::Rename(session_id, name) => {
-                        this.rename_session(session_id.clone(), name.clone(), cx);
-                    }
-                    SessionsPaneEvent::CloseSession(session_id) => {
-                        this.close_session(session_id, cx);
-                    }
-                    SessionsPaneEvent::Dismiss => {
-                        this.dismiss_drawer(window, cx, true);
-                    }
+                |this, _, event: &SessionsPaneEvent, window, cx| {
+                    this.dispatch_ui_intent(event.into(), window, cx);
                 },
             ),
             cx.subscribe_in(
                 &composer_pane,
                 window,
-                |this, _, event: &ComposerPaneEvent, window, cx| match event {
-                    ComposerPaneEvent::InputChanged(value) => {
-                        this.app
-                            .workspaces
-                            .active_mut()
-                            .composer
-                            .edit(value.clone());
-                        this.notify_composer_pane(cx);
-                    }
-                    ComposerPaneEvent::Focused => {
-                        this.record_focus(FocusTarget::Composer, window, cx);
-                    }
-                    ComposerPaneEvent::AddAttachments => this.choose_composer_attachments(cx),
-                    ComposerPaneEvent::RemoveAttachment(index) => {
-                        this.remove_composer_attachment(*index, cx);
-                    }
-                    ComposerPaneEvent::ChooseProjectDirectory => {
-                        this.choose_project_directory(cx);
-                    }
-                    ComposerPaneEvent::ClearProjectDirectory => {
-                        this.clear_project_directory(cx);
-                    }
-                    ComposerPaneEvent::SubmitPrimary => {
-                        if !this.root_action_blocked_by_modal(window, cx) {
-                            this.submit_primary_composer(cx);
-                        }
-                    }
-                    ComposerPaneEvent::Submit => this.submit_composer(cx),
-                    ComposerPaneEvent::SubmitRunning => {
-                        this.submit_active_control(
-                            this.active_composer_running_mode().submission_kind(),
-                            cx,
-                        );
-                    }
-                    ComposerPaneEvent::SetRunningMode(mode) => {
-                        this.set_active_composer_running_mode(*mode, cx);
-                    }
+                |this, _, event: &ComposerPaneEvent, window, cx| {
+                    this.dispatch_ui_intent(event.into(), window, cx);
                 },
             ),
             cx.subscribe_in(
                 &inspector_pane,
                 window,
-                |this, _, event: &InspectorPaneEvent, window, cx| match event {
-                    InspectorPaneEvent::Close => {
-                        this.dismiss_drawer(window, cx, true);
-                    }
-                    InspectorPaneEvent::RequestFileReview(request) => {
-                        this.request_file_review(request.clone(), cx);
-                    }
-                    InspectorPaneEvent::CopyReviewPath => this.copy_review_path(cx),
-                    InspectorPaneEvent::CopyFileReview => this.copy_file_review(cx),
-                    InspectorPaneEvent::OpenExternalEditor => {
-                        this.open_review_in_external_editor(cx);
-                    }
-                    InspectorPaneEvent::Recovery { identity, action } => {
-                        this.submit_recovery_action(identity.clone(), *action, cx);
-                    }
-                    InspectorPaneEvent::SelectSection(section) => {
-                        this.app
-                            .workspaces
-                            .active_mut()
-                            .presentation
-                            .inspector_section = *section;
-                        this.notify_inspector_pane(cx);
-                    }
+                |this, _, event: &InspectorPaneEvent, window, cx| {
+                    this.dispatch_ui_intent(event.into(), window, cx);
                 },
             ),
             cx.subscribe_in(
                 &root_modal_host,
                 window,
-                |this, _, event: &RootModalHostEvent, window, cx| match event {
-                    RootModalHostEvent::ExecutePalette(command) => {
-                        this.ui.command_palette.close();
-                        this.dismiss_modal(window, cx);
-                        this.execute_palette_command(*command, window, cx);
-                    }
-                    RootModalHostEvent::DecideAuthorization { identity, decision } => {
-                        this.decide_tool_authorization(identity.clone(), decision.clone(), cx);
-                    }
-                    RootModalHostEvent::CopyFullMessage => {
-                        if let Some(message) = &this.ui.conversation_full_message {
-                            let text = message.text.to_string();
-                            this.write_clipboard(
-                                Some(text),
-                                ClipboardFeedback::ConversationAnnouncement(
-                                    "Full message copied.".into(),
-                                ),
-                                cx,
-                            );
-                        }
-                    }
-                    RootModalHostEvent::CloseFullMessage => {
-                        this.close_full_conversation_message(window, cx);
-                    }
+                |this, _, event: &RootModalHostEvent, window, cx| {
+                    this.dispatch_ui_intent(event.into(), window, cx);
                 },
             ),
             cx.subscribe_in(
                 &center_drawer_host,
                 window,
-                |this, _, event: &CenterDrawerHostEvent, window, cx| match event {
-                    CenterDrawerHostEvent::Dismiss => this.dismiss_drawer(window, cx, true),
+                |this, _, event: &CenterDrawerHostEvent, window, cx| {
+                    this.dispatch_ui_intent(event.into(), window, cx);
                 },
             ),
             cx.observe_window_bounds(window, Self::window_bounds_changed),
@@ -818,6 +641,151 @@ impl NativeShell {
                 center_drawer_host.set_view_model(center_drawer_view_model);
             });
         shell
+    }
+
+    fn dispatch_ui_intent(
+        &mut self,
+        intent: UiIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match intent {
+            UiIntent::Navigate(target) => self.navigate_center(target, window, cx),
+            UiIntent::RefreshSessions => self.request_session_catalog(cx),
+            UiIntent::SetProjectCollapsed {
+                group_id,
+                collapsed,
+            } => {
+                let transition = self.connection.controller.reduce(
+                    &mut self.app,
+                    DesktopEvent::Ui(CatalogIntent::SetProjectCollapsed {
+                        group_id,
+                        collapsed,
+                    }),
+                    |state, event| {
+                        let DesktopEvent::Ui(CatalogIntent::SetProjectCollapsed {
+                            group_id,
+                            collapsed,
+                        }) = event
+                        else {
+                            unreachable!("catalog disclosure receives one typed intent")
+                        };
+                        if state.catalog.set_group_collapsed(&group_id, collapsed) {
+                            Transition::changed(UiRegion::Sessions)
+                        } else {
+                            Transition::default()
+                        }
+                    },
+                );
+                if transition.changes().contains(UiRegion::Sessions) {
+                    self.notify_sessions_pane(cx);
+                    cx.notify();
+                }
+            }
+            UiIntent::RenameSession { session_id, name } => {
+                self.rename_session(session_id, name, cx);
+            }
+            UiIntent::CloseSession(session_id) => self.close_session(&session_id, cx),
+            UiIntent::DismissDrawer => self.dismiss_drawer(window, cx, true),
+            UiIntent::ToggleSessions => self.toggle_sessions(window, cx),
+            UiIntent::ToggleInspector => self.toggle_context(window, cx),
+            UiIntent::Reload => self.reload_local_resources(cx),
+            UiIntent::SelectModel(model_id) => {
+                self.submit_selection(DesktopRuntimeSelectionKind::Model, model_id.to_string(), cx)
+            }
+            UiIntent::SelectSessionProfile(profile_id) => self.submit_selection(
+                DesktopRuntimeSelectionKind::SessionProfile,
+                profile_id.to_string(),
+                cx,
+            ),
+            UiIntent::SelectThinking(level) => self.select_thinking_level(level, cx),
+            UiIntent::Abort => self.abort_active_operation(cx),
+            UiIntent::ComposerInputChanged(value) => {
+                self.app.workspaces.active_mut().composer.edit(value);
+                self.notify_composer_pane(cx);
+            }
+            UiIntent::ComposerFocused => self.record_focus(FocusTarget::Composer, window, cx),
+            UiIntent::AddAttachments => self.choose_composer_attachments(cx),
+            UiIntent::RemoveAttachment(index) => self.remove_composer_attachment(index, cx),
+            UiIntent::ChooseProjectDirectory => self.choose_project_directory(cx),
+            UiIntent::ClearProjectDirectory => {
+                self.clear_project_directory(cx);
+            }
+            UiIntent::SubmitPrimary => {
+                if !self.root_action_blocked_by_modal(window, cx) {
+                    self.submit_primary_composer(cx);
+                }
+            }
+            UiIntent::Submit => self.submit_composer(cx),
+            UiIntent::SubmitRunning => self
+                .submit_active_control(self.active_composer_running_mode().submission_kind(), cx),
+            UiIntent::SetRunningMode(mode) => self.set_active_composer_running_mode(mode, cx),
+            UiIntent::SelectConversation { block_id, durable } => {
+                self.record_focus(FocusTarget::CenterBody, window, cx);
+                let workspace = self.app.workspaces.active_mut();
+                let Some(projection) = workspace.projection.as_ref() else {
+                    return;
+                };
+                workspace.presentation.conversation_controller.select_row(
+                    block_id,
+                    durable,
+                    projection.conversation(),
+                );
+                self.notify_conversation_pane(cx);
+                self.notify_conversation_header(cx);
+            }
+            UiIntent::ConversationScrolled => {
+                cx.defer_in(window, |this, _, cx| {
+                    this.reconcile_conversation_scroll(cx);
+                });
+            }
+            UiIntent::CopyConversation(block_id) => self.copy_conversation_row(&block_id, cx),
+            UiIntent::CopyToolDetails(block_id) => self.copy_tool_details(&block_id, cx),
+            UiIntent::CopyCodeCompleted => self.announce_conversation_copy("Code copied.", cx),
+            UiIntent::ToggleConversationDetails(block_id) => {
+                self.toggle_conversation_details(&block_id, cx);
+            }
+            UiIntent::OpenFullConversation(block_id) => {
+                self.open_full_conversation_message(&block_id, window, cx);
+            }
+            UiIntent::Recovery { identity, action } => {
+                self.submit_recovery_action(identity, action, cx);
+            }
+            UiIntent::ConversationMeasured(measurement) => {
+                self.submit_conversation_row_measurement(&measurement, cx);
+            }
+            UiIntent::FollowLatest => self.follow_latest(cx),
+            UiIntent::RequestFileReview(request) => self.request_file_review(request, cx),
+            UiIntent::CopyReviewPath => self.copy_review_path(cx),
+            UiIntent::CopyFileReview => self.copy_file_review(cx),
+            UiIntent::OpenExternalEditor => self.open_review_in_external_editor(cx),
+            UiIntent::SelectInspectorSection(section) => {
+                self.app
+                    .workspaces
+                    .active_mut()
+                    .presentation
+                    .inspector_section = section;
+                self.notify_inspector_pane(cx);
+            }
+            UiIntent::ExecutePalette(command) => {
+                self.ui.command_palette.close();
+                self.dismiss_modal(window, cx);
+                self.execute_palette_command(command, window, cx);
+            }
+            UiIntent::DecideAuthorization { identity, decision } => {
+                self.decide_tool_authorization(identity, decision, cx);
+            }
+            UiIntent::CopyFullMessage => {
+                if let Some(message) = &self.ui.conversation_full_message {
+                    self.write_clipboard(
+                        Some(message.text.to_string()),
+                        ClipboardFeedback::ConversationAnnouncement("Full message copied.".into()),
+                        cx,
+                    );
+                }
+            }
+            UiIntent::CloseFullMessage => self.close_full_conversation_message(window, cx),
+        }
     }
 
     fn active_command_contains(&self, intent: &DesktopCommandIntent) -> bool {
@@ -10774,6 +10742,7 @@ mod desktop_style;
 mod evo_brand;
 pub(crate) mod home_pane;
 pub(crate) mod inspector_pane;
+mod intent;
 mod project_catalog_controller;
 pub(crate) mod root_modal_host;
 pub(crate) mod sessions_pane;
@@ -10807,6 +10776,7 @@ use conversation_pane::CONVERSATION_RAIL_WIDTH;
 use conversation_pane::{ConversationPane, ConversationPaneEvent};
 use home_pane::HomePane;
 use inspector_pane::{InspectorPane, InspectorPaneEvent};
+use intent::UiIntent;
 use root_modal_host::{RootModalHost, RootModalHostEvent};
 use sessions_pane::{SessionsPane, SessionsPaneEvent};
 use skills_pane::SkillsPane;
