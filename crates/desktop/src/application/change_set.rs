@@ -3,6 +3,8 @@
     reason = "DSK-730 contract regions are consumed incrementally through DSK-743"
 )]
 
+use desktop::projection::{ContextDirtyFlags, DesktopProjectionDelta};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum UiRegion {
@@ -40,11 +42,64 @@ impl UiChangeSet {
     pub(crate) const fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    pub(crate) fn for_projection(replaced: bool, delta: Option<&DesktopProjectionDelta>) -> Self {
+        let conversation = delta.is_some_and(|delta| delta.conversation || delta.tools);
+        let authorizations = delta.is_some_and(|delta| delta.authorizations);
+        let inspector_immediate = delta.is_some_and(|delta| {
+            delta.context.contains(ContextDirtyFlags::OPERATIONS)
+                || delta.context.contains(ContextDirtyFlags::DELEGATIONS)
+                || delta.context.contains(ContextDirtyFlags::CHANGES)
+                || delta.diagnostics
+                || delta.recoveries
+                || delta.session
+                || delta.profiles
+                || delta.capabilities
+                || delta.lifecycle
+        });
+        let mut changes = Self::default();
+        if replaced || authorizations {
+            changes.insert(UiRegion::Root);
+            changes.insert(UiRegion::Composer);
+        }
+        if conversation {
+            changes.insert(UiRegion::Conversation);
+        }
+        if replaced || inspector_immediate {
+            changes.insert(UiRegion::Inspector);
+        } else if delta.is_some_and(|delta| delta.context.contains(ContextDirtyFlags::USAGE)) {
+            changes.insert(UiRegion::InspectorTelemetry);
+        }
+        if replaced
+            || delta.is_some_and(|delta| {
+                delta.context.contains(ContextDirtyFlags::OPERATIONS)
+                    || delta.lifecycle
+                    || delta.session
+            })
+        {
+            changes.insert(UiRegion::ConversationHeader);
+        }
+        if replaced
+            || delta.is_some_and(|delta| {
+                delta.context.contains(ContextDirtyFlags::OPERATIONS)
+                    || delta.lifecycle
+                    || delta.session
+                    || delta.authorizations
+            })
+        {
+            changes.insert(UiRegion::Modal);
+        }
+        if replaced {
+            changes.insert(UiRegion::Sessions);
+        }
+        changes
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{UiChangeSet, UiRegion};
+    use desktop::projection::{ContextDirtyFlags, DesktopProjectionDelta};
 
     #[test]
     fn merge_is_idempotent_and_preserves_every_changed_region() {
@@ -58,5 +113,33 @@ mod tests {
         assert!(changes.contains(UiRegion::Sessions));
         assert!(!changes.contains(UiRegion::Inspector));
         assert!(!changes.is_empty());
+    }
+
+    #[test]
+    fn projection_delta_maps_to_typed_regions_without_root_over_invalidation() {
+        let streaming = DesktopProjectionDelta {
+            conversation: true,
+            ..DesktopProjectionDelta::default()
+        };
+        let streaming_changes = UiChangeSet::for_projection(false, Some(&streaming));
+        assert!(streaming_changes.contains(UiRegion::Conversation));
+        assert!(!streaming_changes.contains(UiRegion::Root));
+        assert!(!streaming_changes.contains(UiRegion::Inspector));
+
+        let authorization = DesktopProjectionDelta {
+            authorizations: true,
+            ..DesktopProjectionDelta::default()
+        };
+        let authorization_changes = UiChangeSet::for_projection(false, Some(&authorization));
+        assert!(authorization_changes.contains(UiRegion::Root));
+        assert!(authorization_changes.contains(UiRegion::Modal));
+
+        let usage = DesktopProjectionDelta {
+            context: ContextDirtyFlags::USAGE,
+            ..DesktopProjectionDelta::default()
+        };
+        let usage_changes = UiChangeSet::for_projection(false, Some(&usage));
+        assert!(usage_changes.contains(UiRegion::InspectorTelemetry));
+        assert!(!usage_changes.contains(UiRegion::Inspector));
     }
 }

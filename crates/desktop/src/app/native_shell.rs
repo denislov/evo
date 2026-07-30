@@ -16,7 +16,9 @@ use desktop::conversation::{
 use desktop::conversation::{TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, conversation_block_height};
 use desktop::file_review::{DesktopFileReviewDocument, MAX_VISIBLE_FILE_CHANGES};
 use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel, PreferenceWriter};
-use desktop::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
+use desktop::projection::{
+    DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus, ProjectionEvent,
+};
 use desktop::runtime::{
     DesktopPromptTarget, DesktopRecoveryAction, DesktopRecoveryIdentity, DesktopRuntimeBridge,
     DesktopRuntimeOwnerTarget, DesktopRuntimeSelectionKind, MAX_PROMPT_ATTACHMENTS,
@@ -52,11 +54,11 @@ use crate::actions::{
 #[cfg(test)]
 use crate::application::reducer::safe_runtime_rejection_notice;
 use crate::application::{
-    change_set::UiRegion,
+    change_set::{UiChangeSet, UiRegion},
     commands::{CommandCompletionError, CommandTracker, DesktopCommandIntent},
     reducer::{
         DesktopController, DesktopEvent, ProjectionUpdateResult, RuntimeUpdatePort, Transition,
-        UiIntent, runtime_update_hydrated_snapshot,
+        UiIntent,
     },
     state::DesktopState,
     workspace::{SessionId, WorkspaceKey, WorkspaceStore},
@@ -1585,12 +1587,16 @@ impl NativeShell {
         cx.notify();
     }
 
-    fn apply_projection_update_for(
+    fn apply_projection_event_for(
         &mut self,
         owner: &WorkspaceKey,
-        update: desktop::runtime::DesktopRuntimeUpdate,
+        event: Option<ProjectionEvent>,
         creates_session_from_prompt: bool,
+        completed_prompt_command: Option<u64>,
     ) -> ProjectionUpdateResult {
+        let Some(event) = event else {
+            return ProjectionUpdateResult::new(false, Default::default());
+        };
         let composer_state_before = self.composer_pane_state_for(owner);
         let projection_was_none = self
             .app
@@ -1598,7 +1604,10 @@ impl NativeShell {
             .get(owner)
             .is_none_or(|workspace| workspace.projection.is_none());
         if projection_was_none {
-            let hydrated = runtime_update_hydrated_snapshot(&update);
+            let hydrated = match &event {
+                ProjectionEvent::Hydrated { snapshot, .. } => Some(snapshot),
+                _ => None,
+            };
             if let Some(hydrated) = hydrated {
                 if let Some(workspace) = self.app.workspaces.get_mut(owner) {
                     workspace.project = hydrated.project.clone();
@@ -1611,12 +1620,9 @@ impl NativeShell {
                     }
                 }
                 self.reconcile_thinking_selection_for(owner);
-            } else if let Some(metadata) = match &update {
-                desktop::runtime::DesktopRuntimeUpdate::Reloaded { metadata, .. }
-                | desktop::runtime::DesktopRuntimeUpdate::SelectionChanged { metadata, .. }
-                | desktop::runtime::DesktopRuntimeUpdate::PromptStarted { metadata, .. } => {
-                    Some(metadata)
-                }
+            } else if let Some(metadata) = match &event {
+                ProjectionEvent::Metadata(metadata)
+                | ProjectionEvent::PromptStarted { metadata, .. } => Some(metadata),
                 _ => None,
             } {
                 if let Some(workspace) = self.app.workspaces.get_mut(owner) {
@@ -1649,16 +1655,13 @@ impl NativeShell {
             return ProjectionUpdateResult::new(true, Default::default());
         }
 
-        let completes_submitted_prompt = matches!(
-            &update,
-            desktop::runtime::DesktopRuntimeUpdate::PromptFinished { command_id, .. }
-                if self
-                    .app
-                    .workspaces
-                    .get(owner)
-                    .and_then(|workspace| workspace.composer.submitted())
-                    .is_some_and(|submitted| submitted.command_id == *command_id)
-        );
+        let completes_submitted_prompt = completed_prompt_command.is_some_and(|command_id| {
+            self.app
+                .workspaces
+                .get(owner)
+                .and_then(|workspace| workspace.composer.submitted())
+                .is_some_and(|submitted| submitted.command_id == command_id)
+        });
         let (had_active_operation, outcome, project_after, active_operation_after, sequence_after) = {
             let workspace = self
                 .app
@@ -1670,7 +1673,7 @@ impl NativeShell {
                 .as_mut()
                 .expect("projection availability was checked");
             let had_active_operation = projection.snapshot().active_operation.is_some();
-            let outcome = projection.apply(update);
+            let outcome = projection.apply(event);
             let project_after = projection.project().clone();
             let active_operation_after = projection.snapshot().active_operation.is_some();
             let sequence_after = projection.cursor().last_event_sequence;
@@ -1689,40 +1692,24 @@ impl NativeShell {
             .project = project_after;
         self.reconcile_thinking_selection_for(owner);
 
-        let dirty = ProjectionDirtyRouting::for_projection(outcome.is_replaced(), outcome.delta());
-        let mut changes = crate::application::change_set::UiChangeSet::default();
-        if dirty.root {
-            changes.insert(UiRegion::Root);
-        }
-        if dirty.conversation {
-            changes.insert(UiRegion::Conversation);
-        }
-        if dirty.composer {
-            changes.insert(UiRegion::Composer);
-        }
-        if dirty.inspector_immediate {
-            changes.insert(UiRegion::Inspector);
-        } else if dirty.inspector_telemetry {
-            changes.insert(UiRegion::InspectorTelemetry);
-        }
-        if dirty.conversation_header {
-            changes.insert(UiRegion::ConversationHeader);
-        }
-        if dirty.root_modal {
-            changes.insert(UiRegion::Modal);
-        }
-        if dirty.sessions || had_active_operation != active_operation_after {
+        let delta = outcome.delta();
+        let conversation_dirty = delta.is_some_and(|delta| delta.conversation || delta.tools);
+        let file_changes_dirty = delta.is_some_and(|delta| {
+            delta
+                .context
+                .contains(desktop::projection::ContextDirtyFlags::CHANGES)
+        });
+        let mut changes = UiChangeSet::for_projection(outcome.is_replaced(), delta);
+        if had_active_operation != active_operation_after {
             changes.insert(UiRegion::Sessions);
         }
 
         if let Some(workspace) = self.app.workspaces.get_mut(owner) {
-            if dirty.sessions {
-                workspace.conversation_controller.apply_delta(true, 0);
-            } else if dirty.conversation {
-                workspace
-                    .conversation_controller
-                    .apply_delta(false, sequence_after);
-            }
+            workspace.conversation_controller.apply_projection_delta(
+                outcome.is_replaced(),
+                delta,
+                sequence_after,
+            );
             if outcome.is_replaced() {
                 if completes_submitted_prompt
                     && !active_operation_after
@@ -1746,9 +1733,7 @@ impl NativeShell {
                         .conversation_controller
                         .reconcile_hydration(&source, sequence_after);
                 }
-            } else if dirty.conversation
-                && let Some(projection) = workspace.projection.as_ref()
-            {
+            } else if conversation_dirty && let Some(projection) = workspace.projection.as_ref() {
                 let source = ConversationSource::new(projection, workspace.composer.submitted());
                 workspace
                     .conversation_controller
@@ -1785,7 +1770,7 @@ impl NativeShell {
             };
             let _ = self.complete_command(command_id, owner, &intent);
         }
-        if outcome.is_replaced() || dirty.file_changes {
+        if outcome.is_replaced() || file_changes_dirty {
             self.reconcile_file_review_for(owner);
         }
         if composer_state_before != self.composer_pane_state_for(owner) {
@@ -5283,13 +5268,19 @@ impl RuntimeUpdatePort for NativeShell {
             .unwrap_or_default()
     }
 
-    fn apply_projection_update(
+    fn apply_projection_event(
         &mut self,
         owner: &WorkspaceKey,
-        update: desktop::runtime::DesktopRuntimeUpdate,
+        event: Option<ProjectionEvent>,
         creates_session_from_prompt: bool,
+        completed_prompt_command: Option<u64>,
     ) -> ProjectionUpdateResult {
-        self.apply_projection_update_for(owner, update, creates_session_from_prompt)
+        self.apply_projection_event_for(
+            owner,
+            event,
+            creates_session_from_prompt,
+            completed_prompt_command,
+        )
     }
 
     fn request_resync_if_needed(&mut self, owner: &WorkspaceKey) {
@@ -11234,14 +11225,14 @@ mod tests {
         ] {
             assert!(
                 projection
-                    .apply(crate::runtime::DesktopRuntimeUpdate::product_event(event))
+                    .apply(ProjectionEvent::Product(event))
                     .is_applied()
             );
         }
 
         let mut controller = ConversationController::default();
         let source = ConversationSource::new(&projection, None);
-        controller.apply_delta(true, 3);
+        controller.apply_projection_delta(true, None, 3);
         controller.prepare_rows(&source, 900);
         let row_ids = |controller: &ConversationController| {
             (0..controller.row_count())
@@ -11267,25 +11258,30 @@ mod tests {
         let mut streamed = projection.clone();
         assert!(
             streamed
-                .apply(crate::runtime::DesktopRuntimeUpdate::product_event(
-                    live_event(
-                        4,
-                        serde_json::json!({
-                            "family": "message",
-                            "payload": {
-                                "kind": "delta",
-                                "operation_id": "operation-1",
-                                "turn_id": "turn-2",
-                                "message_id": "message-2",
-                                "text": "streaming",
-                            },
-                        }),
-                    )
-                ))
+                .apply(ProjectionEvent::Product(live_event(
+                    4,
+                    serde_json::json!({
+                        "family": "message",
+                        "payload": {
+                            "kind": "delta",
+                            "operation_id": "operation-1",
+                            "turn_id": "turn-2",
+                            "message_id": "message-2",
+                            "text": "streaming",
+                        },
+                    }),
+                )))
                 .is_applied()
         );
         let streamed_source = ConversationSource::new(&streamed, None);
-        controller.apply_delta(false, 4);
+        controller.apply_projection_delta(
+            false,
+            Some(&desktop::projection::DesktopProjectionDelta {
+                conversation: true,
+                ..Default::default()
+            }),
+            4,
+        );
         controller.prepare_rows(&streamed_source, 900);
         assert_eq!(row_ids(&controller), expected);
     }
@@ -11322,7 +11318,7 @@ mod tests {
         .expect("the live overlay fixture must deserialize");
         assert!(
             projection
-                .apply(crate::runtime::DesktopRuntimeUpdate::product_event(started))
+                .apply(ProjectionEvent::Product(started))
                 .is_applied()
         );
         assert_eq!(projection.tools().len(), 1);
@@ -11332,13 +11328,12 @@ mod tests {
         session.cursor = projection.cursor().clone();
         assert!(
             projection
-                .apply(crate::runtime::DesktopRuntimeUpdate::Reloaded {
-                    command_id: 1,
-                    metadata: desktop::runtime::DesktopRuntimeMetadataSnapshot {
+                .apply(ProjectionEvent::Metadata(
+                    desktop::runtime::DesktopRuntimeMetadataSnapshot {
                         project: fixture.project,
                         session: Some(session),
                     },
-                })
+                ))
                 .is_replaced()
         );
 
@@ -11349,7 +11344,7 @@ mod tests {
         );
         let source = ConversationSource::new(&projection, None);
         let mut controller = ConversationController::default();
-        controller.apply_delta(true, 1);
+        controller.apply_projection_delta(true, None, 1);
         controller.prepare_rows(&source, 900);
         assert_eq!(
             controller
@@ -11391,7 +11386,7 @@ mod tests {
             body.push_str("Another sentence of the streamed answer. ");
             let projection = streaming_projection(&body);
             let source = ConversationSource::new(&projection, None);
-            controller.apply_delta(true, 0);
+            controller.apply_projection_delta(true, None, 0);
             controller.prepare_rows(&source, 900);
 
             let row = controller.row_at(0).expect("the streaming row exists");
@@ -11906,14 +11901,14 @@ mod tests {
             tools: true,
             ..Default::default()
         };
-        assert!(!root_projection_dirty(false, Some(&streaming)));
-        assert!(root_projection_dirty(true, Some(&streaming)));
+        assert!(!UiChangeSet::for_projection(false, Some(&streaming)).contains(UiRegion::Root));
+        assert!(UiChangeSet::for_projection(true, Some(&streaming)).contains(UiRegion::Root));
 
         let authorization = desktop::projection::DesktopProjectionDelta {
             authorizations: true,
             ..Default::default()
         };
-        assert!(root_projection_dirty(false, Some(&authorization)));
+        assert!(UiChangeSet::for_projection(false, Some(&authorization)).contains(UiRegion::Root));
     }
 
     #[test]
@@ -11924,11 +11919,12 @@ mod tests {
             tools: true,
             ..Default::default()
         };
-        assert!(!inspector_projection_dirty(&streaming));
+        assert!(
+            !UiChangeSet::for_projection(false, Some(&streaming)).contains(UiRegion::Inspector)
+        );
 
         streaming.diagnostics = true;
-        assert!(inspector_projection_dirty(&streaming));
-        assert!(inspector_projection_immediate_dirty(&streaming));
+        assert!(UiChangeSet::for_projection(false, Some(&streaming)).contains(UiRegion::Inspector));
     }
 
     #[test]
@@ -11942,8 +11938,9 @@ mod tests {
             context: desktop::projection::ContextDirtyFlags::USAGE,
             ..Default::default()
         };
-        assert!(inspector_projection_dirty(&usage));
-        assert!(!inspector_projection_immediate_dirty(&usage));
+        let changes = UiChangeSet::for_projection(false, Some(&usage));
+        assert!(changes.contains(UiRegion::InspectorTelemetry));
+        assert!(!changes.contains(UiRegion::Inspector));
 
         let start = Instant::now();
         assert_eq!(
@@ -11968,10 +11965,16 @@ mod tests {
             tools: true,
             ..Default::default()
         };
-        assert!(!conversation_header_projection_dirty(&streaming));
+        assert!(
+            !UiChangeSet::for_projection(false, Some(&streaming))
+                .contains(UiRegion::ConversationHeader)
+        );
 
         streaming.lifecycle = true;
-        assert!(conversation_header_projection_dirty(&streaming));
+        assert!(
+            UiChangeSet::for_projection(false, Some(&streaming))
+                .contains(UiRegion::ConversationHeader)
+        );
     }
 
     #[test]
@@ -11982,10 +11985,10 @@ mod tests {
             tools: true,
             ..Default::default()
         };
-        assert!(!root_modal_host_projection_dirty(&streaming));
+        assert!(!UiChangeSet::for_projection(false, Some(&streaming)).contains(UiRegion::Modal));
 
         streaming.authorizations = true;
-        assert!(root_modal_host_projection_dirty(&streaming));
+        assert!(UiChangeSet::for_projection(false, Some(&streaming)).contains(UiRegion::Modal));
     }
 
     #[test]
@@ -12037,7 +12040,6 @@ mod sessions_pane;
 mod skills_pane;
 mod streaming_text;
 mod toast_host;
-mod update;
 
 use center_drawer_host::{
     CenterDrawerHost, CenterDrawerHostEvent, CenterDrawerKind, CenterDrawerViewModel,
@@ -12080,9 +12082,3 @@ use root_modal_host::{
 use sessions_pane::{SessionRuntimeState, SessionsPane, SessionsPaneEvent, SessionsPaneViewModel};
 use skills_pane::{SkillsPane, SkillsPaneViewModel};
 use toast_host::{ToastHost, ToastNotice};
-use update::ProjectionDirtyRouting;
-#[cfg(test)]
-use update::{
-    conversation_header_projection_dirty, inspector_projection_dirty,
-    inspector_projection_immediate_dirty, root_modal_host_projection_dirty, root_projection_dirty,
-};

@@ -32,7 +32,7 @@ use crate::conversation::{MAX_TRANSCRIPT_BLOCKS, MAX_TRANSCRIPT_BYTES};
 use crate::projection::{
     ContextDirtyFlags, DesktopMessageStatus, DesktopProjection, DesktopProjectionApply,
     DesktopProjectionLifecycle, DesktopToolStatus, MAX_AUTHORIZATION_TEXT_BYTES,
-    MAX_DESKTOP_MESSAGE_OVERLAYS,
+    MAX_DESKTOP_MESSAGE_OVERLAYS, ProjectionEvent,
 };
 
 use super::bridge::build_desktop_runtime;
@@ -583,13 +583,10 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     let product_snapshot = projection.snapshot().clone();
     assert!(
         projection
-            .apply(DesktopRuntimeUpdate::Reloaded {
-                command_id: 7,
-                metadata: DesktopRuntimeMetadataSnapshot {
-                    project: projection.project().clone(),
-                    session: None,
-                },
-            })
+            .apply(ProjectionEvent::Metadata(DesktopRuntimeMetadataSnapshot {
+                project: projection.project().clone(),
+                session: None,
+            }))
             .is_replaced()
     );
     assert_eq!(projection.snapshot(), &product_snapshot);
@@ -625,7 +622,14 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
         metadata.session.as_ref().unwrap().session.session_id,
         session_id
     );
-    assert!(projection.apply(update).is_replaced());
+    assert!(
+        projection
+            .apply(
+                crate::application::reducer::projection_event(update)
+                    .expect("selection update must map to projection metadata"),
+            )
+            .is_replaced()
+    );
     assert_eq!(projection.conversation(), &conversation);
 
     bridge
@@ -656,7 +660,14 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
         metadata.project.selected_model_id,
         "claude-3-5-haiku-latest"
     );
-    assert!(projection.apply(update).is_replaced());
+    assert!(
+        projection
+            .apply(
+                crate::application::reducer::projection_event(update)
+                    .expect("profile update must map to projection metadata"),
+            )
+            .is_replaced()
+    );
     assert_eq!(projection.conversation(), &conversation);
 
     bridge
@@ -803,17 +814,19 @@ async fn ten_mib_transcript_stays_single_hydration_across_metadata_commands() {
                 metadata: metadata.clone(),
             },
         };
-        assert!(projection.apply(update).is_replaced());
-    }
-    for command_id in 164..180 {
         assert!(
             projection
-                .apply(DesktopRuntimeUpdate::RecoveryChanged {
-                    command_id,
-                    action: DesktopRecoveryAction::Retry,
-                    recovery_id: format!("recovery-{command_id}"),
-                    recovery: recovery.clone(),
-                })
+                .apply(
+                    crate::application::reducer::projection_event(update)
+                        .expect("metadata fixture must map to a projection event"),
+                )
+                .is_replaced()
+        );
+    }
+    for _ in 164..180 {
+        assert!(
+            projection
+                .apply(ProjectionEvent::Recovery(recovery.clone()))
                 .is_replaced()
         );
     }
@@ -1709,10 +1722,12 @@ async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
     let finished = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let update = bridge.next_update().await.unwrap();
-            assert!(!matches!(
-                projection.apply(update.clone()),
-                DesktopProjectionApply::NeedsResync
-            ));
+            if let Some(event) = crate::application::reducer::projection_event(update.clone()) {
+                assert!(!matches!(
+                    projection.apply(event),
+                    DesktopProjectionApply::NeedsResync
+                ));
+            }
             if let DesktopRuntimeUpdate::PromptFinished {
                 command_id: 13,
                 snapshot,
@@ -2282,11 +2297,11 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                 );
                 assert!(
                     baseline
-                        .apply(DesktopRuntimeUpdate::product_event(valid.clone()))
+                        .apply(ProjectionEvent::Product(valid.clone()))
                         .is_applied()
                 );
                 assert_eq!(
-                    baseline.apply(DesktopRuntimeUpdate::product_event(valid)),
+                    baseline.apply(ProjectionEvent::Product(valid)),
                     DesktopProjectionApply::IgnoredDuplicate
                 );
 
@@ -2300,7 +2315,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                     submitted_operation.as_deref(),
                 );
                 assert_eq!(
-                    gap_projection.apply(DesktopRuntimeUpdate::product_event(gap)),
+                    gap_projection.apply(ProjectionEvent::Product(gap)),
                     DesktopProjectionApply::NeedsResync
                 );
                 assert_eq!(gap_projection.cursor(), &original_cursor);
@@ -2310,7 +2325,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                 );
                 assert!(
                     gap_projection
-                        .apply(DesktopRuntimeUpdate::ResyncRequired {
+                        .apply(ProjectionEvent::ProductSnapshot {
                             reason: DesktopRuntimeError {
                                 code: "test_resync".into(),
                                 message: "replace after an injected cursor gap".into(),
@@ -2334,7 +2349,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                     submitted_operation.as_deref(),
                 );
                 assert_eq!(
-                    wrong_session.apply(DesktopRuntimeUpdate::product_event(mismatched)),
+                    wrong_session.apply(ProjectionEvent::Product(mismatched)),
                     DesktopProjectionApply::NeedsResync
                 );
                 assert_eq!(
@@ -2351,7 +2366,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                     submitted_operation.as_deref(),
                 );
                 assert_eq!(
-                    wrong_stream.apply(DesktopRuntimeUpdate::product_event(mismatched)),
+                    wrong_stream.apply(ProjectionEvent::Product(mismatched)),
                     DesktopProjectionApply::NeedsResync
                 );
                 assert_eq!(
@@ -2376,7 +2391,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                 );
                 let mismatched = serde_json::from_value(value).unwrap();
                 assert_eq!(
-                    wrong_generation.apply(DesktopRuntimeUpdate::product_event(mismatched)),
+                    wrong_generation.apply(ProjectionEvent::Product(mismatched)),
                     DesktopProjectionApply::NeedsResync
                 );
                 assert_eq!(
@@ -2394,7 +2409,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
                         Some("unrelated-operation"),
                     );
                     assert_eq!(
-                        wrong_operation.apply(DesktopRuntimeUpdate::product_event(mismatched)),
+                        wrong_operation.apply(ProjectionEvent::Product(mismatched)),
                         DesktopProjectionApply::NeedsResync
                     );
                     assert_eq!(
@@ -2411,13 +2426,15 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
             }
 
             saw_finished |= matches!(update, DesktopRuntimeUpdate::PromptFinished { .. });
-            let outcome = projection.apply(update);
-            assert_ne!(
-                outcome,
-                DesktopProjectionApply::NeedsResync,
-                "real runtime updates must satisfy the desktop projection contract: {:?}",
-                projection.issues().back()
-            );
+            if let Some(event) = crate::application::reducer::projection_event(update) {
+                let outcome = projection.apply(event);
+                assert_ne!(
+                    outcome,
+                    DesktopProjectionApply::NeedsResync,
+                    "real runtime updates must satisfy the desktop projection contract: {:?}",
+                    projection.issues().back()
+                );
+            }
             if saw_finished && saw_active_resync {
                 break;
             }
@@ -2468,7 +2485,7 @@ async fn shared_cross_adapter_fixture_matches_desktop_product_state_exactly() {
             CodingAgentClientProjectionApply::Applied(_)
         ));
         let terminal = event.terminal_operation().is_some();
-        let outcome = desktop.apply(DesktopRuntimeUpdate::product_event(event));
+        let outcome = desktop.apply(ProjectionEvent::Product(event));
         assert!(outcome.is_applied());
         assert_eq!(outcome.delta().unwrap().terminal, terminal);
     }
@@ -2580,7 +2597,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(started));
+    let outcome = overlays.apply(ProjectionEvent::Product(started));
     assert!(outcome.is_applied());
     let delta = outcome.delta().unwrap();
     assert!(delta.cursor);
@@ -2606,11 +2623,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    assert!(
-        overlays
-            .apply(DesktopRuntimeUpdate::product_event(delta))
-            .is_applied()
-    );
+    assert!(overlays.apply(ProjectionEvent::Product(delta)).is_applied());
 
     sequence += 1;
     let completed = rewritten_event_kind(
@@ -2643,7 +2656,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(completed));
+    let outcome = overlays.apply(ProjectionEvent::Product(completed));
     assert!(outcome.is_applied());
     let delta = outcome.delta().unwrap();
     assert!(delta.conversation);
@@ -2694,7 +2707,7 @@ fn assert_bounded_streaming_overlays(
         );
         assert!(
             overlays
-                .apply(DesktopRuntimeUpdate::product_event(completed))
+                .apply(ProjectionEvent::Product(completed))
                 .is_applied()
         );
     }
@@ -2721,7 +2734,7 @@ fn assert_bounded_streaming_overlays(
     );
     assert!(
         overlays
-            .apply(DesktopRuntimeUpdate::product_event(tool_started))
+            .apply(ProjectionEvent::Product(tool_started))
             .is_applied()
     );
     sequence += 1;
@@ -2743,7 +2756,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(tool_completed));
+    let outcome = overlays.apply(ProjectionEvent::Product(tool_completed));
     assert!(outcome.is_applied());
     let delta = outcome.delta().unwrap();
     assert!(delta.tools);
@@ -2782,7 +2795,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(delegation));
+    let outcome = overlays.apply(ProjectionEvent::Product(delegation));
     assert!(outcome.is_applied());
     let delta = outcome.delta().unwrap();
     assert!(delta.context.contains(ContextDirtyFlags::DELEGATIONS));
@@ -2822,7 +2835,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(recovery));
+    let outcome = overlays.apply(ProjectionEvent::Product(recovery));
     assert!(outcome.is_applied());
     assert!(outcome.delta().unwrap().recoveries);
     assert_eq!(
@@ -2851,7 +2864,7 @@ fn assert_bounded_streaming_overlays(
             }
         }),
     );
-    let outcome = overlays.apply(DesktopRuntimeUpdate::product_event(diagnostic));
+    let outcome = overlays.apply(ProjectionEvent::Product(diagnostic));
     assert!(outcome.is_applied());
     assert!(outcome.delta().unwrap().diagnostics);
     assert_eq!(
@@ -2872,7 +2885,7 @@ fn assert_bounded_streaming_overlays(
     fresh.cursor = overlays.cursor().clone();
     assert!(
         overlays
-            .apply(DesktopRuntimeUpdate::ResyncRequired {
+            .apply(ProjectionEvent::ProductSnapshot {
                 reason: DesktopRuntimeError {
                     code: "overlay_resync".into(),
                     message: "discard incomplete live overlays".into(),
@@ -3117,7 +3130,14 @@ async fn typed_recovery_reasons_replace_the_projection_atomically() {
         panic!("live lag must become a typed resync update");
     };
     assert_eq!(reason.code, "product_event_live_receiver_lag");
-    assert!(projection.apply(live_lag).is_replaced());
+    assert!(
+        projection
+            .apply(
+                crate::application::reducer::projection_event(live_lag)
+                    .expect("live lag must map to a product snapshot"),
+            )
+            .is_replaced()
+    );
     assert_eq!(
         projection
             .last_resync_reason()
@@ -3137,11 +3157,18 @@ async fn typed_recovery_reasons_replace_the_projection_atomically() {
         panic!("retained gap must become a typed resync update");
     };
     assert_eq!(reason.code, "product_event_retained_history_gap");
-    assert!(projection.apply(retained_gap).is_replaced());
+    assert!(
+        projection
+            .apply(
+                crate::application::reducer::projection_event(retained_gap)
+                    .expect("retained gap must map to a product snapshot"),
+            )
+            .is_replaced()
+    );
     assert!(projection.recent_events().is_empty());
     assert_eq!(
-        projection.apply(DesktopRuntimeUpdate::Stopped),
-        DesktopProjectionApply::NoChange
+        projection.apply(ProjectionEvent::Stopped),
+        DesktopProjectionApply::NoDelta
     );
     assert_eq!(projection.lifecycle(), DesktopProjectionLifecycle::Stopped);
     bridge.shutdown().await.unwrap();

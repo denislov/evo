@@ -18,8 +18,8 @@ use crate::conversation::{
     conversation_block_height,
 };
 use desktop::projection::{
-    DesktopMessageOverlay, DesktopMessageStatus, DesktopProjection, DesktopToolOverlay,
-    DesktopToolStatus,
+    DesktopMessageOverlay, DesktopMessageStatus, DesktopProjection, DesktopProjectionDelta,
+    DesktopToolOverlay, DesktopToolStatus,
 };
 
 pub(super) const RESIZE_DEBOUNCE: Duration = Duration::from_millis(67);
@@ -355,12 +355,20 @@ impl ConversationController {
     /// delta only records the event sequence so the next frame can reconcile
     /// the live tail without rescanning the whole history; once the bounded
     /// sequence window overflows the tail is rebuilt instead.
-    pub(super) fn apply_delta(&mut self, sessions_replaced: bool, last_event_sequence: u64) {
-        if sessions_replaced {
+    pub(super) fn apply_projection_delta(
+        &mut self,
+        replaced: bool,
+        delta: Option<&DesktopProjectionDelta>,
+        last_event_sequence: u64,
+    ) {
+        if replaced {
             self.render_full_dirty = true;
             self.render_live_dirty = true;
             self.render_dirty_sequences.clear();
             self.render_sequence_overflow = false;
+            return;
+        }
+        if !delta.is_some_and(|delta| delta.conversation || delta.tools) {
             return;
         }
 

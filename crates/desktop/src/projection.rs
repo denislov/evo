@@ -16,8 +16,7 @@ use coding_agent::api::event::{
 use crate::conversation::ConversationProjection;
 use crate::runtime::{
     DesktopRecoveryIdentity, DesktopRuntimeError, DesktopRuntimeHydratedSnapshot,
-    DesktopRuntimeMetadataSnapshot, DesktopRuntimeRecoverySnapshot, DesktopRuntimeResyncSnapshot,
-    DesktopRuntimeUpdate,
+    DesktopRuntimeMetadataSnapshot, DesktopRuntimeRecoverySnapshot,
 };
 
 pub const MAX_DESKTOP_EVENT_MARKERS: usize = 256;
@@ -35,12 +34,51 @@ pub enum DesktopProjectionLifecycle {
     Stopped,
 }
 
+#[derive(Debug)]
+pub(crate) enum ProjectionEvent {
+    Metadata(DesktopRuntimeMetadataSnapshot),
+    Recovery(DesktopRuntimeRecoverySnapshot),
+    Hydrated {
+        snapshot: DesktopRuntimeHydratedSnapshot,
+        allow_session_change: bool,
+        issue: Option<DesktopRuntimeError>,
+    },
+    PromptStarted {
+        operation_id: String,
+        metadata: DesktopRuntimeMetadataSnapshot,
+    },
+    Product(CodingAgentProductEvent),
+    ProductSnapshot {
+        reason: DesktopRuntimeError,
+        snapshot: CodingAgentSnapshot,
+    },
+    Issue(DesktopRuntimeError),
+    RuntimeFailed(DesktopRuntimeError),
+    Stopped,
+}
+
+impl ProjectionEvent {
+    const fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Metadata(_) => "metadata",
+            Self::Recovery(_) => "recovery",
+            Self::Hydrated { .. } => "hydrated",
+            Self::PromptStarted { .. } => "prompt_started",
+            Self::Product(_) => "product_event",
+            Self::ProductSnapshot { .. } => "product_snapshot",
+            Self::Issue(_) => "issue",
+            Self::RuntimeFailed(_) => "runtime_failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopProjectionApply {
     Applied(DesktopProjectionDelta),
     Replaced(DesktopProjectionDelta),
     IgnoredDuplicate,
-    NoChange,
+    NoDelta,
     NeedsResync,
 }
 
@@ -57,7 +95,7 @@ impl DesktopProjectionApply {
     pub const fn delta(&self) -> Option<&DesktopProjectionDelta> {
         match self {
             Self::Applied(delta) | Self::Replaced(delta) => Some(delta),
-            Self::IgnoredDuplicate | Self::NoChange | Self::NeedsResync => None,
+            Self::IgnoredDuplicate | Self::NoDelta | Self::NeedsResync => None,
         }
     }
 }
@@ -455,46 +493,30 @@ impl DesktopProjection {
         self.last_resync_reason.as_ref()
     }
 
-    pub fn apply(&mut self, update: DesktopRuntimeUpdate) -> DesktopProjectionApply {
+    pub(crate) fn apply(&mut self, event: ProjectionEvent) -> DesktopProjectionApply {
         let _span = tracing::trace_span!(
             "desktop.projection.apply",
-            update_kind = update.kind_label(),
+            event_kind = event.kind_label(),
             cursor = self.cursor().last_event_sequence
         )
         .entered();
-        match update {
-            DesktopRuntimeUpdate::Reloaded { metadata, .. }
-            | DesktopRuntimeUpdate::SelectionChanged { metadata, .. } => {
-                self.replace_metadata_snapshot(metadata)
-            }
-            DesktopRuntimeUpdate::RecoveryChanged { recovery, .. } => {
-                self.replace_recovery_snapshot(recovery)
-            }
-            DesktopRuntimeUpdate::Resynced { replacement, .. } => match replacement {
-                DesktopRuntimeResyncSnapshot::Metadata(metadata) => {
-                    self.replace_metadata_snapshot(metadata)
-                }
-                DesktopRuntimeResyncSnapshot::Hydrated(snapshot) => {
-                    self.replace_runtime_snapshot(snapshot, false, None)
-                }
-            },
-            DesktopRuntimeUpdate::SessionChanged { snapshot, .. } => {
-                self.replace_runtime_snapshot(snapshot, true, None)
-            }
-            DesktopRuntimeUpdate::PromptAcceptedWithSession { snapshot, .. } => {
-                self.replace_runtime_snapshot(snapshot, true, None)
-            }
-            DesktopRuntimeUpdate::PromptRejectedWithSession {
-                snapshot, error, ..
+        match event {
+            ProjectionEvent::Metadata(metadata) => self.replace_metadata_snapshot(metadata),
+            ProjectionEvent::Recovery(recovery) => self.replace_recovery_snapshot(recovery),
+            ProjectionEvent::Hydrated {
+                snapshot,
+                allow_session_change,
+                issue,
             } => {
-                let outcome = self.replace_runtime_snapshot(snapshot, true, None);
-                self.push_issue(DesktopProjectionIssue::new(error.code, error.message));
+                let outcome = self.replace_runtime_snapshot(snapshot, allow_session_change, None);
+                if let Some(error) = issue {
+                    self.push_issue(DesktopProjectionIssue::new(error.code, error.message));
+                }
                 outcome
             }
-            DesktopRuntimeUpdate::PromptStarted {
+            ProjectionEvent::PromptStarted {
                 operation_id,
                 metadata,
-                ..
             } => {
                 if metadata
                     .session
@@ -509,44 +531,26 @@ impl DesktopProjection {
                 }
                 self.replace_metadata_snapshot(metadata)
             }
-            DesktopRuntimeUpdate::PromptFinished { snapshot, .. } => {
-                self.replace_runtime_snapshot(snapshot, false, None)
-            }
-            DesktopRuntimeUpdate::ProductEvent { event, .. } => self.apply_product_event(event),
-            DesktopRuntimeUpdate::ResyncRequired { reason, snapshot } => {
+            ProjectionEvent::Product(event) => self.apply_product_event(event),
+            ProjectionEvent::ProductSnapshot { reason, snapshot } => {
                 self.replace_product_snapshot(snapshot, Some(reason))
             }
-            DesktopRuntimeUpdate::CommandRejected { code, message, .. } => {
-                self.push_issue(DesktopProjectionIssue::new(code, message));
-                DesktopProjectionApply::NoChange
+            ProjectionEvent::Issue(error) => {
+                self.push_issue(DesktopProjectionIssue::new(error.code, error.message));
+                DesktopProjectionApply::NoDelta
             }
-            DesktopRuntimeUpdate::RuntimeFailed { error } => {
+            ProjectionEvent::RuntimeFailed(error) => {
                 self.lifecycle = DesktopProjectionLifecycle::Failed;
                 self.push_issue(DesktopProjectionIssue::new(
                     error.code.clone(),
                     error.message.clone(),
                 ));
-                DesktopProjectionApply::NoChange
+                DesktopProjectionApply::NoDelta
             }
-            DesktopRuntimeUpdate::Stopped => {
+            ProjectionEvent::Stopped => {
                 self.lifecycle = DesktopProjectionLifecycle::Stopped;
-                DesktopProjectionApply::NoChange
+                DesktopProjectionApply::NoDelta
             }
-            DesktopRuntimeUpdate::SessionClosed {
-                command_id,
-                session_id,
-            } => {
-                tracing::trace!(command_id, session_id, "desktop.session.closed");
-                DesktopProjectionApply::NoChange
-            }
-            DesktopRuntimeUpdate::PromptAccepted { .. }
-            | DesktopRuntimeUpdate::SessionsListed { .. }
-            | DesktopRuntimeUpdate::SessionRenamed { .. }
-            | DesktopRuntimeUpdate::SessionNameObserved { .. }
-            | DesktopRuntimeUpdate::ControlAccepted { .. }
-            | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
-            | DesktopRuntimeUpdate::FileReviewed { .. }
-            | DesktopRuntimeUpdate::ExternalEditorOpened { .. } => DesktopProjectionApply::NoChange,
         }
     }
 

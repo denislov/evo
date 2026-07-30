@@ -9,8 +9,9 @@ use coding_agent::api::{
     review::{CodingAgentFileReview, CodingAgentFileReviewRequest},
 };
 use desktop::runtime::{
-    DesktopRecoveryAction, DesktopRuntimeCommandKind, DesktopRuntimeHydratedSnapshot,
-    DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind, DesktopRuntimeUpdate,
+    DesktopRecoveryAction, DesktopRuntimeCommandKind, DesktopRuntimeError,
+    DesktopRuntimeHydratedSnapshot, DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind,
+    DesktopRuntimeUpdate,
 };
 use desktop::shell::truncate_label;
 use thiserror::Error;
@@ -22,6 +23,7 @@ use super::{
     state::DesktopState,
     workspace::WorkspaceKey,
 };
+use crate::projection::ProjectionEvent;
 
 /// Exhaustive protocol coverage used by the root runtime reducer.
 ///
@@ -362,11 +364,12 @@ pub(crate) trait RuntimeUpdatePort {
     );
     fn selected_model_label(&self, owner: &WorkspaceKey) -> String;
     fn selected_profile_label(&self, owner: &WorkspaceKey) -> String;
-    fn apply_projection_update(
+    fn apply_projection_event(
         &mut self,
         owner: &WorkspaceKey,
-        update: DesktopRuntimeUpdate,
+        event: Option<ProjectionEvent>,
         creates_session_from_prompt: bool,
+        completed_prompt_command: Option<u64>,
     ) -> ProjectionUpdateResult;
     fn request_resync_if_needed(&mut self, owner: &WorkspaceKey);
     fn active_runtime_is_running(&self) -> bool;
@@ -612,8 +615,17 @@ fn reduce_runtime_update(
         update => {
             let completion = capture_projection_completion(port, &target, &update);
             reduce_pre_projection_update(port, &target, &completion_owner, &update, &mut changes);
-            let projection =
-                port.apply_projection_update(&target, update, creates_session_from_prompt);
+            let completed_prompt_command = match &update {
+                DesktopRuntimeUpdate::PromptFinished { command_id, .. } => Some(*command_id),
+                _ => None,
+            };
+            let event = projection_event(update);
+            let projection = port.apply_projection_event(
+                &target,
+                event,
+                creates_session_from_prompt,
+                completed_prompt_command,
+            );
             changes.merge(projection.changes());
             reconcile_projection_completion(port, &target, completion, projection, &mut changes);
             port.request_resync_if_needed(&target);
@@ -622,6 +634,77 @@ fn reduce_runtime_update(
 
     let foreground = port.active_workspace_key();
     workspace_update_transition(&foreground, &target, changes)
+}
+
+pub(crate) fn projection_event(update: DesktopRuntimeUpdate) -> Option<ProjectionEvent> {
+    match update {
+        DesktopRuntimeUpdate::Reloaded { metadata, .. }
+        | DesktopRuntimeUpdate::SelectionChanged { metadata, .. } => {
+            Some(ProjectionEvent::Metadata(metadata))
+        }
+        DesktopRuntimeUpdate::RecoveryChanged { recovery, .. } => {
+            Some(ProjectionEvent::Recovery(recovery))
+        }
+        DesktopRuntimeUpdate::Resynced { replacement, .. } => Some(match replacement {
+            DesktopRuntimeResyncSnapshot::Metadata(metadata) => ProjectionEvent::Metadata(metadata),
+            DesktopRuntimeResyncSnapshot::Hydrated(snapshot) => ProjectionEvent::Hydrated {
+                snapshot,
+                allow_session_change: false,
+                issue: None,
+            },
+        }),
+        DesktopRuntimeUpdate::SessionChanged { snapshot, .. }
+        | DesktopRuntimeUpdate::PromptAcceptedWithSession { snapshot, .. } => {
+            Some(ProjectionEvent::Hydrated {
+                snapshot,
+                allow_session_change: true,
+                issue: None,
+            })
+        }
+        DesktopRuntimeUpdate::PromptRejectedWithSession {
+            snapshot, error, ..
+        } => Some(ProjectionEvent::Hydrated {
+            snapshot,
+            allow_session_change: true,
+            issue: Some(error),
+        }),
+        DesktopRuntimeUpdate::PromptStarted {
+            operation_id,
+            metadata,
+            ..
+        } => Some(ProjectionEvent::PromptStarted {
+            operation_id,
+            metadata,
+        }),
+        DesktopRuntimeUpdate::PromptFinished { snapshot, .. } => Some(ProjectionEvent::Hydrated {
+            snapshot,
+            allow_session_change: false,
+            issue: None,
+        }),
+        DesktopRuntimeUpdate::ProductEvent { event, .. } => Some(ProjectionEvent::Product(event)),
+        DesktopRuntimeUpdate::ResyncRequired { reason, snapshot } => {
+            Some(ProjectionEvent::ProductSnapshot { reason, snapshot })
+        }
+        DesktopRuntimeUpdate::CommandRejected { code, message, .. } => {
+            Some(ProjectionEvent::Issue(DesktopRuntimeError {
+                code,
+                message,
+            }))
+        }
+        DesktopRuntimeUpdate::RuntimeFailed { error } => {
+            Some(ProjectionEvent::RuntimeFailed(error))
+        }
+        DesktopRuntimeUpdate::Stopped => Some(ProjectionEvent::Stopped),
+        DesktopRuntimeUpdate::SessionClosed { .. }
+        | DesktopRuntimeUpdate::SessionsListed { .. }
+        | DesktopRuntimeUpdate::SessionRenamed { .. }
+        | DesktopRuntimeUpdate::SessionNameObserved { .. }
+        | DesktopRuntimeUpdate::PromptAccepted { .. }
+        | DesktopRuntimeUpdate::ControlAccepted { .. }
+        | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
+        | DesktopRuntimeUpdate::FileReviewed { .. }
+        | DesktopRuntimeUpdate::ExternalEditorOpened { .. } => None,
+    }
 }
 
 fn capture_projection_completion(

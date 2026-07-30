@@ -34,7 +34,7 @@ use super::native_shell::{
 };
 use crate::preferences::DesktopPreferences;
 use crate::projection::DesktopProjection;
-use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot, DesktopRuntimeUpdate};
+use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot};
 
 const PERFORMANCE_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_PERF_REPLAY";
 const VISUAL_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_VISUAL_REPLAY";
@@ -900,7 +900,7 @@ fn apply_visual_running_tool(projection: &mut DesktopProjection) -> Result<(), S
         let event = serde_json::from_value(value)
             .map_err(|error| format!("could not decode visual product event: {error}"))?;
         if !matches!(
-            projection.apply(DesktopRuntimeUpdate::product_event(event)),
+            projection.apply(crate::projection::ProjectionEvent::Product(event)),
             crate::projection::DesktopProjectionApply::Applied(_)
         ) {
             return Err("visual running-tool event did not apply to the projection".into());

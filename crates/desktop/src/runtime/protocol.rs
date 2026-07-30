@@ -603,6 +603,7 @@ pub enum DesktopRuntimeUpdate {
 }
 
 impl DesktopRuntimeUpdate {
+    #[cfg(test)]
     pub(crate) fn product_event(event: CodingAgentProductEvent) -> Self {
         let session_id = event
             .session_id()
