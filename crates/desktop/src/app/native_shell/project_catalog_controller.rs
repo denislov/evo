@@ -10,8 +10,8 @@ use gpui::Context;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{MAX_SESSION_WORKSPACES, NativeShell};
+use crate::application::commands::DesktopCommandIntent;
 use crate::application::workspace::WorkspaceKey;
-use crate::command_ledger::DesktopCommandIntent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProjectCatalogState {
@@ -299,17 +299,12 @@ impl NativeShell {
                 .composer
                 .submitted()
                 .is_some()
-            || self
-                .workspace_store
-                .active_mut()
-                .command_ledger
-                .contains_where(|intent| {
-                    matches!(
-                        intent,
-                        DesktopCommandIntent::CreateSession
-                            | DesktopCommandIntent::OpenSession { .. }
-                    )
-                })
+            || self.command_tracker.contains_anywhere(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
+                )
+            })
         {
             return;
         }
@@ -333,10 +328,7 @@ impl NativeShell {
                 .active_mut()
                 .set_preference_notice("Creating a new session…".into()),
             Err(message) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(message);
@@ -347,12 +339,7 @@ impl NativeShell {
     }
 
     pub(in crate::app) fn request_session_catalog(&mut self, cx: &mut Context<Self>) {
-        if self
-            .workspace_store
-            .active_mut()
-            .command_ledger
-            .contains(&DesktopCommandIntent::ListSessions)
-        {
+        if self.active_command_contains(&DesktopCommandIntent::ListSessions) {
             return;
         }
         let intent = DesktopCommandIntent::ListSessions;
@@ -371,10 +358,7 @@ impl NativeShell {
             },
         );
         if let Err(message) = admission {
-            self.workspace_store
-                .active_mut()
-                .command_ledger
-                .complete(command_id, &intent);
+            self.complete_active_command(command_id, &intent);
             self.project_catalog.fail_refresh(message.clone());
             self.workspace_store
                 .active_mut()
@@ -394,9 +378,16 @@ impl NativeShell {
         let intent = DesktopCommandIntent::RenameSession {
             session_id: session_id.clone(),
         };
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
-            return;
+        let owner = WorkspaceKey::session(session_id.clone());
+        let command_id = match self.command_tracker.reserve(owner.clone(), intent.clone()) {
+            Ok(command_id) => command_id,
+            Err(error) => {
+                self.workspace_store
+                    .active_mut()
+                    .set_preference_notice(error.to_string());
+                self.notify_toast_host(cx);
+                return;
+            }
         };
         let admission = self.runtime.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
@@ -407,10 +398,7 @@ impl NativeShell {
             },
         );
         if let Err(message) = admission {
-            self.workspace_store
-                .active_mut()
-                .command_ledger
-                .complete(command_id, &intent);
+            self.complete_command(command_id, &owner, &intent);
             self.workspace_store
                 .active_mut()
                 .set_preference_notice(message);
@@ -487,17 +475,12 @@ impl NativeShell {
                 .composer
                 .submitted()
                 .is_some()
-            || self
-                .workspace_store
-                .active_mut()
-                .command_ledger
-                .contains_where(|intent| {
-                    matches!(
-                        intent,
-                        DesktopCommandIntent::CreateSession
-                            | DesktopCommandIntent::OpenSession { .. }
-                    )
-                })
+            || self.command_tracker.contains_anywhere(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
+                )
+            })
         {
             self.workspace_store.active_mut().set_preference_notice(
                 "Session switching is available only while the runtime is idle.".into(),
@@ -521,9 +504,16 @@ impl NativeShell {
         let intent = DesktopCommandIntent::OpenSession {
             session_id: session_id.clone(),
         };
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            cx.notify();
-            return;
+        let owner = WorkspaceKey::session(session_id.clone());
+        let command_id = match self.command_tracker.reserve(owner.clone(), intent.clone()) {
+            Ok(command_id) => command_id,
+            Err(error) => {
+                self.workspace_store
+                    .active_mut()
+                    .set_preference_notice(error.to_string());
+                cx.notify();
+                return;
+            }
         };
         let admission = self.runtime.as_ref().map_or_else(
             || Err("desktop runtime is stopped".to_owned()),
@@ -543,10 +533,7 @@ impl NativeShell {
                     ));
             }
             Err(message) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_command(command_id, &owner, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(message);

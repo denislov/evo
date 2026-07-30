@@ -11,7 +11,6 @@ mod actions;
 mod app;
 mod application;
 mod assets;
-mod command_ledger;
 mod conversation;
 mod file_review;
 mod preferences;

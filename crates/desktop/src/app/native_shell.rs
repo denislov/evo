@@ -49,8 +49,8 @@ use crate::actions::{
     PalettePrevious, SelectNextConversation, SelectPreviousConversation, SubmitComposer,
     ToggleInspectorPanel, ToggleSelectedConversationDetails, TrapOverlayFocus,
 };
+use crate::application::commands::{CommandCompletionError, CommandTracker, DesktopCommandIntent};
 use crate::application::workspace::{SessionId, WorkspaceKey, WorkspaceStore};
-use crate::command_ledger::{DesktopCommandIntent, DesktopCommandLedger};
 
 const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -285,7 +285,6 @@ pub(super) struct SessionWorkspace {
     composer_needs_sync: bool,
     composer_running_mode: ComposerRunningMode,
     composer_attachments: Vec<PathBuf>,
-    command_ledger: DesktopCommandLedger,
     thinking_selection: DesktopThinkingLevel,
     thinking_hint: Option<Arc<str>>,
     file_review: Arc<DesktopFileReviewState>,
@@ -297,13 +296,11 @@ impl SessionWorkspace {
         project: CodingAgentEmbeddingSnapshot,
         projection: Option<DesktopProjection>,
         preference_notice: Option<String>,
-        command_ledger: DesktopCommandLedger,
     ) -> Self {
         Self::new_with_thinking(
             project,
             projection,
             preference_notice,
-            command_ledger,
             DesktopThinkingLevel::Default,
         )
     }
@@ -312,7 +309,6 @@ impl SessionWorkspace {
         project: CodingAgentEmbeddingSnapshot,
         projection: Option<DesktopProjection>,
         preference_notice: Option<String>,
-        command_ledger: DesktopCommandLedger,
         thinking_selection: DesktopThinkingLevel,
     ) -> Self {
         let draft_workspace_selection = workspace_selection_from_embedding(&project);
@@ -320,7 +316,6 @@ impl SessionWorkspace {
             project,
             projection,
             preference_notice,
-            command_ledger,
             thinking_selection,
             draft_workspace_selection,
         )
@@ -330,7 +325,6 @@ impl SessionWorkspace {
         project: CodingAgentEmbeddingSnapshot,
         projection: Option<DesktopProjection>,
         preference_notice: Option<String>,
-        command_ledger: DesktopCommandLedger,
         thinking_selection: DesktopThinkingLevel,
         draft_workspace_selection: CodingAgentWorkspaceSelection,
     ) -> Self {
@@ -349,7 +343,6 @@ impl SessionWorkspace {
             composer_needs_sync: false,
             composer_running_mode: ComposerRunningMode::default(),
             composer_attachments: Vec::new(),
-            command_ledger,
             thinking_selection,
             thinking_hint: thinking_fallback
                 .then(|| Arc::from("Thinking reset to Auto for the selected model.")),
@@ -500,7 +493,7 @@ pub(super) struct NativeShell {
     runtime: Option<DesktopRuntimeCommandHandle>,
     runtime_updates: VecDeque<desktop::runtime::DesktopRuntimeUpdate>,
     runtime_update_target: Option<WorkspaceKey>,
-    next_command_id: u64,
+    command_tracker: CommandTracker,
     home_project: CodingAgentEmbeddingSnapshot,
     projectless_workspace_selection: CodingAgentWorkspaceSelection,
     workspace_store: WorkspaceStore<SessionWorkspace>,
@@ -576,15 +569,16 @@ impl NativeShell {
             "the desktop Home clear target must be a managed Projectless workspace"
         );
         let (runtime_commands, mut runtime_events, runtime_shutdown) = runtime.into_parts();
-        let mut command_ledger = DesktopCommandLedger::default();
+        let mut command_tracker = CommandTracker::default();
         if let Some(session_id) = initial_session_id {
             let intent = DesktopCommandIntent::OpenSession {
                 session_id: session_id.clone(),
             };
-            match command_ledger.reserve(intent.clone()) {
+            let owner = WorkspaceKey::session(session_id.clone());
+            match command_tracker.reserve(owner.clone(), intent.clone()) {
                 Ok(command_id) => {
                     if let Err(error) = runtime_commands.try_open_session(command_id, &session_id) {
-                        command_ledger.complete(command_id, &intent);
+                        let _ = command_tracker.complete(command_id, &owner, &intent);
                         preference_notice = Some(error.to_string());
                     }
                 }
@@ -848,7 +842,6 @@ impl NativeShell {
         })
         .detach();
 
-        let next_command_id = command_ledger.next_command_id();
         let thinking_selection = projection
             .as_ref()
             .map(|projection| {
@@ -864,7 +857,6 @@ impl NativeShell {
                 project,
                 projection,
                 preference_notice,
-                command_ledger,
                 thinking_selection,
                 projectless_workspace_selection.clone(),
             )
@@ -873,7 +865,6 @@ impl NativeShell {
                 project,
                 projection,
                 preference_notice,
-                command_ledger,
                 thinking_selection,
             )
         };
@@ -883,7 +874,6 @@ impl NativeShell {
                     home_project.clone(),
                     None,
                     None,
-                    DesktopCommandLedger::default(),
                     DesktopThinkingLevel::Default,
                     projectless_workspace_selection.clone(),
                 ));
@@ -897,7 +887,7 @@ impl NativeShell {
             runtime: Some(runtime_commands),
             runtime_updates: VecDeque::new(),
             runtime_update_target: None,
-            next_command_id,
+            command_tracker,
             home_project,
             projectless_workspace_selection,
             workspace_store,
@@ -996,29 +986,124 @@ impl NativeShell {
             .expect("runtime update target must reference a workspace entry")
     }
 
-    fn command_owner_key(&self, command_id: u64) -> Option<WorkspaceKey> {
-        self.workspace_store.iter().find_map(|(key, workspace)| {
-            workspace
-                .command_ledger
-                .intent(command_id)
-                .is_some()
-                .then(|| key.clone())
-        })
+    pub(super) fn update_workspace_key(&self) -> WorkspaceKey {
+        self.runtime_update_target
+            .clone()
+            .unwrap_or_else(|| self.workspace_store.active_key().clone())
     }
 
-    fn complete_workspace_command(
+    fn active_command_contains(&self, intent: &DesktopCommandIntent) -> bool {
+        self.command_tracker
+            .contains(self.workspace_store.active_key(), intent)
+    }
+
+    fn active_command_contains_where(
+        &self,
+        predicate: impl Fn(&DesktopCommandIntent) -> bool,
+    ) -> bool {
+        self.command_tracker
+            .contains_where(self.workspace_store.active_key(), predicate)
+    }
+
+    fn complete_active_command(&mut self, command_id: u64, intent: &DesktopCommandIntent) -> bool {
+        let owner = self.workspace_store.active_key().clone();
+        self.complete_command(command_id, &owner, intent)
+    }
+
+    pub(super) fn complete_command(
         &mut self,
-        owner: &WorkspaceKey,
         command_id: u64,
+        observed_owner: &WorkspaceKey,
         intent: &DesktopCommandIntent,
     ) -> bool {
-        self.workspace_store
-            .get_mut(owner)
-            .is_some_and(|workspace| workspace.command_ledger.complete(command_id, intent))
+        let pending_owner = self.command_tracker.owner(command_id).cloned();
+        match self
+            .command_tracker
+            .complete(command_id, observed_owner, intent)
+        {
+            Ok(_) => true,
+            Err(CommandCompletionError::OwnerMismatch) => {
+                if let Some(pending_owner) = pending_owner {
+                    self.require_command_owner_resync(&pending_owner, observed_owner);
+                }
+                false
+            }
+            Err(
+                CommandCompletionError::UnknownCommand | CommandCompletionError::IntentMismatch,
+            ) => false,
+        }
     }
 
-    fn runtime_update_workspace_key(
-        &self,
+    fn reject_command(
+        &mut self,
+        command_id: u64,
+        observed_owner: &WorkspaceKey,
+        command: desktop::runtime::DesktopRuntimeCommandKind,
+    ) -> Option<DesktopCommandIntent> {
+        let pending_owner = self.command_tracker.owner(command_id).cloned();
+        match self
+            .command_tracker
+            .reject(command_id, observed_owner, command)
+        {
+            Ok(pending) => Some(pending.into_intent()),
+            Err(CommandCompletionError::OwnerMismatch) => {
+                if let Some(pending_owner) = pending_owner {
+                    self.require_command_owner_resync(&pending_owner, observed_owner);
+                }
+                None
+            }
+            Err(
+                CommandCompletionError::UnknownCommand | CommandCompletionError::IntentMismatch,
+            ) => None,
+        }
+    }
+
+    fn complete_matching_command(
+        &mut self,
+        owner: &WorkspaceKey,
+        predicate: impl Fn(&DesktopCommandIntent) -> bool,
+    ) -> Option<DesktopCommandIntent> {
+        let (command_id, intent) = self.command_tracker.find(owner, predicate)?;
+        self.complete_command(command_id, owner, &intent)
+            .then_some(intent)
+    }
+
+    fn require_command_owner_resync(
+        &mut self,
+        pending_owner: &WorkspaceKey,
+        observed_owner: &WorkspaceKey,
+    ) {
+        let mut marked = false;
+        for owner in [pending_owner, observed_owner] {
+            let Some(workspace) = self.workspace_store.get_mut(owner) else {
+                continue;
+            };
+            marked = true;
+            if let Some(projection) = workspace.projection.as_mut() {
+                projection.require_command_resync(
+                    "command_owner_mismatch",
+                    "runtime command completion targeted a different workspace",
+                );
+            }
+            workspace.set_preference_notice(
+                "Runtime response targeted another session; resync is required.".into(),
+            );
+        }
+        if !marked {
+            let workspace = self.workspace_store.active_mut();
+            if let Some(projection) = workspace.projection.as_mut() {
+                projection.require_command_resync(
+                    "command_owner_mismatch",
+                    "runtime command completion targeted a different workspace",
+                );
+            }
+            workspace.set_preference_notice(
+                "Runtime response targeted another session; resync is required.".into(),
+            );
+        }
+    }
+
+    fn runtime_update_observed_workspace_key(
         update: &desktop::runtime::DesktopRuntimeUpdate,
     ) -> Option<WorkspaceKey> {
         use desktop::runtime::{DesktopRuntimeResyncSnapshot, DesktopRuntimeUpdate};
@@ -1047,16 +1132,62 @@ impl NativeShell {
             DesktopRuntimeUpdate::ResyncRequired { snapshot, .. } => {
                 Some(snapshot.session.session_id.clone())
             }
-            DesktopRuntimeUpdate::SessionsListed { .. }
-            | DesktopRuntimeUpdate::SessionRenamed { .. }
-            | DesktopRuntimeUpdate::SessionNameObserved { .. }
-            | DesktopRuntimeUpdate::SessionClosed { .. } => None,
-            _ => {
-                return runtime_update_command_id(update)
-                    .and_then(|command_id| self.command_owner_key(command_id));
-            }
+            DesktopRuntimeUpdate::SessionRenamed { session_id, .. }
+            | DesktopRuntimeUpdate::SessionClosed { session_id, .. } => Some(session_id.clone()),
+            _ => None,
         };
         session_id.map(WorkspaceKey::session)
+    }
+
+    fn validate_runtime_update_command_owner(
+        &mut self,
+        update: &desktop::runtime::DesktopRuntimeUpdate,
+    ) -> bool {
+        let Some(command_id) = runtime_update_command_id(update) else {
+            return true;
+        };
+        let Some(pending_owner) = self.command_tracker.owner(command_id).cloned() else {
+            return true;
+        };
+        let Some(observed_owner) = Self::runtime_update_observed_workspace_key(update) else {
+            return true;
+        };
+        if pending_owner == observed_owner {
+            return true;
+        }
+        self.require_command_owner_resync(&pending_owner, &observed_owner);
+        false
+    }
+
+    pub(super) fn runtime_update_completion_owner(
+        &self,
+        update: &desktop::runtime::DesktopRuntimeUpdate,
+    ) -> WorkspaceKey {
+        Self::runtime_update_observed_workspace_key(update)
+            .or_else(|| {
+                runtime_update_command_id(update)
+                    .and_then(|command_id| self.command_tracker.owner(command_id).cloned())
+            })
+            .unwrap_or_else(|| self.update_workspace_key())
+    }
+
+    fn runtime_update_workspace_key(
+        &self,
+        update: &desktop::runtime::DesktopRuntimeUpdate,
+    ) -> Option<WorkspaceKey> {
+        use desktop::runtime::DesktopRuntimeUpdate;
+        if matches!(
+            update,
+            DesktopRuntimeUpdate::SessionRenamed { .. }
+                | DesktopRuntimeUpdate::SessionNameObserved { .. }
+                | DesktopRuntimeUpdate::SessionClosed { .. }
+        ) {
+            return None;
+        }
+        Self::runtime_update_observed_workspace_key(update).or_else(|| {
+            runtime_update_command_id(update)
+                .and_then(|command_id| self.command_tracker.owner(command_id).cloned())
+        })
     }
 
     fn navigate_center(
@@ -1164,9 +1295,12 @@ impl NativeShell {
                 self.home_project.clone(),
                 None,
                 None,
-                DesktopCommandLedger::default(),
                 thinking_selection,
                 self.projectless_workspace_selection.clone(),
+            );
+            self.command_tracker.transfer_owner(
+                &WorkspaceKey::Home,
+                &WorkspaceKey::Session(target_session_id.clone()),
             );
             let promoted = self
                 .workspace_store
@@ -1181,7 +1315,6 @@ impl NativeShell {
             snapshot.project.clone(),
             Some(projection),
             None,
-            DesktopCommandLedger::default(),
             thinking_selection,
         );
         self.workspace_store
@@ -1201,21 +1334,13 @@ impl NativeShell {
         session_id: &str,
         intent: DesktopCommandIntent,
     ) -> Result<u64, String> {
-        let command_id = self.next_command_id;
-        let next_command_id = command_id
-            .checked_add(1)
-            .ok_or_else(|| "Desktop command sequence is exhausted; restart the app.".to_owned())?;
         let key = WorkspaceKey::session(session_id);
-        let ledger = &mut self
-            .workspace_store
-            .get_mut(&key)
-            .ok_or_else(|| "Cannot close an unavailable session.".to_owned())?
-            .command_ledger;
-        ledger
-            .reserve_with_id(command_id, intent)
-            .map_err(|error| error.to_string())?;
-        self.next_command_id = next_command_id;
-        Ok(command_id)
+        if !self.workspace_store.contains(&key) {
+            return Err("Cannot close an unavailable session.".to_owned());
+        }
+        self.command_tracker
+            .reserve(key, intent)
+            .map_err(|error| error.to_string())
     }
 
     fn close_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
@@ -1243,7 +1368,7 @@ impl NativeShell {
             });
         if let Err(error) = admission {
             let owner = WorkspaceKey::session(session_id);
-            let _ = self.complete_workspace_command(&owner, command_id, &intent);
+            let _ = self.complete_command(command_id, &owner, &intent);
             self.workspace_store
                 .active_mut()
                 .set_preference_notice(error);
@@ -1251,9 +1376,12 @@ impl NativeShell {
         self.notify_sessions_pane(cx);
     }
 
-    fn remove_closed_workspace(&mut self, session_id: &str) {
+    fn remove_closed_workspace(&mut self, session_id: &str) -> usize {
+        let owner = WorkspaceKey::session(session_id);
+        let cancelled = self.command_tracker.cancel_owner(&owner).len();
         self.workspace_store
             .remove_session(&SessionId::from_dto(session_id));
+        cancelled
     }
 
     pub(super) fn install_native_visual_catalog_fixture(
@@ -1597,12 +1725,26 @@ impl NativeShell {
             let inherit_home_thinking = match &update {
                 desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession { .. }
                 | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession { .. } => true,
-                desktop::runtime::DesktopRuntimeUpdate::SessionChanged { command_id, .. } => self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .matches(*command_id, &DesktopCommandIntent::CreateSession),
+                desktop::runtime::DesktopRuntimeUpdate::SessionChanged { command_id, .. } => {
+                    self.command_tracker.matches(
+                        *command_id,
+                        &foreground_key,
+                        &DesktopCommandIntent::CreateSession,
+                    )
+                }
                 _ => false,
             };
+            if inherit_home_thinking
+                && let desktop::runtime::DesktopRuntimeUpdate::SessionChanged {
+                    command_id,
+                    snapshot,
+                } = &update
+            {
+                let _ = self.command_tracker.transfer_command(
+                    *command_id,
+                    WorkspaceKey::session(hydrated_session_id(snapshot)),
+                );
+            }
             let creates_session_from_prompt = match &update {
                 desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
                     command_id,
@@ -1611,16 +1753,26 @@ impl NativeShell {
                 | desktop::runtime::DesktopRuntimeUpdate::PromptRejectedWithSession {
                     command_id,
                     ..
-                } => self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .matches(*command_id, &DesktopCommandIntent::Prompt),
+                } => self.command_tracker.matches(
+                    *command_id,
+                    &foreground_key,
+                    &DesktopCommandIntent::Prompt,
+                ),
                 _ => false,
             };
             if creates_session_from_prompt
                 && let Some(snapshot) = runtime_update_hydrated_snapshot(&update)
             {
                 let _ = self.install_hydrated_workspace(snapshot, inherit_home_thinking, true);
+            }
+            if !self.validate_runtime_update_command_owner(&update) {
+                self.runtime_update_target = runtime_update_command_id(&update)
+                    .and_then(|command_id| self.command_tracker.owner(command_id).cloned())
+                    .filter(|owner| self.workspace_store.contains(owner));
+                self.request_resync_if_needed();
+                self.runtime_update_target = None;
+                applied += 1;
+                continue;
             }
             let mut background_update = false;
             if !is_session_change
@@ -1684,21 +1836,22 @@ impl NativeShell {
                 applied += 1;
                 continue;
             }
+            let update_owner = self.runtime_update_completion_owner(&update);
             match &update {
                 desktop::runtime::DesktopRuntimeUpdate::PromptAccepted { command_id }
                 | desktop::runtime::DesktopRuntimeUpdate::PromptAcceptedWithSession {
                     command_id,
                     ..
                 } => {
-                    if self
+                    if self.complete_command(
+                        *command_id,
+                        &update_owner,
+                        &DesktopCommandIntent::Prompt,
+                    ) && self
                         .update_workspace_mut()
-                        .command_ledger
-                        .complete(*command_id, &DesktopCommandIntent::Prompt)
-                        && self
-                            .update_workspace_mut()
-                            .composer
-                            .accepted(*command_id)
-                            .is_ok()
+                        .composer
+                        .accepted(*command_id)
+                        .is_ok()
                     {
                         self.update_workspace_mut().composer_attachments.clear();
                         self.update_workspace_mut().composer_needs_sync = true;
@@ -1714,10 +1867,9 @@ impl NativeShell {
                     ..
                 } => {
                     if self
-                        .update_workspace_mut()
-                        .command_ledger
-                        .complete_rejection(
+                        .reject_command(
                             *command_id,
+                            &update_owner,
                             desktop::runtime::DesktopRuntimeCommandKind::SubmitPrompt,
                         )
                         .is_some()
@@ -1751,10 +1903,9 @@ impl NativeShell {
                     ..
                 } => {
                     if self
-                        .update_workspace_mut()
-                        .command_ledger
-                        .complete_rejection(
+                        .reject_command(
                             *command_id,
+                            &update_owner,
                             desktop::runtime::DesktopRuntimeCommandKind::SubmitPrompt,
                         )
                         .is_some()
@@ -1773,8 +1924,9 @@ impl NativeShell {
                     command_id,
                     command: desktop::runtime::DesktopRuntimeCommandKind::Abort,
                     receipt,
-                } if self.update_workspace_mut().command_ledger.complete(
+                } if self.complete_command(
                     *command_id,
+                    &update_owner,
                     &DesktopCommandIntent::Abort {
                         operation_id: receipt.operation_id.clone(),
                     },
@@ -1801,10 +1953,7 @@ impl NativeShell {
                         }
                         _ => unreachable!("match pattern admits only active controls"),
                     };
-                    if self
-                        .update_workspace_mut()
-                        .command_ledger
-                        .complete(*command_id, &intent)
+                    if self.complete_command(*command_id, &update_owner, &intent)
                         && self
                             .update_workspace_mut()
                             .composer
@@ -1823,9 +1972,21 @@ impl NativeShell {
                     authorization_id,
                     decision,
                 } if self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .complete_authorization(*command_id, authorization_id) =>
+                    .command_tracker
+                    .intent(*command_id)
+                    .filter(|intent| {
+                        matches!(
+                            intent,
+                            DesktopCommandIntent::Authorization {
+                                authorization_id: pending_authorization_id,
+                                ..
+                            } if pending_authorization_id == authorization_id
+                        )
+                    })
+                    .cloned()
+                    .is_some_and(|intent| {
+                        self.complete_command(*command_id, &update_owner, &intent)
+                    }) =>
                 {
                     let decision = match decision {
                         ToolAuthorizationDecision::AllowOnce => "allow once",
@@ -1842,10 +2003,9 @@ impl NativeShell {
                     code,
                     ..
                 } if self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .complete_rejection(
+                    .reject_command(
                         *command_id,
+                        &update_owner,
                         desktop::runtime::DesktopRuntimeCommandKind::Abort,
                     )
                     .is_some() =>
@@ -1863,10 +2023,9 @@ impl NativeShell {
                     code,
                     ..
                 } if self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .complete_rejection(
+                    .reject_command(
                         *command_id,
+                        &update_owner,
                         desktop::runtime::DesktopRuntimeCommandKind::Reload,
                     )
                     .is_some() =>
@@ -1884,9 +2043,7 @@ impl NativeShell {
                     code,
                     ..
                 } if self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .complete_rejection(*command_id, *command)
+                    .reject_command(*command_id, &update_owner, *command)
                     .is_some() =>
                 {
                     self.update_workspace_mut().set_preference_notice(format!(
@@ -1904,9 +2061,7 @@ impl NativeShell {
                 } => {
                     let notice = safe_runtime_rejection_notice(*command, code);
                     if self
-                        .update_workspace_mut()
-                        .command_ledger
-                        .complete_rejection(*command_id, *command)
+                        .reject_command(*command_id, &update_owner, *command)
                         .is_some()
                         && self
                             .update_workspace_mut()
@@ -1923,10 +2078,9 @@ impl NativeShell {
                     code,
                     ..
                 } if self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .complete_rejection(
+                    .reject_command(
                         *command_id,
+                        &update_owner,
                         desktop::runtime::DesktopRuntimeCommandKind::DecideToolAuthorization,
                     )
                     .is_some() =>
@@ -1946,9 +2100,7 @@ impl NativeShell {
                     code,
                     ..
                 } if self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .complete_rejection(*command_id, *command)
+                    .reject_command(*command_id, &update_owner, *command)
                     .is_some() =>
                 {
                     self.update_workspace_mut()
@@ -1965,9 +2117,7 @@ impl NativeShell {
                     code,
                     ..
                 } if self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .complete_rejection(*command_id, *command)
+                    .reject_command(*command_id, &update_owner, *command)
                     .is_some() =>
                 {
                     self.update_workspace_mut()
@@ -1980,10 +2130,9 @@ impl NativeShell {
                     code,
                     ..
                 } if self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .complete_rejection(
+                    .reject_command(
                         *command_id,
+                        &update_owner,
                         desktop::runtime::DesktopRuntimeCommandKind::ListSessions,
                     )
                     .is_some() =>
@@ -2002,14 +2151,11 @@ impl NativeShell {
                     code,
                     ..
                 } => {
-                    if let Some(DesktopCommandIntent::FileReview { request }) = self
-                        .update_workspace_mut()
-                        .command_ledger
-                        .complete_rejection(
-                            *command_id,
-                            desktop::runtime::DesktopRuntimeCommandKind::ReviewChangedFile,
-                        )
-                    {
+                    if let Some(DesktopCommandIntent::FileReview { request }) = self.reject_command(
+                        *command_id,
+                        &update_owner,
+                        desktop::runtime::DesktopRuntimeCommandKind::ReviewChangedFile,
+                    ) {
                         self.update_workspace_mut().file_review =
                             Arc::new(DesktopFileReviewState::Failed {
                                 request,
@@ -2028,10 +2174,9 @@ impl NativeShell {
                     code,
                     ..
                 } if self
-                    .update_workspace_mut()
-                    .command_ledger
-                    .complete_rejection(
+                    .reject_command(
                         *command_id,
+                        &update_owner,
                         desktop::runtime::DesktopRuntimeCommandKind::OpenExternalEditor,
                     )
                     .is_some() =>
@@ -2049,30 +2194,28 @@ impl NativeShell {
                     ..
                 } => {
                     sessions_pane_dirty = true;
-                    self.update_workspace_mut()
-                        .command_ledger
-                        .complete(*command_id, &DesktopCommandIntent::Prompt);
-                    self.update_workspace_mut()
-                        .command_ledger
-                        .complete_where(|intent| {
-                            matches!(
-                                intent,
-                                DesktopCommandIntent::Abort {
-                                    operation_id: pending_operation_id,
-                                } if pending_operation_id == operation_id
-                            )
-                        });
-                    self.update_workspace_mut()
-                        .command_ledger
-                        .complete_where(|intent| {
-                            matches!(
-                                intent,
-                                DesktopCommandIntent::Authorization {
-                                    operation_id: pending_operation_id,
-                                    ..
-                                } if pending_operation_id == operation_id
-                            )
-                        });
+                    let _ = self.complete_command(
+                        *command_id,
+                        &update_owner,
+                        &DesktopCommandIntent::Prompt,
+                    );
+                    self.complete_matching_command(&update_owner, |intent| {
+                        matches!(
+                            intent,
+                            DesktopCommandIntent::Abort {
+                                operation_id: pending_operation_id,
+                            } if pending_operation_id == operation_id
+                        )
+                    });
+                    self.complete_matching_command(&update_owner, |intent| {
+                        matches!(
+                            intent,
+                            DesktopCommandIntent::Authorization {
+                                operation_id: pending_operation_id,
+                                ..
+                            } if pending_operation_id == operation_id
+                        )
+                    });
                     if let Some(error) = error {
                         self.update_workspace_mut().set_preference_notice(format!(
                             "Prompt finished with runtime error ({}).",
@@ -2088,7 +2231,7 @@ impl NativeShell {
                             truncate_label(&error.code, 28)
                         ));
                     }
-                    self.update_workspace_mut().command_ledger.clear();
+                    self.command_tracker.cancel_all();
                     self.reject_pending_composer(format!(
                         "desktop runtime failed ({})",
                         truncate_label(&error.code, 28)
@@ -2099,7 +2242,7 @@ impl NativeShell {
                     if self.project_catalog.state().is_loading() {
                         self.project_catalog.fail_refresh("desktop runtime stopped");
                     }
-                    self.update_workspace_mut().command_ledger.clear();
+                    self.command_tracker.cancel_all();
                     self.reject_pending_composer("desktop runtime stopped".into());
                 }
                 _ => {}
@@ -2282,10 +2425,10 @@ impl NativeShell {
                     .conversation_controller
                     .reconcile_content(&source, event_sequence_after);
             }
-            if let Some((command_id, authorization_id, _)) = self
-                .update_workspace_mut()
-                .command_ledger
-                .authorization()
+            let update_owner = self.update_workspace_key();
+            if let Some((command_id, authorization_id, operation_id)) = self
+                .command_tracker
+                .authorization(&update_owner)
                 .map(|(command_id, authorization_id, operation_id)| {
                     (
                         command_id,
@@ -2305,9 +2448,11 @@ impl NativeShell {
                             .any(|request| request.authorization_id == authorization_id)
                     })
             {
-                self.update_workspace_mut()
-                    .command_ledger
-                    .complete_authorization(command_id, &authorization_id);
+                let intent = DesktopCommandIntent::Authorization {
+                    authorization_id,
+                    operation_id,
+                };
+                let _ = self.complete_command(command_id, &update_owner, &intent);
             }
             if outcome.is_replaced() || file_changes_dirty {
                 self.reconcile_file_review();
@@ -2585,16 +2730,15 @@ impl NativeShell {
                     })
                 });
         if !remains_current {
-            self.update_workspace_mut()
-                .command_ledger
-                .complete_where(|intent| {
-                    matches!(
-                        intent,
-                        DesktopCommandIntent::FileReview {
-                            request: pending_request,
-                        } if pending_request == &request
-                    )
-                });
+            let owner = self.update_workspace_key();
+            self.complete_matching_command(&owner, |intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::FileReview {
+                        request: pending_request,
+                    } if pending_request == &request
+                )
+            });
             self.update_workspace_mut().file_review = Arc::new(DesktopFileReviewState::Empty);
         }
     }
@@ -2690,9 +2834,8 @@ impl NativeShell {
                 projection.lifecycle() == DesktopProjectionLifecycle::NeedsResync
             })
             || self
-                .update_workspace()
-                .command_ledger
-                .contains(&DesktopCommandIntent::Resync)
+                .command_tracker
+                .contains(&self.update_workspace_key(), &DesktopCommandIntent::Resync)
         {
             return;
         }
@@ -2709,9 +2852,8 @@ impl NativeShell {
             },
         );
         if let Err(message) = admission {
-            self.update_workspace_mut()
-                .command_ledger
-                .complete(command_id, &intent);
+            let owner = self.update_workspace_key();
+            let _ = self.complete_command(command_id, &owner, &intent);
             self.update_workspace_mut().set_preference_notice(message);
         }
     }
@@ -2763,10 +2905,7 @@ impl NativeShell {
             ) {
             Ok(payload) => payload.to_owned(),
             Err(error) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(error.to_string());
@@ -2797,10 +2936,7 @@ impl NativeShell {
             },
         );
         if let Err(message) = admission {
-            self.workspace_store
-                .active_mut()
-                .command_ledger
-                .complete(command_id, &intent);
+            self.complete_active_command(command_id, &intent);
             let _ = self
                 .workspace_store
                 .active_mut()
@@ -3088,10 +3224,7 @@ impl NativeShell {
         {
             Ok(payload) => payload.to_owned(),
             Err(error) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(error.to_string());
@@ -3128,10 +3261,7 @@ impl NativeShell {
             },
         );
         if let Err(message) = admission {
-            self.workspace_store
-                .active_mut()
-                .command_ledger
-                .complete(command_id, &intent);
+            self.complete_active_command(command_id, &intent);
             let _ = self
                 .workspace_store
                 .active_mut()
@@ -3145,12 +3275,9 @@ impl NativeShell {
     }
 
     fn abort_active_operation(&mut self, cx: &mut Context<Self>) {
-        if self
-            .workspace_store
-            .active_mut()
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Abort { .. }))
-        {
+        if self.active_command_contains_where(|intent| {
+            matches!(intent, DesktopCommandIntent::Abort { .. })
+        }) {
             return;
         }
         let Some(operation_id) = self
@@ -3198,10 +3325,7 @@ impl NativeShell {
                     .set_preference_notice("Abort requested…".into());
             }
             Err(message) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(message);
@@ -3214,12 +3338,7 @@ impl NativeShell {
 
     fn reload_local_resources(&mut self, cx: &mut Context<Self>) {
         let intent = DesktopCommandIntent::Reload;
-        if self
-            .workspace_store
-            .active_mut()
-            .command_ledger
-            .contains(&intent)
-        {
+        if self.active_command_contains(&intent) {
             return;
         }
         if self
@@ -3263,10 +3382,7 @@ impl NativeShell {
                     .set_preference_notice("Reloading local resources…".into());
             }
             Err(message) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(message);
@@ -3283,12 +3399,9 @@ impl NativeShell {
         action: DesktopRecoveryAction,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .workspace_store
-            .active_mut()
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Recovery { .. }))
-        {
+        if self.active_command_contains_where(|intent| {
+            matches!(intent, DesktopCommandIntent::Recovery { .. })
+        }) {
             return;
         }
         if self
@@ -3350,10 +3463,7 @@ impl NativeShell {
                     ));
             }
             Err(message) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(message);
@@ -3393,12 +3503,9 @@ impl NativeShell {
         if already_selected {
             return;
         }
-        if self
-            .workspace_store
-            .active_mut()
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)))
-        {
+        if self.active_command_contains_where(|intent| {
+            matches!(intent, DesktopCommandIntent::Selection(_))
+        }) {
             return;
         }
         if self
@@ -3455,10 +3562,7 @@ impl NativeShell {
                     .set_preference_notice("Applying selection…".into());
             }
             Err(message) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(message);
@@ -3551,12 +3655,9 @@ impl NativeShell {
         decision: ToolAuthorizationDecision,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .workspace_store
-            .active_mut()
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Authorization { .. }))
-        {
+        if self.active_command_contains_where(|intent| {
+            matches!(intent, DesktopCommandIntent::Authorization { .. })
+        }) {
             return;
         }
         let intent = DesktopCommandIntent::Authorization {
@@ -3583,10 +3684,7 @@ impl NativeShell {
                     .set_preference_notice("Authorization decision pending…".into());
             }
             Err(message) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(message);
@@ -3853,12 +3951,9 @@ impl NativeShell {
         let intent = DesktopCommandIntent::FileReview {
             request: request.clone(),
         };
-        if self
-            .workspace_store
-            .active_mut()
-            .command_ledger
-            .contains_where(|pending| matches!(pending, DesktopCommandIntent::FileReview { .. }))
-        {
+        if self.active_command_contains_where(|pending| {
+            matches!(pending, DesktopCommandIntent::FileReview { .. })
+        }) {
             self.workspace_store
                 .active_mut()
                 .set_preference_notice("Another file review is already pending.".into());
@@ -3878,10 +3973,7 @@ impl NativeShell {
             .as_ref()
             .map(|projection| projection.snapshot().session.session_id.clone())
         else {
-            self.workspace_store
-                .active_mut()
-                .command_ledger
-                .complete(command_id, &intent);
+            self.complete_active_command(command_id, &intent);
             self.workspace_store
                 .active_mut()
                 .set_preference_notice("File review requires an open session.".into());
@@ -3907,10 +3999,7 @@ impl NativeShell {
                     .set_preference_notice("Loading changed-file review…".into());
             }
             Err(message) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(message);
@@ -4011,10 +4100,7 @@ impl NativeShell {
             .as_ref()
             .map(|projection| projection.snapshot().session.session_id.clone())
         else {
-            self.workspace_store
-                .active_mut()
-                .command_ledger
-                .complete(command_id, &intent);
+            self.complete_active_command(command_id, &intent);
             self.workspace_store
                 .active_mut()
                 .set_preference_notice("External editor requires an open session.".into());
@@ -4041,10 +4127,7 @@ impl NativeShell {
                     ));
             }
             Err(message) => {
-                self.workspace_store
-                    .active_mut()
-                    .command_ledger
-                    .complete(command_id, &intent);
+                self.complete_active_command(command_id, &intent);
                 self.workspace_store
                     .active_mut()
                     .set_preference_notice(message);
@@ -4808,15 +4891,12 @@ impl NativeShell {
             composer_running,
             awaiting_prompt_start: self.workspace_store.active().composer.submitted().is_some()
                 && !composer_running,
-            session_pending: self.workspace_store.active().command_ledger.contains_where(
-                |intent| {
-                    matches!(
-                        intent,
-                        DesktopCommandIntent::CreateSession
-                            | DesktopCommandIntent::OpenSession { .. }
-                    )
-                },
-            ),
+            session_pending: self.command_tracker.contains_anywhere(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
+                )
+            }),
             active_status: self.semantic_status(),
             keyboard_focus_visible: self.keyboard_focus_visible(),
             presented_as_drawer: self.active_drawer == Some(CenterDrawerKind::Sessions),
@@ -5060,19 +5140,15 @@ impl NativeShell {
             selected_section: self.workspace_store.active().inspector_section,
             composer_running,
             awaiting_prompt_start,
-            recovery_pending: self
-                .workspace_store
-                .active()
-                .command_ledger
-                .contains_where(|intent| matches!(intent, DesktopCommandIntent::Recovery { .. })),
-            file_review_pending: self
-                .workspace_store
-                .active()
-                .command_ledger
-                .contains_where(|intent| matches!(intent, DesktopCommandIntent::FileReview { .. })),
-            external_editor_pending: self.workspace_store.active().command_ledger.contains_where(
-                |intent| matches!(intent, DesktopCommandIntent::ExternalEditor { .. }),
-            ),
+            recovery_pending: self.active_command_contains_where(|intent| {
+                matches!(intent, DesktopCommandIntent::Recovery { .. })
+            }),
+            file_review_pending: self.active_command_contains_where(|intent| {
+                matches!(intent, DesktopCommandIntent::FileReview { .. })
+            }),
+            external_editor_pending: self.active_command_contains_where(|intent| {
+                matches!(intent, DesktopCommandIntent::ExternalEditor { .. })
+            }),
             external_editor_configured: self.preferences.external_editor.is_some(),
             changed_files,
             change_count: snapshot.context.changes.len(),
@@ -5130,10 +5206,8 @@ impl NativeShell {
             .cloned()
             .map(|request| {
                 let decision_pending = self
-                    .workspace_store
-                    .active()
-                    .command_ledger
-                    .authorization()
+                    .command_tracker
+                    .authorization(self.workspace_store.active_key())
                     .is_some_and(|(_, authorization_id, operation_id)| {
                         authorization_id == request.authorization_id
                             && operation_id == request.operation_id
@@ -5264,16 +5338,10 @@ impl NativeShell {
         let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
         let awaiting_prompt_start =
             self.workspace_store.active().composer.submitted().is_some() && !composer_running;
-        let reload_pending = self
-            .workspace_store
-            .active()
-            .command_ledger
-            .contains(&DesktopCommandIntent::Reload);
-        let selection_pending = self
-            .workspace_store
-            .active()
-            .command_ledger
-            .contains_where(|intent| matches!(intent, DesktopCommandIntent::Selection(_)));
+        let reload_pending = self.active_command_contains(&DesktopCommandIntent::Reload);
+        let selection_pending = self.active_command_contains_where(|intent| {
+            matches!(intent, DesktopCommandIntent::Selection(_))
+        });
         let current_model_id = project.selected_model_id.as_str();
         let current_profile_id = snapshot
             .map(|snapshot| snapshot.session.default_agent_profile_id.as_str())
@@ -5325,11 +5393,9 @@ impl NativeShell {
             idle: self.workspace_store.active().projection.is_none(),
             status: self.semantic_status(),
             composer_running,
-            abort_pending: self
-                .workspace_store
-                .active()
-                .command_ledger
-                .contains_where(|intent| matches!(intent, DesktopCommandIntent::Abort { .. })),
+            abort_pending: self.active_command_contains_where(|intent| {
+                matches!(intent, DesktopCommandIntent::Abort { .. })
+            }),
             reload_pending,
             selector_disabled: composer_running
                 || awaiting_prompt_start
@@ -6400,10 +6466,11 @@ mod tests {
         );
         shell.update(cx, |shell, cx| {
             let command_id = shell
-                .workspace_store
-                .active()
-                .command_ledger
-                .command_id_for(&DesktopCommandIntent::ListSessions)
+                .command_tracker
+                .command_id_for(
+                    shell.workspace_store.active_key(),
+                    &DesktopCommandIntent::ListSessions,
+                )
                 .expect("the explicit refresh remains pending");
             shell.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionsListed {
@@ -6487,11 +6554,7 @@ mod tests {
                 }
             );
             assert!(
-                !shell
-                    .workspace_store
-                    .active()
-                    .command_ledger
-                    .contains(&DesktopCommandIntent::ListSessions),
+                !shell.active_command_contains(&DesktopCommandIntent::ListSessions),
                 "failed admission must release the pending refresh"
             );
         });
@@ -6507,11 +6570,7 @@ mod tests {
                 project_catalog_controller::ProjectCatalogState::Error { .. }
             ));
             assert!(
-                !shell
-                    .workspace_store
-                    .active()
-                    .command_ledger
-                    .contains(&DesktopCommandIntent::ListSessions),
+                !shell.active_command_contains(&DesktopCommandIntent::ListSessions),
                 "failed refresh must not schedule another attempt"
             );
         });
@@ -6533,10 +6592,11 @@ mod tests {
         );
         shell.update(cx, |shell, cx| {
             let command_id = shell
-                .workspace_store
-                .active()
-                .command_ledger
-                .command_id_for(&DesktopCommandIntent::ListSessions)
+                .command_tracker
+                .command_id_for(
+                    shell.workspace_store.active_key(),
+                    &DesktopCommandIntent::ListSessions,
+                )
                 .expect("refresh is pending before rejection");
             shell.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::CommandRejected {
@@ -7098,8 +7158,9 @@ mod tests {
                 session_id: "session-first".into(),
             };
             let command_id = shell
-                .reserve_command(intent.clone())
-                .expect("the first open command fits the home ledger");
+                .command_tracker
+                .reserve(WorkspaceKey::session("session-first"), intent.clone())
+                .expect("the first open command fits the global tracker");
             shell.runtime_ui_notification_count = 0;
             shell.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionChanged {
@@ -7114,13 +7175,7 @@ mod tests {
                 shell.workspace_store.active().composer.draft(),
                 "home draft"
             );
-            assert!(
-                !shell
-                    .workspace_store
-                    .active()
-                    .command_ledger
-                    .matches(command_id, &intent)
-            );
+            assert!(shell.command_tracker.pending(command_id).is_none());
             assert!(shell.runtime_ui_notification_count > 0);
         });
         assert_eq!(
@@ -7128,6 +7183,64 @@ mod tests {
             [],
             "opening a session must not trigger a full catalog request"
         );
+    }
+
+    #[gpui::test]
+    fn runtime_command_owner_mismatch_is_rejected_and_requires_resync(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let projection = DesktopProjection::new(visual_test_snapshot_for("owner-session-a"))
+            .expect("owner session A fixture is valid");
+        let (shell, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection,
+        );
+
+        shell.update(cx, |shell, cx| {
+            let owner = WorkspaceKey::session("owner-session-a");
+            let command_id = shell
+                .command_tracker
+                .reserve(owner.clone(), DesktopCommandIntent::Reload)
+                .expect("reload command fits the global tracker");
+            let mut foreign = visual_test_snapshot_for("owner-session-b");
+            foreign.project.selected_model_id = "foreign-model-must-not-apply".into();
+            shell
+                .runtime_updates
+                .push_back(desktop::runtime::DesktopRuntimeUpdate::Reloaded {
+                    command_id,
+                    metadata: desktop::runtime::DesktopRuntimeMetadataSnapshot {
+                        project: foreign.project,
+                        session: Some(foreign.session),
+                    },
+                });
+
+            assert!(shell.poll_runtime(cx));
+            assert!(shell.command_tracker.matches(
+                command_id,
+                &owner,
+                &DesktopCommandIntent::Reload,
+            ));
+            assert_ne!(
+                shell.workspace_store.active().project.selected_model_id,
+                "foreign-model-must-not-apply"
+            );
+            let projection = shell
+                .workspace_store
+                .active()
+                .projection
+                .as_ref()
+                .expect("owner session remains hydrated");
+            assert_eq!(
+                projection.lifecycle(),
+                DesktopProjectionLifecycle::NeedsResync
+            );
+            assert!(
+                projection
+                    .issues()
+                    .iter()
+                    .any(|issue| issue.code == "command_owner_mismatch")
+            );
+        });
     }
 
     #[gpui::test]
@@ -7189,7 +7302,6 @@ mod tests {
                     background_snapshot.project,
                     Some(background_projection),
                     None,
-                    DesktopCommandLedger::default(),
                 ),
             );
             shell.project_catalog.replace_catalog(
@@ -7253,13 +7365,7 @@ mod tests {
                     .rejection()
                     .is_some()
             );
-            assert!(
-                !shell
-                    .workspace_store
-                    .active()
-                    .command_ledger
-                    .matches(command_id, &DesktopCommandIntent::Prompt)
-            );
+            assert!(shell.command_tracker.pending(command_id).is_none());
             assert!(
                 shell
                     .workspace_store
@@ -7301,7 +7407,6 @@ mod tests {
                 session_b_snapshot.project.clone(),
                 Some(session_b_projection),
                 None,
-                DesktopCommandLedger::default(),
             );
             let change = CodingAgentFileChangeSnapshot {
                 path: "session-b-only.rs".into(),
@@ -7319,19 +7424,17 @@ mod tests {
             session_b.inspector_section = InspectorSection::Task;
             session_b.file_review =
                 Arc::new(DesktopFileReviewState::Loading(review_request.clone()));
-            session_b
-                .command_ledger
-                .reserve_with_id(
-                    9_001,
-                    DesktopCommandIntent::FileReview {
-                        request: review_request.clone(),
-                    },
-                )
-                .expect("session B test command fits its bounded ledger");
 
             shell.workspace_store.active_mut().composer.edit("draft a");
             shell.workspace_store.active_mut().inspector_section = InspectorSection::Runtime;
             insert_session_workspace(shell, "session-b", session_b);
+            let review_intent = DesktopCommandIntent::FileReview {
+                request: review_request.clone(),
+            };
+            let review_command_id = shell
+                .command_tracker
+                .reserve(WorkspaceKey::session("session-b"), review_intent.clone())
+                .expect("session B test command fits the global tracker");
             let sessions = shell.sessions_pane_view_model();
             assert_eq!(
                 sessions
@@ -7370,12 +7473,9 @@ mod tests {
                 DesktopFileReviewState::Empty
             ));
             assert!(
-                shell
-                    .workspace_store
-                    .active()
-                    .command_ledger
-                    .intent(9_001)
-                    .is_none()
+                !shell
+                    .command_tracker
+                    .contains(shell.workspace_store.active_key(), &review_intent,)
             );
 
             let background = session_workspace(shell, "session-b")
@@ -7395,7 +7495,11 @@ mod tests {
                 background.file_review.as_ref(),
                 DesktopFileReviewState::Loading(request) if *request == review_request
             ));
-            assert!(background.command_ledger.intent(9_001).is_some());
+            assert!(shell.command_tracker.matches(
+                review_command_id,
+                &WorkspaceKey::session("session-b"),
+                &review_intent,
+            ));
 
             assert!(activate_session(shell, "session-b"));
             assert_eq!(shell.workspace_store.active().composer.draft(), "draft b");
@@ -7417,12 +7521,7 @@ mod tests {
                 insert_session_workspace(
                     shell,
                     session_id,
-                    SessionWorkspace::new(
-                        snapshot.project,
-                        Some(projection),
-                        None,
-                        DesktopCommandLedger::default(),
-                    ),
+                    SessionWorkspace::new(snapshot.project, Some(projection), None),
                 );
             }
             assert_eq!(
@@ -7469,19 +7568,20 @@ mod tests {
             insert_session_workspace(
                 shell,
                 "close-session-b",
-                SessionWorkspace::new(
-                    snapshot_b.project,
-                    Some(projection_b),
-                    None,
-                    DesktopCommandLedger::default(),
-                ),
+                SessionWorkspace::new(snapshot_b.project, Some(projection_b), None),
             );
+            let owner = WorkspaceKey::session("close-session-b");
+            let abandoned_command_id = shell
+                .command_tracker
+                .reserve(owner.clone(), DesktopCommandIntent::Reload)
+                .expect("background pending command fits the global tracker");
             let intent = DesktopCommandIntent::CloseSession {
                 session_id: "close-session-b".into(),
             };
             shell.close_session("close-session-b", cx);
-            let command_id = session_workspace(shell, "close-session-b")
-                .and_then(|workspace| workspace.command_ledger.command_id_for(&intent))
+            let command_id = shell
+                .command_tracker
+                .command_id_for(&owner, &intent)
                 .expect("close command is owned by the target workspace");
             shell.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionClosed {
@@ -7492,6 +7592,16 @@ mod tests {
             assert!(shell.poll_runtime(cx));
             assert_eq!(active_session_id(shell), Some("close-session-a"));
             assert!(session_workspace(shell, "close-session-b").is_none());
+            assert!(
+                shell
+                    .command_tracker
+                    .pending(abandoned_command_id)
+                    .is_none()
+            );
+            assert_eq!(
+                shell.workspace_store.active().preference_notice.as_deref(),
+                Some("Session closed; 1 pending command(s) cancelled.")
+            );
             assert!(shell.project_catalog.catalog().is_empty());
         });
         assert_eq!(
@@ -7523,8 +7633,9 @@ mod tests {
             let intent = DesktopCommandIntent::CloseSession {
                 session_id: "close-active-session".into(),
             };
-            let command_id = session_workspace(shell, "close-active-session")
-                .and_then(|workspace| workspace.command_ledger.command_id_for(&intent))
+            let command_id = shell
+                .command_tracker
+                .command_id_for(&WorkspaceKey::session("close-active-session"), &intent)
                 .expect("close command remains owned by the active session");
             shell.runtime_updates.push_back(
                 desktop::runtime::DesktopRuntimeUpdate::SessionClosed {
@@ -10040,19 +10151,15 @@ mod tests {
                 .contains(&desktop::runtime::DesktopRuntimeCommandKind::DecideToolAuthorization)
         );
         assert!(shell.read_with(cx, |shell, _| {
-            shell
-                .workspace_store
-                .active()
-                .command_ledger
-                .contains_where(|intent| {
-                    matches!(
-                        intent,
-                        DesktopCommandIntent::Authorization {
-                            authorization_id,
-                            ..
-                        } if authorization_id == "authorization-visual-test"
-                    )
-                })
+            shell.active_command_contains_where(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::Authorization {
+                        authorization_id,
+                        ..
+                    } if authorization_id == "authorization-visual-test"
+                )
+            })
         }));
     }
 
@@ -10114,19 +10221,15 @@ mod tests {
                 .contains(&desktop::runtime::DesktopRuntimeCommandKind::RetryRecovery)
         );
         assert!(shell.read_with(cx, |shell, _| {
-            shell
-                .workspace_store
-                .active()
-                .command_ledger
-                .contains_where(|intent| {
-                    matches!(
-                        intent,
-                        DesktopCommandIntent::Recovery {
-                            recovery_id,
-                            action: DesktopRecoveryAction::Retry,
-                        } if recovery_id == "recovery-visual-test"
-                    )
-                })
+            shell.active_command_contains_where(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::Recovery {
+                        recovery_id,
+                        action: DesktopRecoveryAction::Retry,
+                    } if recovery_id == "recovery-visual-test"
+                )
+            })
         }));
 
         let changed_file = cx
@@ -10245,19 +10348,15 @@ mod tests {
                 .contains(&desktop::runtime::DesktopRuntimeCommandKind::RetryRecovery)
         );
         assert!(shell.read_with(cx, |shell, _| {
-            shell
-                .workspace_store
-                .active()
-                .command_ledger
-                .contains_where(|intent| {
-                    matches!(
-                        intent,
-                        DesktopCommandIntent::Recovery {
-                            recovery_id,
-                            action: DesktopRecoveryAction::Retry,
-                        } if recovery_id == "recovery-inline-diagnostic"
-                    )
-                })
+            shell.active_command_contains_where(|intent| {
+                matches!(
+                    intent,
+                    DesktopCommandIntent::Recovery {
+                        recovery_id,
+                        action: DesktopRecoveryAction::Retry,
+                    } if recovery_id == "recovery-inline-diagnostic"
+                )
+            })
         }));
     }
 
@@ -10936,12 +11035,7 @@ mod tests {
             let snapshot = visual_test_snapshot_for("temporary-history-session");
             let projection = DesktopProjection::new(snapshot.clone())
                 .expect("history session fixture is a valid projection");
-            let history = SessionWorkspace::new(
-                snapshot.project,
-                Some(projection),
-                None,
-                DesktopCommandLedger::default(),
-            );
+            let history = SessionWorkspace::new(snapshot.project, Some(projection), None);
             insert_session_workspace(shell, "temporary-history-session", history);
             assert!(activate_session(shell, "temporary-history-session"));
             shell
@@ -11102,7 +11196,6 @@ mod tests {
                     snapshot_b.project,
                     Some(projection_b),
                     None,
-                    DesktopCommandLedger::default(),
                     thinking_b,
                 ),
             );
@@ -11180,14 +11273,8 @@ mod tests {
     fn composer_mode_and_draft_are_scoped_to_the_active_session() {
         let projection = visual_test_projection();
         let project = projection.project().clone();
-        let mut session_a = SessionWorkspace::new(
-            project.clone(),
-            Some(projection),
-            None,
-            DesktopCommandLedger::default(),
-        );
-        let mut session_b =
-            SessionWorkspace::new(project, None, None, DesktopCommandLedger::default());
+        let mut session_a = SessionWorkspace::new(project.clone(), Some(projection), None);
+        let mut session_b = SessionWorkspace::new(project, None, None);
         session_a.composer.edit("draft a");
         session_a.composer_running_mode = ComposerRunningMode::QueueNext;
         session_b.composer.edit("draft b");
@@ -11208,14 +11295,8 @@ mod tests {
     fn inspector_section_selection_is_scoped_to_the_session() {
         let projection = visual_test_projection();
         let project = projection.project().clone();
-        let mut session_a = SessionWorkspace::new(
-            project.clone(),
-            Some(projection),
-            None,
-            DesktopCommandLedger::default(),
-        );
-        let mut session_b =
-            SessionWorkspace::new(project, None, None, DesktopCommandLedger::default());
+        let mut session_a = SessionWorkspace::new(project.clone(), Some(projection), None);
+        let mut session_b = SessionWorkspace::new(project, None, None);
         session_a.inspector_section = InspectorSection::Runtime;
         session_b.inspector_section = InspectorSection::Task;
 

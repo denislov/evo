@@ -441,6 +441,10 @@ impl DesktopProjection {
         &self.issues
     }
 
+    pub(crate) fn require_command_resync(&mut self, code: &str, message: &str) {
+        self.require_resync(DesktopProjectionIssue::new(code, message));
+    }
+
     #[cfg(test)]
     pub(crate) const fn counters(&self) -> DesktopProjectionCounters {
         self.counters
