@@ -250,8 +250,6 @@ impl Render for ConversationPane {
                         let copy_tool_command_block_id = block_id.clone();
                         let copy_tool_output_block_id = block_id.clone();
                         let tool_header_toggle_block_id = block_id.clone();
-                        let tool_chevron_select_block_id = block_id.clone();
-                        let tool_chevron_toggle_block_id = block_id.clone();
                         let reasoning_collapsed_toggle_block_id = block_id.clone();
                         let reasoning_collapsed_chevron_block_id = block_id.clone();
                         let reasoning_expanded_toggle_block_id = block_id.clone();
@@ -287,14 +285,12 @@ impl Render for ConversationPane {
                         let tool_command = is_tool
                             .then(|| structured_tool_command(&block.detail, &block.text))
                             .flatten();
-                        let tool_exit_code = is_tool.then(|| {
-                            tool_exit_code_label(
-                                &block.title,
-                                &text,
-                                block.done,
-                                block.is_error,
-                            )
-                        });
+                        let tool_name = is_tool.then(|| tool_name_from_title(&block.title));
+                        let tool_label = tool_name.map(tool_display_label);
+                        let tool_expandable = tool_name.is_some_and(tool_is_expandable);
+                        let tool_summary_text = tool_name
+                            .map(|name| tool_summary(name, &block.detail, &block.text))
+                            .unwrap_or_default();
                         let has_collapsible_detail = (is_assistant && !detail_text.is_empty())
                             || (is_tool && (!text.is_empty() || !detail_text.is_empty()));
                         let terminal_label = if block.is_error {
@@ -426,7 +422,7 @@ impl Render for ConversationPane {
                                                         .items_center()
                                                         .gap_token(DesignSpace::Sm)
                                                         .when(
-                                                            is_tool && has_collapsible_detail,
+                                                            is_tool && tool_expandable,
                                                             |surface| {
                                                                 surface
                                                                     .role(Role::Button)
@@ -445,9 +441,7 @@ impl Render for ConversationPane {
                                                                         durable,
                                                                     },
                                                                 );
-                                                                if is_tool
-                                                                    && has_collapsible_detail
-                                                                {
+                                                                if is_tool && tool_expandable {
                                                                     cx.emit(
                                                                         ConversationPaneEvent::ToggleDetails {
                                                                             block_id: tool_header_toggle_block_id.clone(),
@@ -456,51 +450,101 @@ impl Render for ConversationPane {
                                                                 }
                                                             },
                                                         ))
-                                                        .child(
-                                                            div()
-                                                                // Keep the former label padding so
-                                                                // removing its filled chip does not
-                                                                // perturb measured row height. Role
-                                                                // identity now comes from the leading
-                                                                // glyph and text tone alone.
-                                                                .px_token(DesignSpace::Sm)
-                                                                .py_token(DesignSpace::Xs)
-                                                                .text_token(DesignText::Metadata)
-                                                                .font_weight(
-                                                                    gpui::FontWeight::SEMIBOLD,
-                                                                )
-                                                                .text_color(rgb(
-                                                                    visual.accent.value(),
-                                                                ))
-                                                                .child(visual.glyph),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_token(DesignText::Body)
-                                                                .font_weight(
-                                                                    gpui::FontWeight::MEDIUM,
-                                                                )
-                                                                .text_color(rgb(theme.text.value()))
-                                                                .child(SharedString::new(
-                                                                    block.title.clone(),
-                                                                )),
-                                                        )
-                                                        .when_some(
-                                                            terminal_label.filter(|_| is_tool),
-                                                            |surface, label| {
-                                                                surface.child(
+                                                        .when(is_tool, |main| {
+                                                            main.child(
+                                                                div()
+                                                                    .px_token(DesignSpace::Sm)
+                                                                    .py_token(DesignSpace::Xs)
+                                                                    .text_token(DesignText::Metadata)
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .text_color(rgb(
+                                                                        theme.text.value(),
+                                                                    ))
+                                                                    .child(tool_label.unwrap_or("Tool")),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_token(DesignText::Body)
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::MEDIUM,
+                                                                    )
+                                                                    .text_color(rgb(
+                                                                        theme.muted_text.value(),
+                                                                    ))
+                                                                    .min_w_0()
+                                                                    .truncate()
+                                                                    .child(SharedString::new(
+                                                                        tool_summary_text.clone(),
+                                                                    )),
+                                                            )
+                                                            .when(tool_expandable, |main| {
+                                                                main.child(
                                                                     div()
+                                                                        .id((
+                                                                            "tool-toggle-details",
+                                                                            index,
+                                                                        ))
+                                                                        .debug_selector(|| {
+                                                                            "desktop-toggle-tool-details"
+                                                                                .into()
+                                                                        })
                                                                         .flex_shrink_0()
+                                                                        .w(px(32.))
+                                                                        .h(px(32.))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
                                                                         .text_token(
                                                                             DesignText::Metadata,
                                                                         )
                                                                         .text_color(rgb(
-                                                                            visual.accent.value(),
+                                                                            theme.muted_text.value(),
                                                                         ))
-                                                                        .child(label),
+                                                                        .opacity(0.)
+                                                                        .group_hover(
+                                                                            hover_group.clone(),
+                                                                            |style| {
+                                                                                style.opacity(1.)
+                                                                            },
+                                                                        )
+                                                                        .child(if detail_expanded {
+                                                                            "v"
+                                                                        } else {
+                                                                            ">"
+                                                                        }),
                                                                 )
-                                                            },
-                                                        ),
+                                                            })
+                                                        })
+                                                        .when(!is_tool, |main| {
+                                                            main.child(
+                                                                div()
+                                                                    .px_token(DesignSpace::Sm)
+                                                                    .py_token(DesignSpace::Xs)
+                                                                    .text_token(DesignText::Metadata)
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .text_color(rgb(
+                                                                        visual.accent.value(),
+                                                                    ))
+                                                                    .child(visual.glyph),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_token(DesignText::Body)
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::MEDIUM,
+                                                                    )
+                                                                    .text_color(rgb(
+                                                                        theme.text.value(),
+                                                                    ))
+                                                                    .child(SharedString::new(
+                                                                        block.title.clone(),
+                                                                    )),
+                                                            )
+                                                        }),
                                                 )
                                                 .when_some(
                                                     terminal_label.filter(|_| !is_tool),
@@ -516,45 +560,6 @@ impl Render for ConversationPane {
                                                         )
                                                     },
                                                 )
-                                                .when(
-                                                    is_tool && has_collapsible_detail,
-                                                    |header| {
-                                                        header.child(
-                                                            DesktopIconButton::new(
-                                                                ("toggle-tool-details", index),
-                                                                if detail_expanded {
-                                                                    DesktopIcon::ChevronUp
-                                                                } else {
-                                                                    DesktopIcon::ChevronDown
-                                                                },
-                                                                if detail_expanded {
-                                                                    "Hide tool output and arguments"
-                                                                } else {
-                                                                    "Show tool output and arguments"
-                                                                },
-                                                            )
-                                                            .build()
-                                                            .debug_selector(|| {
-                                                                "desktop-toggle-tool-details".into()
-                                                            })
-                                                            .on_click(cx.listener(
-                                                                move |_, _, _, cx| {
-                                                                    cx.emit(
-                                                                        ConversationPaneEvent::Select {
-                                                                            block_id: tool_chevron_select_block_id.clone(),
-                                                                            durable,
-                                                                        },
-                                                                    );
-                                                                    cx.emit(
-                                                                        ConversationPaneEvent::ToggleDetails {
-                                                                            block_id: tool_chevron_toggle_block_id.clone(),
-                                                                        },
-                                                                    );
-                                                                },
-                                                            )),
-                                                        )
-                                                    },
-                                                ),
                                         )
                                         .when(
                                             is_assistant
@@ -736,29 +741,71 @@ impl Render for ConversationPane {
                                         },
                                         )
                                         .when(is_tool && detail_expanded, |card| {
+                                            let tool_name_str = tool_name_from_title(&block.title);
+                                            let is_shell = tool_name_str == "bash";
+                                            let is_edit = tool_name_str == "edit";
                                             card.child(
                                                 div()
                                                     .flex()
                                                     .flex_col()
                                                     .gap_token(DesignSpace::Xs)
-                                                    .when_some(tool_command.clone(), |section, command| {
-                                                        section
-                                                            .child(
-                                                                div()
-                                                                    .text_token(DesignText::Metadata)
-                                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                                    .text_color(rgb(theme.subtle_text.value()))
-                                                                    .child("COMMAND"),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .font_family(MONOSPACE_FONT_FAMILY)
-                                                                    .text_token(DesignText::Metadata)
-                                                                    .text_color(rgb(theme.text.value()))
-                                                                    .whitespace_normal()
-                                                                    .child(command),
-                                                            )
-                                                    })
+                                                    .child(
+                                                        div()
+                                                            .id(("tool-output-region", index))
+                                                            .debug_selector(|| {
+                                                                "desktop-tool-output-region".into()
+                                                            })
+                                                            .rounded_token(DesignRadius::Md)
+                                                            .border_1()
+                                                            .border_color(rgb(theme.divider.value()))
+                                                            .bg(rgb(theme.surface.value()))
+                                                            .max_h(px(400.))
+                                                            .overflow_scroll()
+                                                            .p_token(DesignSpace::Sm)
+                                                            .font_family(MONOSPACE_FONT_FAMILY)
+                                                            .text_token(DesignText::Metadata)
+                                                            .when(is_shell, |region| {
+                                                                region
+                                                                    .child(
+                                                                        div()
+                                                                            .text_color(rgb(
+                                                                                theme.subtle_text.value(),
+                                                                            ))
+                                                                            .child(SharedString::new(format!(
+                                                                                "$ {}",
+                                                                                tool_command.clone().unwrap_or_default()
+                                                                            ))),
+                                                                    )
+                                                                    .when(!text.is_empty(), |region| {
+                                                                        region.child(
+                                                                            div()
+                                                                                .text_color(rgb(theme.text.value()))
+                                                                                .child(
+                                                                                    StreamingText::new(
+                                                                                        text.clone(),
+                                                                                        text_phase,
+                                                                                        text_phase.renders_markdown().then(|| {
+                                                                                            pane.markdown_state(&markdown_key, &text, cx)
+                                                                                        }),
+                                                                                        cx.entity().downgrade(),
+                                                                                    )
+                                                                                    .into_any_element(),
+                                                                                ),
+                                                                        )
+                                                                    })
+                                                            })
+                                                            .when(is_edit, |region| {
+                                                                region.child(edit_diff_view(&block.detail, &block.text, &theme))
+                                                            })
+                                                            .when(!is_shell && !is_edit, |region| {
+                                                                region.child(
+                                                                    div()
+                                                                        .text_color(rgb(theme.text.value()))
+                                                                        .whitespace_normal()
+                                                                        .child(SharedString::new(text.to_string())),
+                                                                )
+                                                            }),
+                                                    )
                                                     .child(
                                                         div()
                                                             .flex()
@@ -824,7 +871,7 @@ impl Render for ConversationPane {
                                                     ),
                                             )
                                         })
-                                        .when(!text.is_empty() && (!is_tool || detail_expanded), |card| {
+                                        .when(!text.is_empty() && !is_tool, |card| {
                                             let content = StreamingText::new(
                                                 text.clone(),
                                                 text_phase,
@@ -834,106 +881,33 @@ impl Render for ConversationPane {
                                                 cx.entity().downgrade(),
                                             )
                                             .into_any_element();
-                                            if is_tool {
-                                                card.child(
-                                                    div()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_token(DesignSpace::Xs)
-                                                        .child(
-                                                            div()
-                                                                .text_token(DesignText::Metadata)
-                                                                .font_weight(
-                                                                    gpui::FontWeight::SEMIBOLD,
-                                                                )
-                                                                .text_color(rgb(
-                                                                    theme.subtle_text.value(),
-                                                                ))
-                                                                .child("OUTPUT"),
-                                                        )
-                                                        .child(content),
-                                                )
-                                            } else {
-                                                card.child(content)
-                                            }
+                                            card.child(content)
                                         })
                                         .when(
                                             !is_assistant
                                                 && !detail_text.is_empty()
-                                                && (!is_tool || detail_expanded),
+                                                && !is_tool,
                                             |card| {
-                                            card.child(
-                                                div()
-                                                    .mt_token(DesignSpace::Xs)
-                                                    .pl_token(DesignSpace::Md)
-                                                    .py_token(DesignSpace::Sm)
-                                                    .when(is_tool, |detail| {
-                                                        detail
-                                                            .font_family(MONOSPACE_FONT_FAMILY)
-                                                            .text_token(DesignText::Metadata)
-                                                    })
-                                                    .text_color(rgb(theme.muted_text.value()))
-                                                    .when(is_tool, |detail| {
-                                                        detail.child(
-                                                            div()
-                                                                .mb_token(DesignSpace::Xs)
-                                                                .font_family(
-                                                                    desktop::shell::UI_FONT_FAMILY,
-                                                                )
-                                                                .text_token(DesignText::Metadata)
-                                                                .font_weight(
-                                                                    gpui::FontWeight::SEMIBOLD,
-                                                                )
-                                                                .text_color(rgb(
-                                                                    theme.subtle_text.value(),
-                                                                ))
-                                                                .child("ARGUMENTS"),
-                                                        )
-                                                    })
-                                                    .child(
-                                                        StreamingText::new(
-                                                            detail_text.clone(),
-                                                            text_phase,
-                                                            text_phase.renders_markdown().then(|| {
-                                                                pane.markdown_state(
-                                                                    &detail_markdown_key,
-                                                                    &detail_text,
-                                                                    cx,
-                                                                )
-                                                            }),
-                                                            cx.entity().downgrade(),
-                                                        )
-                                                        .into_any_element(),
-                                                    ),
-                                            )
-                                        },
-                                        )
-                                        .when_some(
-                                            (is_tool && detail_expanded)
-                                                .then_some(tool_exit_code)
-                                                .flatten(),
-                                            |card, exit_code| {
                                                 card.child(
                                                     div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_token(DesignSpace::Sm)
-                                                        .text_token(DesignText::Metadata)
+                                                        .mt_token(DesignSpace::Xs)
+                                                        .pl_token(DesignSpace::Md)
+                                                        .py_token(DesignSpace::Sm)
+                                                        .text_color(rgb(theme.muted_text.value()))
                                                         .child(
-                                                            div()
-                                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                                .text_color(rgb(theme.subtle_text.value()))
-                                                                .child("EXIT CODE"),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .font_family(MONOSPACE_FONT_FAMILY)
-                                                                .text_color(rgb(if block.is_error {
-                                                                    theme.danger.value()
-                                                                } else {
-                                                                    theme.muted_text.value()
-                                                                }))
-                                                                .child(exit_code),
+                                                            StreamingText::new(
+                                                                detail_text.clone(),
+                                                                text_phase,
+                                                                text_phase.renders_markdown().then(|| {
+                                                                    pane.markdown_state(
+                                                                        &detail_markdown_key,
+                                                                        &detail_text,
+                                                                        cx,
+                                                                    )
+                                                                }),
+                                                                cx.entity().downgrade(),
+                                                            )
+                                                            .into_any_element(),
                                                         ),
                                                 )
                                             },
@@ -1225,6 +1199,96 @@ fn conversation_recovery_button(
                 action,
             });
         }))
+}
+
+fn tool_name_from_title(title: &str) -> &str {
+    title.rsplit(" · ").next().unwrap_or(title)
+}
+
+fn tool_display_label(name: &str) -> &'static str {
+    match name {
+        "bash" => "Shell",
+        "edit" => "Edit",
+        "read" => "Read",
+        _ => "Tool",
+    }
+}
+
+fn tool_is_expandable(name: &str) -> bool {
+    !matches!(name, "read")
+}
+
+fn tool_arguments_json(detail: &str, text: &str) -> Option<serde_json::Value> {
+    [detail, text]
+        .into_iter()
+        .find_map(|s| serde_json::from_str(s).ok())
+}
+
+fn tool_summary(name: &str, detail: &str, text: &str) -> String {
+    let Some(args) = tool_arguments_json(detail, text) else {
+        return String::new();
+    };
+    match name {
+        "bash" => args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .unwrap_or_default(),
+        "read" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let offset = args.get("offset").and_then(|v| v.as_u64());
+            let limit = args.get("limit").and_then(|v| v.as_u64());
+            match (offset, limit) {
+                (Some(o), Some(l)) => format!("{path} [{o},{l}]"),
+                _ => path.to_owned(),
+            }
+        }
+        "edit" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let (added, removed) = args
+                .get("edits")
+                .and_then(|v| v.as_array())
+                .map(|edits| {
+                    edits.iter().fold((0usize, 0usize), |(a, r), edit| {
+                        let old = edit.get("oldText").and_then(|v| v.as_str()).unwrap_or("");
+                        let new = edit.get("newText").and_then(|v| v.as_str()).unwrap_or("");
+                        (a + new.lines().count(), r + old.lines().count())
+                    })
+                })
+                .unwrap_or((0, 0));
+            format!("{path} +{added} -{removed}")
+        }
+        _ => String::new(),
+    }
+}
+
+fn edit_diff_view(detail: &str, text: &str, theme: &SemanticTheme) -> gpui::AnyElement {
+    let args = tool_arguments_json(detail, text);
+    let edits = args
+        .as_ref()
+        .and_then(|a| a.get("edits").and_then(|v| v.as_array()));
+    let mut container = div().flex().flex_col();
+    if let Some(edits) = edits {
+        for edit in edits {
+            let old = edit.get("oldText").and_then(|v| v.as_str()).unwrap_or("");
+            let new = edit.get("newText").and_then(|v| v.as_str()).unwrap_or("");
+            for line in old.lines() {
+                container = container.child(
+                    div()
+                        .text_color(rgb(theme.danger.value()))
+                        .child(SharedString::new(format!("- {line}"))),
+                );
+            }
+            for line in new.lines() {
+                container = container.child(
+                    div()
+                        .text_color(rgb(theme.accent.value()))
+                        .child(SharedString::new(format!("+ {line}"))),
+                );
+            }
+        }
+    }
+    container.into_any_element()
 }
 
 fn structured_tool_command(detail: &str, text: &str) -> Option<String> {
