@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（Phase 3 进行中，DSK-731 已完成，下一项 DSK-732）
+> 状态：执行中（Phase 3 进行中，DSK-732 已完成，下一项 DSK-733）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1019,7 +1019,7 @@ Gate：Gate A + Gate B。
 | DSK-D730-01 | DSK-730 | 尚未接入的 root event/transition 分支使用模块级 `dead_code` allow | `application/reducer.rs` | DSK-733 | 待清理；runtime branch 在 DSK-731 接入，platform/timer/effect branch 在 DSK-733 接入后删除 allow |
 | DSK-D730-02 | DSK-730 | typed platform effect/result contract 尚未由 executor 消费，使用模块级 `dead_code` allow | `application/effect.rs` | DSK-733 | 待清理；picker/timer/editor/writer 迁移后删除 allow |
 | DSK-D730-03 | DSK-730 | `UiChangeSet` 预定义 region 尚未全部进入 refresh routing，使用模块级 `dead_code` allow | `application/change_set.rs` | DSK-743 | 待清理；统一 selective refresh 后删除 allow |
-| DSK-D731-01 | DSK-731 | `DesktopProjection` 仍直接接收宽 `DesktopRuntimeUpdate`，projection apply、conversation/file-review post-reconcile 与 delta dirty 转换暂由 adapter 的单一 port method 承接 | `app/native_shell.rs::apply_projection_update_for`、`application/reducer.rs::RuntimeUpdatePort::apply_projection_update` | DSK-732 | 待清理；DSK-732 以窄 `ProjectionEvent` 和 application-owned dirty routing 替换该 broad method |
+| DSK-D731-01 | DSK-731 | `DesktopProjection` 仍直接接收宽 `DesktopRuntimeUpdate`，projection apply、conversation/file-review post-reconcile 与 delta dirty 转换暂由 adapter 的单一 port method 承接 | `app/native_shell.rs::apply_projection_update_for`、`application/reducer.rs::RuntimeUpdatePort::apply_projection_update` | DSK-732 | 已清理（`93a0586`）；projection 只接收窄 `ProjectionEvent`，application reducer 负责提取事件和 `DesktopProjectionDelta -> UiChangeSet`，旧 broad method 与 `native_shell/update.rs` 已删除 |
 | DSK-D731-02 | DSK-731 | projection 触发的 resync command admission 暂由 reducer 决策后通过 port 同步发送，尚未形成 typed runtime effect/executor 边界 | `app/native_shell.rs::request_resync_for`、`application/reducer.rs::RuntimeUpdatePort::request_resync_if_needed` | DSK-733 | 待清理；异步 effect/result 全部回流 reducer 时删除 direct send port |
 | DSK-D731-03 | DSK-731 | `SessionWorkspace`/catalog concrete type 仍位于 GPUI adapter，application reducer 通过窄 `RuntimeUpdatePort` 执行显式 owner 的原子 mutation | `application/reducer.rs::RuntimeUpdatePort`、`app/native_shell.rs` | DSK-740 | 待清理；聚合 Shell UI state 时把纯 runtime workspace/catalog state 收归 application，删除 concrete-state bridge |
 
@@ -1232,16 +1232,40 @@ Gate 与性能记录：
   `reduce_runtime`、`Transition::merge` 与 running 状态返回。preference writer error、conversation row
   measurement 和 GPUI entity refresh 位于独立 `apply_runtime_poll` adapter；原 8 个 scattered dirty bool
   改为 typed `UiChangeSet`，并新增 `InspectorTelemetry` region 保留 usage-only 250 ms throttle。
-- DSK-732 仍需把 `apply_projection_update_for` 中 broad `DesktopRuntimeUpdate -> DesktopProjection`、conversation/
-  file-review post-reconcile 与 delta dirty conversion 移出 GPUI adapter；DSK-733 需把 reducer 决定的 resync
-  direct send 收敛为 typed effect；DSK-740 在纯 runtime workspace/catalog state 收归 application 后删除
-  concrete-state `RuntimeUpdatePort` bridge。三项均已登记精确路径和删除任务，没有兼容 façade、dual write
-  或未登记债务。
+- DSK-731 当时留下的 broad projection input/dirty routing 债务已在 DSK-732 清理；DSK-733 仍需把 reducer
+  决定的 resync direct send 收敛为 typed effect；DSK-740 在纯 runtime workspace/catalog state 收归
+  application 后删除 concrete-state `RuntimeUpdatePort` bridge。剩余两项均已登记精确路径和删除任务，
+  没有兼容 façade、dual write 或未登记债务。
 - Gate A 与 Gate B 通过：desktop lib `301 passed / 5 ignored / 0 failed`，dependency boundary
   `10 passed`，all-target check/test、严格 clippy、format 与 diff check 全部通过；runtime/projection 全套 unit
   tests 包含在 lib/all-targets 结果中。附加 `scripts/desktop-perf-gate.sh` 通过：10 MiB fixture hydration
   14,892 µs、scroll render P95 202 µs、input P95 1 µs；10k block headless CPU frame P95 2,926 µs、input
   roundtrip P95 5,558 µs、input-change-to-render P95 350 µs、window RSS growth 24,162,304 bytes。本任务未改
+  render/layout/ViewModel 或像素语义，因此未运行、未更新 visual golden。
+
+### DSK-732 实际结果
+
+- 新增 9 类窄 `ProjectionEvent`：metadata、recovery、hydrated、prompt-started、product event、product
+  snapshot、issue、runtime failure 与 stopped。`application::reducer::projection_event` 对 23 类
+  `DesktopRuntimeUpdate` 做穷尽提取，catalog、editor 和纯 acknowledgement update 显式映射为 `None`；
+  `DesktopProjection::apply` 不再导入或接收 runtime protocol enum，原纯协议 `NoChange` arms 已删除，
+  projection 内部无 delta 的结果改名为语义更准确的 `NoDelta`。
+- product projection 的 duplicate、gap、association mismatch、resync replacement 语义保持不变；runtime 到
+  projection 的 integration tests 显式经过生产 `projection_event` reducer。测试和 native performance fixture
+  直接构造窄 projection event，没有引入 test-only 宽输入 compatibility façade。
+- `ProjectionDirtyRouting` 已合并到 application-owned `UiChangeSet::for_projection`，统一生成 root、
+  conversation、composer、inspector、telemetry、header、modal 与 sessions region；usage-only inspector refresh
+  仍走 250 ms telemetry throttle，streaming-only delta 不会过度刷新 root/inspector/header/modal。
+- conversation controller 的入口改为 `apply_projection_delta(replaced, delta, sequence)`，只接收 projection
+  delta 和目标 workspace 所属 controller，不再接触 root Shell；NativeShell 端口收窄并改名为
+  `apply_projection_event*`。删除旧 `native_shell/update.rs`、旧 broad method 名称与所有分散 dirty helper，
+  DSK-D731-01 已按约定清零。
+- Gate A 通过：desktop lib `302 passed / 5 ignored / 0 failed`，dependency boundary `10 passed`，
+  all-target check、严格 clippy、format 与 diff check 全部通过；projection 定向测试 `12 passed`，覆盖
+  duplicate/gap/resync/replacement。`scripts/desktop-perf-gate.sh` 通过：10 MiB fixture hydration
+  14,511 µs、scroll render P95 218 µs、input P95 1 µs、RSS growth 442,368 bytes；10k block hydration
+  2,423 µs、headless CPU frame P95 2,736 µs、input roundtrip P95 5,832 µs、input-change-to-render P95
+  424 µs、window RSS growth 24,555,520 bytes。本任务只改变 projection 输入与 invalidation routing，未改
   render/layout/ViewModel 或像素语义，因此未运行、未更新 visual golden。
 
 ### 任务状态
@@ -1256,7 +1280,7 @@ Gate 与性能记录：
 | DSK-721 | 已完成 | `4ddde38` | 单一 cloneable `RuntimeCommandClient` 成为 validation/admission/send authority；Bridge 仅负责 bootstrap 与 owner split；Gate A、queue closed/full、redaction、shutdown/join 定向测试通过；未更新 golden |
 | DSK-730 | 已完成 | `333bffe` | typed application event/effect/transition/change-set contract；`DesktopState` 成为 workspace/command/catalog/preferences 唯一 owner；首个 catalog disclosure reducer delegation 接入；Gate A 与 3 项纯 contract 测试通过 |
 | DSK-731 | 已完成 | `c4c0eef` | 单一 root runtime reducer 穷尽 23 variants；删除 direct/projection completion 双权威与隐式 update target；Gate A/B、coverage table、runtime/projection unit、headless perf 全通过；未更新 golden |
-| DSK-732 | 待执行 | — | — |
+| DSK-732 | 已完成 | `93a0586` | 9 类窄 `ProjectionEvent` 与 application-owned dirty routing；删除纯 protocol arms 和旧 update module；Gate A、projection gap/duplicate/resync/replacement 及 headless perf 全通过；未更新 golden |
 | DSK-733 | 待执行 | — | — |
 | DSK-740 | 待执行 | — | — |
 | DSK-741 | 待执行 | — | — |
