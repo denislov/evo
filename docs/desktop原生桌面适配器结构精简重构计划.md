@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（Phase 1 进行中，DSK-710 已完成，下一项 DSK-711）
+> 状态：执行中（Phase 1 已完成，下一项 DSK-720）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1113,14 +1113,34 @@ Gate 与性能记录：
   desktop lib `289 passed / 5 ignored / 0 failed`、format 与 diff check 全部通过。
 - `scripts/desktop-visual-golden.sh` 的 8 个当前 fixture 全部 `RMSE=0`，未更新 golden。
 
+### DSK-711 实际结果
+
+- 新增 application-layer `SessionId`、`WorkspaceKey::{Home, Session(SessionId)}` 与泛型
+  `WorkspaceStore { active, entries }`。Home 始终是普通 typed entry；真实 session ID 即使为 `"home"`
+  也不会与 Home surface 冲突。
+- `NativeShell` 删除独立 active slot 与 parked map，切换只修改 active key，workspace entry 不再
+  remove/swap。首次 prompt/create/open 从 Home 建立 session 时，原 Home owner 被 typed promotion，
+  同时安装新的 Home entry；command completion 会在 promotion 后重新解析实际 owner。
+- 后台 runtime update 通过独立 `runtime_update_target` 直接路由目标 entry，不改变 active key；后台
+  projection、composer、file review、thinking reconciliation 与 resync ledger 均使用目标 workspace，
+  且不会覆盖 active UI dirty state。所有 early-return/continue 路径都会清理 update target。
+- 关闭 background session 只删除目标 entry；关闭 active session 确定性回退 Home，不依赖 HashMap
+  iteration。容量仍为最多 4 个 durable session，Home 不占 session quota，也没有隐式 eviction。
+- 新增/强化测试覆盖：typed Home/真实 `"home"` 隔离、Home promotion、active close fallback、
+  Home ↔ durable session 的 draft/attachments/conversation viewport 恢复、background update owner 隔离、
+  command rekey completion 与容量拒绝。
+- Gate A 与 Gate B 通过：desktop lib `293 passed / 5 ignored / 0 failed`，dependency boundary
+  `10 passed`，all-targets、严格 clippy、format 与 diff check 全部通过。
+- `scripts/desktop-visual-golden.sh` 全部 20 个 fixture 均 `RMSE=0`，未更新 golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
 | --- | --- | --- | --- |
 | DSK-700 | 已完成 | `87c941a` | Gate B、clippy、headless/native perf、reviewed visual compare 全通过；同步 stale conversation goldens |
 | DSK-701 | 已完成 | `e0aabab` | 删除 exact child inventory；10 项 boundary tests 通过；临时 `runtime/protocol.rs -> gpui` 变异被精确拒绝并已撤销 |
-| DSK-710 | 已完成 | 待提交 | 删除 `NativeShell` 的 `Deref/DerefMut`，workspace 字段显式归属 `active_workspace`；Gate A、5 项 workspace/session 定向测试与 8 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
-| DSK-711 | 待执行 | — | — |
+| DSK-710 | 已完成 | `3c689e0` | 删除 `NativeShell` 的 `Deref/DerefMut`，workspace 字段显式归属 `active_workspace`；Gate A、5 项 workspace/session 定向测试与 8 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
+| DSK-711 | 已完成 | 待提交 | typed `WorkspaceKey/WorkspaceStore` 替代 Home sentinel 与 swap；Gate A/B、owner/lifecycle 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-720 | 待执行 | — | — |
 | DSK-721 | 待执行 | — | — |
 | DSK-730 | 待执行 | — | — |

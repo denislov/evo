@@ -11,6 +11,7 @@ use desktop::{
 use gpui::Context;
 
 use super::{DesktopFileReviewState, DesktopThinkingLevel, NativeShell, recovery_action_label};
+use crate::application::workspace::{SessionId, WorkspaceKey};
 use crate::command_ledger::DesktopCommandIntent;
 
 pub(super) enum DirectCommandUpdate {
@@ -34,12 +35,13 @@ pub(super) fn reconcile_direct_update(
             let intent = DesktopCommandIntent::CloseSession {
                 session_id: session_id.clone(),
             };
-            let sessions_dirty = shell.complete_workspace_command(&session_id, command_id, &intent);
+            let owner = WorkspaceKey::Session(SessionId::from_dto(session_id.clone()));
+            let sessions_dirty = shell.complete_workspace_command(&owner, command_id, &intent);
             if sessions_dirty {
                 shell.remove_closed_workspace(&session_id);
                 shell.project_catalog.remove_session(&session_id);
                 shell
-                    .active_workspace
+                    .update_workspace_mut()
                     .set_preference_notice("Session closed.".into());
             }
             DirectCommandUpdate::Consumed {
@@ -49,18 +51,18 @@ pub(super) fn reconcile_direct_update(
         }
         DesktopRuntimeUpdate::FileReviewed { command_id, review } => {
             let request = CodingAgentFileReviewRequest::new(review.change.clone(), review.revision);
-            let inspector_dirty = shell.active_workspace.command_ledger.complete(
+            let inspector_dirty = shell.update_workspace_mut().command_ledger.complete(
                 command_id,
                 &DesktopCommandIntent::FileReview {
                     request: request.clone(),
                 },
             );
             if inspector_dirty {
-                shell.active_workspace.file_review = Arc::new(DesktopFileReviewState::Ready(
+                shell.update_workspace_mut().file_review = Arc::new(DesktopFileReviewState::Ready(
                     DesktopFileReviewDocument::from_product(review),
                 ));
                 shell
-                    .active_workspace
+                    .update_workspace_mut()
                     .set_preference_notice("Changed-file review loaded.".into());
             }
             DirectCommandUpdate::Consumed {
@@ -72,14 +74,14 @@ pub(super) fn reconcile_direct_update(
             command_id,
             project_relative_path,
         } => {
-            let inspector_dirty = shell.active_workspace.command_ledger.complete(
+            let inspector_dirty = shell.update_workspace_mut().command_ledger.complete(
                 command_id,
                 &DesktopCommandIntent::ExternalEditor {
                     project_relative_path: project_relative_path.clone(),
                 },
             );
             if inspector_dirty {
-                shell.active_workspace.set_preference_notice(format!(
+                shell.update_workspace_mut().set_preference_notice(format!(
                     "Opened {} in the configured editor.",
                     truncate_label(&project_relative_path, 48)
                 ));
@@ -94,15 +96,13 @@ pub(super) fn reconcile_direct_update(
             sessions,
             omitted,
         } => {
-            let sessions_dirty = shell
-                .command_owner_session_id(command_id)
-                .is_some_and(|owner| {
-                    shell.complete_workspace_command(
-                        &owner,
-                        command_id,
-                        &DesktopCommandIntent::ListSessions,
-                    )
-                });
+            let sessions_dirty = shell.command_owner_key(command_id).is_some_and(|owner| {
+                shell.complete_workspace_command(
+                    &owner,
+                    command_id,
+                    &DesktopCommandIntent::ListSessions,
+                )
+            });
             if sessions_dirty {
                 shell.project_catalog.replace_catalog(sessions, omitted);
             }
@@ -121,7 +121,7 @@ pub(super) fn reconcile_direct_update(
                 session_id: session_id.clone(),
             };
             let sessions_dirty = shell
-                .active_workspace
+                .update_workspace_mut()
                 .command_ledger
                 .complete(command_id, &intent);
             if sessions_dirty {
@@ -129,7 +129,7 @@ pub(super) fn reconcile_direct_update(
                     .project_catalog
                     .rename_session(&session_id, name, updated_at);
                 shell
-                    .active_workspace
+                    .update_workspace_mut()
                     .set_preference_notice("Session name updated.".into());
             }
             DirectCommandUpdate::Consumed {
@@ -161,7 +161,7 @@ pub(super) struct ProjectionCommandCompletions {
     )>,
     recovery: Option<(u64, DesktopRecoveryAction, String)>,
     resync: Option<u64>,
-    session: Option<(String, u64, DesktopCommandIntent)>,
+    session: Option<(WorkspaceKey, u64, DesktopCommandIntent)>,
 }
 
 impl ProjectionCommandCompletions {
@@ -171,7 +171,7 @@ impl ProjectionCommandCompletions {
                 command_id,
                 metadata,
             } if shell
-                .active_workspace
+                .update_workspace()
                 .command_ledger
                 .matches(*command_id, &DesktopCommandIntent::Reload) =>
             {
@@ -192,7 +192,7 @@ impl ProjectionCommandCompletions {
                 thinking_fallback,
                 ..
             } if shell
-                .active_workspace
+                .update_workspace()
                 .command_ledger
                 .matches(*command_id, &DesktopCommandIntent::Selection(*selection)) =>
             {
@@ -206,7 +206,7 @@ impl ProjectionCommandCompletions {
                 action,
                 recovery_id,
                 ..
-            } if shell.active_workspace.command_ledger.matches(
+            } if shell.update_workspace().command_ledger.matches(
                 *command_id,
                 &DesktopCommandIntent::Recovery {
                     recovery_id: recovery_id.clone(),
@@ -221,7 +221,7 @@ impl ProjectionCommandCompletions {
         let resync = match update {
             DesktopRuntimeUpdate::Resynced { command_id, .. }
                 if shell
-                    .active_workspace
+                    .update_workspace()
                     .command_ledger
                     .matches(*command_id, &DesktopCommandIntent::Resync) =>
             {
@@ -231,7 +231,7 @@ impl ProjectionCommandCompletions {
         };
         let session = match update {
             DesktopRuntimeUpdate::SessionChanged { command_id, .. } => shell
-                .active_workspace
+                .update_workspace()
                 .command_ledger
                 .intent(*command_id)
                 .filter(|intent| {
@@ -242,12 +242,10 @@ impl ProjectionCommandCompletions {
                     )
                 })
                 .cloned()
-                .map(|intent| {
-                    (
-                        shell.active_workspace.session_id().to_owned(),
-                        *command_id,
-                        intent,
-                    )
+                .and_then(|intent| {
+                    shell
+                        .command_owner_key(*command_id)
+                        .map(|owner| (owner, *command_id, intent))
                 }),
             _ => None,
         };
@@ -269,48 +267,49 @@ impl ProjectionCommandCompletions {
         let mut sessions_dirty = false;
         if let Some(command_id) = self.resync
             && shell
-                .active_workspace
+                .update_workspace_mut()
                 .command_ledger
                 .complete(command_id, &DesktopCommandIntent::Resync)
         {
             shell
-                .active_workspace
+                .update_workspace_mut()
                 .set_preference_notice(if projection_replaced {
                     "Runtime state resynchronized.".into()
                 } else {
                     "Resync response failed projection validation.".into()
                 });
         }
-        if let Some((owner_session_id, command_id, intent)) = self.session
-            && shell.complete_workspace_command(&owner_session_id, command_id, &intent)
-        {
-            let created = matches!(&intent, DesktopCommandIntent::CreateSession);
-            sessions_dirty = true;
-            shell
-                .active_workspace
-                .set_preference_notice(if projection_replaced {
-                    match intent {
-                        DesktopCommandIntent::CreateSession => "Created a new session.".into(),
-                        DesktopCommandIntent::OpenSession { .. } => {
-                            "Opened the requested session.".into()
+        if let Some((owner, command_id, intent)) = self.session {
+            let owner = shell.command_owner_key(command_id).unwrap_or(owner);
+            if shell.complete_workspace_command(&owner, command_id, &intent) {
+                let created = matches!(&intent, DesktopCommandIntent::CreateSession);
+                sessions_dirty = true;
+                shell
+                    .update_workspace_mut()
+                    .set_preference_notice(if projection_replaced {
+                        match intent {
+                            DesktopCommandIntent::CreateSession => "Created a new session.".into(),
+                            DesktopCommandIntent::OpenSession { .. } => {
+                                "Opened the requested session.".into()
+                            }
+                            _ => unreachable!("session completion was filtered by typed intent"),
                         }
-                        _ => unreachable!("session completion was filtered by typed intent"),
-                    }
-                } else {
-                    "Session response failed projection validation; resync is required.".into()
-                });
-            if projection_replaced && created {
-                sessions_dirty |= shell.insert_active_session_into_catalog();
+                    } else {
+                        "Session response failed projection validation; resync is required.".into()
+                    });
+                if projection_replaced && created {
+                    sessions_dirty |= shell.insert_active_session_into_catalog();
+                }
             }
         }
         if let Some((command_id, skill_count, prompt_count, profile_count)) = self.reload
             && shell
-                .active_workspace
+                .update_workspace_mut()
                 .command_ledger
                 .complete(command_id, &DesktopCommandIntent::Reload)
         {
             shell
-                .active_workspace
+                .update_workspace_mut()
                 .set_preference_notice(if projection_replaced {
                     format!(
                         "Reloaded {skill_count} skills, {prompt_count} prompts, and \
@@ -322,17 +321,17 @@ impl ProjectionCommandCompletions {
         }
         if let Some((command_id, selection, thinking_level, thinking_fallback)) = self.selection
             && shell
-                .active_workspace
+                .update_workspace_mut()
                 .command_ledger
                 .complete(command_id, &DesktopCommandIntent::Selection(selection))
         {
             if projection_replaced && selection == DesktopRuntimeSelectionKind::Model {
                 let thinking_selection = DesktopThinkingLevel::from_explicit(thinking_level);
-                shell.active_workspace.thinking_selection = thinking_selection;
-                shell.active_workspace.thinking_hint = thinking_fallback
+                shell.update_workspace_mut().thinking_selection = thinking_selection;
+                shell.update_workspace_mut().thinking_hint = thinking_fallback
                     .then(|| Arc::from("Thinking reset to Auto for the selected model."));
                 let session_id = shell
-                    .active_workspace
+                    .update_workspace_mut()
                     .projection
                     .as_ref()
                     .map(|projection| projection.snapshot().session.session_id.clone());
@@ -344,27 +343,25 @@ impl ProjectionCommandCompletions {
                 match selection {
                     DesktopRuntimeSelectionKind::Model => format!(
                         "Future prompts will use model {}.",
-                        truncate_label(&shell.active_workspace.project.selected_model_id, 28)
+                        truncate_label(&shell.update_workspace_mut().project.selected_model_id, 28)
                     ),
                     DesktopRuntimeSelectionKind::SessionProfile => format!(
                         "Session profile changed to {}.",
                         truncate_label(
-                            shell
-                                .active_workspace
-                                .projection
-                                .as_ref()
-                                .map(|projection| {
-                                    projection
-                                        .snapshot()
-                                        .session
-                                        .default_agent_profile_id
-                                        .as_str()
-                                })
-                                .unwrap_or_else(|| shell
-                                    .active_workspace
-                                    .project
-                                    .default_agent_profile_id
-                                    .as_str()),
+                            {
+                                let workspace = shell.update_workspace();
+                                workspace
+                                    .projection
+                                    .as_ref()
+                                    .map(|projection| {
+                                        projection
+                                            .snapshot()
+                                            .session
+                                            .default_agent_profile_id
+                                            .as_str()
+                                    })
+                                    .unwrap_or(workspace.project.default_agent_profile_id.as_str())
+                            },
                             28
                         )
                     ),
@@ -372,10 +369,10 @@ impl ProjectionCommandCompletions {
             } else {
                 "Selection response failed projection validation; resync is required.".into()
             };
-            shell.active_workspace.set_preference_notice(notice);
+            shell.update_workspace_mut().set_preference_notice(notice);
         }
         if let Some((command_id, action, recovery_id)) = self.recovery
-            && shell.active_workspace.command_ledger.complete(
+            && shell.update_workspace_mut().command_ledger.complete(
                 command_id,
                 &DesktopCommandIntent::Recovery {
                     recovery_id: recovery_id.clone(),
@@ -384,7 +381,7 @@ impl ProjectionCommandCompletions {
             )
         {
             shell
-                .active_workspace
+                .update_workspace_mut()
                 .set_preference_notice(if projection_replaced {
                     format!(
                         "Recovery {} accepted for {}.",
@@ -408,12 +405,12 @@ pub(super) fn reserve_command(
     let command_id = shell.next_command_id;
     let Some(next_command_id) = command_id.checked_add(1) else {
         shell
-            .active_workspace
+            .update_workspace_mut()
             .set_preference_notice("desktop command IDs are exhausted".into());
         return None;
     };
     match shell
-        .active_workspace
+        .update_workspace_mut()
         .command_ledger
         .reserve_with_id(command_id, intent)
     {
@@ -423,7 +420,7 @@ pub(super) fn reserve_command(
         }
         Err(error) => {
             shell
-                .active_workspace
+                .update_workspace_mut()
                 .set_preference_notice(error.to_string());
             None
         }
