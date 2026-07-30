@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-740 已完成，下一项 DSK-741）
+> 状态：执行中（DSK-741 已完成，下一项 DSK-742）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1021,7 +1021,7 @@ Gate：Gate A + Gate B。
 | DSK-D730-03 | DSK-730 | `UiChangeSet` 预定义 region 尚未全部进入 refresh routing，使用模块级 `dead_code` allow | `application/change_set.rs` | DSK-743 | 待清理；统一 selective refresh 后删除 allow |
 | DSK-D731-01 | DSK-731 | `DesktopProjection` 仍直接接收宽 `DesktopRuntimeUpdate`，projection apply、conversation/file-review post-reconcile 与 delta dirty 转换暂由 adapter 的单一 port method 承接 | `app/native_shell.rs::apply_projection_update_for`、`application/reducer.rs::RuntimeUpdatePort::apply_projection_update` | DSK-732 | 已清理（`93a0586`）；projection 只接收窄 `ProjectionEvent`，application reducer 负责提取事件和 `DesktopProjectionDelta -> UiChangeSet`，旧 broad method 与 `native_shell/update.rs` 已删除 |
 | DSK-D731-02 | DSK-731 | projection 触发的 resync command admission 暂由 reducer 决策后通过 port 同步发送，尚未形成 typed runtime effect/executor 边界 | `app/native_shell.rs::request_resync_for`、`application/reducer.rs::RuntimeUpdatePort::request_resync_if_needed` | DSK-733 | 已清理（`582d3ae`）；旧 direct-send port 已删除，resync command reservation、`RequestResync` effect、admission result 与失败 completion 全部回流 reducer |
-| DSK-D731-03 | DSK-731 | `SessionWorkspace`/catalog concrete type 仍位于 GPUI adapter，application reducer 通过窄 `RuntimeUpdatePort` 执行显式 owner 的原子 mutation | `application/reducer.rs::RuntimeUpdatePort`、`app/native_shell.rs` | DSK-741 | 待清理；DSK-740 已先建立 `ShellUiState` 的 presentation owner，但 concrete workspace 拆分会同时改变 feature presenter 输入，改在 DSK-741 一次完成 application state 下沉、presenter input 收窄和 bridge 删除；未增加 alias、dual write 或 compatibility façade |
+| DSK-D731-03 | DSK-731 | `SessionWorkspace`/catalog concrete type 仍位于 GPUI adapter，application reducer 通过窄 `RuntimeUpdatePort` 执行显式 owner 的原子 mutation | `application/reducer.rs::RuntimeUpdatePort`、`app/native_shell.rs` | DSK-741 | 已清理（`c3a9f2f`）；application 直接拥有 `WorkspaceState`、catalog 与 runtime mutation，root reducer 直接接收 typed `DesktopState`；旧 `RuntimeUpdatePort` 及 `NativeShell` bridge impl 已删除，只保留 feature-owned presentation extension；无 alias、dual write 或 compatibility façade |
 
 ## 十二、风险与处置
 
@@ -1325,6 +1325,34 @@ Gate 与性能记录：
   DSK-741 的 feature presenter 输入，因此删除任务调整到 DSK-741，在一次切分中删除 concrete-state
   `RuntimeUpdatePort`；本次没有新增兼容层、dual write 或第二份 state。
 
+### DSK-741 实际结果
+
+- sessions、composer、conversation、header、inspector、root modal、center drawer 与 skills 的
+  ViewModel builder 已分别下放到 feature module；root 只调用 `view_model(...)` 并把结果推给 child entity，
+  不再了解任何 feature ViewModel 字段构造。输入按 feature 收窄为 `&NativeDesktopState + &ShellUiState`、
+  `&SessionWorkspace + &ShellUiState`、单独 `&SessionWorkspace` 或 immutable global skill slice；presenter
+  不持有 GPUI context、不发送命令、不修改 state，也不读取 filesystem/process。
+- 新增 `ui/shell/presentation.rs`，统一 semantic status、runtime/recovery label、recovery action 与 usage cost
+  projection；model/thinking menu projection 归 conversation header presenter。新增完整 equality/repeatability
+  验证：可比较 ViewModel 直接做全量 equality，conversation 对非比较型 render/scroll handles 之外的展示事实做
+  typed snapshot equality；idle/running 既有 ViewModel bounds tests 继续通过。
+- `WorkspaceState<Presentation>`、`ProjectCatalogController`、Home workspace defaults、file-review/composer/
+  thinking facts 与 runtime mutation 已下沉 application。`DesktopState` 通过第三个类型参数持有必备
+  `RuntimeWorkspaceDefaults`，没有可空 seed、duplicate field 或 dual write；`NativeShell` 顶层由 7 fields
+  进一步收敛为 connection、application state、global skills、views、ui state 共 5 fields。
+- root runtime reducer 现在直接接收
+  `DesktopState<WorkspaceState<P>, ProjectCatalogController, RuntimeWorkspaceDefaults>`；删除
+  `RuntimeUpdatePort` trait、`NativeShell` bridge impl 及 adapter 内重复的 hydration/projection/catalog/command
+  mutation。唯一保留的 `RuntimeWorkspacePresentation` extension 只更新 conversation derived cache，runtime
+  owner、command、projection、catalog、preferences 仍由 application 单一写入。DSK-D731-03 因此清零。
+- runtime preference selection 变化通过 application dirty handoff 继续进入原 typed preference effect；新增
+  runtime stop/failure pending-composer test，确认按 `ComposerAdmission::Pending` 恢复精确 draft 并保留安全
+  rejection。既有 owner mismatch、Home promotion、background workspace、thinking fallback、catalog 与 dirty
+  routing tests 全部在 direct-state 路径通过。
+- Gate A 通过：desktop lib `311 passed / 5 ignored / 0 failed`，dependency boundary `10 passed`，all-target
+  check、严格 clippy、format 与 diff check 全部通过。`scripts/desktop-visual-golden.sh` 的 20 个 fixture 全部
+  `RMSE=0`，未更新 golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1340,7 +1368,7 @@ Gate 与性能记录：
 | DSK-732 | 已完成 | `93a0586` | 9 类窄 `ProjectionEvent` 与 application-owned dirty routing；删除纯 protocol arms 和旧 update module；Gate A、projection gap/duplicate/resync/replacement 及 headless perf 全通过；未更新 golden |
 | DSK-733 | 已完成 | `582d3ae` | 所有 picker/writer/clipboard/resync/Root timer completion 回流 reducer，显式 shutdown signal；清理 DSK-D730-01/02 与 DSK-D731-02；Gate A 和 race/stale/error 定向测试通过；未更新 golden |
 | DSK-740 | 已完成 | `9ac1a57` | `ShellViews/ShellUiState/ShellConnection/ShellRuntimeExecutor` 聚合，Shell 41→7 fields；typed Home/Session init；Gate A 与 focus/modal/drawer 定向测试通过；DSK-D731-03 调整到 DSK-741 与 presenter 输入切分一起清理 |
-| DSK-741 | 待执行 | — | — |
+| DSK-741 | 已完成 | `c3a9f2f` | feature presenters 下放；application-owned workspace/catalog/runtime mutation；删除 `RuntimeUpdatePort` 与 DSK-D731-03；Gate A、ViewModel equality 及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-742 | 待执行 | — | — |
 | DSK-743 | 待执行 | — | — |
 | DSK-750 | 待执行 | — | — |
