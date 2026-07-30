@@ -5782,7 +5782,7 @@ mod tests {
         assert_eq!(
             runtime_harness.drain_command_kinds(),
             [],
-            "startup must not load the session catalog"
+            "NativeShell::new must not auto-load the session catalog"
         );
         cx.executor().advance_clock(Duration::from_secs(60));
         cx.run_until_parked();

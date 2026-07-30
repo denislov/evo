@@ -319,7 +319,7 @@ impl NativeShell {
         cx.notify();
     }
 
-    pub(super) fn request_session_catalog(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::app) fn request_session_catalog(&mut self, cx: &mut Context<Self>) {
         if self
             .command_ledger
             .contains(&DesktopCommandIntent::ListSessions)

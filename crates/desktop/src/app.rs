@@ -218,6 +218,7 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
                             cx,
                         )
                     });
+                    view.update(cx, |shell, cx| shell.request_session_catalog(cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 }) {
                     eprintln!("desktop: failed to open native window: {error}");
