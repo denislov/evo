@@ -68,6 +68,13 @@ impl CodingAgentSessionOptions {
         self
     }
 
+    /// Keep repository authority while removing workspace-specific list filters.
+    pub(crate) fn without_workspace_filter(mut self) -> Self {
+        self.cwd = None;
+        self.workspace_scope = None;
+        self
+    }
+
     pub fn with_session_log_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.session_log_root = Some(root.into());
         self

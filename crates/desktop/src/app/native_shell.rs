@@ -23,10 +23,10 @@ use desktop::runtime::{
     MAX_PROMPT_ATTACHMENTS, validate_prompt_attachments,
 };
 use desktop::shell::{
-    CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH, FocusState, FocusTarget,
-    MIN_CONVERSATION_WIDTH, PanelVisibility, SESSION_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH,
-    SESSION_PANEL_WIDTH, SemanticColor, SemanticStatus, SemanticTheme, ShellLayout, UI_FONT_FAMILY,
-    truncate_label,
+    CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH,
+    CONVERSATION_CONTENT_MAX_WIDTH, FocusState, FocusTarget, MIN_CONVERSATION_WIDTH,
+    PanelVisibility, SESSION_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_WIDTH,
+    SemanticColor, SemanticStatus, SemanticTheme, ShellLayout, UI_FONT_FAMILY, truncate_label,
 };
 use gpui::{
     ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -95,7 +95,7 @@ fn conversation_block_visual(
 ) -> ConversationBlockVisual {
     match kind {
         ConversationBlockKind::User => ConversationBlockVisual {
-            glyph: "YOU",
+            glyph: "",
             accent: theme.accent,
             align_right: true,
         },
@@ -676,11 +676,8 @@ impl NativeShell {
                     ConversationPaneEvent::Copy { block_id } => {
                         this.copy_conversation_row(block_id, cx);
                     }
-                    ConversationPaneEvent::CopyToolCommand { block_id } => {
-                        this.copy_tool_command(block_id, cx);
-                    }
-                    ConversationPaneEvent::CopyToolOutput { block_id } => {
-                        this.copy_tool_output(block_id, cx);
+                    ConversationPaneEvent::CopyToolDetails { block_id } => {
+                        this.copy_tool_details(block_id, cx);
                     }
                     ConversationPaneEvent::CopyCodeCompleted => {
                         this.announce_conversation_copy("Code copied.", cx);
@@ -690,9 +687,6 @@ impl NativeShell {
                     }
                     ConversationPaneEvent::OpenFull { block_id } => {
                         this.open_full_conversation_message(block_id, window, cx);
-                    }
-                    ConversationPaneEvent::OpenToolOutput { block_id } => {
-                        this.open_full_tool_output(block_id, window, cx);
                     }
                     ConversationPaneEvent::Recovery { identity, action } => {
                         this.submit_recovery_action(identity.clone(), *action, cx);
@@ -3346,73 +3340,16 @@ impl NativeShell {
         self.announce_conversation_copy("Message copied.", cx);
     }
 
-    fn tool_command(&self, block_id: &str) -> Option<String> {
-        let projection = self.projection.as_ref()?;
-        let arguments = projection
-            .conversation()
-            .block(block_id)
-            .filter(|block| block.kind == ConversationBlockKind::Tool)
-            .map(|block| block.detail.as_str())
-            .or_else(|| {
-                projection
-                    .tools()
-                    .iter()
-                    .find(|tool| tool_conversation_block_id(tool) == block_id)
-                    .map(|tool| tool.arguments.as_str())
-            })?;
-        serde_json::from_str::<serde_json::Value>(arguments)
-            .ok()?
-            .get("command")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    fn tool_output(&self, block_id: &str) -> Option<(Arc<str>, Arc<str>, bool)> {
-        let projection = self.projection.as_ref()?;
-        if let Some(block) = projection
-            .conversation()
-            .block(block_id)
-            .filter(|block| block.kind == ConversationBlockKind::Tool)
-        {
-            return Some((
-                Arc::from(block.title.as_str()),
-                Arc::from(block.text.as_str()),
-                block.truncated || block.text.len() > MAX_COPY_BYTES,
-            ));
-        }
-        projection
-            .tools()
-            .iter()
-            .find(|tool| tool_conversation_block_id(tool) == block_id)
-            .map(|tool| {
-                (
-                    Arc::from(format!("Tool · {} · output", tool.name)),
-                    Arc::from(tool.detail.as_str()),
-                    tool.truncated || tool.detail.len() > MAX_COPY_BYTES,
-                )
-            })
-    }
-
-    fn copy_tool_command(&mut self, block_id: &str, cx: &mut Context<Self>) {
-        let Some(command) = self.tool_command(block_id) else {
-            self.set_preference_notice("This tool does not expose a structured command.".into());
+    fn copy_tool_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
+        let Some(row) = self.conversation_controller.row_for_block(block_id) else {
+            self.set_preference_notice("Tool details are no longer available to copy.".into());
             self.notify_toast_host(cx);
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(command));
-        self.announce_conversation_copy("Tool command copied.", cx);
-    }
-
-    fn copy_tool_output(&mut self, block_id: &str, cx: &mut Context<Self>) {
-        let Some((_, output, _)) = self.tool_output(block_id) else {
-            self.set_preference_notice("Tool output is no longer available to copy.".into());
-            self.notify_toast_host(cx);
-            return;
-        };
-        cx.write_to_clipboard(ClipboardItem::new_string(conversation_copy_text(
-            &output, "",
-        )));
-        self.announce_conversation_copy("Tool output copied.", cx);
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            conversation_pane::tool_detail_copy_text(&row.title, &row.detail, &row.text),
+        ));
+        self.announce_conversation_copy("Tool details copied.", cx);
     }
 
     fn announce_conversation_copy(&mut self, message: &str, cx: &mut Context<Self>) {
@@ -3437,33 +3374,6 @@ impl NativeShell {
             });
         })
         .detach();
-    }
-
-    fn open_full_tool_output(
-        &mut self,
-        block_id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((title, text, source_truncated)) = self.tool_output(block_id) else {
-            self.set_preference_notice("Tool output is no longer available to open.".into());
-            self.notify_toast_host(cx);
-            return;
-        };
-        tracing::trace!(
-            target: "desktop",
-            event = "message_full_view_open",
-            block_id,
-            content = "tool_output",
-            bytes = text.len(),
-        );
-        self.conversation_full_message = Some(ConversationFullMessageView {
-            block_id: block_id.to_owned(),
-            title,
-            text,
-            source_truncated,
-        });
-        self.activate_modal(DesktopModalKind::FullMessage, window, cx);
     }
 
     fn open_full_conversation_message(
@@ -5008,7 +4918,8 @@ impl Render for NativeShell {
         let layout = self.layout(window);
         self.focus.reconcile_layout(layout);
         if self.projection.is_some() {
-            let requested_layout_width = conversation_width_bucket(layout.center.width);
+            let requested_layout_width =
+                conversation_width_bucket(layout.center.width.min(CONVERSATION_CONTENT_MAX_WIDTH));
             let (layout_width, width_refresh) = self
                 .conversation_controller
                 .width_for_render(requested_layout_width);
@@ -5600,6 +5511,13 @@ mod tests {
         snapshot.transcript.items.push(item);
         DesktopProjection::new(snapshot)
             .expect("message-integrity fixture is a valid product projection")
+    }
+
+    fn projection_with_items(items: Vec<CodingAgentSessionTranscriptItem>) -> DesktopProjection {
+        let mut snapshot = visual_test_snapshot();
+        snapshot.transcript.items = items;
+        DesktopProjection::new(snapshot)
+            .expect("multi-item conversation fixture is a valid product projection")
     }
 
     fn settle_visual_measurements(cx: &mut gpui::VisualTestContext) {
@@ -7607,10 +7525,17 @@ mod tests {
             expanded_height > collapsed_height + 100.,
             "expanded Tool output must contribute its real content height: collapsed={collapsed_height}, expanded={expanded_height}"
         );
+        let output_region = cx
+            .debug_bounds("desktop-tool-output-region")
+            .expect("expanded Tool output uses its dedicated region");
+        assert!(
+            f32::from(output_region.size.height) <= 402.,
+            "expanded Tool output must stay height-bounded and scroll internally: region={output_region:?}"
+        );
     }
 
     #[gpui::test]
-    fn expanded_tool_actions_copy_structured_sources_and_open_output(cx: &mut TestAppContext) {
+    fn expanded_shell_tool_copies_the_displayed_command_and_output(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let command = "cargo test -p desktop";
         let output = "desktop tests passed\n";
@@ -7648,51 +7573,199 @@ mod tests {
             Some(block_id.clone())
         );
 
-        assert_minimum_hit_target(cx, "desktop-toggle-tool-details");
-        assert_minimum_hit_target(cx, "desktop-copy-tool-command");
-        let copy_command = cx
-            .debug_bounds("desktop-copy-tool-command")
-            .expect("structured shell command exposes a copy action");
-        cx.simulate_click(copy_command.center(), gpui::Modifiers::default());
+        assert!(
+            cx.debug_bounds("desktop-tool-output-region").is_some(),
+            "expanded Shell output uses the dedicated bordered region"
+        );
+        assert_minimum_hit_target(cx, "desktop-copy-tool-details");
+        let copy_details = cx
+            .debug_bounds("desktop-copy-tool-details")
+            .expect("the expanded region exposes one hover copy action");
+        cx.simulate_click(copy_details.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
             cx.read_from_clipboard().and_then(|item| item.text()),
-            Some(command.into())
+            Some(format!("$ {command}\n{output}"))
         );
-
-        assert_minimum_hit_target(cx, "desktop-copy-tool-output");
-        let copy_output = cx
-            .debug_bounds("desktop-copy-tool-output")
-            .expect("tool output exposes a copy action");
-        cx.simulate_click(copy_output.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            cx.read_from_clipboard().and_then(|item| item.text()),
-            Some(output.into())
-        );
-
-        assert_minimum_hit_target(cx, "desktop-open-tool-output");
-        let open_output = cx
-            .debug_bounds("desktop-open-tool-output")
-            .expect("tool output exposes a full-output action");
-        cx.simulate_click(open_output.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            shell.read_with(cx, |shell, _| shell.active_modal),
-            Some(DesktopModalKind::FullMessage)
-        );
-        assert!(shell.read_with(cx, |shell, _| {
-            shell
-                .conversation_full_message
-                .as_ref()
-                .is_some_and(|message| message.text.as_ref() == output)
-        }));
     }
 
     #[gpui::test]
-    fn assistant_reasoning_expands_without_losing_the_answer_tail(cx: &mut TestAppContext) {
+    fn read_tool_remains_a_single_collapsed_summary(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::Tool {
+                call_id: "read-summary".into(),
+                name: "read".into(),
+                args: serde_json::json!({
+                    "path": "src/main.rs",
+                    "offset": 40,
+                    "limit": 80,
+                }),
+                result: Some("read output remains hidden".into()),
+                is_error: false,
+                duration_millis: Some(20),
+            }),
+        );
+        settle_visual_measurements(cx);
+
+        assert!(cx.debug_bounds("conversation-last-card").is_some());
+        assert!(
+            cx.debug_bounds("desktop-toggle-tool-details").is_none(),
+            "Read does not expose a disclosure chevron"
+        );
+        assert!(
+            cx.debug_bounds("desktop-tool-toggle-header").is_none(),
+            "Read header is not presented as an expandable surface"
+        );
+        assert!(
+            cx.debug_bounds("desktop-tool-output-region").is_none(),
+            "Read has no expanded output region"
+        );
+        assert!(
+            cx.debug_bounds("desktop-copy-conversation-row").is_none(),
+            "Tool rows do not inherit the generic message copy footer"
+        );
+    }
+
+    #[gpui::test]
+    fn assistant_after_tool_continues_without_repeating_the_identity_header(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_items(vec![
+                CodingAgentSessionTranscriptItem::Tool {
+                    call_id: "identity-tool".into(),
+                    name: "shell".into(),
+                    args: serde_json::json!({ "command": "git status" }),
+                    result: Some("working tree clean".into()),
+                    is_error: false,
+                    duration_millis: Some(20),
+                },
+                CodingAgentSessionTranscriptItem::Assistant {
+                    id: "identity-answer".into(),
+                    text: "This answer is part of the same assistant output.".into(),
+                    thinking: String::new(),
+                    images: Vec::new(),
+                    done: true,
+                    reasoning_duration_millis: None,
+                },
+            ]),
+        );
+        settle_visual_measurements(cx);
+
+        assert!(
+            cx.debug_bounds("conversation-last-card").is_some(),
+            "the final Assistant answer remains rendered"
+        );
+        assert!(
+            cx.debug_bounds("desktop-last-conversation-row-header")
+                .is_none(),
+            "a Tool row must not restart the Assistant identity group"
+        );
+        assert!(
+            cx.debug_bounds("desktop-copy-conversation-row").is_some(),
+            "the final Assistant segment keeps the group's copy action"
+        );
+    }
+
+    #[gpui::test]
+    fn assistant_segment_before_tool_does_not_insert_a_middle_copy_button(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_items(vec![
+                CodingAgentSessionTranscriptItem::Assistant {
+                    id: "pre-tool-answer".into(),
+                    text: "I will inspect the workspace.".into(),
+                    thinking: String::new(),
+                    images: Vec::new(),
+                    done: true,
+                    reasoning_duration_millis: None,
+                },
+                CodingAgentSessionTranscriptItem::Tool {
+                    call_id: "copy-group-tool".into(),
+                    name: "shell".into(),
+                    args: serde_json::json!({ "command": "git status" }),
+                    result: Some("working tree clean".into()),
+                    is_error: false,
+                    duration_millis: Some(20),
+                },
+            ]),
+        );
+        settle_visual_measurements(cx);
+
+        assert!(
+            cx.debug_bounds("desktop-copy-conversation-row").is_none(),
+            "an Assistant segment immediately before Tool must not paint an in-between copy action"
+        );
+    }
+
+    #[gpui::test]
+    fn tool_content_aligns_with_assistant_and_selection_has_no_focus_rail(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_items(vec![
+                CodingAgentSessionTranscriptItem::Assistant {
+                    id: "alignment-answer".into(),
+                    text: "Assistant content alignment reference.".into(),
+                    thinking: String::new(),
+                    images: Vec::new(),
+                    done: true,
+                    reasoning_duration_millis: None,
+                },
+                CodingAgentSessionTranscriptItem::Tool {
+                    call_id: "alignment-tool".into(),
+                    name: "shell".into(),
+                    args: serde_json::json!({ "command": "git status" }),
+                    result: Some("working tree clean".into()),
+                    is_error: false,
+                    duration_millis: Some(20),
+                },
+            ]),
+        );
+        cx.simulate_resize(size(px(1_200.), px(900.)));
+        settle_visual_measurements(cx);
+
+        let assistant_header = cx
+            .debug_bounds("desktop-conversation-row-header")
+            .expect("Assistant header is available as the alignment reference");
+        let tool_header = cx
+            .debug_bounds("desktop-tool-toggle-header")
+            .expect("Tool header is laid out");
+        assert_eq!(
+            (assistant_header.left(), assistant_header.right()),
+            (tool_header.left(), tool_header.right()),
+            "Tool and Assistant content must share the same horizontal bounds"
+        );
+
+        cx.simulate_click(tool_header.center(), gpui::Modifiers::default());
+        settle_visual_measurements(cx);
+        assert!(
+            cx.debug_bounds("conversation-selected-rail").is_none(),
+            "selecting a Tool row must not paint the conversation focus rail"
+        );
+        let output = cx
+            .debug_bounds("desktop-tool-output-region")
+            .expect("selected Tool still expands normally");
+        assert_eq!(
+            (output.left(), output.right()),
+            (tool_header.left(), tool_header.right()),
+            "expanded Tool details must stay aligned with the collapsed summary"
+        );
+    }
+
+    #[gpui::test]
+    fn assistant_reasoning_expands_downward_without_moving_its_top(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_visual_shell(
             cx,
             DesktopRuntimeBridge::disconnected_for_test(),
             projection_with_last_item(CodingAgentSessionTranscriptItem::Assistant {
@@ -7713,6 +7786,10 @@ mod tests {
                 .size
                 .height,
         );
+        let collapsed_top = cx
+            .debug_bounds("conversation-last-card")
+            .expect("collapsed reasoning card is laid out")
+            .top();
 
         assert_minimum_hit_target(cx, "desktop-toggle-reasoning-details");
         let reasoning_header = cx
@@ -7720,17 +7797,41 @@ mod tests {
             .expect("the complete reasoning header is a disclosure action");
         cx.simulate_click(reasoning_header.center(), gpui::Modifiers::default());
         settle_visual_measurements(cx);
+        assert!(shell.read_with(cx, |shell, _| {
+            shell
+                .conversation_controller
+                .toggle_anchor_active_for_tests()
+        }));
 
-        assert_last_row_matches_card_and_tail(cx, "expanded Reasoning");
-        let expanded_height = f32::from(
-            cx.debug_bounds("conversation-last-card")
-                .expect("expanded reasoning card is laid out")
-                .size
-                .height,
-        );
+        let row = cx
+            .debug_bounds("conversation-last-row")
+            .expect("expanded reasoning row remains mounted");
+        let card = cx
+            .debug_bounds("conversation-last-card")
+            .expect("expanded reasoning card is laid out");
+        let tail = cx
+            .debug_bounds("conversation-tail-marker")
+            .expect("expanded reasoning tail remains laid out");
+        let expanded_height = f32::from(card.size.height);
         assert!(
             expanded_height > collapsed_height + 100.,
             "expanded reasoning must contribute its real content height: collapsed={collapsed_height}, expanded={expanded_height}"
+        );
+        assert_eq!(
+            card.top(),
+            collapsed_top,
+            "expanding details must keep the message top fixed and grow downward"
+        );
+        assert!(
+            (f32::from(row.size.height)
+                - (expanded_height + CONVERSATION_ROW_VERTICAL_PADDING_PX as f32))
+                .abs()
+                <= 1.,
+            "the expanded virtual row must match its measured card: row={row:?}, card={card:?}"
+        );
+        assert!(
+            tail.bottom() <= row.bottom() + px(1.),
+            "the expanded tail must remain inside its own row even when below the viewport: tail={tail:?}, row={row:?}"
         );
     }
 
@@ -7835,7 +7936,7 @@ mod tests {
         assert_minimum_hit_target(cx, "desktop-copy-conversation-row");
 
         let row_header = cx
-            .debug_bounds("desktop-conversation-row-header")
+            .debug_bounds("desktop-last-conversation-row-header")
             .expect("conversation row header exposes its typed selection path");
         cx.simulate_click(row_header.center(), gpui::Modifiers::default());
         settle_visual_measurements(cx);
@@ -10543,7 +10644,7 @@ mod tests {
         let outcome = controller.submit_row_measurement(
             &source,
             &ConversationRowMeasurement {
-                item_key: expanded_row.item_key,
+                item_key: expanded_row.item_key.clone(),
                 source_revision: expanded_row.source_revision,
                 width_bucket: 600,
                 text_phase: expanded_row.text_phase,
@@ -10556,6 +10657,24 @@ mod tests {
         assert_eq!(
             controller.render_heights_for_tests().borrow()[0],
             target_top
+        );
+
+        let second_outcome = controller.submit_row_measurement(
+            &source,
+            &ConversationRowMeasurement {
+                item_key: expanded_row.item_key,
+                source_revision: expanded_row.source_revision,
+                width_bucket: 600,
+                text_phase: expanded_row.text_phase,
+                details_expanded: true,
+                height: estimated_height + 160.,
+            },
+        );
+        assert!(second_outcome.pane_dirty);
+        assert_eq!(
+            controller.scroll_top_for_tests(),
+            scroll_top,
+            "later measurements from the same expansion must keep its top anchor"
         );
     }
 
@@ -10629,12 +10748,12 @@ mod tests {
         let diagnostic = conversation_block_visual(ConversationBlockKind::Diagnostic, true, theme);
 
         assert!(user.align_right);
+        assert_eq!(user.glyph, "");
         assert!(!assistant.align_right);
         assert_ne!(tool.accent, failed_tool.accent);
         assert_eq!(tool.accent, theme.muted_text);
         assert_eq!(failed_tool.accent, theme.danger);
         assert_eq!(diagnostic.accent, theme.danger);
-        assert_ne!(user.glyph, assistant.glyph);
         assert_ne!(assistant.glyph, tool.glyph);
         assert_ne!(tool.glyph, diagnostic.glyph);
         assert_eq!(delegation.accent, theme.accent);
@@ -10666,6 +10785,170 @@ mod tests {
             cx.debug_bounds("conversation-last-card"),
             Some(card_before),
             "the selection rail must not participate in card layout"
+        );
+    }
+
+    #[gpui::test]
+    fn conversation_track_centers_without_inspector_and_keeps_ai_copy_at_bottom_left(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell_with_preferences(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::Assistant {
+                id: "centered-track".into(),
+                text: "A short answer inside the centered transcript track.".into(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: None,
+            }),
+            DesktopPreferences {
+                sessions_panel_visible: false,
+                context_panel_visible: false,
+                ..DesktopPreferences::default()
+            },
+        );
+        cx.simulate_resize(size(px(1_600.), px(900.)));
+        settle_visual_measurements(cx);
+
+        let panel = cx
+            .debug_bounds("desktop-conversation-panel")
+            .expect("conversation panel is laid out");
+        let track = cx
+            .debug_bounds("conversation-last-track")
+            .expect("conversation row exposes its centered content track");
+        let card = cx
+            .debug_bounds("conversation-last-card")
+            .expect("Assistant card is laid out");
+        let copy = cx
+            .debug_bounds("desktop-copy-conversation-row")
+            .expect("Assistant copy action is laid out");
+        let composer = cx
+            .debug_bounds("desktop-composer-panel")
+            .expect("Composer is laid out");
+        let left_margin = f32::from(track.left() - panel.left());
+        let right_margin = f32::from(panel.right() - track.right());
+
+        assert!(
+            (left_margin - right_margin).abs() <= 1.,
+            "hidden Inspector must leave equal transcript margins: panel={panel:?}, track={track:?}"
+        );
+        assert!(
+            (f32::from(track.size.width) - CONVERSATION_CONTENT_MAX_WIDTH as f32).abs() <= 1.,
+            "wide viewports must cap the centered transcript track"
+        );
+        assert_eq!(
+            composer.left(),
+            track.left(),
+            "Composer and transcript share the same centered left edge"
+        );
+        assert_eq!(
+            composer.right(),
+            track.right(),
+            "Composer and transcript share the same centered right edge"
+        );
+        assert!(
+            (f32::from(card.size.width) - desktop::shell::ASSISTANT_MESSAGE_MAX_WIDTH as f32).abs()
+                <= 1.,
+            "Assistant content fills the bounded track interior"
+        );
+        assert!(
+            f32::from(copy.left() - card.left()) <= 17. && copy.top() > card.top() + px(32.),
+            "Assistant copy action belongs at the card's bottom-left: card={card:?}, copy={copy:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn short_user_message_wraps_content_and_keeps_copy_outside_bottom_right(
+        cx: &mut TestAppContext,
+    ) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell_with_preferences(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::User {
+                text: "Short prompt".into(),
+            }),
+            DesktopPreferences {
+                sessions_panel_visible: false,
+                context_panel_visible: false,
+                ..DesktopPreferences::default()
+            },
+        );
+        cx.simulate_resize(size(px(1_600.), px(900.)));
+        settle_visual_measurements(cx);
+
+        let track = cx
+            .debug_bounds("conversation-last-track")
+            .expect("User row exposes its centered content track");
+        let card = cx
+            .debug_bounds("conversation-last-card")
+            .expect("User card is laid out");
+        let copy = cx
+            .debug_bounds("desktop-copy-conversation-row")
+            .expect("User copy action is laid out");
+        let bubble = cx
+            .debug_bounds("desktop-user-message-bubble")
+            .expect("User message exposes its rounded background independently");
+
+        assert!(
+            f32::from(card.size.width) < 320.,
+            "short User content should determine the bubble width: card={card:?}"
+        );
+        assert!(
+            (f32::from(track.right() - card.right())
+                - desktop::shell::DESKTOP_DESIGN_TOKENS.spacing.lg as f32)
+                .abs()
+                <= 1.,
+            "User bubble remains right-aligned inside the centered track: track={track:?}, card={card:?}"
+        );
+        assert!(
+            (f32::from(card.left() - bubble.left())).abs() <= 1.
+                && (f32::from(card.right() - bubble.right())).abs() <= 1.,
+            "the rounded background should span the User card independently: card={card:?}, bubble={bubble:?}"
+        );
+        assert!(
+            copy.top() >= bubble.bottom() && f32::from(card.right() - copy.right()) <= 17.,
+            "User copy action belongs outside the bubble at bottom-right: card={card:?}, bubble={bubble:?}, copy={copy:?}"
+        );
+        assert!(
+            cx.debug_bounds("desktop-last-conversation-row-header")
+                .is_none(),
+            "User messages should not render a YOU identity label"
+        );
+    }
+
+    #[gpui::test]
+    fn long_user_message_stops_at_max_width_and_grows_vertically(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell_with_preferences(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(CodingAgentSessionTranscriptItem::User {
+                text: "A long prompt with enough words to wrap naturally. ".repeat(120),
+            }),
+            DesktopPreferences {
+                sessions_panel_visible: false,
+                context_panel_visible: false,
+                ..DesktopPreferences::default()
+            },
+        );
+        cx.simulate_resize(size(px(1_600.), px(900.)));
+        settle_visual_measurements(cx);
+
+        let card = cx
+            .debug_bounds("conversation-last-card")
+            .expect("long User card is laid out");
+        assert!(
+            (f32::from(card.size.width) - desktop::shell::USER_MESSAGE_MAX_WIDTH as f32).abs()
+                <= 1.,
+            "long User content must stop at the configured maximum width: card={card:?}"
+        );
+        assert!(
+            f32::from(card.size.height) > 160.,
+            "content beyond the maximum width must wrap and grow vertically: card={card:?}"
         );
     }
 

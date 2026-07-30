@@ -1958,6 +1958,66 @@ async fn projectless_first_prompt_records_the_global_only_scratch_cwd() {
 }
 
 #[tokio::test]
+async fn desktop_session_catalog_lists_project_and_projectless_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let sessions = temp.path().join("sessions");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let _env = ProcessEnvGuard::isolated(&global);
+    let options = CodingAgentEmbeddingOptions::for_workspace(
+        CodingAgentWorkspaceSelection::projectless("catalog-home"),
+    )
+    .unwrap()
+    .with_session_dir(&sessions)
+    .with_model_id("claude-sonnet-4-5");
+    let mut state = RuntimeState {
+        home: HomeRuntimeContext::load(options).unwrap(),
+        workspaces: std::collections::HashMap::new(),
+        focused_session_id: None,
+        fail_next_prompt_start: false,
+    };
+
+    let projectless = state
+        .create_session_for_workspace(
+            CodingAgentWorkspaceSelection::projectless("catalog-projectless"),
+            "claude-sonnet-4-5".into(),
+            "default".into(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+    let project_session = state
+        .create_session_for_workspace(
+            CodingAgentWorkspaceSelection::project(&project),
+            "claude-sonnet-4-5".into(),
+            "default".into(),
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+
+    let (catalog, omitted) = state.session_catalog().unwrap();
+    assert_eq!(omitted, 0);
+    assert!(catalog.iter().any(|entry| {
+        entry.session_id == projectless.session_id
+            && entry.workspace.kind
+                == coding_agent::api::view::CodingAgentWorkspaceKind::Projectless
+    }));
+    assert!(catalog.iter().any(|entry| {
+        entry.session_id == project_session.session_id
+            && entry.workspace.kind == coding_agent::api::view::CodingAgentWorkspaceKind::Project
+    }));
+
+    for (_, mut workspace) in std::mem::take(&mut state.workspaces) {
+        workspace.session.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn session_creation_failure_rejects_the_first_prompt_without_an_active_owner() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, _) = isolated_options(&temp);

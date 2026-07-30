@@ -45,9 +45,6 @@ pub(super) struct ConversationSource<'a> {
 #[derive(Clone)]
 struct ConversationToggleAnchor {
     item_key: ConversationItemKey,
-    source_revision: u64,
-    width_bucket: u32,
-    details_expanded: bool,
     row_top: f32,
     scroll_top: f32,
     layout_applied: bool,
@@ -333,28 +330,20 @@ impl ConversationController {
                     let row_top = heights.get(..index)?.iter().copied().sum();
                     Some(ConversationToggleAnchor {
                         item_key: row.item_key.clone(),
-                        source_revision: row.source_revision,
-                        width_bucket: row.width_bucket,
-                        details_expanded: false,
                         row_top,
                         scroll_top: (-f32::from(self.scroll.offset().y)).max(0.),
                         layout_applied: false,
                     })
                 })
         };
-        let details_expanded = if self.expanded_details.remove(block_id) {
-            false
-        } else {
+        let collapsed = self.expanded_details.remove(block_id);
+        if !collapsed {
             if self.expanded_details.len() >= MAX_EXPANDED_DETAILS {
                 self.expanded_details.clear();
             }
             self.expanded_details.insert(block_id.to_owned());
-            true
-        };
-        self.toggle_anchor = anchor.map(|mut anchor| {
-            anchor.details_expanded = details_expanded;
-            anchor
-        });
+        }
+        self.toggle_anchor = anchor;
         self.render_full_dirty = true;
     }
 
@@ -392,6 +381,7 @@ impl ConversationController {
         source: &ConversationSource<'_>,
         content_revision: u64,
     ) {
+        self.toggle_anchor = None;
         let visible_blocks = source.visible_count();
         self.viewport
             .reconcile_hydration(source.conversation(), visible_blocks, content_revision);
@@ -404,6 +394,7 @@ impl ConversationController {
         source: &ConversationSource<'_>,
         content_revision: u64,
     ) {
+        self.toggle_anchor = None;
         let visible_blocks = source.visible_count();
         self.viewport
             .on_content_changed(visible_blocks, content_revision);
@@ -423,6 +414,7 @@ impl ConversationController {
     // ---- scrolling --------------------------------------------------------
 
     pub(super) fn follow_latest(&mut self, visible_count: usize) {
+        self.toggle_anchor = None;
         self.viewport.resume_latest(visible_count);
         self.align_scroll_to_bottom(visible_count);
     }
@@ -457,6 +449,7 @@ impl ConversationController {
     /// Returns whether follow-latest hysteresis changed and the pane and header
     /// have to be notified.
     pub(super) fn reconcile_scroll(&mut self) -> bool {
+        self.toggle_anchor = None;
         let offset_y = f32::from(self.scroll.offset().y);
         let max_offset_y = f32::from(self.scroll.max_offset().y);
         self.viewport
@@ -497,18 +490,26 @@ impl ConversationController {
         } else {
             &mut self.live_layout
         };
-        let is_toggle_measurement = self.toggle_anchor.as_ref().is_some_and(|anchor| {
-            anchor.layout_applied
-                && anchor.item_key == measurement.item_key
-                && anchor.source_revision == measurement.source_revision
-                && anchor.width_bucket == measurement.width_bucket
-                && anchor.details_expanded == measurement.details_expanded
-        });
         let Some(resolution) = layout.submit_measurement(measurement, Instant::now()) else {
             return outcome;
         };
-        if is_toggle_measurement {
-            self.toggle_anchor = None;
+        let active_toggle_scroll_top = self
+            .toggle_anchor
+            .as_ref()
+            .filter(|anchor| anchor.layout_applied)
+            .map(|anchor| anchor.scroll_top);
+        if let Some(scroll_top) = active_toggle_scroll_top {
+            let current = (-f32::from(self.scroll.offset().y)).max(0.);
+            if (current - scroll_top).abs() > 0.5 {
+                let mut offset = self.scroll.offset();
+                offset.y = px(-scroll_top);
+                self.scroll.set_offset(offset);
+                tracing::trace!(
+                    target: "desktop",
+                    event = "toggle_scroll_anchor_restore_after_measurement",
+                    scroll_top,
+                );
+            }
         }
         if let Some(delay) = resolution.next_refresh_after {
             outcome.refresh = Some((delay, durable));
@@ -518,7 +519,7 @@ impl ConversationController {
         }
 
         let paused_scroll_top =
-            (!is_toggle_measurement && !self.viewport.follow_latest()).then(|| {
+            (active_toggle_scroll_top.is_none() && !self.viewport.follow_latest()).then(|| {
                 let scroll_top = (-f32::from(self.scroll.offset().y)).max(0.);
                 let render_heights = self.render_heights.borrow();
                 compensate_scroll_top_for_single_row_height(
@@ -535,7 +536,7 @@ impl ConversationController {
         }
         drop(row_sizes);
 
-        if is_toggle_measurement {
+        if active_toggle_scroll_top.is_some() {
             tracing::trace!(target: "desktop", event = "toggle_scroll_anchor_hold");
         } else if self.viewport.follow_latest() {
             self.align_scroll_to_bottom(source.visible_count());
@@ -1001,21 +1002,19 @@ impl ConversationController {
                 toggle_scroll_top = row_layout.paused_scroll_top.map(|resolved_row_top| {
                     (anchor.scroll_top + resolved_row_top - anchor.row_top).max(0.)
                 });
-                if toggle_scroll_top.is_some() {
-                    let resolved_identity = self
+                if let Some(resolved_scroll_top) = toggle_scroll_top {
+                    let row_still_exists = self
                         .render_rows
                         .borrow()
                         .iter()
-                        .find(|row| row.item_key == anchor.item_key)
-                        .map(|row| (row.source_revision, row.width_bucket));
-                    if let Some((source_revision, width_bucket)) = resolved_identity {
+                        .any(|row| row.item_key == anchor.item_key);
+                    if row_still_exists {
                         if let Some(current) = self
                             .toggle_anchor
                             .as_mut()
                             .filter(|current| current.item_key == anchor.item_key)
                         {
-                            current.source_revision = source_revision;
-                            current.width_bucket = width_bucket;
+                            current.scroll_top = resolved_scroll_top;
                             current.layout_applied = true;
                         }
                     } else {
@@ -1101,7 +1100,7 @@ impl ConversationController {
             self.render_heights.borrow().len(),
             visible_conversation_count
         );
-        let toggle_anchor_applied = toggle_scroll_top.is_some();
+        let toggle_anchor_active = self.toggle_anchor.is_some();
         if let Some(toggle_scroll_top) = toggle_scroll_top {
             let mut offset = self.scroll.offset();
             offset.y = px(-toggle_scroll_top);
@@ -1119,7 +1118,7 @@ impl ConversationController {
             offset.y = px(-adjusted_scroll_top);
             self.scroll.set_offset(offset);
         }
-        if self.viewport.follow_latest() && !toggle_anchor_applied {
+        if self.viewport.follow_latest() && !toggle_anchor_active {
             self.align_scroll_to_bottom(visible_conversation_count);
         }
         next_refresh_after.map(|delay| (delay, refresh_requires_full))
@@ -1147,6 +1146,10 @@ impl ConversationController {
             .borrow()
             .last()
             .map(|row| row.item_key.row_id().to_owned())
+    }
+
+    pub(super) fn toggle_anchor_active_for_tests(&self) -> bool {
+        self.toggle_anchor.is_some()
     }
 }
 

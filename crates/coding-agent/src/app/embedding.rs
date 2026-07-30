@@ -642,6 +642,19 @@ impl CodingAgentEmbeddingContext {
             .map_err(CodingAgentPublicError::from)
     }
 
+    /// Build a durable-session directory query across every workspace stored
+    /// under this context's session root.
+    ///
+    /// Unlike [`Self::session_query`], this keeps the configured repository
+    /// root but removes the current workspace/cwd filter. Product surfaces that
+    /// group historical sessions by project should use this directory view.
+    pub fn session_directory_query(
+        &self,
+    ) -> Result<CodingAgentSessionQuery, CodingAgentPublicError> {
+        CodingAgentSessionQuery::from_run_options_unscoped(&self.resolved.session)
+            .map_err(CodingAgentPublicError::from)
+    }
+
     /// Build an opaque session bootstrap handle for this context.
     pub fn session_bootstrap(&self) -> CodingAgentSessionBootstrap {
         CodingAgentSessionBootstrap::from_internal(

@@ -17,7 +17,10 @@ pub const COMPOSER_MIN_HEIGHT: u32 = 88;
 pub const COMPOSER_MAX_HEIGHT: u32 = 236;
 pub const USER_MESSAGE_MAX_WIDTH: u32 = 920;
 pub const ASSISTANT_MESSAGE_MAX_WIDTH: u32 = 960;
-pub const USER_MESSAGE_WIDTH_PERCENT: u32 = 70;
+/// Maximum centered transcript track, including one large spacing token on
+/// either side of the widest message.
+pub const CONVERSATION_CONTENT_MAX_WIDTH: u32 =
+    ASSISTANT_MESSAGE_MAX_WIDTH + DESKTOP_DESIGN_TOKENS.spacing.lg * 2;
 pub const UI_FONT_FAMILY: &str = ".SystemUIFont";
 pub const MONOSPACE_FONT_FAMILY: &str = "monospace";
 

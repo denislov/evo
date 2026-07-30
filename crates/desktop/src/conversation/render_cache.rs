@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::markdown::bounded_markdown_preview;
 use super::model::{ConversationBlockKind, ConversationItemKey, MAX_TRANSCRIPT_BLOCKS};
-use crate::shell::USER_MESSAGE_WIDTH_PERCENT;
+use crate::shell::{ASSISTANT_MESSAGE_MAX_WIDTH, USER_MESSAGE_MAX_WIDTH};
 
 pub const STREAMING_MARKDOWN_SETTLE_DELAY: Duration = Duration::from_millis(100);
 pub const MAX_SETTLING_MARKDOWN_BYTES: usize = 64 * 1024;
@@ -55,9 +55,9 @@ pub fn conversation_block_height(
     panel_width: u32,
 ) -> f32 {
     let effective_width = if kind == ConversationBlockKind::User {
-        panel_width.saturating_mul(USER_MESSAGE_WIDTH_PERCENT) / 100
+        panel_width.min(USER_MESSAGE_MAX_WIDTH)
     } else {
-        panel_width
+        panel_width.min(ASSISTANT_MESSAGE_MAX_WIDTH)
     };
     let columns = (effective_width.saturating_sub(128) as usize / 8).max(24);
     let main_rows = estimated_text_rows(text, columns);

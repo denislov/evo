@@ -209,7 +209,7 @@ impl RuntimeState {
     pub(super) fn session_catalog(
         &self,
     ) -> Result<(Vec<DesktopSessionCatalogEntry>, usize), DesktopBridgeError> {
-        let catalog = self.home.context.session_query()?.overviews()?;
+        let catalog = self.home.context.session_directory_query()?.overviews()?;
         let omitted = catalog
             .overviews
             .len()

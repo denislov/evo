@@ -11,7 +11,7 @@ pub(super) enum DesignSpace {
 }
 
 impl DesignSpace {
-    const fn pixels(self) -> f32 {
+    pub(super) const fn pixels(self) -> f32 {
         let spacing = DESKTOP_DESIGN_TOKENS.spacing;
         match self {
             Self::Xs => spacing.xs as f32,

@@ -454,6 +454,16 @@ impl CodingAgentSessionQuery {
         Ok(Self { options })
     }
 
+    pub(crate) fn from_run_options_unscoped(
+        session_options: &Option<SessionRunOptions>,
+    ) -> Result<Self, CodingSessionError> {
+        let options = enabled_session_options(session_options)
+            .map(interactive_navigation_options)
+            .transpose()?
+            .map(CodingAgentSessionOptions::without_workspace_filter);
+        Ok(Self { options })
+    }
+
     pub fn catalog(&self) -> Result<CodingAgentSessionCatalog, CodingAgentPublicError> {
         self.catalog_internal()
             .map_err(CodingAgentPublicError::from)

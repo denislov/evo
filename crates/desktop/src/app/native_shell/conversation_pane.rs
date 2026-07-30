@@ -1,9 +1,10 @@
 use gpui::{
     ElementId, Entity, EventEmitter, IntoElement, ParentElement as _, Render, Role, SharedString,
-    Styled as _, Window, div, prelude::*, px, relative, rgb,
+    Styled as _, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::{
-    ElementExt as _, VirtualListScrollHandle, button::Button, text::TextViewState, v_virtual_list,
+    ElementExt as _, Icon, Sizable as _, VirtualListScrollHandle, button::Button,
+    text::TextViewState, v_virtual_list,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -11,28 +12,41 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use unicode_width::UnicodeWidthChar as _;
 
 use super::{
     ConversationBlockKind, conversation_block_visual,
     conversation_controller::ConversationRenderReader,
     desktop_controls::{
-        DesktopCriticalButton, DesktopCriticalTone, DesktopIcon, DesktopIconButton,
+        DesktopControlSize, DesktopCriticalButton, DesktopCriticalTone, DesktopIcon,
+        DesktopIconButton,
     },
     desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
     streaming_text::{StreamingText, markdown_completion_trace_enabled, trace_markdown_parse},
 };
 use desktop::conversation::{
     ConversationRowMeasurement, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, compact_duration,
+    conversation_copy_text,
 };
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
 use desktop::shell::{
-    ASSISTANT_MESSAGE_MAX_WIDTH, CONVERSATION_ROW_VERTICAL_PADDING_PX, MONOSPACE_FONT_FAMILY,
-    SemanticTheme, USER_MESSAGE_MAX_WIDTH, USER_MESSAGE_WIDTH_PERCENT,
+    ASSISTANT_MESSAGE_MAX_WIDTH, CONVERSATION_CONTENT_MAX_WIDTH,
+    CONVERSATION_ROW_VERTICAL_PADDING_PX, MONOSPACE_FONT_FAMILY, SemanticTheme,
+    USER_MESSAGE_MAX_WIDTH,
 };
 
 /// Width of the leading rail that carries conversation selection now that
 /// blocks no longer paint a card background.
 pub(super) const CONVERSATION_RAIL_WIDTH: f32 = 2.;
+// The background excludes only the gap and copy control. The card's bottom
+// padding remains inside the bubble, matching its top padding and vertically
+// centering the message body.
+const USER_MESSAGE_COPY_FOOTER_INSET: f32 =
+    DesignSpace::Sm.pixels() + DesktopControlSize::Compact.pixels();
+const CONVERSATION_TAIL_MARKER_HEIGHT: f32 = 1.;
+const USER_MESSAGE_HORIZONTAL_CHROME: f32 = 48.;
+const USER_MESSAGE_COLUMN_WIDTH: f32 = 8.;
+const USER_MESSAGE_MIN_WIDTH: f32 = 64.;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ConversationPaneEvent {
@@ -43,10 +57,7 @@ pub(super) enum ConversationPaneEvent {
     Copy {
         block_id: String,
     },
-    CopyToolCommand {
-        block_id: String,
-    },
-    CopyToolOutput {
+    CopyToolDetails {
         block_id: String,
     },
     CopyCodeCompleted,
@@ -54,9 +65,6 @@ pub(super) enum ConversationPaneEvent {
         block_id: String,
     },
     OpenFull {
-        block_id: String,
-    },
-    OpenToolOutput {
         block_id: String,
     },
     Recovery {
@@ -244,20 +252,29 @@ impl Render for ConversationPane {
                                 .then(|| diagnostic_recovery.clone())
                                 .flatten();
                         let row_count = render.len();
+                        let is_last_row = index + 1 == row_count;
+                        let user_message_background_inset = USER_MESSAGE_COPY_FOOTER_INSET
+                            + if is_last_row {
+                                DesignSpace::Sm.pixels() + CONVERSATION_TAIL_MARKER_HEIGHT
+                            } else {
+                                0.
+                            };
                         let block_id = block.item_key.row_id().to_owned();
                         let select_block_id = block_id.clone();
                         let copy_block_id = block_id.clone();
-                        let copy_tool_command_block_id = block_id.clone();
-                        let copy_tool_output_block_id = block_id.clone();
+                        let copy_tool_details_block_id = block_id.clone();
                         let tool_header_toggle_block_id = block_id.clone();
                         let reasoning_collapsed_toggle_block_id = block_id.clone();
                         let reasoning_collapsed_chevron_block_id = block_id.clone();
                         let reasoning_expanded_toggle_block_id = block_id.clone();
                         let reasoning_expanded_chevron_block_id = block_id.clone();
                         let full_block_id = block_id.clone();
-                        let open_tool_output_block_id = block_id.clone();
                         let hover_group = SharedString::new(format!(
                             "conversation-card:{}",
+                            block.item_key.stable_id()
+                        ));
+                        let tool_output_hover_group = SharedString::new(format!(
+                            "tool-output:{}",
                             block.item_key.stable_id()
                         ));
                         let durable = block.durable;
@@ -275,13 +292,23 @@ impl Render for ConversationPane {
                         let measurement_owner = cx.entity().downgrade();
                         let text = block.text.clone();
                         let detail_text = block.detail.clone();
+                        let user_card_width = (block.kind == ConversationBlockKind::User)
+                            .then(|| user_message_width(&text));
                         let theme = SemanticTheme::GEEK_DARK;
                         let visual = conversation_block_visual(block.kind, block.is_error, theme);
                         let is_assistant = block.kind == ConversationBlockKind::Assistant;
+                        let previous_kind = index.checked_sub(1).and_then(|previous| {
+                            render.row(previous).map(|(row, _)| row.kind)
+                        });
+                        let next_kind = render.row(index + 1).map(|(row, _)| row.kind);
+                        let show_identity_header =
+                            conversation_identity_header_visible(block.kind, previous_kind);
                         let reasoning_duration_label = block
                             .reasoning_duration_millis
                             .map(compact_duration);
                         let is_tool = block.kind == ConversationBlockKind::Tool;
+                        let show_generic_copy =
+                            conversation_copy_footer_visible(block.kind, next_kind);
                         let tool_command = is_tool
                             .then(|| structured_tool_command(&block.detail, &block.text))
                             .flatten();
@@ -291,8 +318,6 @@ impl Render for ConversationPane {
                         let tool_summary_text = tool_name
                             .map(|name| tool_summary(name, &block.detail, &block.text))
                             .unwrap_or_default();
-                        let has_collapsible_detail = (is_assistant && !detail_text.is_empty())
-                            || (is_tool && (!text.is_empty() || !detail_text.is_empty()));
                         let terminal_label = if block.is_error {
                             Some("failed")
                         } else if is_tool && block.done {
@@ -309,7 +334,7 @@ impl Render for ConversationPane {
                         // Selection paints a full-height leading rail; hover no
                         // longer paints a stub. The rail is absolutely
                         // positioned and never affects row height.
-                        let selection_rail = selected.then(|| {
+                        let selection_rail = (selected && !is_tool).then(|| {
                             div()
                                 .debug_selector(|| "conversation-selected-rail".to_owned())
                                 .absolute()
@@ -340,12 +365,25 @@ impl Render for ConversationPane {
                                 .h(px(row_height))
                                 .w_full()
                                 .min_w_0()
-                                .px_token(DesignSpace::Lg)
                                 .py_token(DesignSpace::Xs)
                                 .flex()
                                 .items_start()
-                                .when(visual.align_right, |row| row.justify_end())
                                 .child(
+                                    div()
+                                        .when(index + 1 == row_count, |track| {
+                                            track.debug_selector(|| {
+                                                "conversation-last-track".to_owned()
+                                            })
+                                        })
+                                        .w_full()
+                                        .max_w(px(CONVERSATION_CONTENT_MAX_WIDTH as f32))
+                                        .mx_auto()
+                                        .min_w_0()
+                                        .px_token(DesignSpace::Lg)
+                                        .flex()
+                                        .items_start()
+                                        .when(visual.align_right, |track| track.justify_end())
+                                        .child(
                                     div()
                                         .relative()
                                         .group(hover_group.clone())
@@ -358,7 +396,6 @@ impl Render for ConversationPane {
                                                 "conversation-last-card".to_owned()
                                             })
                                         })
-                                        .w_full()
                                         .min_w_0()
                                         .when(block.preview_truncated, |card| {
                                             card.max_h(px(TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT))
@@ -379,34 +416,61 @@ impl Render for ConversationPane {
                                                 ));
                                             });
                                         })
-                                        .when(visual.align_right, |card| {
-                                            card.w(relative(
-                                                USER_MESSAGE_WIDTH_PERCENT as f32 / 100.,
-                                            ))
+                                        .when_some(user_card_width, |card, width| {
+                                            card.w(px(width))
                                                 .max_w(px(USER_MESSAGE_MAX_WIDTH as f32))
                                         })
                                         .when(!visual.align_right, |card| {
-                                            card.max_w(px(ASSISTANT_MESSAGE_MAX_WIDTH as f32))
+                                            card.w_full()
+                                                .max_w(px(ASSISTANT_MESSAGE_MAX_WIDTH as f32))
                                         })
-                                        .px_token(DesignSpace::Lg)
-                                        .py_token(DesignSpace::Md)
                                         .flex()
                                         .flex_col()
-                                        .gap_token(DesignSpace::Sm)
+                                        .when(is_tool, |card| {
+                                            card.px_token(DesignSpace::Lg)
+                                                .py_token(DesignSpace::Xs)
+                                                .gap_token(DesignSpace::Xs)
+                                        })
+                                        .when(!is_tool, |card| {
+                                            card.px_token(DesignSpace::Lg)
+                                                .py_token(DesignSpace::Md)
+                                                .gap_token(DesignSpace::Sm)
+                                        })
+                                        .when(visual.align_right, |card| {
+                                            card.child(
+                                                div()
+                                                    .debug_selector(|| {
+                                                        "desktop-user-message-bubble".into()
+                                                    })
+                                                    .absolute()
+                                                    .top_0()
+                                                    .left_0()
+                                                    .right_0()
+                                                    .bottom(px(user_message_background_inset))
+                                                    .rounded_token(DesignRadius::Lg)
+                                                    .bg(rgb(theme.elevated.value())),
+                                            )
+                                        })
                                         .when_some(selection_rail, |card, rail| card.child(rail))
-                                        .child(
-                                            div()
+                                        .when(show_identity_header, |card| {
+                                            card.child(
+                                                div()
                                                 .id(("conversation-row-header", index))
                                                 .debug_selector(|| {
                                                     "desktop-conversation-row-header".into()
+                                                })
+                                                .when(index + 1 == row_count, |header| {
+                                                    header.debug_selector(|| {
+                                                        "desktop-last-conversation-row-header"
+                                                            .into()
+                                                    })
                                                 })
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()
                                                 .gap_token(DesignSpace::Md)
-                                                .pr_12()
                                                 .when(
-                                                    is_tool && has_collapsible_detail,
+                                                    is_tool && tool_expandable,
                                                     |header| {
                                                         header.debug_selector(|| {
                                                             "desktop-tool-toggle-header".into()
@@ -509,11 +573,15 @@ impl Render for ConversationPane {
                                                                                 style.opacity(1.)
                                                                             },
                                                                         )
-                                                                        .child(if detail_expanded {
-                                                                            "v"
-                                                                        } else {
-                                                                            ">"
-                                                                        }),
+                                                                        .child(
+                                                                            Icon::new(
+                                                                                tool_disclosure_icon(
+                                                                                    detail_expanded,
+                                                                                )
+                                                                                .name(),
+                                                                            )
+                                                                            .small(),
+                                                                        ),
                                                                 )
                                                             })
                                                         })
@@ -531,19 +599,21 @@ impl Render for ConversationPane {
                                                                     ))
                                                                     .child(visual.glyph),
                                                             )
-                                                            .child(
-                                                                div()
-                                                                    .text_token(DesignText::Body)
-                                                                    .font_weight(
-                                                                        gpui::FontWeight::MEDIUM,
-                                                                    )
-                                                                    .text_color(rgb(
-                                                                        theme.text.value(),
-                                                                    ))
-                                                                    .child(SharedString::new(
-                                                                        block.title.clone(),
-                                                                    )),
-                                                            )
+                                                            .when(block.kind != ConversationBlockKind::User, |main| {
+                                                                main.child(
+                                                                    div()
+                                                                        .text_token(DesignText::Body)
+                                                                        .font_weight(
+                                                                            gpui::FontWeight::MEDIUM,
+                                                                        )
+                                                                        .text_color(rgb(
+                                                                            theme.text.value(),
+                                                                        ))
+                                                                        .child(SharedString::new(
+                                                                            block.title.clone(),
+                                                                        )),
+                                                                )
+                                                            })
                                                         }),
                                                 )
                                                 .when_some(
@@ -559,8 +629,9 @@ impl Render for ConversationPane {
                                                                 .child(label),
                                                         )
                                                     },
-                                                )
-                                        )
+                                                ),
+                                            )
+                                        })
                                         .when(
                                             is_assistant
                                                 && !detail_text.is_empty()
@@ -740,28 +811,29 @@ impl Render for ConversationPane {
                                             )
                                         },
                                         )
-                                        .when(is_tool && detail_expanded, |card| {
+                                        .when(is_tool && tool_expandable && detail_expanded, |card| {
                                             let tool_name_str = tool_name_from_title(&block.title);
-                                            let is_shell = tool_name_str == "bash";
+                                            let is_shell = matches!(tool_name_str, "bash" | "shell");
                                             let is_edit = tool_name_str == "edit";
                                             card.child(
                                                 div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap_token(DesignSpace::Xs)
+                                                    .id(("tool-output-region", index))
+                                                    .debug_selector(|| {
+                                                        "desktop-tool-output-region".into()
+                                                    })
+                                                    .relative()
+                                                    .group(tool_output_hover_group.clone())
+                                                    .rounded_token(DesignRadius::Md)
+                                                    .border_1()
+                                                    .border_color(rgb(theme.divider.value()))
+                                                    .bg(rgb(theme.surface.value()))
                                                     .child(
                                                         div()
-                                                            .id(("tool-output-region", index))
-                                                            .debug_selector(|| {
-                                                                "desktop-tool-output-region".into()
-                                                            })
-                                                            .rounded_token(DesignRadius::Md)
-                                                            .border_1()
-                                                            .border_color(rgb(theme.divider.value()))
-                                                            .bg(rgb(theme.surface.value()))
+                                                            .id(("tool-output-scroll", index))
                                                             .max_h(px(400.))
-                                                            .overflow_scroll()
+                                                            .overflow_y_scroll()
                                                             .p_token(DesignSpace::Sm)
+                                                            .pr_12()
                                                             .font_family(MONOSPACE_FONT_FAMILY)
                                                             .text_token(DesignText::Metadata)
                                                             .when(is_shell, |region| {
@@ -769,105 +841,93 @@ impl Render for ConversationPane {
                                                                     .child(
                                                                         div()
                                                                             .text_color(rgb(
-                                                                                theme.subtle_text.value(),
+                                                                                theme
+                                                                                    .subtle_text
+                                                                                    .value(),
                                                                             ))
-                                                                            .child(SharedString::new(format!(
-                                                                                "$ {}",
-                                                                                tool_command.clone().unwrap_or_default()
-                                                                            ))),
-                                                                    )
-                                                                    .when(!text.is_empty(), |region| {
-                                                                        region.child(
-                                                                            div()
-                                                                                .text_color(rgb(theme.text.value()))
-                                                                                .child(
-                                                                                    StreamingText::new(
-                                                                                        text.clone(),
-                                                                                        text_phase,
-                                                                                        text_phase.renders_markdown().then(|| {
-                                                                                            pane.markdown_state(&markdown_key, &text, cx)
-                                                                                        }),
-                                                                                        cx.entity().downgrade(),
-                                                                                    )
-                                                                                    .into_any_element(),
+                                                                            .child(
+                                                                                SharedString::new(
+                                                                                    format!(
+                                                                                        "$ {}",
+                                                                                        tool_command
+                                                                                            .clone()
+                                                                                            .unwrap_or_default()
+                                                                                    ),
                                                                                 ),
-                                                                        )
-                                                                    })
+                                                                            ),
+                                                                    )
+                                                                    .when(
+                                                                        !text.is_empty(),
+                                                                        |region| {
+                                                                            region.child(
+                                                                                div()
+                                                                                    .text_color(rgb(
+                                                                                        theme
+                                                                                            .text
+                                                                                            .value(),
+                                                                                    ))
+                                                                                    .child(
+                                                                                        SharedString::new(
+                                                                                            text.to_string(),
+                                                                                        ),
+                                                                                    ),
+                                                                            )
+                                                                        },
+                                                                    )
                                                             })
                                                             .when(is_edit, |region| {
-                                                                region.child(edit_diff_view(&block.detail, &block.text, &theme))
+                                                                region.child(edit_diff_view(
+                                                                    &block.detail,
+                                                                    &block.text,
+                                                                    &theme,
+                                                                ))
                                                             })
-                                                            .when(!is_shell && !is_edit, |region| {
-                                                                region.child(
-                                                                    div()
-                                                                        .text_color(rgb(theme.text.value()))
-                                                                        .whitespace_normal()
-                                                                        .child(SharedString::new(text.to_string())),
-                                                                )
-                                                            }),
+                                                            .when(
+                                                                !is_shell && !is_edit,
+                                                                |region| {
+                                                                    region.child(
+                                                                        div()
+                                                                            .text_color(rgb(
+                                                                                theme.text.value(),
+                                                                            ))
+                                                                            .whitespace_normal()
+                                                                            .child(
+                                                                                SharedString::new(
+                                                                                    text.to_string(),
+                                                                                ),
+                                                                            ),
+                                                                    )
+                                                                },
+                                                            ),
                                                     )
                                                     .child(
                                                         div()
-                                                            .flex()
-                                                            .flex_wrap()
-                                                            .items_center()
-                                                            .gap_token(DesignSpace::Xs)
-                                                            .when(tool_command.is_some(), |actions| {
-                                                                actions.child(
-                                                                    DesktopIconButton::new(
-                                                                        ("copy-tool-command", index),
-                                                                        DesktopIcon::Copy,
-                                                                        "Copy the complete bounded tool command",
-                                                                    )
-                                                                        .build()
-                                                                        .debug_selector(|| {
-                                                                            "desktop-copy-tool-command".into()
-                                                                        })
-                                                                        .on_click(cx.listener(move |_, _, _, cx| {
-                                                                            cx.stop_propagation();
-                                                                            cx.emit(ConversationPaneEvent::CopyToolCommand {
-                                                                                block_id: copy_tool_command_block_id.clone(),
-                                                                            });
-                                                                        })),
+                                                            .absolute()
+                                                            .top_2()
+                                                            .right_2()
+                                                            .child(conversation_hover_tool(
+                                                                DesktopIconButton::new(
+                                                                    ("copy-tool-details", index),
+                                                                    DesktopIcon::Copy,
+                                                                    "Copy the displayed tool details",
                                                                 )
-                                                            })
-                                                            .when(!text.is_empty(), |actions| {
-                                                                actions
-                                                                    .child(
-                                                                        DesktopIconButton::new(
-                                                                            ("copy-tool-output", index),
-                                                                            DesktopIcon::Copy,
-                                                                            "Copy the complete bounded tool output",
-                                                                        )
-                                                                            .build()
-                                                                            .debug_selector(|| {
-                                                                                "desktop-copy-tool-output".into()
-                                                                            })
-                                                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                                                cx.stop_propagation();
-                                                                                cx.emit(ConversationPaneEvent::CopyToolOutput {
-                                                                                    block_id: copy_tool_output_block_id.clone(),
-                                                                                });
-                                                                            })),
-                                                                    )
-                                                                    .child(
-                                                                        DesktopIconButton::new(
-                                                                            ("open-tool-output", index),
-                                                                            DesktopIcon::Expand,
-                                                                            "Open the complete bounded tool output",
-                                                                        )
-                                                                            .build()
-                                                                            .debug_selector(|| {
-                                                                                "desktop-open-tool-output".into()
-                                                                            })
-                                                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                                                cx.stop_propagation();
-                                                                                cx.emit(ConversationPaneEvent::OpenToolOutput {
-                                                                                    block_id: open_tool_output_block_id.clone(),
-                                                                                });
-                                                                            })),
-                                                                    )
-                                                            }),
+                                                                .build()
+                                                                .debug_selector(|| {
+                                                                    "desktop-copy-tool-details".into()
+                                                                })
+                                                                .on_click(cx.listener(
+                                                                    move |_, _, _, cx| {
+                                                                        cx.stop_propagation();
+                                                                        cx.emit(
+                                                                            ConversationPaneEvent::CopyToolDetails {
+                                                                                block_id: copy_tool_details_block_id.clone(),
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                )),
+                                                                tool_output_hover_group,
+                                                                false,
+                                                            )),
                                                     ),
                                             )
                                         })
@@ -962,7 +1022,7 @@ impl Render for ConversationPane {
                                                     ),
                                             )
                                         })
-                                        .when(block.preview_truncated, |card| {
+                                        .when(block.preview_truncated && !is_tool, |card| {
                                             card.child(
                                                 div()
                                                     .absolute()
@@ -971,7 +1031,6 @@ impl Render for ConversationPane {
                                                     .bottom_0()
                                                     .flex()
                                                     .items_center()
-                                                    .justify_between()
                                                     .gap_token(DesignSpace::Sm)
                                                     .border_t_1()
                                                     .border_color(rgb(theme.warning.value()))
@@ -979,29 +1038,60 @@ impl Render for ConversationPane {
                                                     .px_token(DesignSpace::Lg)
                                                     .py_token(DesignSpace::Sm)
                                                     .text_color(rgb(theme.warning.value()))
+                                                    .when(!visual.align_right && show_generic_copy, |actions| {
+                                                        actions.child(conversation_copy_button(
+                                                            ("copy-conversation-row", index),
+                                                            copy_block_id.clone(),
+                                                            hover_group.clone(),
+                                                            selected,
+                                                            cx,
+                                                        ))
+                                                    })
                                                     .child(
-                                                        "! preview truncated at desktop safety limit",
+                                                        div()
+                                                            .flex_1()
+                                                            .child("! preview truncated at desktop safety limit"),
                                                     )
                                                     .child(
-                                                        DesktopIconButton::new(
-                                                            ("open-full-message", index),
-                                                            DesktopIcon::Expand,
-                                                            "Open the complete bounded message source",
-                                                        )
-                                                            .build()
-                                                            .debug_selector(|| {
-                                                                "desktop-open-full-message".into()
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_token(DesignSpace::Xs)
+                                                            .when(visual.align_right && show_generic_copy, |actions| {
+                                                                actions.child(
+                                                                    conversation_copy_button(
+                                                                        (
+                                                                            "copy-conversation-row",
+                                                                            index,
+                                                                        ),
+                                                                        copy_block_id.clone(),
+                                                                        hover_group.clone(),
+                                                                        selected,
+                                                                        cx,
+                                                                    ),
+                                                                )
                                                             })
-                                                            .on_click(cx.listener(
-                                                                move |_, _, _, cx| {
-                                                                    cx.emit(
-                                                                        ConversationPaneEvent::OpenFull {
-                                                                            block_id: full_block_id
-                                                                                .clone(),
-                                                                        },
-                                                                    );
-                                                                },
-                                                            )),
+                                                            .child(
+                                                                DesktopIconButton::new(
+                                                                    ("open-full-message", index),
+                                                                    DesktopIcon::Expand,
+                                                                    "Open the complete bounded message source",
+                                                                )
+                                                                .build()
+                                                                .debug_selector(|| {
+                                                                    "desktop-open-full-message".into()
+                                                                })
+                                                                .on_click(cx.listener(
+                                                                    move |_, _, _, cx| {
+                                                                        cx.emit(
+                                                                            ConversationPaneEvent::OpenFull {
+                                                                                block_id: full_block_id
+                                                                                    .clone(),
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                )),
+                                                            ),
                                                     ),
                                             )
                                         })
@@ -1028,41 +1118,26 @@ impl Render for ConversationPane {
                                                         "conversation-tail-marker".to_owned()
                                                     })
                                                     .w_full()
-                                                    .h(px(1.)),
+                                                    .h(px(CONVERSATION_TAIL_MARKER_HEIGHT)),
                                             )
                                         })
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .top_2()
-                                                .right_2()
-                                                .flex()
-                                                .child(
-                                                    conversation_hover_tool(
-                                                        DesktopIconButton::new(
-                                                            ("copy-conversation-row", index),
-                                                            DesktopIcon::Copy,
-                                                            "Copy this bounded message",
-                                                        )
-                                                        .build()
-                                                        .debug_selector(|| {
-                                                            "desktop-copy-conversation-row".into()
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            move |_, _, _, cx| {
-                                                                cx.stop_propagation();
-                                                                cx.emit(
-                                                                    ConversationPaneEvent::Copy {
-                                                                        block_id: copy_block_id
-                                                                            .clone(),
-                                                                    },
-                                                                );
-                                                            },
-                                                        )),
-                                                        hover_group,
+                                        .when(!block.preview_truncated && show_generic_copy, |card| {
+                                            card.child(
+                                                div()
+                                                    .w_full()
+                                                    .flex()
+                                                    .when(visual.align_right, |actions| {
+                                                        actions.justify_end()
+                                                    })
+                                                    .child(conversation_copy_button(
+                                                        ("copy-conversation-row", index),
+                                                        copy_block_id.clone(),
+                                                        hover_group.clone(),
                                                         selected,
-                                                    ),
-                                                ),
+                                                        cx,
+                                                    )),
+                                            )
+                                        }),
                                         ),
                                 ),
                         )
@@ -1164,6 +1239,28 @@ impl Render for ConversationPane {
     }
 }
 
+fn conversation_copy_button(
+    id: impl Into<ElementId>,
+    block_id: String,
+    hover_group: SharedString,
+    selected: bool,
+    cx: &gpui::Context<ConversationPane>,
+) -> Button {
+    conversation_hover_tool(
+        DesktopIconButton::new(id, DesktopIcon::Copy, "Copy this bounded message")
+            .build()
+            .debug_selector(|| "desktop-copy-conversation-row".into())
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.stop_propagation();
+                cx.emit(ConversationPaneEvent::Copy {
+                    block_id: block_id.clone(),
+                });
+            })),
+        hover_group,
+        selected,
+    )
+}
+
 fn conversation_hover_tool(button: Button, hover_group: SharedString, selected: bool) -> Button {
     // Keep the button paint-visible with zero opacity instead of using
     // `visibility: hidden`: GPUI registers tab stops during paint after its
@@ -1201,13 +1298,63 @@ fn conversation_recovery_button(
         }))
 }
 
+fn user_message_width(text: &str) -> f32 {
+    let maximum = USER_MESSAGE_MAX_WIDTH as f32;
+    let maximum_content = maximum - USER_MESSAGE_HORIZONTAL_CHROME;
+    let maximum_columns = (maximum_content / USER_MESSAGE_COLUMN_WIDTH).ceil() as usize;
+    let mut line_columns = 0usize;
+    let mut widest_line = 0usize;
+
+    for character in text.chars() {
+        if character == '\n' {
+            widest_line = widest_line.max(line_columns);
+            line_columns = 0;
+            continue;
+        }
+        let character_columns = if character == '\t' {
+            4
+        } else {
+            character.width().unwrap_or_default()
+        };
+        line_columns = line_columns.saturating_add(character_columns);
+        if line_columns >= maximum_columns {
+            return maximum;
+        }
+    }
+    widest_line = widest_line.max(line_columns);
+
+    (widest_line as f32 * USER_MESSAGE_COLUMN_WIDTH + USER_MESSAGE_HORIZONTAL_CHROME)
+        .clamp(USER_MESSAGE_MIN_WIDTH, maximum)
+}
+
+fn conversation_identity_header_visible(
+    kind: ConversationBlockKind,
+    previous_kind: Option<ConversationBlockKind>,
+) -> bool {
+    kind != ConversationBlockKind::User
+        && (kind != ConversationBlockKind::Assistant
+            || previous_kind != Some(ConversationBlockKind::Tool))
+}
+
+fn conversation_copy_footer_visible(
+    kind: ConversationBlockKind,
+    next_kind: Option<ConversationBlockKind>,
+) -> bool {
+    kind != ConversationBlockKind::Tool
+        && !(kind == ConversationBlockKind::Assistant
+            && next_kind == Some(ConversationBlockKind::Tool))
+}
+
 fn tool_name_from_title(title: &str) -> &str {
-    title.rsplit(" · ").next().unwrap_or(title)
+    title
+        .strip_prefix("Tool · ")
+        .and_then(|title| title.split(" · ").next())
+        .unwrap_or(title)
 }
 
 fn tool_display_label(name: &str) -> &'static str {
     match name {
-        "bash" => "Shell",
+        "bash" | "shell" => "Shell",
         "edit" => "Edit",
         "read" => "Read",
         _ => "Tool",
@@ -1218,10 +1365,40 @@ fn tool_is_expandable(name: &str) -> bool {
     !matches!(name, "read")
 }
 
+fn tool_disclosure_icon(expanded: bool) -> DesktopIcon {
+    if expanded {
+        DesktopIcon::ChevronDown
+    } else {
+        DesktopIcon::ChevronRight
+    }
+}
+
 fn tool_arguments_json(detail: &str, text: &str) -> Option<serde_json::Value> {
     [detail, text]
         .into_iter()
         .find_map(|s| serde_json::from_str(s).ok())
+}
+
+fn edit_replacements(args: &serde_json::Value) -> Vec<(&str, &str)> {
+    let mut replacements = args
+        .get("edits")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|edit| {
+            Some((
+                edit.get("oldText")?.as_str()?,
+                edit.get("newText")?.as_str()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if let (Some(old), Some(new)) = (
+        args.get("oldText").and_then(|value| value.as_str()),
+        args.get("newText").and_then(|value| value.as_str()),
+    ) {
+        replacements.push((old, new));
+    }
+    replacements
 }
 
 fn tool_summary(name: &str, detail: &str, text: &str) -> String {
@@ -1229,7 +1406,7 @@ fn tool_summary(name: &str, detail: &str, text: &str) -> String {
         return String::new();
     };
     match name {
-        "bash" => args
+        "bash" | "shell" => args
             .get("command")
             .and_then(|v| v.as_str())
             .map(str::to_owned)
@@ -1240,22 +1417,19 @@ fn tool_summary(name: &str, detail: &str, text: &str) -> String {
             let limit = args.get("limit").and_then(|v| v.as_u64());
             match (offset, limit) {
                 (Some(o), Some(l)) => format!("{path} [{o},{l}]"),
-                _ => path.to_owned(),
+                (Some(o), None) => format!("{path} [{o},]"),
+                (None, Some(l)) => format!("{path} [,{l}]"),
+                (None, None) => path.to_owned(),
             }
         }
         "edit" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let (added, removed) = args
-                .get("edits")
-                .and_then(|v| v.as_array())
-                .map(|edits| {
-                    edits.iter().fold((0usize, 0usize), |(a, r), edit| {
-                        let old = edit.get("oldText").and_then(|v| v.as_str()).unwrap_or("");
-                        let new = edit.get("newText").and_then(|v| v.as_str()).unwrap_or("");
-                        (a + new.lines().count(), r + old.lines().count())
-                    })
-                })
-                .unwrap_or((0, 0));
+            let (added, removed) = edit_replacements(&args).into_iter().fold(
+                (0usize, 0usize),
+                |(added, removed), (old, new)| {
+                    (added + new.lines().count(), removed + old.lines().count())
+                },
+            );
             format!("{path} +{added} -{removed}")
         }
         _ => String::new(),
@@ -1264,14 +1438,9 @@ fn tool_summary(name: &str, detail: &str, text: &str) -> String {
 
 fn edit_diff_view(detail: &str, text: &str, theme: &SemanticTheme) -> gpui::AnyElement {
     let args = tool_arguments_json(detail, text);
-    let edits = args
-        .as_ref()
-        .and_then(|a| a.get("edits").and_then(|v| v.as_array()));
     let mut container = div().flex().flex_col();
-    if let Some(edits) = edits {
-        for edit in edits {
-            let old = edit.get("oldText").and_then(|v| v.as_str()).unwrap_or("");
-            let new = edit.get("newText").and_then(|v| v.as_str()).unwrap_or("");
+    if let Some(args) = args.as_ref() {
+        for (old, new) in edit_replacements(args) {
             for line in old.lines() {
                 container = container.child(
                     div()
@@ -1291,6 +1460,22 @@ fn edit_diff_view(detail: &str, text: &str, theme: &SemanticTheme) -> gpui::AnyE
     container.into_any_element()
 }
 
+fn edit_diff_text(detail: &str, text: &str) -> String {
+    let Some(args) = tool_arguments_json(detail, text) else {
+        return String::new();
+    };
+    edit_replacements(&args)
+        .into_iter()
+        .flat_map(|(old, new)| {
+            old.lines()
+                .map(|line| format!("- {line}"))
+                .chain(new.lines().map(|line| format!("+ {line}")))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn structured_tool_command(detail: &str, text: &str) -> Option<String> {
     [detail, text].into_iter().find_map(|arguments| {
         serde_json::from_str::<serde_json::Value>(arguments)
@@ -1301,47 +1486,125 @@ fn structured_tool_command(detail: &str, text: &str) -> Option<String> {
     })
 }
 
-fn tool_exit_code_label(title: &str, output: &str, done: bool, is_error: bool) -> String {
-    if !done {
-        return "running".to_owned();
+pub(super) fn tool_detail_copy_text(title: &str, detail: &str, text: &str) -> String {
+    match tool_name_from_title(title) {
+        "bash" | "shell" => {
+            let command = structured_tool_command(detail, text).unwrap_or_default();
+            conversation_copy_text(&format!("$ {command}"), text)
+        }
+        "edit" => conversation_copy_text(&edit_diff_text(detail, text), ""),
+        _ => conversation_copy_text(text, ""),
     }
-    if title.split(" · ").nth(1) != Some("bash") {
-        return "not reported".to_owned();
-    }
-    if !is_error {
-        return "0".to_owned();
-    }
-    output
-        .rsplit_once("Command exited with code ")
-        .and_then(|(_, code)| code.lines().next())
-        .filter(|code| code.parse::<i32>().is_ok())
-        .unwrap_or("not reported")
-        .to_owned()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversationPane, MAX_MARKDOWN_PARSE_STATES, tool_exit_code_label};
+    use super::{
+        ConversationBlockKind, ConversationPane, MAX_MARKDOWN_PARSE_STATES,
+        conversation_copy_footer_visible, conversation_identity_header_visible, edit_diff_text,
+        tool_detail_copy_text, tool_disclosure_icon, tool_name_from_title, tool_summary,
+        user_message_width,
+    };
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::{Theme, ThemeMode, text::TextViewState};
     use std::sync::Arc;
 
     #[test]
-    fn tool_metadata_uses_only_structured_or_reported_values() {
-        assert_eq!(tool_exit_code_label("Tool · bash", "ok", true, false), "0");
+    fn user_message_width_wraps_content_and_caps_long_lines() {
+        assert!(user_message_width("Short prompt") < 320.);
+        assert!(user_message_width("中文提示") >= user_message_width("test"));
         assert_eq!(
-            tool_exit_code_label(
-                "Tool · bash",
-                "failed\n\nCommand exited with code 101",
-                true,
-                true
+            user_message_width(&"long wrapping prompt ".repeat(200)),
+            desktop::shell::USER_MESSAGE_MAX_WIDTH as f32
+        );
+    }
+
+    #[test]
+    fn tool_titles_and_summaries_use_structured_arguments() {
+        assert_eq!(tool_name_from_title("Tool · bash · 320 ms"), "bash");
+        assert_eq!(
+            tool_summary("bash", r#"{"command":"git status --short"}"#, ""),
+            "git status --short"
+        );
+        assert_eq!(
+            tool_summary(
+                "read",
+                r#"{"path":"src/main.rs","offset":40,"limit":80}"#,
+                ""
             ),
-            "101"
+            "src/main.rs [40,80]"
         );
         assert_eq!(
-            tool_exit_code_label("Tool · read", "ok", true, false),
-            "not reported"
+            tool_summary(
+                "edit",
+                r#"{"path":"src/main.rs","oldText":"one\ntwo","newText":"three\nfour\nfive"}"#,
+                ""
+            ),
+            "src/main.rs +3 -2"
         );
+    }
+
+    #[test]
+    fn tool_detail_copy_matches_the_expanded_shell_and_edit_views() {
+        assert_eq!(
+            tool_detail_copy_text(
+                "Tool · shell · 1.2 s",
+                r#"{"command":"git status"}"#,
+                "M src/main.rs\n"
+            ),
+            "$ git status\nM src/main.rs\n"
+        );
+        let edit = r#"{"path":"src/main.rs","oldText":"old one\nold two","newText":"new one"}"#;
+        assert_eq!(edit_diff_text(edit, ""), "- old one\n- old two\n+ new one");
+        assert_eq!(
+            tool_detail_copy_text("Tool · edit · 90 ms", edit, "done"),
+            "- old one\n- old two\n+ new one"
+        );
+    }
+
+    #[test]
+    fn identity_headers_hide_for_user_and_continue_across_a_tool_row() {
+        assert!(!conversation_identity_header_visible(
+            ConversationBlockKind::User,
+            Some(ConversationBlockKind::Assistant)
+        ));
+        assert!(!conversation_identity_header_visible(
+            ConversationBlockKind::Assistant,
+            Some(ConversationBlockKind::Tool)
+        ));
+        assert!(conversation_identity_header_visible(
+            ConversationBlockKind::Assistant,
+            Some(ConversationBlockKind::User)
+        ));
+        assert!(conversation_identity_header_visible(
+            ConversationBlockKind::Tool,
+            Some(ConversationBlockKind::Assistant)
+        ));
+    }
+
+    #[test]
+    fn assistant_copy_waits_until_the_tool_group_finishes() {
+        assert!(!conversation_copy_footer_visible(
+            ConversationBlockKind::Assistant,
+            Some(ConversationBlockKind::Tool)
+        ));
+        assert!(conversation_copy_footer_visible(
+            ConversationBlockKind::Assistant,
+            None
+        ));
+        assert!(!conversation_copy_footer_visible(
+            ConversationBlockKind::Tool,
+            Some(ConversationBlockKind::Assistant)
+        ));
+    }
+
+    #[test]
+    fn tool_disclosure_rotates_down_when_expanded() {
+        assert_eq!(
+            tool_disclosure_icon(false),
+            super::DesktopIcon::ChevronRight
+        );
+        assert_eq!(tool_disclosure_icon(true), super::DesktopIcon::ChevronDown);
     }
 
     fn measure(cx: &mut gpui::VisualTestContext, state: &Entity<TextViewState>) -> f32 {

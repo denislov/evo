@@ -1,4 +1,6 @@
-use desktop::shell::{COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, SemanticTheme};
+use desktop::shell::{
+    COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, CONVERSATION_CONTENT_MAX_WIDTH, SemanticTheme,
+};
 use gpui::{
     EventEmitter, FocusHandle, Focusable as _, IntoElement, ParentElement as _, Render, Role,
     Styled as _, Subscription, Window, div, prelude::*, px, rgb,
@@ -264,6 +266,9 @@ impl Render for ComposerPane {
             .debug_selector(|| "desktop-composer-panel".into())
             .min_h(px(COMPOSER_MIN_HEIGHT as f32))
             .max_h(px(COMPOSER_MAX_HEIGHT as f32))
+            .w_full()
+            .max_w(px(CONVERSATION_CONTENT_MAX_WIDTH as f32))
+            .mx_auto()
             .flex_shrink_0()
             .px_token(DesignSpace::Lg)
             .py_token(DesignSpace::Md)
