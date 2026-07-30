@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（Phase 2 已完成，下一项 DSK-730）
+> 状态：执行中（Phase 3 进行中，DSK-730 已完成，下一项 DSK-731）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1016,7 +1016,9 @@ Gate：Gate A + Gate B。
 
 | 债务 ID | 引入任务 | 临时内容 | 路径 | 删除任务 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| — | — | 当前无计划内债务 | — | — | — |
+| DSK-D730-01 | DSK-730 | 尚未接入的 root event/transition 分支使用模块级 `dead_code` allow | `application/reducer.rs` | DSK-733 | 待清理；runtime branch 在 DSK-731 接入，platform/timer/effect branch 在 DSK-733 接入后删除 allow |
+| DSK-D730-02 | DSK-730 | typed platform effect/result contract 尚未由 executor 消费，使用模块级 `dead_code` allow | `application/effect.rs` | DSK-733 | 待清理；picker/timer/editor/writer 迁移后删除 allow |
+| DSK-D730-03 | DSK-730 | `UiChangeSet` 预定义 region 尚未全部进入 refresh routing，使用模块级 `dead_code` allow | `application/change_set.rs` | DSK-743 | 待清理；统一 selective refresh 后删除 allow |
 
 ## 十二、风险与处置
 
@@ -1183,6 +1185,31 @@ Gate 与性能记录：
   all-target check、严格 clippy、format 与 diff check 全部通过。本任务只改变内部 command ownership 与
   admission 结构，没有 UI/render 语义变更，未更新 visual golden。
 
+### DSK-730 实际结果
+
+- 新增 `application/{state,reducer,effect,change_set}.rs`，建立 typed `DesktopEvent`、`UiIntent`、
+  `PlatformResult`、`DesktopTimer`、`Transition`、`DesktopEffect` 与 `UiChangeSet` contract。runtime update
+  在 root event 中使用 `Box`，避免把小 UI/platform/timer event 扩大到约 1.7 KiB。
+- `DesktopState<Workspace, Catalog>` 成为 `WorkspaceStore`、global `CommandTracker`、catalog 与
+  `DesktopPreferences` model 的唯一聚合 owner；`NativeShell` 原四个平行字段全部删除，改为单一
+  `app: DesktopState`。这是所有权迁移，不存在 mirror、dual write 或兼容 façade。
+- `DesktopController` 只拥有单调且 checked 的 effect request ID sequence；`reduce(&mut DesktopState, …)`
+  在迁移期只把唯一 mutable state 交给一个 typed delegation branch。session catalog disclosure 成为首个
+  生产接入点：`UiIntent::SetProjectCollapsed` 经 reducer 产生 `UiChangeSet::Sessions`，adapter 只据此刷新
+  sessions pane。
+- `EffectIdentity` 由 typed `EffectRequestId + WorkspaceKey` 构成。picker result 除 ID/owner 外还必须匹配
+  picker kind；external-editor result 也必须匹配 effect kind；timer 自身携带相同 identity，后续异步结果
+  不再需要仅凭当时 active workspace 关联。
+- 新增 3 项纯测试：`UiChangeSet::merge` 的幂等/并集行为、delegated reducer 只修改传入的单一 state、
+  picker/editor/timer 对 kind/request ID/owner 的严格 identity 匹配。另运行 catalog disclosure GPUI 测试与
+  background workspace owner 隔离测试，均通过。
+- application dependency guard 自动覆盖全部新增文件，确认没有 GPUI、filesystem/process/thread 或 Tokio
+  executor 依赖。Gate A 通过：desktop lib `300 passed / 5 ignored / 0 failed`，dependency boundary
+  `10 passed`，all-target check、严格 clippy、format 与 diff check 全部通过。本任务没有改变 render/layout
+  语义，未更新 visual golden。
+- contract 中尚未由后续 reducer/effect executor 消费的分支以三条精确执行债务登记，分别由
+  DSK-731/733/743 接入并删除模块级 `dead_code` allow；没有把迁移债务移出本计划。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1193,7 +1220,7 @@ Gate 与性能记录：
 | DSK-711 | 已完成 | `7953d88` | typed `WorkspaceKey/WorkspaceStore` 替代 Home sentinel 与 swap；Gate A/B、owner/lifecycle 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-720 | 已完成 | `9c9cbc4` | global `CommandTracker` 成为唯一 ID/owner/intent authority；Gate A、8 项纯 tracker 测试、owner mismatch/queue/rejection/resync 定向测试及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-721 | 已完成 | `4ddde38` | 单一 cloneable `RuntimeCommandClient` 成为 validation/admission/send authority；Bridge 仅负责 bootstrap 与 owner split；Gate A、queue closed/full、redaction、shutdown/join 定向测试通过；未更新 golden |
-| DSK-730 | 待执行 | — | — |
+| DSK-730 | 已完成 | `333bffe` | typed application event/effect/transition/change-set contract；`DesktopState` 成为 workspace/command/catalog/preferences 唯一 owner；首个 catalog disclosure reducer delegation 接入；Gate A 与 3 项纯 contract 测试通过 |
 | DSK-731 | 待执行 | — | — |
 | DSK-732 | 待执行 | — | — |
 | DSK-733 | 待执行 | — | — |
