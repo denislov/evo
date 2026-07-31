@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-753 已完成，下一项 DSK-760）
+> 状态：执行中（DSK-760 已完成，下一项 DSK-761）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1481,6 +1481,23 @@ Gate 与性能记录：
   all-target check、严格 clippy、format 与 diff check 全部通过。20 项 visual golden compare 全部 `RMSE=0`，
   未更新 golden；任务未改变 render/layout/ViewModel、refresh routing 或 runtime channel，因此未运行 performance gate。
 
+### DSK-760 实际结果
+
+- `native_shell.rs` 从 7,703 行降至 1,017 行，并且只保留一处 `#[cfg(test)]`：外置的 `mod tests;` 声明。
+  原内嵌测试按 `workspace`、`commands`、`runtime_updates`、`focus`、`responsive`、`overlays`、`performance`
+  拆入独立 suite，共享构造数据集中到 `fixtures.rs`；未增加 production public API 或通用 test-only 后门。
+- 将相邻 conversation selection、滚动补偿、indexed update、telemetry refresh delay、dirty routing、runtime
+  rejection、workspace owner、presentation label/model menu/composer latency 等纯逻辑断言迁到各自 application/UI
+  owner 的 unit tests。GPUI suite 聚焦 entity/render、hit-test、focus、responsive、overlay/accessibility 与真实交互边界。
+- 删除 4 项直接调用私有 resize/重复 workspace close 顺序的脆弱测试，并合并重复 dirty-routing/label 场景；
+  desktop lib 从 `319` 收敛为 `312 passed / 5 ignored / 0 failed`，减少的是重复或无行为约束的 case，相关行为断言
+  已由 owner-local tests 承接。dependency boundary 增至 16 项，持续约束 suite 分类及主文件不得恢复 test helper/import。
+- 修正超大 Unicode markdown fixture：继续覆盖 `MAX_MARKDOWN_PREVIEW_BYTES` 以上的截断、完整 modal 与 copy 行为，
+  但避免构造约 670 KiB 的复杂多行布局；该定向测试由超过 60 秒降至约 4.05 秒，desktop lib 全量墙钟由
+  70.29 秒降至 5.19 秒（约 92.6%）。
+- Gate A/B 全部通过：all-target check、严格 clippy、format、diff check、desktop lib 与 16 项 dependency boundary
+  全绿。20 项 visual golden compare 全部 `RMSE=0`，未更新 golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1503,7 +1520,7 @@ Gate 与性能记录：
 | DSK-751 | 已完成 | `847b2a4` | review presentation 与 external-editor platform 分权；runtime 仅重校验 opaque target；typed launch result 回 reducer；Gate A/B、4 项 review bounds、5 项 editor/platform 定向测试与 13 项 boundary 全通过；未更新 golden |
 | DSK-752 | 已完成 | `43af5ca` | runtime contract/client/worker/dispatch 单一 authority 路径；删除旧 module path 与 9 个 unused re-export；Gate A、54 项 runtime 与 14 项 boundary 全通过；未运行 perf/visual gate |
 | DSK-753 | 已完成 | `eb7c090` | presentation 按 conversation/sessions/inspector/components/shell feature 归位；合并 center navigation；旧路径/空目录守卫、Gate A/B 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
-| DSK-760 | 待执行 | — | — |
+| DSK-760 | 已完成 | `cf1ef69` | native shell 大测试按 7 类行为 suite + fixtures 外置，纯逻辑下沉 owner；主文件 7,703→1,017 行且仅保留 `mod tests`；lib 墙钟 70.29s→5.19s；Gate A/B、16 项 boundary 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-761 | 待执行 | — | — |
 | DSK-762 | 待执行 | — | — |
 | DSK-770 | 待执行 | — | — |
