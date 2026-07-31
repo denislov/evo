@@ -361,7 +361,7 @@ impl Render for ConversationHeader {
         let Some(view_model) = self.view_model.clone() else {
             return div().h(px(CENTER_HEADER_HEIGHT as f32)).into_any_element();
         };
-        let theme = SemanticTheme::GEEK_DARK;
+        let theme = SemanticTheme::current(cx);
         let status = view_model.status;
         let viewport = window.viewport_size();
         let layout = ShellLayout::resolve_with_panel_widths(
@@ -550,7 +550,7 @@ impl Render for ConversationHeader {
                                         .py_token(DesignSpace::Xs)
                                         .bg(rgb(theme.surface.value()))
                                         .text_token(DesignText::Metadata)
-                                        .text_color(semantic_status_color(status))
+                                        .text_color(semantic_status_color(status, theme))
                                         .child(status.glyph())
                                         .child(header_runtime_status_label(
                                             status,

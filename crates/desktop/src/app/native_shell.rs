@@ -13,7 +13,7 @@ use desktop::runtime::{
 };
 use desktop::ui::conversation::{
     ComposerState, ComposerSubmissionKind, ConversationBlockKind, ConversationRowMeasurement,
-    MAX_COPY_BYTES, conversation_copy_text, conversation_width_bucket,
+    DelegationStatus, MAX_COPY_BYTES, conversation_copy_text, conversation_width_bucket,
 };
 use desktop::ui::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH,
@@ -77,13 +77,30 @@ pub(crate) fn conversation_focus_accent(focused: bool, theme: SemanticTheme) -> 
     if focused { theme.accent } else { theme.divider }
 }
 
-pub(crate) fn semantic_status_color(status: SemanticStatus) -> gpui::Rgba {
-    let theme = SemanticTheme::GEEK_DARK;
+pub(crate) fn semantic_status_color(status: SemanticStatus, theme: SemanticTheme) -> gpui::Rgba {
     rgb(match status {
         SemanticStatus::Idle => theme.muted_text.value(),
         SemanticStatus::Running => theme.accent.value(),
         SemanticStatus::Warning | SemanticStatus::Authorization => theme.warning.value(),
         SemanticStatus::Error => theme.danger.value(),
+    })
+}
+
+/// Accent colour for a delegation's lifecycle state, mirroring
+/// [`semantic_status_color`] for the delegation status vocabulary.
+pub(crate) fn delegation_status_color(
+    status: DelegationStatus,
+    theme: SemanticTheme,
+) -> gpui::Rgba {
+    rgb(match status {
+        DelegationStatus::Requested | DelegationStatus::Completed | DelegationStatus::Unknown => {
+            theme.muted_text.value()
+        }
+        DelegationStatus::Running => theme.accent.value(),
+        DelegationStatus::Failed => theme.danger.value(),
+        DelegationStatus::Rejected
+        | DelegationStatus::Cancelled
+        | DelegationStatus::ConfirmationRequired => theme.warning.value(),
     })
 }
 

@@ -25,7 +25,7 @@ impl NativeShell {
             });
             self.app.workspaces.active_mut().composer_needs_sync = false;
         }
-        let theme = SemanticTheme::GEEK_DARK;
+        let theme = SemanticTheme::current(cx);
         let layout = self.layout(window);
         self.ui.focus.reconcile_layout(layout);
         if self.app.workspaces.active_mut().projection.is_some() {

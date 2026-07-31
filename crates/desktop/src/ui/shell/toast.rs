@@ -235,7 +235,7 @@ impl ToastHost {
 
 impl Render for ToastHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = SemanticTheme::GEEK_DARK;
+        let theme = SemanticTheme::current(cx);
         let width = u32::from(window.viewport_size().width)
             .saturating_sub(TOAST_EDGE_INSET.saturating_mul(2))
             .min(MAX_TOAST_WIDTH);

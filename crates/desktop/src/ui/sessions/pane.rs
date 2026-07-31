@@ -349,7 +349,7 @@ impl Render for SessionsPane {
                 .into_any_element();
         };
         let panel_width = view_model.panel_width;
-        let theme = SemanticTheme::GEEK_DARK;
+        let theme = SemanticTheme::current(cx);
         let active_session_id = view_model.active_session_id.as_ref();
         let composer_running = view_model.composer_running;
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
@@ -388,8 +388,10 @@ impl Render for SessionsPane {
                     &runtime_states,
                 );
                 let project_status_label = runtime_status_label(project_status, contains_active);
-                let project_status_color = project_status
-                    .map_or_else(|| rgb(theme.muted_text.value()), semantic_status_color);
+                let project_status_color = project_status.map_or_else(
+                    || rgb(theme.muted_text.value()),
+                    |status| semantic_status_color(status, theme),
+                );
                 let scope_detail = match group.workspace.kind {
                     CodingAgentWorkspaceKind::Project => group
                         .workspace
@@ -490,7 +492,7 @@ impl Render for SessionsPane {
                             (
                                 semantic_status.glyph(),
                                 runtime_status_label(Some(semantic_status), active),
-                                semantic_status_color(semantic_status),
+                                semantic_status_color(semantic_status, theme),
                             )
                         } else {
                             (

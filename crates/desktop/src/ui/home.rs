@@ -59,9 +59,9 @@ impl Render for HomePane {
     fn render(
         &mut self,
         window: &mut gpui::Window,
-        _: &mut gpui::Context<Self>,
+        cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
-        let theme = SemanticTheme::GEEK_DARK;
+        let theme = SemanticTheme::current(cx);
         let viewport = window.viewport_size();
         let layout = HomeHeroLayout::resolve(u32::from(viewport.width), u32::from(viewport.height));
 

@@ -353,7 +353,7 @@ impl Render for InspectorPane {
                 .into_any_element();
         };
         let panel_width = view_model.panel_width;
-        let theme = SemanticTheme::GEEK_DARK;
+        let theme = SemanticTheme::current(cx);
         let composer_running = view_model.composer_running;
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
         let recovery_pending = view_model.recovery_pending;
@@ -894,7 +894,7 @@ fn inspector_section_tab(
     let click_scroll = tab_scroll.clone();
     let key_focus = tab_focus;
     let key_scroll = tab_scroll;
-    let theme = SemanticTheme::GEEK_DARK;
+    let theme = SemanticTheme::current(cx);
     div()
         .id(id)
         .role(Role::Tab)

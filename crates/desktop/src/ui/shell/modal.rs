@@ -105,7 +105,7 @@ impl Render for RootModalHost {
         let Some(view_model) = self.view_model.clone() else {
             return div().into_any_element();
         };
-        let theme = SemanticTheme::GEEK_DARK;
+        let theme = SemanticTheme::current(cx);
         let palette_rows = PALETTE_ENTRIES
             .iter()
             .enumerate()

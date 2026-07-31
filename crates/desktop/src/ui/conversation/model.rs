@@ -15,6 +15,8 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_BLOCK_TEXT_BYTES: usize = 1024 * 1024;
 pub const MAX_THINKING_TEXT_BYTES: usize = 512 * 1024;
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
+/// Title prefix shared with the copy path so delegation titles cannot drift.
+pub const DELEGATION_TITLE_PREFIX: &str = "Delegation · ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConversationBlockKind {
@@ -39,6 +41,56 @@ impl ConversationBlockKind {
             Self::Diagnostic => "diagnostic",
         }
     }
+}
+
+/// Durable lifecycle state of a delegation, parsed from the delegate tool's
+/// status string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegationStatus {
+    Requested,
+    Running,
+    Completed,
+    Failed,
+    Rejected,
+    Cancelled,
+    ConfirmationRequired,
+    Unknown,
+}
+
+impl DelegationStatus {
+    pub fn parse(status: &str) -> Self {
+        match status {
+            "requested" => Self::Requested,
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "rejected" => Self::Rejected,
+            "cancelled" => Self::Cancelled,
+            "confirmation_required" => Self::ConfirmationRequired,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Requested => "Requested",
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Rejected => "Rejected",
+            Self::Cancelled => "Cancelled",
+            Self::ConfirmationRequired => "Awaiting approval",
+            Self::Unknown => "Delegated",
+        }
+    }
+}
+
+/// Display metadata for a delegation block: which profile received the task
+/// and how the delegation resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationMeta {
+    pub target_id: String,
+    pub status: DelegationStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,6 +184,8 @@ pub struct ConversationBlock {
     pub image_count: usize,
     pub reasoning_duration_millis: Option<u64>,
     pub truncated: bool,
+    /// Delegation target and lifecycle state; `None` for every other kind.
+    pub delegation: Option<DelegationMeta>,
 }
 
 impl ConversationBlock {
@@ -140,7 +194,14 @@ impl ConversationBlock {
     }
 
     fn retained_bytes(&self) -> usize {
-        self.id.len() + self.title.len() + self.text.len() + self.detail.len()
+        self.id.len()
+            + self.title.len()
+            + self.text.len()
+            + self.detail.len()
+            + self
+                .delegation
+                .as_ref()
+                .map_or(0, |meta| meta.target_id.len())
     }
 
     fn refresh_source_revision(&mut self) {
@@ -253,118 +314,128 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
         } => *reasoning_duration_millis,
         _ => None,
     };
-    let (kind, source_id, title, text, detail, done, is_error, image_count, truncated) = match item
-    {
-        CodingAgentSessionTranscriptItem::User { text } => {
-            let (text, truncated) = truncate_bytes(text, MAX_BLOCK_TEXT_BYTES);
-            (
-                ConversationBlockKind::User,
-                String::new(),
-                "You".into(),
-                text,
-                String::new(),
-                true,
-                false,
-                0,
-                truncated,
-            )
-        }
-        CodingAgentSessionTranscriptItem::Assistant {
-            id,
-            text,
-            thinking,
-            images,
-            done,
-            ..
-        } => {
-            let (text, text_truncated) = truncate_bytes(text, MAX_BLOCK_TEXT_BYTES);
-            let (thinking, thinking_truncated) = truncate_bytes(thinking, MAX_THINKING_TEXT_BYTES);
-            (
-                ConversationBlockKind::Assistant,
+    let (kind, source_id, title, text, detail, done, is_error, image_count, truncated, delegation) =
+        match item {
+            CodingAgentSessionTranscriptItem::User { text } => {
+                let (text, truncated) = truncate_bytes(text, MAX_BLOCK_TEXT_BYTES);
+                (
+                    ConversationBlockKind::User,
+                    String::new(),
+                    "You".into(),
+                    text,
+                    String::new(),
+                    true,
+                    false,
+                    0,
+                    truncated,
+                    None,
+                )
+            }
+            CodingAgentSessionTranscriptItem::Assistant {
                 id,
-                "Assistant".into(),
                 text,
                 thinking,
+                images,
                 done,
-                false,
-                images.len(),
-                text_truncated || thinking_truncated,
-            )
-        }
-        CodingAgentSessionTranscriptItem::Tool {
-            call_id,
-            name,
-            args,
-            result,
-            is_error,
-            duration_millis,
-        } => {
-            let arguments = serde_json::to_string_pretty(&args)
-                .unwrap_or_else(|_| "<invalid tool arguments>".into());
-            let (arguments, args_truncated) = truncate_bytes(arguments, MAX_TOOL_ARGUMENT_BYTES);
-            let (result, result_truncated) =
-                truncate_bytes(result.unwrap_or_default(), MAX_BLOCK_TEXT_BYTES);
-            (
-                ConversationBlockKind::Tool,
+                ..
+            } => {
+                let (text, text_truncated) = truncate_bytes(text, MAX_BLOCK_TEXT_BYTES);
+                let (thinking, thinking_truncated) =
+                    truncate_bytes(thinking, MAX_THINKING_TEXT_BYTES);
+                (
+                    ConversationBlockKind::Assistant,
+                    id,
+                    "Assistant".into(),
+                    text,
+                    thinking,
+                    done,
+                    false,
+                    images.len(),
+                    text_truncated || thinking_truncated,
+                    None,
+                )
+            }
+            CodingAgentSessionTranscriptItem::Tool {
                 call_id,
-                tool_title(&name, duration_millis),
+                name,
+                args,
                 result,
-                arguments,
-                true,
                 is_error,
-                0,
-                args_truncated || result_truncated,
-            )
-        }
-        CodingAgentSessionTranscriptItem::Delegation {
-            tool_call_id,
-            target_kind,
-            target_id,
-            task,
-            status,
-            summary,
-            ..
-        } => {
-            let (task, task_truncated) = truncate_bytes(task, MAX_BLOCK_TEXT_BYTES);
-            let (summary, summary_truncated) =
-                truncate_bytes(summary.unwrap_or(status), MAX_BLOCK_TEXT_BYTES);
-            (
-                ConversationBlockKind::Delegation,
+                duration_millis,
+            } => {
+                let arguments = serde_json::to_string_pretty(&args)
+                    .unwrap_or_else(|_| "<invalid tool arguments>".into());
+                let (arguments, args_truncated) =
+                    truncate_bytes(arguments, MAX_TOOL_ARGUMENT_BYTES);
+                let (result, result_truncated) =
+                    truncate_bytes(result.unwrap_or_default(), MAX_BLOCK_TEXT_BYTES);
+                (
+                    ConversationBlockKind::Tool,
+                    call_id,
+                    tool_title(&name, duration_millis),
+                    result,
+                    arguments,
+                    true,
+                    is_error,
+                    0,
+                    args_truncated || result_truncated,
+                    None,
+                )
+            }
+            CodingAgentSessionTranscriptItem::Delegation {
                 tool_call_id,
-                format!("Delegation · {target_kind:?} · {target_id}"),
+                target_kind,
+                target_id,
                 task,
+                status,
                 summary,
-                true,
-                false,
-                0,
-                task_truncated || summary_truncated,
-            )
-        }
-        CodingAgentSessionTranscriptItem::CompactionSummary { summary } => summary_block(
-            ConversationBlockKind::CompactionSummary,
-            "Compaction",
-            summary,
-        ),
-        CodingAgentSessionTranscriptItem::BranchSummary { summary } => summary_block(
-            ConversationBlockKind::BranchSummary,
-            "Branch summary",
-            summary,
-        ),
-        CodingAgentSessionTranscriptItem::Diagnostic { message } => {
-            let (message, truncated) = truncate_bytes(message, MAX_BLOCK_TEXT_BYTES);
-            (
-                ConversationBlockKind::Diagnostic,
-                String::new(),
-                "Diagnostic".into(),
-                message,
-                String::new(),
-                true,
-                true,
-                0,
-                truncated,
-            )
-        }
-    };
+                ..
+            } => {
+                let (task, task_truncated) = truncate_bytes(task, MAX_BLOCK_TEXT_BYTES);
+                let (summary, summary_truncated) =
+                    truncate_bytes(summary.unwrap_or_default(), MAX_BLOCK_TEXT_BYTES);
+                (
+                    ConversationBlockKind::Delegation,
+                    tool_call_id,
+                    format!("{DELEGATION_TITLE_PREFIX}{target_kind:?}"),
+                    task,
+                    summary,
+                    true,
+                    false,
+                    0,
+                    task_truncated || summary_truncated,
+                    Some(DelegationMeta {
+                        target_id: target_id.to_string(),
+                        status: DelegationStatus::parse(&status),
+                    }),
+                )
+            }
+            CodingAgentSessionTranscriptItem::CompactionSummary { summary } => summary_block(
+                ConversationBlockKind::CompactionSummary,
+                "Compaction",
+                summary,
+            ),
+            CodingAgentSessionTranscriptItem::BranchSummary { summary } => summary_block(
+                ConversationBlockKind::BranchSummary,
+                "Branch summary",
+                summary,
+            ),
+            CodingAgentSessionTranscriptItem::Diagnostic { message } => {
+                let (message, truncated) = truncate_bytes(message, MAX_BLOCK_TEXT_BYTES);
+                (
+                    ConversationBlockKind::Diagnostic,
+                    String::new(),
+                    "Diagnostic".into(),
+                    message,
+                    String::new(),
+                    true,
+                    true,
+                    0,
+                    truncated,
+                    None,
+                )
+            }
+        };
     let id = if source_id.is_empty() {
         format!("{index:08}:{}", kind.key())
     } else {
@@ -382,6 +453,7 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
         image_count,
         reasoning_duration_millis,
         truncated,
+        delegation,
     };
     block.refresh_source_revision();
     block
@@ -444,6 +516,14 @@ fn conversation_block_revision(block: &ConversationBlock) -> u64 {
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
+    // A status-only transition (running -> cancelled, unchanged task and
+    // summary) must still invalidate the render cache, or the header would
+    // keep showing the stale status.
+    if let Some(delegation) = &block.delegation {
+        hash = update(hash, &(delegation.target_id.len() as u64).to_le_bytes());
+        hash = update(hash, delegation.target_id.as_bytes());
+        hash = update(hash, &[delegation.status as u8]);
+    }
     update(hash, &[u8::from(block.truncated)])
 }
 
@@ -461,6 +541,7 @@ fn summary_block(
     bool,
     usize,
     bool,
+    Option<DelegationMeta>,
 ) {
     let (summary, truncated) = truncate_bytes(summary, MAX_BLOCK_TEXT_BYTES);
     (
@@ -473,6 +554,7 @@ fn summary_block(
         false,
         0,
         truncated,
+        None,
     )
 }
 
@@ -503,6 +585,86 @@ mod tests {
         CodingAgentSessionTranscriptItem::User {
             text: format!("message {index}"),
         }
+    }
+
+    #[test]
+    fn delegation_status_parses_the_tool_vocabulary() {
+        for (raw, expected, label) in [
+            ("requested", DelegationStatus::Requested, "Requested"),
+            ("running", DelegationStatus::Running, "Running"),
+            ("completed", DelegationStatus::Completed, "Completed"),
+            ("failed", DelegationStatus::Failed, "Failed"),
+            ("rejected", DelegationStatus::Rejected, "Rejected"),
+            ("cancelled", DelegationStatus::Cancelled, "Cancelled"),
+            (
+                "confirmation_required",
+                DelegationStatus::ConfirmationRequired,
+                "Awaiting approval",
+            ),
+        ] {
+            let parsed = DelegationStatus::parse(raw);
+            assert_eq!(parsed, expected, "{raw}");
+            assert_eq!(parsed.label(), label, "{raw}");
+        }
+        assert_eq!(
+            DelegationStatus::parse("mystery-status"),
+            DelegationStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn delegation_block_carries_target_and_status_metadata() {
+        use coding_agent::api::view::{ProfileId, ProfileKind};
+        let snapshot = transcript(vec![CodingAgentSessionTranscriptItem::Delegation {
+            tool_call_id: "call-delegation".into(),
+            requesting_profile_id: ProfileId::new("sa-main").unwrap(),
+            target_kind: ProfileKind::Agent,
+            target_id: ProfileId::new("sa_plan").unwrap(),
+            task: "Implement the auth flow\nsecond line".into(),
+            status: "running".into(),
+            child_operation_id: Some("op-1".into()),
+            summary: None,
+        }]);
+        let block = ConversationProjection::hydrate(snapshot).blocks()[0].clone();
+        assert_eq!(block.title, "Delegation · Agent");
+        assert_eq!(block.text, "Implement the auth flow\nsecond line");
+        // No summary yet: the detail stays empty instead of falling back to
+        // the raw status string, which the header shows on its own.
+        assert_eq!(block.detail, "");
+        let meta = block.delegation.expect("delegation metadata");
+        assert_eq!(meta.target_id, "sa_plan");
+        assert_eq!(meta.status, DelegationStatus::Running);
+        assert!(block.done);
+        assert!(!block.is_error);
+    }
+
+    #[test]
+    fn delegation_status_transitions_bump_the_block_revision() {
+        use coding_agent::api::view::{ProfileId, ProfileKind};
+        fn delegation_block(status: &str) -> ConversationBlock {
+            let snapshot = transcript(vec![CodingAgentSessionTranscriptItem::Delegation {
+                tool_call_id: "call-delegation".into(),
+                requesting_profile_id: ProfileId::new("sa-main").unwrap(),
+                target_kind: ProfileKind::Agent,
+                target_id: ProfileId::new("sa_plan").unwrap(),
+                task: "Implement the auth flow".into(),
+                status: status.into(),
+                child_operation_id: None,
+                summary: None,
+            }]);
+            ConversationProjection::hydrate(snapshot).blocks()[0].clone()
+        }
+        // Same task and (empty) summary, only the status changes: the render
+        // cache must see a new revision so the header chip re-renders.
+        assert_ne!(
+            delegation_block("running").source_revision,
+            delegation_block("completed").source_revision
+        );
+        // Unrelated statuses stay stable across identical inputs.
+        assert_eq!(
+            delegation_block("running").source_revision,
+            delegation_block("running").source_revision
+        );
     }
 
     #[test]
@@ -819,6 +981,7 @@ mod tests {
                         reasoning_duration_millis: None,
                         truncated: false,
                         durable: false,
+                        delegation: None,
                     },
                     900,
                 );

@@ -34,8 +34,8 @@ struct StartupFailure {
 }
 
 impl Render for StartupFailure {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let theme = SemanticTheme::GEEK_DARK;
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = SemanticTheme::current(cx);
         div()
             .size_full()
             .p_8()

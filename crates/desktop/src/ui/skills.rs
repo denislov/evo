@@ -33,8 +33,8 @@ impl SkillsPane {
 }
 
 impl Render for SkillsPane {
-    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        let theme = SemanticTheme::GEEK_DARK;
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let theme = SemanticTheme::current(cx);
         let skill_count = self.view_model.skills.len();
         let skill_rows = self
             .view_model

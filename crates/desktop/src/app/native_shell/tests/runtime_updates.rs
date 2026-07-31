@@ -102,6 +102,7 @@ fn secondary_message_details_are_collapsed_by_default_and_height_aware() {
             reasoning_duration_millis: Some(2_430),
             truncated: false,
             durable: true,
+            delegation: None,
         },
         900,
     );
@@ -614,6 +615,38 @@ fn conversation_kinds_have_distinct_leading_markers() {
     assert_ne!(assistant.glyph, tool.glyph);
     assert_ne!(tool.glyph, diagnostic.glyph);
     assert_eq!(delegation.accent, theme.accent);
+}
+
+#[test]
+fn delegation_status_colors_follow_the_semantic_vocabulary() {
+    let theme = SemanticTheme::GEEK_DARK;
+    let color = |status| delegation_status_color(status, theme);
+    assert_eq!(color(DelegationStatus::Running), rgb(theme.accent.value()));
+    assert_eq!(color(DelegationStatus::Failed), rgb(theme.danger.value()));
+    assert_eq!(
+        color(DelegationStatus::Rejected),
+        rgb(theme.warning.value())
+    );
+    assert_eq!(
+        color(DelegationStatus::Cancelled),
+        rgb(theme.warning.value())
+    );
+    assert_eq!(
+        color(DelegationStatus::ConfirmationRequired),
+        rgb(theme.warning.value())
+    );
+    assert_eq!(
+        color(DelegationStatus::Completed),
+        rgb(theme.muted_text.value())
+    );
+    assert_eq!(
+        color(DelegationStatus::Requested),
+        rgb(theme.muted_text.value())
+    );
+    assert_eq!(
+        color(DelegationStatus::Unknown),
+        rgb(theme.muted_text.value())
+    );
 }
 
 #[gpui::test]

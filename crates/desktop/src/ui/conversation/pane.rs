@@ -14,8 +14,10 @@ use std::{
 };
 use unicode_width::UnicodeWidthChar as _;
 
-use super::{ConversationBlockKind, controller::ConversationRenderReader};
-use crate::app::native_shell::{SessionWorkspace, conversation_block_visual};
+use super::{ConversationBlockKind, DELEGATION_TITLE_PREFIX, controller::ConversationRenderReader};
+use crate::app::native_shell::{
+    SessionWorkspace, conversation_block_visual, delegation_status_color,
+};
 use crate::ui::components::streaming_text::{
     StreamingText, markdown_completion_trace_enabled, trace_markdown_parse,
 };
@@ -344,6 +346,7 @@ impl Render for ConversationPane {
         let full_view_block_id = view_model.full_view_block_id;
         let diagnostic_recovery = view_model.diagnostic_recovery;
         let render = view_model.render;
+        let theme = SemanticTheme::current(cx);
         let transcript_list = v_virtual_list(
             cx.entity(),
             "conversation-transcript",
@@ -375,6 +378,7 @@ impl Render for ConversationPane {
                         let select_block_id = block_id.clone();
                         let copy_block_id = block_id.clone();
                         let copy_tool_details_block_id = block_id.clone();
+                        let delegation_copy_block_id = copy_tool_details_block_id.clone();
                         let tool_header_toggle_block_id = block_id.clone();
                         let reasoning_collapsed_toggle_block_id = block_id.clone();
                         let reasoning_collapsed_chevron_block_id = block_id.clone();
@@ -389,6 +393,7 @@ impl Render for ConversationPane {
                             "tool-output:{}",
                             block.item_key.stable_id()
                         ));
+                        let delegation_output_hover_group = tool_output_hover_group.clone();
                         let durable = block.durable;
                         let markdown_key = block.markdown_state_key.clone();
                         let detail_markdown_key = block.detail_markdown_state_key.clone();
@@ -406,7 +411,6 @@ impl Render for ConversationPane {
                         let detail_text = block.detail.clone();
                         let user_card_width = (block.kind == ConversationBlockKind::User)
                             .then(|| user_message_width(&text));
-                        let theme = SemanticTheme::GEEK_DARK;
                         let visual = conversation_block_visual(block.kind, block.is_error, theme);
                         let is_assistant = block.kind == ConversationBlockKind::Assistant;
                         let previous_kind = index.checked_sub(1).and_then(|previous| {
@@ -419,6 +423,14 @@ impl Render for ConversationPane {
                             .reasoning_duration_millis
                             .map(compact_duration);
                         let is_tool = block.kind == ConversationBlockKind::Tool;
+                        let is_delegation = block.kind == ConversationBlockKind::Delegation;
+                        let delegation = block.delegation.as_ref();
+                        let delegation_expandable = is_delegation;
+                        let delegation_summary_text = if is_delegation {
+                            delegation_task_summary(&block.text)
+                        } else {
+                            String::new()
+                        };
                         let show_generic_copy =
                             conversation_copy_footer_visible(block.kind, next_kind);
                         let tool_command = is_tool
@@ -439,10 +451,19 @@ impl Render for ConversationPane {
                         } else {
                             None
                         };
-                        let accessible_label = terminal_label.map_or_else(
-                            || block.title.to_string(),
-                            |state| format!("{}, {state}", block.title),
-                        );
+                        let accessible_label = if let Some(meta) = delegation {
+                            format!(
+                                "{}, {}, {}",
+                                block.title,
+                                meta.target_id,
+                                meta.status.label()
+                            )
+                        } else {
+                            terminal_label.map_or_else(
+                                || block.title.to_string(),
+                                |state| format!("{}, {state}", block.title),
+                            )
+                        };
                         // Selection paints a full-height leading rail; hover no
                         // longer paints a stub. The rail is absolutely
                         // positioned and never affects row height.
@@ -589,6 +610,11 @@ impl Render for ConversationPane {
                                                         })
                                                     },
                                                 )
+                                                .when(is_delegation, |header| {
+                                                    header.debug_selector(|| {
+                                                        "desktop-delegation-toggle-header".into()
+                                                    })
+                                                })
                                                 .child(
                                                     div()
                                                         .id(("conversation-row-main", index))
@@ -608,6 +634,14 @@ impl Render for ConversationPane {
                                                                     .aria_expanded(detail_expanded)
                                                             },
                                                         )
+                                                        .when(is_delegation, |surface| {
+                                                            surface
+                                                                .role(Role::Button)
+                                                                .aria_label(
+                                                                    "Show or hide delegation details",
+                                                                )
+                                                                .aria_expanded(detail_expanded)
+                                                        })
                                                         .on_click(cx.listener(
                                                             move |_, _, _, cx| {
                                                                 cx.emit(
@@ -617,7 +651,9 @@ impl Render for ConversationPane {
                                                                         durable,
                                                                     },
                                                                 );
-                                                                if is_tool && tool_expandable {
+                                                                if (is_tool && tool_expandable)
+                                                                    || is_delegation
+                                                                {
                                                                     cx.emit(
                                                                         ConversationPaneEvent::ToggleDetails {
                                                                             block_id: tool_header_toggle_block_id.clone(),
@@ -697,7 +733,111 @@ impl Render for ConversationPane {
                                                                 )
                                                             })
                                                         })
-                                                        .when(!is_tool, |main| {
+                                                        .when(is_delegation, |main| {
+                                                            main.child(
+                                                                div()
+                                                                    .px_token(DesignSpace::Sm)
+                                                                    .py_token(DesignSpace::Xs)
+                                                                    .text_token(DesignText::Metadata)
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .text_color(rgb(
+                                                                        visual.accent.value(),
+                                                                    ))
+                                                                    .child(visual.glyph),
+                                                            )
+                                                            .when_some(delegation, |main, meta| {
+                                                                main.child(
+                                                                    div()
+                                                                        .text_token(
+                                                                            DesignText::Body,
+                                                                        )
+                                                                        .font_weight(
+                                                                            gpui::FontWeight::MEDIUM,
+                                                                        )
+                                                                        .text_color(rgb(
+                                                                            theme.text.value(),
+                                                                        ))
+                                                                        .min_w_0()
+                                                                        .truncate()
+                                                                        .child(SharedString::new(
+                                                                            &meta.target_id,
+                                                                        )),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .flex_shrink_0()
+                                                                        .text_token(
+                                                                            DesignText::Metadata,
+                                                                        )
+                                                                        .text_color(
+                                                                            delegation_status_color(
+                                                                                meta.status, theme,
+                                                                            ),
+                                                                        )
+                                                                        .child(meta.status.label()),
+                                                                )
+                                                            })
+                                                            .child(
+                                                                div()
+                                                                    .text_token(DesignText::Body)
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::MEDIUM,
+                                                                    )
+                                                                    .text_color(rgb(
+                                                                        theme.muted_text.value(),
+                                                                    ))
+                                                                    .min_w_0()
+                                                                    .truncate()
+                                                                    .child(SharedString::new(
+                                                                        delegation_summary_text
+                                                                            .clone(),
+                                                                    )),
+                                                            )
+                                                            .when(delegation_expandable, |main| {
+                                                                main.child(
+                                                                    div()
+                                                                        .id((
+                                                                            "delegation-toggle-details",
+                                                                            index,
+                                                                        ))
+                                                                        .debug_selector(|| {
+                                                                            "desktop-toggle-delegation-details"
+                                                                                .into()
+                                                                        })
+                                                                        .flex_shrink_0()
+                                                                        .w(px(32.))
+                                                                        .h(px(32.))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
+                                                                        .text_token(
+                                                                            DesignText::Metadata,
+                                                                        )
+                                                                        .text_color(rgb(
+                                                                            theme.muted_text.value(),
+                                                                        ))
+                                                                        .opacity(0.)
+                                                                        .group_hover(
+                                                                            hover_group.clone(),
+                                                                            |style| {
+                                                                                style.opacity(1.)
+                                                                            },
+                                                                        )
+                                                                        .child(
+                                                                            Icon::new(
+                                                                                tool_disclosure_icon(
+                                                                                    detail_expanded,
+                                                                                )
+                                                                                .name(),
+                                                                            )
+                                                                            .small(),
+                                                                        ),
+                                                                )
+                                                            })
+                                                        })
+                                                        .when(!is_tool && !is_delegation, |main| {
                                                             main.child(
                                                                 div()
                                                                     .px_token(DesignSpace::Sm)
@@ -927,6 +1067,7 @@ impl Render for ConversationPane {
                                             let tool_name_str = tool_name_from_title(&block.title);
                                             let is_shell = matches!(tool_name_str, "bash" | "shell");
                                             let is_edit = tool_name_str == "edit";
+                                            let is_write = tool_name_str == "write";
                                             card.child(
                                                 div()
                                                     .id(("tool-output-region", index))
@@ -994,8 +1135,41 @@ impl Render for ConversationPane {
                                                                     &theme,
                                                                 ))
                                                             })
+                                                            .when(is_write, |region| {
+                                                                let diff = write_diff_text(
+                                                                    &block.detail,
+                                                                    &block.text,
+                                                                );
+                                                                if diff.is_empty() {
+                                                                    region.when(
+                                                                        !text.is_empty(),
+                                                                        |region| {
+                                                                            region.child(
+                                                                                div()
+                                                                                    .text_color(rgb(
+                                                                                        theme
+                                                                                            .text
+                                                                                            .value(),
+                                                                                    ))
+                                                                                    .whitespace_normal()
+                                                                                    .child(
+                                                                                        SharedString::new(
+                                                                                            &text,
+                                                                                        ),
+                                                                                    ),
+                                                                            )
+                                                                        },
+                                                                    )
+                                                                } else {
+                                                                    region.child(write_diff_view(
+                                                                        &block.detail,
+                                                                        &block.text,
+                                                                        &theme,
+                                                                    ))
+                                                                }
+                                                            })
                                                             .when(
-                                                                !is_shell && !is_edit,
+                                                                !is_shell && !is_edit && !is_write,
                                                                 |region| {
                                                                     region.child(
                                                                         div()
@@ -1043,7 +1217,134 @@ impl Render for ConversationPane {
                                                     ),
                                             )
                                         })
-                                        .when(!text.is_empty() && !is_tool, |card| {
+                                        .when(is_delegation && detail_expanded, |card| {
+                                            card.child(
+                                                div()
+                                                    .id(("delegation-output-region", index))
+                                                    .debug_selector(|| {
+                                                        "desktop-delegation-detail".into()
+                                                    })
+                                                    .relative()
+                                                    .group(delegation_output_hover_group.clone())
+                                                    .rounded_token(DesignRadius::Md)
+                                                    .border_1()
+                                                    .border_color(rgb(
+                                                        theme.divider.value(),
+                                                    ))
+                                                    .bg(rgb(theme.surface.value()))
+                                                    .child(
+                                                        div()
+                                                            .id((
+                                                                "delegation-output-scroll",
+                                                                index,
+                                                            ))
+                                                            .p_token(DesignSpace::Sm)
+                                                            .pr_12()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap_token(DesignSpace::Md)
+                                                            .child(
+                                                                div()
+                                                                    .text_color(rgb(
+                                                                        theme.text.value(),
+                                                                    ))
+                                                                    .child(
+                                                                        StreamingText::new(
+                                                                            text.clone(),
+                                                                            text_phase,
+                                                                            text_phase
+                                                                                .renders_markdown()
+                                                                                .then(|| {
+                                                                                    pane.markdown_state(
+                                                                                        &markdown_key,
+                                                                                        &text,
+                                                                                        cx,
+                                                                                    )
+                                                                                }),
+                                                                            cx.entity()
+                                                                                .downgrade(),
+                                                                        )
+                                                                        .into_any_element(),
+                                                                    ),
+                                                            )
+                                                            .when(
+                                                                !detail_text.is_empty(),
+                                                                |region| {
+                                                                    region
+                                                                        .child(
+                                                                            div()
+                                                                                .h(px(1.))
+                                                                                .bg(rgb(
+                                                                                    theme
+                                                                                        .divider
+                                                                                        .value(),
+                                                                                )),
+                                                                        )
+                                                                        .child(
+                                                                            div()
+                                                                                .text_color(rgb(
+                                                                                    theme
+                                                                                        .muted_text
+                                                                                        .value(),
+                                                                                ))
+                                                                                .child(
+                                                                                    StreamingText::new(
+                                                                                        detail_text.clone(),
+                                                                                        text_phase,
+                                                                                        text_phase
+                                                                                            .renders_markdown()
+                                                                                            .then(|| {
+                                                                                                pane.markdown_state(
+                                                                                                    &detail_markdown_key,
+                                                                                                    &detail_text,
+                                                                                                    cx,
+                                                                                                )
+                                                                                            }),
+                                                                                        cx.entity()
+                                                                                            .downgrade(),
+                                                                                    )
+                                                                                    .into_any_element(),
+                                                                                ),
+                                                                        )
+                                                                },
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .absolute()
+                                                            .top_2()
+                                                            .right_2()
+                                                            .child(conversation_hover_tool(
+                                                                DesktopIconButton::new(
+                                                                    (
+                                                                        "copy-delegation-details",
+                                                                        index,
+                                                                    ),
+                                                                    DesktopIcon::Copy,
+                                                                    "Copy the delegation task and result",
+                                                                )
+                                                                .build()
+                                                                .debug_selector(|| {
+                                                                    "desktop-copy-delegation-details"
+                                                                        .into()
+                                                                })
+                                                                .on_click(cx.listener(
+                                                                    move |_, _, _, cx| {
+                                                                        cx.stop_propagation();
+                                                                        cx.emit(
+                                                                            ConversationPaneEvent::CopyToolDetails {
+                                                                                block_id: delegation_copy_block_id.clone(),
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                )),
+                                                                delegation_output_hover_group,
+                                                                false,
+                                                            )),
+                                                    ),
+                                            )
+                                        })
+                                        .when(!text.is_empty() && !is_tool && !is_delegation, |card| {
                                             let content = StreamingText::new(
                                                 text.clone(),
                                                 text_phase,
@@ -1058,7 +1359,8 @@ impl Render for ConversationPane {
                                         .when(
                                             !is_assistant
                                                 && !detail_text.is_empty()
-                                                && !is_tool,
+                                                && !is_tool
+                                                && !is_delegation,
                                             |card| {
                                                 card.child(
                                                     div()
@@ -1261,7 +1563,6 @@ impl Render for ConversationPane {
         )
         .track_scroll(&scroll_handle);
 
-        let theme = SemanticTheme::GEEK_DARK;
         let follow_latest_label = if unseen_updates == 0 {
             "Latest ↓".to_owned()
         } else {
@@ -1452,9 +1753,16 @@ fn conversation_copy_footer_visible(
     kind: ConversationBlockKind,
     next_kind: Option<ConversationBlockKind>,
 ) -> bool {
-    kind != ConversationBlockKind::Tool
-        && !(kind == ConversationBlockKind::Assistant
-            && next_kind == Some(ConversationBlockKind::Tool))
+    !(matches!(
+        kind,
+        ConversationBlockKind::Tool | ConversationBlockKind::Delegation
+    ) || kind == ConversationBlockKind::Assistant
+        && next_kind == Some(ConversationBlockKind::Tool))
+}
+
+/// Collapsed-header summary for a delegation: the first line of the task.
+fn delegation_task_summary(text: &str) -> String {
+    text.lines().next().unwrap_or_default().to_owned()
 }
 
 fn tool_name_from_title(title: &str) -> &str {
@@ -1468,6 +1776,7 @@ fn tool_display_label(name: &str) -> &'static str {
     match name {
         "bash" | "shell" => "Shell",
         "edit" => "Edit",
+        "write" => "Write",
         "read" => "Read",
         _ => "Tool",
     }
@@ -1544,6 +1853,14 @@ fn tool_summary(name: &str, detail: &str, text: &str) -> String {
             );
             format!("{path} +{added} -{removed}")
         }
+        "write" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let added = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map_or(0, |content| content.lines().count());
+            format!("{path} +{added}")
+        }
         _ => String::new(),
     }
 }
@@ -1570,6 +1887,39 @@ fn edit_diff_view(detail: &str, text: &str, theme: &SemanticTheme) -> gpui::AnyE
         }
     }
     container.into_any_element()
+}
+
+fn write_diff_view(detail: &str, text: &str, theme: &SemanticTheme) -> gpui::AnyElement {
+    let args = tool_arguments_json(detail, text);
+    let mut container = div().flex().flex_col();
+    if let Some(args) = args.as_ref()
+        && let Some(content) = args.get("content").and_then(|v| v.as_str())
+    {
+        for line in content.lines() {
+            container = container.child(
+                div()
+                    .text_color(rgb(theme.accent.value()))
+                    .child(SharedString::new(format!("+ {line}"))),
+            );
+        }
+    }
+    container.into_any_element()
+}
+
+fn write_diff_text(detail: &str, text: &str) -> String {
+    let Some(args) = tool_arguments_json(detail, text) else {
+        return String::new();
+    };
+    args.get("content")
+        .and_then(|v| v.as_str())
+        .map(|content| {
+            content
+                .lines()
+                .map(|line| format!("+ {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
 }
 
 fn edit_diff_text(detail: &str, text: &str) -> String {
@@ -1605,6 +1955,15 @@ pub(crate) fn tool_detail_copy_text(title: &str, detail: &str, text: &str) -> St
             conversation_copy_text(&format!("$ {command}"), text)
         }
         "edit" => conversation_copy_text(&edit_diff_text(detail, text), ""),
+        "write" => {
+            let diff = write_diff_text(detail, text);
+            if diff.is_empty() {
+                conversation_copy_text(text, "")
+            } else {
+                conversation_copy_text(&diff, "")
+            }
+        }
+        _ if title.starts_with(DELEGATION_TITLE_PREFIX) => conversation_copy_text(text, detail),
         _ => conversation_copy_text(text, ""),
     }
 }
@@ -1613,9 +1972,9 @@ pub(crate) fn tool_detail_copy_text(title: &str, detail: &str, text: &str) -> St
 mod tests {
     use super::{
         ConversationBlockKind, ConversationPane, MAX_MARKDOWN_PARSE_STATES,
-        conversation_copy_footer_visible, conversation_identity_header_visible, edit_diff_text,
-        tool_detail_copy_text, tool_disclosure_icon, tool_name_from_title, tool_summary,
-        user_message_width,
+        conversation_copy_footer_visible, conversation_identity_header_visible,
+        delegation_task_summary, edit_diff_text, tool_detail_copy_text, tool_disclosure_icon,
+        tool_name_from_title, tool_summary, user_message_width, write_diff_text,
     };
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::{Theme, ThemeMode, text::TextViewState};
@@ -1654,10 +2013,18 @@ mod tests {
             ),
             "src/main.rs +3 -2"
         );
+        assert_eq!(
+            tool_summary(
+                "write",
+                r#"{"path":"src/lib.rs","content":"line one\nline two\n"}"#,
+                ""
+            ),
+            "src/lib.rs +2"
+        );
     }
 
     #[test]
-    fn tool_detail_copy_matches_the_expanded_shell_and_edit_views() {
+    fn tool_detail_copy_matches_the_expanded_shell_edit_and_write_views() {
         assert_eq!(
             tool_detail_copy_text(
                 "Tool · shell · 1.2 s",
@@ -1671,6 +2038,25 @@ mod tests {
         assert_eq!(
             tool_detail_copy_text("Tool · edit · 90 ms", edit, "done"),
             "- old one\n- old two\n+ new one"
+        );
+        let write = r#"{"path":"src/lib.rs","content":"line one\nline two\n"}"#;
+        assert_eq!(write_diff_text(write, ""), "+ line one\n+ line two");
+        assert_eq!(
+            tool_detail_copy_text("Tool · write · 15 ms", write, "Wrote 18 bytes"),
+            "+ line one\n+ line two"
+        );
+        // A write whose args were truncated mid-JSON (no parseable content)
+        // falls back to copying the tool result text.
+        let truncated = r#"{"path":"src/lib.rs","content":"trunc"#;
+        assert_eq!(write_diff_text(truncated, ""), "");
+        assert_eq!(
+            tool_detail_copy_text("Tool · write · 15 ms", truncated, "Wrote 18 bytes"),
+            "Wrote 18 bytes"
+        );
+        // Delegation copy joins the task and the result summary.
+        assert_eq!(
+            tool_detail_copy_text("Delegation · Agent", "summary text", "task text"),
+            "task text\nsummary text"
         );
     }
 
@@ -1707,6 +2093,32 @@ mod tests {
         assert!(!conversation_copy_footer_visible(
             ConversationBlockKind::Tool,
             Some(ConversationBlockKind::Assistant)
+        ));
+    }
+
+    #[test]
+    fn delegation_summary_uses_the_first_task_line() {
+        assert_eq!(
+            delegation_task_summary("Implement the auth flow\nsecond line"),
+            "Implement the auth flow"
+        );
+        assert_eq!(delegation_task_summary("single line"), "single line");
+        assert_eq!(delegation_task_summary(""), "");
+    }
+
+    #[test]
+    fn delegation_rows_hide_the_generic_copy_footer_like_tools() {
+        assert!(!conversation_copy_footer_visible(
+            ConversationBlockKind::Delegation,
+            None
+        ));
+        assert!(!conversation_copy_footer_visible(
+            ConversationBlockKind::Delegation,
+            Some(ConversationBlockKind::Assistant)
+        ));
+        assert!(conversation_copy_footer_visible(
+            ConversationBlockKind::Assistant,
+            None
         ));
     }
 

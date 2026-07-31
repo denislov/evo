@@ -313,7 +313,7 @@ impl Render for ComposerPane {
         let attachment_disabled_reason = view_model.attachment_disabled_reason;
         let rejection = view_model.rejection;
         let composer_disabled = composer_pending || awaiting_prompt_start;
-        let theme = SemanticTheme::GEEK_DARK;
+        let theme = SemanticTheme::current(cx);
         let running_action_label = match running_mode {
             ComposerRunningMode::SteerNow => "Steer now",
             ComposerRunningMode::QueueNext => "Queue next",

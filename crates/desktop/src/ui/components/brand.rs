@@ -55,6 +55,9 @@ impl EvoBrandMode {
 
     pub(crate) const fn tokens(self) -> EvoBrandTokens {
         match self {
+            // The brand mark is a fixed asset: it keeps the GEEK_DARK
+            // baseline colors (whose accent equals the derived palette's
+            // `colors.blue`), so the logo stays stable across shell themes.
             Self::Dark => EvoBrandTokens {
                 canvas: SemanticTheme::GEEK_DARK.canvas,
                 foreground: SemanticTheme::GEEK_DARK.text,

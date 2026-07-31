@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr as _;
 
 use super::markdown::bounded_markdown_preview;
-use super::model::{ConversationBlockKind, ConversationItemKey, MAX_TRANSCRIPT_BLOCKS};
+use super::model::{
+    ConversationBlockKind, ConversationItemKey, DelegationMeta, MAX_TRANSCRIPT_BLOCKS,
+};
 use crate::ui::shell::{ASSISTANT_MESSAGE_MAX_WIDTH, USER_MESSAGE_MAX_WIDTH};
 
 pub const STREAMING_MARKDOWN_SETTLE_DELAY: Duration = Duration::from_millis(100);
@@ -115,6 +117,7 @@ pub struct ConversationRowRenderSource<'a> {
     pub reasoning_duration_millis: Option<u64>,
     pub truncated: bool,
     pub durable: bool,
+    pub delegation: Option<DelegationMeta>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +172,7 @@ pub struct ConversationRowRenderData {
     pub durable: bool,
     pub width_bucket: u32,
     pub estimated_height: f32,
+    pub delegation: Option<DelegationMeta>,
 }
 
 impl ConversationRowRenderData {
@@ -180,6 +184,10 @@ impl ConversationRowRenderData {
             + self.detail.len()
             + self.markdown_state_key.len()
             + self.detail_markdown_state_key.len()
+            + self
+                .delegation
+                .as_ref()
+                .map_or(0, |meta| meta.target_id.len())
     }
 }
 
@@ -347,6 +355,7 @@ impl ConversationRowRenderCache {
             media_neutralized,
             durable: source.durable,
             width_bucket: effective_width,
+            delegation: source.delegation,
         };
         let retained_bytes = data.retained_bytes();
         let entry = ConversationRowRenderCacheEntry {
@@ -452,6 +461,7 @@ mod tests {
             reasoning_duration_millis: None,
             truncated: false,
             durable: true,
+            delegation: None,
         }
     }
 
@@ -591,6 +601,7 @@ mod tests {
                 reasoning_duration_millis: None,
                 truncated: false,
                 durable: true,
+                delegation: None,
             },
             900,
         );
@@ -615,6 +626,7 @@ mod tests {
                 reasoning_duration_millis: None,
                 truncated: false,
                 durable: true,
+                delegation: None,
             },
             900,
         );
@@ -711,6 +723,7 @@ mod tests {
                 reasoning_duration_millis: None,
                 truncated: false,
                 durable: false,
+                delegation: None,
             },
             900,
         );
@@ -736,6 +749,7 @@ mod tests {
                 reasoning_duration_millis: Some(2_430),
                 truncated: false,
                 durable: true,
+                delegation: None,
             },
             900,
         );
@@ -761,6 +775,7 @@ mod tests {
                 reasoning_duration_millis: Some(2_430),
                 truncated: false,
                 durable: true,
+                delegation: None,
             },
             900,
         );

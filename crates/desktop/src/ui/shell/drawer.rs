@@ -69,7 +69,7 @@ impl Render for CenterDrawerHost {
         let Some(active) = view_model.active else {
             return div().into_any_element();
         };
-        let theme = SemanticTheme::GEEK_DARK;
+        let theme = SemanticTheme::current(cx);
         let (id, label, key_context, width, pane, on_left) = match active {
             CenterDrawerKind::Sessions => (
                 "sessions-drawer",

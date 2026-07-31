@@ -3,6 +3,8 @@
 //! GPUI rendering consumes these types, but geometry, focus, theme, and label
 //! behavior stay deterministic and directly testable.
 
+use gpui::{App, Hsla};
+use gpui_component::{Colorize as _, Theme};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 pub const SESSION_PANEL_WIDTH: u32 = 240;
@@ -301,6 +303,14 @@ impl SemanticColor {
         self.0
     }
 
+    /// Converts an HSLA color from the gpui-component palette to the shell's
+    /// opaque RGB representation, dropping alpha the same way `rgb()` does.
+    fn from_hsla(hsla: Hsla) -> Self {
+        let rgba = hsla.to_rgb();
+        let channel = |component: f32| (component.clamp(0.0, 1.0) * 255.0).round() as u32;
+        Self::rgb((channel(rgba.r) << 16) | (channel(rgba.g) << 8) | channel(rgba.b))
+    }
+
     #[cfg(test)]
     fn channel_luminance(channel: u32) -> f64 {
         let normalized = f64::from(channel) / 255.0;
@@ -380,6 +390,52 @@ impl SemanticTheme {
         focus_ring: SemanticColor::rgb(0x60a5fa),
         reasoning: SemanticColor::rgb(0xb49aef),
     };
+
+    /// Derives the semantic palette from the gpui-component theme, the single
+    /// source of truth for all shell colors. Neutral message surfaces share
+    /// the theme's `tiles` fill; the tinted surfaces (user, thinking,
+    /// diagnostic) derive from the closest base color so the shell's
+    /// surface and status distinctions stay intact.
+    pub fn from_theme(theme: &Theme) -> Self {
+        let c = &theme.colors;
+        Self {
+            canvas: SemanticColor::from_hsla(c.background),
+            surface: SemanticColor::from_hsla(c.tiles),
+            elevated: SemanticColor::from_hsla(c.secondary),
+            hover: SemanticColor::from_hsla(c.secondary_hover),
+            selection: SemanticColor::from_hsla(c.selection),
+            user_surface: SemanticColor::from_hsla(c.blue.darken(0.78)),
+            assistant_surface: SemanticColor::from_hsla(c.tiles),
+            thinking_surface: SemanticColor::from_hsla(c.magenta.darken(0.78)),
+            tool_surface: SemanticColor::from_hsla(c.tiles),
+            diagnostic_surface: SemanticColor::from_hsla(c.danger.darken(0.80)),
+            summary_surface: SemanticColor::from_hsla(c.tiles),
+            border: SemanticColor::from_hsla(c.border),
+            divider: SemanticColor::from_hsla(c.border.darken(0.1)),
+            text: SemanticColor::from_hsla(c.foreground),
+            muted_text: SemanticColor::from_hsla(c.muted_foreground),
+            subtle_text: SemanticColor::from_hsla(c.muted_foreground.darken(0.25)),
+            accent: SemanticColor::from_hsla(c.blue),
+            success: SemanticColor::from_hsla(c.success),
+            warning: SemanticColor::from_hsla(c.warning),
+            danger: SemanticColor::from_hsla(c.danger),
+            focus_ring: SemanticColor::from_hsla(c.ring),
+            reasoning: SemanticColor::from_hsla(c.magenta),
+        }
+    }
+
+    /// The theme for the current window: derived from the global
+    /// gpui-component theme when it is dark, otherwise the baked-in
+    /// `GEEK_DARK` baseline. Rendering never hardcodes a palette; it reads
+    /// this single access point. A future light palette only needs to extend
+    /// the dark guard here (and adjust the contrast floor) to light up
+    /// everywhere at once.
+    pub fn current(cx: &App) -> Self {
+        match cx.try_global::<Theme>() {
+            Some(theme) if theme.is_dark() => Self::from_theme(theme),
+            _ => Self::GEEK_DARK,
+        }
+    }
 
     #[cfg(test)]
     pub fn has_readable_contrast(self) -> bool {
@@ -475,6 +531,7 @@ pub fn truncate_label(label: &str, max_columns: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_component::ThemeMode;
 
     #[test]
     fn responsive_layout_hides_context_before_sessions() {
@@ -652,6 +709,51 @@ mod tests {
         assert!(SemanticTheme::GEEK_DARK.has_readable_contrast());
     }
 
+    /// Production rendering derives its palette from the gpui-component dark
+    /// theme, so the same contrast floor must hold for the derived palette.
+    #[gpui::test]
+    fn derived_theme_meets_text_contrast_floor(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+        let theme = cx.update(|cx| SemanticTheme::current(cx));
+        assert!(theme.has_readable_contrast());
+    }
+
+    /// Derived values must come from the component palette, not from a copy of
+    /// the GEEK_DARK constants.
+    #[gpui::test]
+    fn derived_theme_reads_the_component_palette(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+        let theme = cx.update(|cx| SemanticTheme::current(cx));
+        let colors = cx.update(|cx| Theme::global(cx).colors);
+        assert_eq!(theme.canvas, SemanticColor::from_hsla(colors.background));
+        assert_eq!(theme.text, SemanticColor::from_hsla(colors.foreground));
+        assert_eq!(theme.accent, SemanticColor::from_hsla(colors.blue));
+        assert_eq!(theme.border, SemanticColor::from_hsla(colors.border));
+    }
+
+    /// With no global theme installed, `current` falls back to the baseline
+    /// palette instead of panicking on the missing global.
+    #[gpui::test]
+    fn current_falls_back_to_geek_dark_without_a_global_theme(cx: &mut gpui::TestAppContext) {
+        let theme = cx.update(|cx| SemanticTheme::current(cx));
+        assert_eq!(theme, SemanticTheme::GEEK_DARK);
+    }
+
+    /// A light global theme is not derived (the palette is dark-only for now);
+    /// rendering stays on the baseline until a light theme is designed.
+    #[gpui::test]
+    fn current_falls_back_when_the_global_theme_is_light(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let theme = cx.update(|cx| SemanticTheme::current(cx));
+        assert_eq!(theme, SemanticTheme::GEEK_DARK);
+    }
+
     #[test]
     fn semantic_theme_keeps_focus_reasoning_warning_and_failure_distinct() {
         let theme = SemanticTheme::GEEK_DARK;
@@ -664,9 +766,35 @@ mod tests {
         assert_ne!(theme.surface, theme.elevated);
         assert_ne!(theme.hover, theme.selection);
         assert_ne!(theme.divider, theme.focus_ring);
+        assert_ne!(theme.divider, theme.border);
         assert_ne!(theme.subtle_text, theme.muted_text);
         assert_eq!(UI_FONT_FAMILY, ".SystemUIFont");
         assert_eq!(MONOSPACE_FONT_FAMILY, "monospace");
+    }
+
+    /// The derived theme separates the focus ring from the brand accent (the
+    /// component palette's `ring` is neutral, not blue), so focus and
+    /// selection stay distinguishable from emphasis.
+    #[gpui::test]
+    fn derived_theme_keeps_focus_reasoning_warning_and_failure_distinct(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+        let theme = cx.update(|cx| SemanticTheme::current(cx));
+        assert_ne!(theme.focus_ring, theme.accent);
+        assert_ne!(theme.reasoning, theme.focus_ring);
+        assert_ne!(theme.reasoning, theme.warning);
+        assert_ne!(theme.reasoning, theme.danger);
+        assert_ne!(theme.warning, theme.danger);
+        assert_ne!(theme.canvas, theme.surface);
+        assert_ne!(theme.surface, theme.elevated);
+        assert_ne!(theme.hover, theme.selection);
+        assert_ne!(theme.divider, theme.focus_ring);
+        assert_ne!(theme.divider, theme.border);
+        assert_ne!(theme.subtle_text, theme.muted_text);
     }
 
     #[test]

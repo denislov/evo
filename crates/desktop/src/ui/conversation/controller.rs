@@ -688,6 +688,7 @@ impl ConversationController {
                 reasoning_duration_millis: None,
                 truncated: false,
                 durable: false,
+                delegation: None,
             },
             panel_width,
         ))
@@ -718,6 +719,7 @@ impl ConversationController {
                 reasoning_duration_millis: message.reasoning_duration_millis,
                 truncated: message.truncated,
                 durable: false,
+                delegation: None,
             },
             panel_width,
         )
@@ -748,6 +750,7 @@ impl ConversationController {
                 reasoning_duration_millis: None,
                 truncated: tool.truncated,
                 durable: false,
+                delegation: None,
             },
             panel_width,
         )
@@ -800,6 +803,7 @@ impl ConversationController {
                     reasoning_duration_millis: block.reasoning_duration_millis,
                     truncated: block.truncated,
                     durable: true,
+                    delegation: block.delegation.clone(),
                 },
                 panel_width,
             ));

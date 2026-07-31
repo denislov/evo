@@ -25,7 +25,7 @@ pub use layout::{
 };
 pub use model::{
     ConversationBlockKind, ConversationItemKey, ConversationItemKind, ConversationProjection,
-    compact_duration,
+    DELEGATION_TITLE_PREFIX, DelegationStatus, compact_duration,
 };
 pub use render_cache::{
     ConversationRowRenderCache, ConversationRowRenderData, ConversationRowRenderSource,
