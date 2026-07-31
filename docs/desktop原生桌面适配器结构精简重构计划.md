@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-760 已完成，下一项 DSK-761）
+> 状态：执行中（DSK-761 已完成，下一项 DSK-762）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1498,6 +1498,21 @@ Gate 与性能记录：
 - Gate A/B 全部通过：all-target check、严格 clippy、format、diff check、desktop lib 与 16 项 dependency boundary
   全绿。20 项 visual golden compare 全部 `RMSE=0`，未更新 golden。
 
+### DSK-761 实际结果
+
+- 执行时 `runtime/tests.rs` 已增长到 4,034 行（计划调研值为 3,859 行）；该单文件已删除，54 项测试按
+  `admission`、`ordering`、`overflow`、`reconnect`、`recovery`、`shutdown` 六类状态机不变量迁入
+  `runtime/tests/`，入口 `mod.rs` 只负责共享 import、fixture include 与 suite 声明。
+- `fixtures.rs` 仅承载 process env、workspace/target、cross-adapter 数据与 runtime 启动构造，不封装行为 assertion；
+  原来散落在六个 suite 的 22 处“isolated options + runtime + 首个 snapshot”重复 setup 已合并为
+  `start_isolated_runtime`。带 projection 行为断言的 streaming overlay helper 留在 `recovery.rs`。
+- 未扩大任何 production API 可见性；测试模块子树继续通过父模块访问 private/`pub(super)` owner。逐项审计 race
+  tests 后保留 sender loss、split owner、explicit signal、deadline、runtime panic、window close/abort、steer/follow-up
+  等不同不变量，没有把名称相似但失效模式不同的边界场景误合并。
+- dependency boundary 增至 17 项：禁止恢复根级 `runtime/tests.rs`，要求六类 suite 与 fixture 完整存在，并禁止
+  fixture 文件包含 test case 或隐藏 `assert`。Gate A 全部通过；runtime tests `54 passed / 0 failed`（0.90 秒），
+  desktop lib `312 passed / 5 ignored / 0 failed`，all-target check、严格 clippy、format 与 diff check 全绿。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1521,7 +1536,7 @@ Gate 与性能记录：
 | DSK-752 | 已完成 | `43af5ca` | runtime contract/client/worker/dispatch 单一 authority 路径；删除旧 module path 与 9 个 unused re-export；Gate A、54 项 runtime 与 14 项 boundary 全通过；未运行 perf/visual gate |
 | DSK-753 | 已完成 | `eb7c090` | presentation 按 conversation/sessions/inspector/components/shell feature 归位；合并 center navigation；旧路径/空目录守卫、Gate A/B 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-760 | 已完成 | `cf1ef69` | native shell 大测试按 7 类行为 suite + fixtures 外置，纯逻辑下沉 owner；主文件 7,703→1,017 行且仅保留 `mod tests`；lib 墙钟 70.29s→5.19s；Gate A/B、16 项 boundary 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
-| DSK-761 | 待执行 | — | — |
+| DSK-761 | 已完成 | `3482e8c` | runtime 4,034 行单文件按 6 类状态机 invariant + fixtures 拆分；22 处启动 setup 合并；54 项 runtime tests 保持全绿，Gate A 与 17 项 boundary 全通过；未扩大 production API |
 | DSK-762 | 待执行 | — | — |
 | DSK-770 | 待执行 | — | — |
 | DSK-771 | 待执行 | — | — |
