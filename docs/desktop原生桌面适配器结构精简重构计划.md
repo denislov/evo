@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-761 已完成，下一项 DSK-762）
+> 状态：执行中（DSK-762 已完成，下一项 DSK-770）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1513,6 +1513,24 @@ Gate 与性能记录：
   fixture 文件包含 test case 或隐藏 `assert`。Gate A 全部通过；runtime tests `54 passed / 0 failed`（0.90 秒），
   desktop lib `312 passed / 5 ignored / 0 failed`，all-target check、严格 clippy、format 与 diff check 全绿。
 
+### DSK-762 实际结果
+
+- 将根级 `app/native_perf.rs` 的 1,051 行 replay request/spec/frame runner/visual fixture 迁入
+  `app/devtools/native_replay.rs`，由窄 `devtools::open_requested` 统一读取互斥 replay env、打开真实窗口或 fail-closed。
+  replay 继续复用 production `NativeShell`、Render、projection 与 component 路径，没有建立第二套 UI。
+- 新增默认关闭的 `desktop-devtools` Cargo feature；默认 desktop 构建不再编译 devtools module。NativeShell 的 visual
+  fixture enum/installer、runtime disconnected replay bridge、brand fixture/mode 与 resident-memory probe 均收窄为
+  `test`/`desktop-devtools` 条件编译，默认构建不持有 fixture authority 或产生 replay-only dead code。
+- native perf、click-to-photon、brand fixture 与 visual golden 的 Bash/PowerShell 构建入口显式启用该 feature。
+  同时修正 DSK-753/760 后遗留的 5 个 headless release test 全限定路径；首次 gate 对 0-test 路径正确失败，修复后
+  5 项均以 `--exact` 实际执行。dependency boundary 增至 18 项，守卫 devtools 路径、feature、fixture gating、
+  replay 脚本 feature 与全部 release test 路径。
+- 两项 performance gate 全通过：native 200-frame GPU present P95/P99 为 5.044/5.491 ms，input→post-render
+  P95/P99 为 8.370/8.418 ms，稳态 RSS 增长 12 KiB，production markdown parse→layout P95 为 91 µs；headless
+  10 MiB、scale/content/streaming、GPUI frame/input 与 markdown matrix 全部在既有预算内。
+- Gate A 全部通过：默认与 `desktop-devtools` all-target check、严格 clippy、format/diff check 全绿；desktop lib
+  `312 passed / 5 ignored / 0 failed`，18 项 boundary 全绿。20 项 visual golden compare 全部 `RMSE=0`，未更新 golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1537,7 +1555,7 @@ Gate 与性能记录：
 | DSK-753 | 已完成 | `eb7c090` | presentation 按 conversation/sessions/inspector/components/shell feature 归位；合并 center navigation；旧路径/空目录守卫、Gate A/B 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-760 | 已完成 | `cf1ef69` | native shell 大测试按 7 类行为 suite + fixtures 外置，纯逻辑下沉 owner；主文件 7,703→1,017 行且仅保留 `mod tests`；lib 墙钟 70.29s→5.19s；Gate A/B、16 项 boundary 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-761 | 已完成 | `3482e8c` | runtime 4,034 行单文件按 6 类状态机 invariant + fixtures 拆分；22 处启动 setup 合并；54 项 runtime tests 保持全绿，Gate A 与 17 项 boundary 全通过；未扩大 production API |
-| DSK-762 | 待执行 | — | — |
+| DSK-762 | 已完成 | `b15731c` | native replay 迁入 feature-gated devtools，默认构建移除 fixture authority；修复 5 个 perf test 路径；Gate A、两个 performance gate、18 项 boundary 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-770 | 待执行 | — | — |
 | DSK-771 | 待执行 | — | — |
 
