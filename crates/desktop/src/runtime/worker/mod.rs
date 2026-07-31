@@ -1,3 +1,5 @@
+//! Dedicated runtime-thread state, session ownership, and ProductEvent pump.
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
@@ -32,7 +34,9 @@ use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{mpsc, watch};
 use tokio::task;
 
-use super::dispatch::dispatch_command_with_updates;
+pub(super) mod dispatch;
+
+use self::dispatch::dispatch_command_with_updates;
 use super::protocol::{
     DESKTOP_UPDATE_QUEUE_CAPACITY, DesktopBridgeError, DesktopRecoveryIdentity,
     DesktopRuntimeCommand, DesktopRuntimeError, DesktopRuntimeErrorSource,

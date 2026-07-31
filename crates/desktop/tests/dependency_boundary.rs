@@ -771,3 +771,91 @@ fn file_review_presentation_and_external_editor_platform_stay_isolated() {
         }
     }
 }
+
+#[test]
+fn runtime_contract_client_and_worker_paths_have_single_authorities() {
+    let runtime = manifest_dir().join("src/runtime");
+    let source_root = manifest_dir().join("src");
+    for removed in [
+        source_root.join("runtime.rs"),
+        runtime.join("bridge.rs"),
+        runtime.join("driver.rs"),
+        runtime.join("dispatch.rs"),
+    ] {
+        assert!(
+            !removed.exists(),
+            "legacy runtime path must stay deleted: {}",
+            removed.display()
+        );
+    }
+    for current in [
+        runtime.join("mod.rs"),
+        runtime.join("client.rs"),
+        runtime.join("protocol.rs"),
+        runtime.join("worker/mod.rs"),
+        runtime.join("worker/dispatch.rs"),
+    ] {
+        assert!(
+            current.is_file(),
+            "runtime authority path is missing: {}",
+            current.display()
+        );
+    }
+
+    let protocol = runtime.join("protocol.rs");
+    let protocol_facts = production_facts(&protocol);
+    assert_paths_exclude(
+        &protocol,
+        &protocol_facts,
+        &[
+            &["gpui"],
+            &["ui"],
+            &["platform"],
+            &["std", "process"],
+            &["std", "thread"],
+            &["std", "fs"],
+        ],
+    );
+    for forbidden in [
+        "DesktopRuntimeBridge",
+        "DesktopRuntimeBootstrap",
+        "RuntimeCommandClient",
+        "RuntimeState",
+        "ActivePrompt",
+        "CodingAgentSession",
+    ] {
+        assert!(
+            !protocol_facts.identifiers.contains(forbidden),
+            "protocol must not own client/worker authority {forbidden}"
+        );
+    }
+
+    let client = runtime.join("client.rs");
+    let client_facts = production_facts(&client);
+    for forbidden in ["RuntimeState", "ActivePrompt", "CodingAgentSession"] {
+        assert!(
+            !client_facts.identifiers.contains(forbidden),
+            "runtime client must not own worker authority {forbidden}"
+        );
+    }
+
+    for worker in [
+        runtime.join("worker/mod.rs"),
+        runtime.join("worker/dispatch.rs"),
+    ] {
+        let facts = production_facts(&worker);
+        for forbidden in [
+            "DesktopRuntimeBridge",
+            "DesktopRuntimeBootstrap",
+            "DesktopRuntimeEventStream",
+            "DesktopRuntimeShutdownGuard",
+            "RuntimeCommandClient",
+        ] {
+            assert!(
+                !facts.identifiers.contains(forbidden),
+                "{} worker must not own client authority {forbidden}",
+                worker.display()
+            );
+        }
+    }
+}

@@ -1,17 +1,19 @@
+//! Typed command dispatch against the worker-owned runtime state.
+
 use std::collections::HashMap;
 
 use coding_agent::api::client::CodingAgentControlId;
 use coding_agent::api::event::CodingAgentRecoveryResolution;
 
-use super::driver::{ActivePrompt, RuntimeState, close_active_prompt, shutdown_active_prompt};
-use super::protocol::{
+use super::{ActivePrompt, RuntimeState, close_active_prompt, shutdown_active_prompt};
+use crate::runtime::protocol::{
     DesktopBridgeError, DesktopPromptTarget, DesktopRecoveryAction, DesktopRuntimeCommand,
     DesktopRuntimeMetadataSnapshot, DesktopRuntimeOwnerTarget, DesktopRuntimeResyncSnapshot,
     DesktopRuntimeSelectionKind, DesktopRuntimeUpdate, runtime_error,
 };
 
 #[cfg(test)]
-pub(super) async fn dispatch_command(
+pub(in crate::runtime) async fn dispatch_command(
     state: &mut RuntimeState,
     active: &mut HashMap<String, ActivePrompt>,
     command: DesktopRuntimeCommand,
@@ -116,12 +118,11 @@ async fn dispatch_command_inner(
                 DesktopRuntimeOwnerTarget::Session { session_id } => {
                     let session_id = resolve_target(state, active, Some(&session_id))?;
                     if let Some(prompt) = active.get_mut(&session_id) {
-                        let (thinking_level, thinking_fallback) =
-                            super::driver::admitted_model_thinking(
-                                &prompt.context,
-                                &model_id,
-                                thinking_level,
-                            )?;
+                        let (thinking_level, thinking_fallback) = super::admitted_model_thinking(
+                            &prompt.context,
+                            &model_id,
+                            thinking_level,
+                        )?;
                         prompt.context.select_model(model_id)?;
                         (
                             active_metadata_snapshot(prompt)?,
@@ -133,12 +134,11 @@ async fn dispatch_command_inner(
                             .workspaces
                             .get_mut(&session_id)
                             .expect("resolved idle workspace must remain present");
-                        let (thinking_level, thinking_fallback) =
-                            super::driver::admitted_model_thinking(
-                                &workspace.context,
-                                &model_id,
-                                thinking_level,
-                            )?;
+                        let (thinking_level, thinking_fallback) = super::admitted_model_thinking(
+                            &workspace.context,
+                            &model_id,
+                            thinking_level,
+                        )?;
                         workspace.context.select_model(model_id)?;
                         (
                             state.metadata_snapshot(Some(&session_id)),
@@ -456,7 +456,7 @@ fn resolve_active_target(
     Ok(session_id)
 }
 
-pub(super) fn dispatch_active_command(
+pub(in crate::runtime) fn dispatch_active_command(
     active: &ActivePrompt,
     command: DesktopRuntimeCommand,
 ) -> DesktopRuntimeUpdate {

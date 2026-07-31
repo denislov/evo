@@ -1,3 +1,5 @@
+//! Bounded runtime DTOs, validation, limits, error projection, and kind labels.
+
 use coding_agent::api::authorization::{ToolAuthorizationDecision, ToolAuthorizationIdentity};
 use coding_agent::api::client::{
     CodingAgentControlReceipt, CodingAgentRecoveryPending, CodingAgentSnapshot,

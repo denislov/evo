@@ -1,3 +1,5 @@
+//! Runtime bootstrap, admission client, ordered event stream, and shutdown ownership.
+
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::thread::{self, JoinHandle};
@@ -26,7 +28,7 @@ use super::protocol::{
     validate_recovery_identity, validate_runtime_owner_target, validate_selection_id,
     validate_session_id, validate_session_name,
 };
-use super::run_runtime;
+use super::worker::run_runtime;
 
 const STREAMING_DELIVERY_COALESCE_WINDOW: Duration = Duration::from_millis(16);
 const MAX_STREAMING_DELIVERIES_PER_BATCH: usize = 64;

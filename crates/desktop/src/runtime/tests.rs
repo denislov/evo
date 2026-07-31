@@ -35,10 +35,10 @@ use crate::projection::{
     MAX_DESKTOP_MESSAGE_OVERLAYS, ProjectionEvent,
 };
 
-use super::bridge::build_desktop_runtime;
-use super::dispatch::{dispatch_active_command, dispatch_command};
-use super::driver::*;
+use super::client::build_desktop_runtime;
 use super::protocol::*;
+use super::worker::dispatch::{dispatch_active_command, dispatch_command};
+use super::worker::*;
 use super::*;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
