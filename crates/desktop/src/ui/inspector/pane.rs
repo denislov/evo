@@ -1,10 +1,10 @@
 use coding_agent::api::review::CodingAgentFileReviewRequest;
 use desktop::projection::DesktopRecoveryStatus;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
-use desktop::shell::{
+use desktop::ui::inspector::review::{DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES};
+use desktop::ui::shell::{
     CONTEXT_PANEL_WIDTH, MONOSPACE_FONT_FAMILY, SemanticColor, SemanticTheme, truncate_label,
 };
-use desktop::ui::inspector::review::{DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES};
 use gpui::{
     EventEmitter, FocusHandle, IntoElement, KeyDownEvent, ParentElement as _, Render, Role,
     ScrollHandle, Styled as _, Window, div, prelude::*, px, rgb,
@@ -12,23 +12,25 @@ use gpui::{
 use gpui_component::{Disableable as _, badge::Badge, button::Button};
 use std::sync::Arc;
 
-use super::{
-    DesktopFileReviewState, InspectorSection, NativeDesktopState, actions,
-    center_drawer_host::CenterDrawerKind,
-    desktop_controls::{
+use crate::actions;
+use crate::app::native_shell::{InspectorSection, NativeDesktopState};
+use crate::application::commands::DesktopCommandIntent;
+use crate::application::workspace_state::DesktopFileReviewState;
+use crate::ui::components::{
+    controls::{
         DesktopActionRow, DesktopControlSize, DesktopCriticalButton, DesktopCriticalTone,
         DesktopIcon, DesktopIconButton, DesktopRowState,
     },
-    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+    style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
-use crate::application::commands::DesktopCommandIntent;
+use crate::ui::shell::drawer::CenterDrawerKind;
 use crate::ui::shell::{
     ShellUiState,
     presentation::{recovery_status_label, runtime_state_label, usage_cost_label},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum InspectorPaneEvent {
+pub(crate) enum InspectorPaneEvent {
     Close,
     RequestFileReview(CodingAgentFileReviewRequest),
     CopyReviewPath,
@@ -42,78 +44,78 @@ pub(super) enum InspectorPaneEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InspectorChangedFileView {
-    pub(super) request: CodingAgentFileReviewRequest,
-    pub(super) mutation_kind: String,
-    pub(super) file_name: String,
-    pub(super) path: String,
+pub(crate) struct InspectorChangedFileView {
+    pub(crate) request: CodingAgentFileReviewRequest,
+    pub(crate) mutation_kind: String,
+    pub(crate) file_name: String,
+    pub(crate) path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InspectorRecoveryView {
-    pub(super) status: String,
-    pub(super) recovery_id: String,
-    pub(super) operation_id: String,
-    pub(super) detail: String,
-    pub(super) attempt_count: String,
-    pub(super) identity: Option<DesktopRecoveryIdentity>,
+pub(crate) struct InspectorRecoveryView {
+    pub(crate) status: String,
+    pub(crate) recovery_id: String,
+    pub(crate) operation_id: String,
+    pub(crate) detail: String,
+    pub(crate) attempt_count: String,
+    pub(crate) identity: Option<DesktopRecoveryIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InspectorDiagnosticView {
-    pub(super) sequence: String,
-    pub(super) operation: String,
-    pub(super) detail: String,
-    pub(super) truncated: bool,
+pub(crate) struct InspectorDiagnosticView {
+    pub(crate) sequence: String,
+    pub(crate) operation: String,
+    pub(crate) detail: String,
+    pub(crate) truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InspectorPaneViewModel {
-    pub(super) panel_width: u32,
-    pub(super) presented_as_drawer: bool,
-    pub(super) keyboard_focus_visible: bool,
-    pub(super) selected_section: InspectorSection,
-    pub(super) composer_running: bool,
-    pub(super) awaiting_prompt_start: bool,
-    pub(super) recovery_pending: bool,
-    pub(super) file_review_pending: bool,
-    pub(super) external_editor_pending: bool,
-    pub(super) external_editor_configured: bool,
-    pub(super) changed_files: Vec<InspectorChangedFileView>,
-    pub(super) change_count: usize,
-    pub(super) file_review: Arc<DesktopFileReviewState>,
-    pub(super) runtime_attention_count: usize,
-    pub(super) task_state: String,
-    pub(super) active_operation: String,
-    pub(super) operation_count: usize,
-    pub(super) delegation_count: usize,
-    pub(super) selected_model: String,
-    pub(super) profile: String,
-    pub(super) thinking: String,
-    pub(super) usage_input: String,
-    pub(super) usage_output: String,
-    pub(super) usage_cache_read: String,
-    pub(super) usage_cache_write: String,
-    pub(super) usage_tokens: String,
-    pub(super) usage_context: String,
-    pub(super) usage_cost: String,
-    pub(super) reduced_motion: bool,
-    pub(super) stream_id: String,
-    pub(super) sequence: String,
-    pub(super) generation: String,
-    pub(super) model_count: usize,
-    pub(super) profile_count: usize,
-    pub(super) skill_count: usize,
-    pub(super) prompt_count: usize,
-    pub(super) context_count: usize,
-    pub(super) latest_recovery: Option<InspectorRecoveryView>,
-    pub(super) latest_diagnostic: Option<InspectorDiagnosticView>,
-    pub(super) latest_config_diagnostic: Option<(String, String)>,
-    pub(super) latest_issue: Option<String>,
-    pub(super) cwd: String,
+pub(crate) struct InspectorPaneViewModel {
+    pub(crate) panel_width: u32,
+    pub(crate) presented_as_drawer: bool,
+    pub(crate) keyboard_focus_visible: bool,
+    pub(crate) selected_section: InspectorSection,
+    pub(crate) composer_running: bool,
+    pub(crate) awaiting_prompt_start: bool,
+    pub(crate) recovery_pending: bool,
+    pub(crate) file_review_pending: bool,
+    pub(crate) external_editor_pending: bool,
+    pub(crate) external_editor_configured: bool,
+    pub(crate) changed_files: Vec<InspectorChangedFileView>,
+    pub(crate) change_count: usize,
+    pub(crate) file_review: Arc<DesktopFileReviewState>,
+    pub(crate) runtime_attention_count: usize,
+    pub(crate) task_state: String,
+    pub(crate) active_operation: String,
+    pub(crate) operation_count: usize,
+    pub(crate) delegation_count: usize,
+    pub(crate) selected_model: String,
+    pub(crate) profile: String,
+    pub(crate) thinking: String,
+    pub(crate) usage_input: String,
+    pub(crate) usage_output: String,
+    pub(crate) usage_cache_read: String,
+    pub(crate) usage_cache_write: String,
+    pub(crate) usage_tokens: String,
+    pub(crate) usage_context: String,
+    pub(crate) usage_cost: String,
+    pub(crate) reduced_motion: bool,
+    pub(crate) stream_id: String,
+    pub(crate) sequence: String,
+    pub(crate) generation: String,
+    pub(crate) model_count: usize,
+    pub(crate) profile_count: usize,
+    pub(crate) skill_count: usize,
+    pub(crate) prompt_count: usize,
+    pub(crate) context_count: usize,
+    pub(crate) latest_recovery: Option<InspectorRecoveryView>,
+    pub(crate) latest_diagnostic: Option<InspectorDiagnosticView>,
+    pub(crate) latest_config_diagnostic: Option<(String, String)>,
+    pub(crate) latest_issue: Option<String>,
+    pub(crate) cwd: String,
 }
 
-pub(super) fn view_model(
+pub(crate) fn view_model(
     app: &NativeDesktopState,
     ui: &ShellUiState,
     global_skill_count: usize,
@@ -311,7 +313,7 @@ pub(crate) struct InspectorPane {
 }
 
 impl InspectorPane {
-    pub(super) fn new(focus: FocusHandle, cx: &mut gpui::Context<Self>) -> Self {
+    pub(crate) fn new(focus: FocusHandle, cx: &mut gpui::Context<Self>) -> Self {
         Self {
             focus,
             tab_focus: std::array::from_fn(|index| cx.focus_handle().tab_index(index as isize)),
@@ -320,12 +322,12 @@ impl InspectorPane {
         }
     }
 
-    pub(super) fn set_view_model(&mut self, view_model: InspectorPaneViewModel) {
+    pub(crate) fn set_view_model(&mut self, view_model: InspectorPaneViewModel) {
         self.view_model = Some(view_model);
     }
 
     #[cfg(test)]
-    pub(super) fn focus_tab(
+    pub(crate) fn focus_tab(
         &self,
         section: InspectorSection,
         window: &mut Window,
@@ -335,7 +337,7 @@ impl InspectorPane {
     }
 
     #[cfg(test)]
-    pub(super) fn tab_scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
+    pub(crate) fn tab_scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
         self.tab_scroll.offset()
     }
 }

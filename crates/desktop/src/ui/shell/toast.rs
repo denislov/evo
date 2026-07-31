@@ -4,30 +4,30 @@ use std::{
     time::{Duration, Instant},
 };
 
-use desktop::shell::{SemanticTheme, UI_FONT_FAMILY};
+use desktop::ui::shell::{SemanticTheme, UI_FONT_FAMILY};
 use gpui::{
     Context, FocusHandle, IntoElement, ParentElement as _, Render, Role, Styled as _, Subscription,
     Window, div, prelude::*, px, rgb,
 };
 
-use super::{
-    desktop_controls::{DesktopControlSize, DesktopIcon, DesktopIconButton},
-    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+use crate::ui::components::{
+    controls::{DesktopControlSize, DesktopIcon, DesktopIconButton},
+    style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 
 /// Product choice for VUI-302. Keep these policy values centralized so the
 /// presentation can change without touching any notice-producing path.
-pub(super) const MAX_VISIBLE_TOASTS: usize = 3;
-pub(super) const TOAST_LIFETIME: Duration = Duration::from_secs(6);
+pub(crate) const MAX_VISIBLE_TOASTS: usize = 3;
+pub(crate) const TOAST_LIFETIME: Duration = Duration::from_secs(6);
 const MAX_NOTICE_SOURCES: usize = 32;
 const MAX_TOAST_WIDTH: u32 = 420;
 const TOAST_EDGE_INSET: u32 = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ToastNotice {
-    pub(super) session_id: Arc<str>,
-    pub(super) revision: u64,
-    pub(super) message: Arc<str>,
+pub(crate) struct ToastNotice {
+    pub(crate) session_id: Arc<str>,
+    pub(crate) revision: u64,
+    pub(crate) message: Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +63,7 @@ pub(crate) struct ToastHost {
 }
 
 impl ToastHost {
-    pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         let focus_in = cx.on_focus_in(&focus, window, |this, _, cx| {
             this.set_focus_within(true, cx);
@@ -85,7 +85,7 @@ impl ToastHost {
         }
     }
 
-    pub(super) fn observe_notice(&mut self, notice: Option<ToastNotice>, cx: &mut Context<Self>) {
+    pub(crate) fn observe_notice(&mut self, notice: Option<ToastNotice>, cx: &mut Context<Self>) {
         let Some(notice) = notice else {
             return;
         };
@@ -225,7 +225,7 @@ impl ToastHost {
     }
 
     #[cfg(test)]
-    pub(super) fn messages(&self) -> Vec<Arc<str>> {
+    pub(crate) fn messages(&self) -> Vec<Arc<str>> {
         self.toasts
             .iter()
             .map(|toast| Arc::clone(&toast.message))

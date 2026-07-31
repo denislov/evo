@@ -13,11 +13,11 @@ use coding_agent::api::event::{
     CodingAgentProductEvent, CodingAgentProductEventKind, CodingAgentWorkflowProductEvent,
 };
 
-use crate::conversation::ConversationProjection;
 use crate::runtime::{
     DesktopRecoveryIdentity, DesktopRuntimeError, DesktopRuntimeHydratedSnapshot,
     DesktopRuntimeMetadataSnapshot, DesktopRuntimeRecoverySnapshot,
 };
+use crate::ui::conversation::ConversationProjection;
 
 pub const MAX_DESKTOP_EVENT_MARKERS: usize = 256;
 pub const MAX_DESKTOP_PROJECTION_ISSUES: usize = 32;

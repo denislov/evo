@@ -9,7 +9,7 @@ use desktop::runtime::{
     DesktopRecoveryAction, DesktopRuntimeCommandKind, DesktopRuntimeError,
     DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind, DesktopRuntimeUpdate,
 };
-use desktop::shell::truncate_label;
+use desktop::ui::shell::truncate_label;
 use thiserror::Error;
 
 use super::{

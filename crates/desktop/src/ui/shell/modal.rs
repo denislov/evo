@@ -2,7 +2,7 @@ use coding_agent::api::authorization::{
     ToolAuthorizationDecision, ToolAuthorizationIdentity, ToolAuthorizationRequest,
     ToolAuthorizationScope,
 };
-use desktop::shell::{DESKTOP_OVERLAY_SCRIM_RGBA, MONOSPACE_FONT_FAMILY, SemanticTheme};
+use desktop::ui::shell::{DESKTOP_OVERLAY_SCRIM_RGBA, MONOSPACE_FONT_FAMILY, SemanticTheme};
 use gpui::{
     EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, SharedString,
     Styled as _, Window, div, prelude::*, px, rgb, rgba,
@@ -10,16 +10,16 @@ use gpui::{
 use gpui_component::{Selectable as _, button::Button};
 use std::sync::Arc;
 
-use super::{
-    ConversationFullMessageView, DesktopPaletteCommand, NativeDesktopState, PALETTE_ENTRIES,
-    actions,
-    desktop_controls::{DesktopCriticalButton, DesktopCriticalTone},
-    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+use super::ShellUiState;
+use crate::actions::{self, DesktopPaletteCommand, PALETTE_ENTRIES};
+use crate::app::native_shell::{ConversationFullMessageView, NativeDesktopState};
+use crate::ui::components::{
+    controls::{DesktopCriticalButton, DesktopCriticalTone},
+    style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
-use crate::ui::shell::ShellUiState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum RootModalHostEvent {
+pub(crate) enum RootModalHostEvent {
     ExecutePalette(DesktopPaletteCommand),
     CopyFullMessage,
     CloseFullMessage,
@@ -30,20 +30,20 @@ pub(super) enum RootModalHostEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RootModalAuthorizationView {
-    pub(super) request: ToolAuthorizationRequest,
-    pub(super) decision_pending: bool,
+pub(crate) struct RootModalAuthorizationView {
+    pub(crate) request: ToolAuthorizationRequest,
+    pub(crate) decision_pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RootModalViewModel {
-    pub(super) palette_open: bool,
-    pub(super) palette_selected: usize,
-    pub(super) authorization: Option<RootModalAuthorizationView>,
-    pub(super) full_message: Option<ConversationFullMessageView>,
+pub(crate) struct RootModalViewModel {
+    pub(crate) palette_open: bool,
+    pub(crate) palette_selected: usize,
+    pub(crate) authorization: Option<RootModalAuthorizationView>,
+    pub(crate) full_message: Option<ConversationFullMessageView>,
 }
 
-pub(super) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> RootModalViewModel {
+pub(crate) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> RootModalViewModel {
     let authorization = app
         .workspaces
         .active()
@@ -80,7 +80,7 @@ pub(crate) struct RootModalHost {
 }
 
 impl RootModalHost {
-    pub(super) fn new(
+    pub(crate) fn new(
         authorization_focus: FocusHandle,
         command_palette_focus: FocusHandle,
         full_message_focus: FocusHandle,
@@ -93,7 +93,7 @@ impl RootModalHost {
         }
     }
 
-    pub(super) fn set_view_model(&mut self, view_model: RootModalViewModel) {
+    pub(crate) fn set_view_model(&mut self, view_model: RootModalViewModel) {
         self.view_model = Some(view_model);
     }
 }

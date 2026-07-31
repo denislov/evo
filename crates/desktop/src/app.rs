@@ -24,7 +24,7 @@ use crate::projection::DesktopProjection;
 use crate::runtime::{
     DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot, DesktopRuntimeStartError,
 };
-use crate::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme, UI_FONT_FAMILY, truncate_label};
+use crate::ui::shell::{MONOSPACE_FONT_FAMILY, SemanticTheme, UI_FONT_FAMILY, truncate_label};
 
 const BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_millis(16);
 

@@ -3,7 +3,7 @@ use coding_agent::api::{
     view::ProfileKind,
 };
 use desktop::preferences::DesktopThinkingLevel;
-use desktop::shell::{
+use desktop::ui::shell::{
     CENTER_HEADER_HEIGHT, PanelVisibility, SemanticStatus, SemanticTheme, ShellLayout,
 };
 use gpui::{
@@ -13,25 +13,25 @@ use gpui::{
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use std::{collections::BTreeMap, sync::Arc};
 
-use super::{
-    NativeDesktopState,
-    center_drawer_host::CenterDrawerKind,
-    conversation_focus_accent,
-    desktop_controls::{
-        DesktopCriticalButton, DesktopCriticalTone, DesktopIcon, DesktopIconButton, DesktopSelector,
-    },
-    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
-    semantic_status_color,
+use crate::app::native_shell::{
+    NativeDesktopState, conversation_focus_accent, semantic_status_color,
 };
 use crate::application::commands::DesktopCommandIntent;
+use crate::ui::components::{
+    controls::{
+        DesktopCriticalButton, DesktopCriticalTone, DesktopIcon, DesktopIconButton, DesktopSelector,
+    },
+    style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+};
+use crate::ui::shell::drawer::CenterDrawerKind;
 use crate::ui::shell::{ShellUiState, presentation::semantic_status};
 
 /// Stable space for the attention-only runtime indicator. Idle leaves this
 /// slot empty so status changes never move the selectors or panel actions.
-pub(super) const HEADER_RUNTIME_STATUS_SLOT_WIDTH: f32 = 104.;
+pub(crate) const HEADER_RUNTIME_STATUS_SLOT_WIDTH: f32 = 104.;
 const HEADER_RUNTIME_STATUS_COMPACT_SLOT_WIDTH: f32 = 80.;
 
-pub(super) const fn header_runtime_status_slot_width(viewport_width: u32) -> f32 {
+pub(crate) const fn header_runtime_status_slot_width(viewport_width: u32) -> f32 {
     if viewport_width < 900 {
         HEADER_RUNTIME_STATUS_COMPACT_SLOT_WIDTH
     } else {
@@ -51,7 +51,7 @@ const fn header_runtime_status_label(status: SemanticStatus, compact: bool) -> &
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ConversationHeaderEvent {
+pub(crate) enum ConversationHeaderEvent {
     ToggleSessions,
     ToggleInspector,
     SelectModel(Arc<str>),
@@ -62,67 +62,67 @@ pub(super) enum ConversationHeaderEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConversationHeaderSelectorOption {
-    pub(super) id: Arc<str>,
-    pub(super) label: Arc<str>,
-    pub(super) selectable: bool,
+pub(crate) struct ConversationHeaderSelectorOption {
+    pub(crate) id: Arc<str>,
+    pub(crate) label: Arc<str>,
+    pub(crate) selectable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConversationHeaderModelOption {
-    pub(super) id: Arc<str>,
-    pub(super) name: Arc<str>,
-    pub(super) display_name: Arc<str>,
+pub(crate) struct ConversationHeaderModelOption {
+    pub(crate) id: Arc<str>,
+    pub(crate) name: Arc<str>,
+    pub(crate) display_name: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConversationHeaderModelGroup {
-    pub(super) provider: Arc<str>,
-    pub(super) options: Arc<[ConversationHeaderModelOption]>,
+pub(crate) struct ConversationHeaderModelGroup {
+    pub(crate) provider: Arc<str>,
+    pub(crate) options: Arc<[ConversationHeaderModelOption]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConversationHeaderModelWarning {
-    pub(super) id: Arc<str>,
-    pub(super) name: Arc<str>,
-    pub(super) reason: Arc<str>,
+pub(crate) struct ConversationHeaderModelWarning {
+    pub(crate) id: Arc<str>,
+    pub(crate) name: Arc<str>,
+    pub(crate) reason: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConversationHeaderThinkingOption {
-    pub(super) selection: DesktopThinkingLevel,
-    pub(super) label: &'static str,
+pub(crate) struct ConversationHeaderThinkingOption {
+    pub(crate) selection: DesktopThinkingLevel,
+    pub(crate) label: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConversationHeaderViewModel {
-    pub(super) idle: bool,
-    pub(super) status: SemanticStatus,
-    pub(super) composer_running: bool,
-    pub(super) abort_pending: bool,
-    pub(super) reload_pending: bool,
-    pub(super) selector_disabled: bool,
-    pub(super) model: Arc<str>,
-    pub(super) profile: Arc<str>,
-    pub(super) thinking: Arc<str>,
-    pub(super) thinking_selection: DesktopThinkingLevel,
-    pub(super) thinking_options: Arc<[ConversationHeaderThinkingOption]>,
-    pub(super) thinking_hint: Option<Arc<str>>,
-    pub(super) current_model_id: Arc<str>,
-    pub(super) current_profile_id: Arc<str>,
-    pub(super) model_groups: Arc<[ConversationHeaderModelGroup]>,
-    pub(super) unavailable_current_model: Option<ConversationHeaderModelWarning>,
-    pub(super) profile_options: Arc<[ConversationHeaderSelectorOption]>,
-    pub(super) project_name: Arc<str>,
-    pub(super) keyboard_focus_visible: bool,
-    pub(super) panel_visibility: PanelVisibility,
-    pub(super) sessions_drawer_open: bool,
-    pub(super) inspector_drawer_open: bool,
-    pub(super) sessions_panel_width: u32,
-    pub(super) context_panel_width: u32,
+pub(crate) struct ConversationHeaderViewModel {
+    pub(crate) idle: bool,
+    pub(crate) status: SemanticStatus,
+    pub(crate) composer_running: bool,
+    pub(crate) abort_pending: bool,
+    pub(crate) reload_pending: bool,
+    pub(crate) selector_disabled: bool,
+    pub(crate) model: Arc<str>,
+    pub(crate) profile: Arc<str>,
+    pub(crate) thinking: Arc<str>,
+    pub(crate) thinking_selection: DesktopThinkingLevel,
+    pub(crate) thinking_options: Arc<[ConversationHeaderThinkingOption]>,
+    pub(crate) thinking_hint: Option<Arc<str>>,
+    pub(crate) current_model_id: Arc<str>,
+    pub(crate) current_profile_id: Arc<str>,
+    pub(crate) model_groups: Arc<[ConversationHeaderModelGroup]>,
+    pub(crate) unavailable_current_model: Option<ConversationHeaderModelWarning>,
+    pub(crate) profile_options: Arc<[ConversationHeaderSelectorOption]>,
+    pub(crate) project_name: Arc<str>,
+    pub(crate) keyboard_focus_visible: bool,
+    pub(crate) panel_visibility: PanelVisibility,
+    pub(crate) sessions_drawer_open: bool,
+    pub(crate) inspector_drawer_open: bool,
+    pub(crate) sessions_panel_width: u32,
+    pub(crate) context_panel_width: u32,
 }
 
-pub(super) fn view_model(
+pub(crate) fn view_model(
     app: &NativeDesktopState,
     ui: &ShellUiState,
 ) -> ConversationHeaderViewModel {
@@ -185,7 +185,7 @@ pub(super) fn view_model(
         .cwd
         .file_name()
         .and_then(|name| name.to_str())
-        .map(|name| desktop::shell::truncate_label(name, 18))
+        .map(|name| desktop::ui::shell::truncate_label(name, 18))
         .unwrap_or_else(|| "Project".into());
 
     ConversationHeaderViewModel {
@@ -202,13 +202,13 @@ pub(super) fn view_model(
             || awaiting_prompt_start
             || reload_pending
             || selection_pending,
-        model: Arc::from(desktop::shell::truncate_label(model, 10)),
-        profile: Arc::from(desktop::shell::truncate_label(profile, 9)),
+        model: Arc::from(desktop::ui::shell::truncate_label(model, 10)),
+        profile: Arc::from(desktop::ui::shell::truncate_label(profile, 9)),
         thinking: Arc::from(
             if workspace.thinking_selection == DesktopThinkingLevel::Default {
                 "Auto".to_owned()
             } else {
-                desktop::shell::truncate_label(&workspace.thinking_selection.label(None), 12)
+                desktop::ui::shell::truncate_label(&workspace.thinking_selection.label(None), 12)
             },
         ),
         thinking_selection: workspace.thinking_selection,
@@ -232,7 +232,7 @@ pub(super) fn view_model(
     }
 }
 
-pub(super) fn thinking_menu(
+pub(crate) fn thinking_menu(
     model: Option<&CodingAgentModelChoice>,
 ) -> Vec<ConversationHeaderThinkingOption> {
     let Some(capability) = model.map(|model| &model.thinking_capability) else {
@@ -274,7 +274,7 @@ pub(super) fn thinking_menu(
     options
 }
 
-pub(super) fn model_menu(
+pub(crate) fn model_menu(
     models: &[CodingAgentModelChoice],
     current_model_id: &str,
 ) -> (
@@ -292,7 +292,7 @@ pub(super) fn model_menu(
             .push(ConversationHeaderModelOption {
                 id: Arc::from(model.id.as_str()),
                 name: Arc::from(model.name.as_str()),
-                display_name: Arc::from(desktop::shell::truncate_label(&model.name, 44)),
+                display_name: Arc::from(desktop::ui::shell::truncate_label(&model.name, 44)),
             });
     }
 
@@ -342,14 +342,14 @@ pub(crate) struct ConversationHeader {
 }
 
 impl ConversationHeader {
-    pub(super) fn new(focus: FocusHandle) -> Self {
+    pub(crate) fn new(focus: FocusHandle) -> Self {
         Self {
             focus,
             view_model: None,
         }
     }
 
-    pub(super) fn set_view_model(&mut self, view_model: ConversationHeaderViewModel) {
+    pub(crate) fn set_view_model(&mut self, view_model: ConversationHeaderViewModel) {
         self.view_model = Some(view_model);
     }
 }
@@ -580,8 +580,8 @@ impl Render for ConversationHeader {
                                     .item(PopupMenuItem::label("Current model unavailable"))
                                     .item(PopupMenuItem::label(format!(
                                         "{} · {} · {}",
-                                        desktop::shell::truncate_label(&warning.name, 32),
-                                        desktop::shell::truncate_label(&warning.id, 36),
+                                        desktop::ui::shell::truncate_label(&warning.name, 32),
+                                        desktop::ui::shell::truncate_label(&warning.id, 36),
                                         warning.reason
                                     )))
                                     .separator();
@@ -608,7 +608,7 @@ impl Render for ConversationHeader {
                                     let display_name = Arc::clone(&option.display_name);
                                     let metadata = Arc::<str>::from(format!(
                                         "Model ID · {}",
-                                        desktop::shell::truncate_label(&option.id, 54)
+                                        desktop::ui::shell::truncate_label(&option.id, 54)
                                     ));
                                     let row_id = Arc::clone(&option.id);
                                     menu = menu.item(

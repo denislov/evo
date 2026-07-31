@@ -4,12 +4,12 @@ use gpui::{
     rgb,
 };
 
-use super::desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
 use super::{
     CONVERSATION_CONTENT_MAX_WIDTH, CONVERSATION_RESIZE_DEBOUNCE, CenterSurface, DesktopTimerKind,
     NativeShell, ResizablePanel, SemanticTheme, ShellLayout, UI_FONT_FAMILY, actions,
     conversation_width_bucket,
 };
+use crate::ui::components::style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
 
 impl NativeShell {
     fn prepare_root_view(

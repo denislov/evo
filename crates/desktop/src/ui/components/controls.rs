@@ -45,9 +45,9 @@ use gpui_component::{
     menu::{DropdownMenu as _, PopupMenu},
 };
 
-use desktop::shell::{SemanticColor, SemanticTheme};
+use desktop::ui::shell::{SemanticColor, SemanticTheme};
 
-use super::desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
+use super::style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
 
 /// Named icons the shell is allowed to use.
 ///
@@ -55,7 +55,7 @@ use super::desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledE
 /// swapped in one place. Every variant resolves to a bundled Lucide asset that
 /// ships with `gpui-component-assets`; nothing here is hand-drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesktopIcon {
+pub(crate) enum DesktopIcon {
     /// Toggle the sessions panel; direction mirrors the panel's screen edge.
     PanelLeftOpen,
     PanelLeftClose,
@@ -88,7 +88,7 @@ pub(super) enum DesktopIcon {
 }
 
 impl DesktopIcon {
-    pub(super) const fn name(self) -> IconName {
+    pub(crate) const fn name(self) -> IconName {
         match self {
             Self::PanelLeftOpen => IconName::PanelLeftOpen,
             Self::PanelLeftClose => IconName::PanelLeftClose,
@@ -120,7 +120,7 @@ impl DesktopIcon {
 /// The state is textual as well as structural, so pending and locked remain
 /// distinguishable when colour is unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesktopProjectDirectoryState {
+pub(crate) enum DesktopProjectDirectoryState {
     Editable,
     Locked,
     Pending,
@@ -133,10 +133,13 @@ impl DesktopProjectDirectoryState {
 
     fn visible_value(self, value: &str) -> String {
         match self {
-            Self::Editable => desktop::shell::truncate_label(value, 30),
-            Self::Locked => format!("{} · Fixed", desktop::shell::truncate_label(value, 22)),
+            Self::Editable => desktop::ui::shell::truncate_label(value, 30),
+            Self::Locked => format!("{} · Fixed", desktop::ui::shell::truncate_label(value, 22)),
             Self::Pending => {
-                format!("{} · Pending", desktop::shell::truncate_label(value, 20))
+                format!(
+                    "{} · Pending",
+                    desktop::ui::shell::truncate_label(value, 20)
+                )
             }
         }
     }
@@ -147,7 +150,7 @@ impl DesktopProjectDirectoryState {
 /// This control owns only display semantics. DSK-650 attaches the directory
 /// picker event without moving project state or picker authority into this
 /// primitive.
-pub(super) struct DesktopProjectDirectoryControl {
+pub(crate) struct DesktopProjectDirectoryControl {
     id: ElementId,
     value: SharedString,
     accessible_label: SharedString,
@@ -155,7 +158,7 @@ pub(super) struct DesktopProjectDirectoryControl {
 }
 
 impl DesktopProjectDirectoryControl {
-    pub(super) fn new(
+    pub(crate) fn new(
         id: impl Into<ElementId>,
         value: impl Into<SharedString>,
         accessible_label: impl Into<SharedString>,
@@ -204,12 +207,12 @@ impl DesktopProjectDirectoryControl {
             .into_any_element()
     }
 
-    pub(super) fn build(self) -> gpui::AnyElement {
+    pub(crate) fn build(self) -> gpui::AnyElement {
         let button = self.button().into_any_element();
         self.wrap(button)
     }
 
-    pub(super) fn build_with_menu(
+    pub(crate) fn build_with_menu(
         self,
         menu: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
     ) -> gpui::AnyElement {
@@ -227,7 +230,7 @@ impl DesktopProjectDirectoryControl {
 /// A control keeps its height across enabled, disabled, busy and selected, so
 /// state changes never reflow the surface that hosts it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesktopControlSize {
+pub(crate) enum DesktopControlSize {
     /// Inline tool action inside a row or card.
     Tool,
     /// Chrome control: panel toggle, overflow, selector.
@@ -239,7 +242,7 @@ pub(super) enum DesktopControlSize {
 }
 
 impl DesktopControlSize {
-    pub(super) const fn pixels(self) -> f32 {
+    pub(crate) const fn pixels(self) -> f32 {
         match self {
             Self::Tool => 28.,
             Self::Compact => 32.,
@@ -251,7 +254,7 @@ impl DesktopControlSize {
 
 /// Where a control sits on the weight ladder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesktopControlWeight {
+pub(crate) enum DesktopControlWeight {
     /// Borderless; carries no permanent visual cost.
     Tool,
     /// Reads as a value, not as an action.
@@ -265,7 +268,7 @@ pub(super) enum DesktopControlWeight {
 /// How severe a critical action is, so Deny and Allow-for-operation cannot
 /// render identically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesktopCriticalTone {
+pub(crate) enum DesktopCriticalTone {
     /// Reversible and safe; the resting choice.
     Neutral,
     /// Grants or proceeds.
@@ -288,7 +291,7 @@ impl DesktopCriticalTone {
 ///
 /// Critical actions share one 40 px height and keep their semantic label at
 /// every viewport. Tone changes weight, never geometry.
-pub(super) struct DesktopCriticalButton {
+pub(crate) struct DesktopCriticalButton {
     id: ElementId,
     label: SharedString,
     accessible_label: SharedString,
@@ -297,7 +300,7 @@ pub(super) struct DesktopCriticalButton {
 }
 
 impl DesktopCriticalButton {
-    pub(super) fn new(
+    pub(crate) fn new(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
         accessible_label: impl Into<SharedString>,
@@ -312,12 +315,12 @@ impl DesktopCriticalButton {
         }
     }
 
-    pub(super) const fn disabled(mut self, disabled: bool) -> Self {
+    pub(crate) const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    pub(super) fn build(self) -> Button {
+    pub(crate) fn build(self) -> Button {
         let button = Button::new(self.id)
             .label(self.label)
             .tooltip(self.accessible_label)
@@ -336,7 +339,7 @@ impl DesktopCriticalButton {
 /// The constructor takes the accessible label because an icon without one is
 /// undiscoverable by keyboard and invisible to a screen reader. The same string
 /// becomes the tooltip, so the two can never drift.
-pub(super) struct DesktopIconButton {
+pub(crate) struct DesktopIconButton {
     id: ElementId,
     icon: DesktopIcon,
     accessible_label: SharedString,
@@ -349,7 +352,7 @@ pub(super) struct DesktopIconButton {
 }
 
 impl DesktopIconButton {
-    pub(super) fn new(
+    pub(crate) fn new(
         id: impl Into<ElementId>,
         icon: DesktopIcon,
         accessible_label: impl Into<SharedString>,
@@ -367,39 +370,39 @@ impl DesktopIconButton {
         }
     }
 
-    pub(super) const fn size(mut self, size: DesktopControlSize) -> Self {
+    pub(crate) const fn size(mut self, size: DesktopControlSize) -> Self {
         self.size = size;
         self
     }
 
-    pub(super) const fn weight(mut self, weight: DesktopControlWeight) -> Self {
+    pub(crate) const fn weight(mut self, weight: DesktopControlWeight) -> Self {
         self.weight = weight;
         self
     }
 
-    pub(super) const fn selected(mut self, selected: bool) -> Self {
+    pub(crate) const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
     }
 
-    pub(super) const fn disabled(mut self, disabled: bool) -> Self {
+    pub(crate) const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
     /// Swap the glyph for a spinner without changing the control's box.
-    pub(super) const fn busy(mut self, busy: bool) -> Self {
+    pub(crate) const fn busy(mut self, busy: bool) -> Self {
         self.busy = busy;
         self
     }
 
     /// Preserve the busy glyph and disabled semantics without rotating it.
-    pub(super) const fn reduced_motion(mut self, reduced_motion: bool) -> Self {
+    pub(crate) const fn reduced_motion(mut self, reduced_motion: bool) -> Self {
         self.reduced_motion = reduced_motion;
         self
     }
 
-    pub(super) fn build(self) -> Button {
+    pub(crate) fn build(self) -> Button {
         let side = px(self.size.pixels());
         let icon = if self.busy {
             DesktopIcon::Busy
@@ -428,7 +431,7 @@ impl DesktopIconButton {
 ///
 /// Distinct from an action button: it advertises state, and the caret says it
 /// opens something rather than performing something.
-pub(super) struct DesktopSelector {
+pub(crate) struct DesktopSelector {
     id: ElementId,
     value: SharedString,
     accessible_label: SharedString,
@@ -437,7 +440,7 @@ pub(super) struct DesktopSelector {
 }
 
 impl DesktopSelector {
-    pub(super) fn new(
+    pub(crate) fn new(
         id: impl Into<ElementId>,
         value: impl Into<SharedString>,
         accessible_label: impl Into<SharedString>,
@@ -451,17 +454,17 @@ impl DesktopSelector {
         }
     }
 
-    pub(super) const fn size(mut self, size: DesktopControlSize) -> Self {
+    pub(crate) const fn size(mut self, size: DesktopControlSize) -> Self {
         self.size = size;
         self
     }
 
-    pub(super) const fn disabled(mut self, disabled: bool) -> Self {
+    pub(crate) const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    pub(super) fn build(self) -> Button {
+    pub(crate) fn build(self) -> Button {
         Button::new(self.id)
             .ghost()
             .label(self.value)
@@ -479,10 +482,10 @@ impl DesktopSelector {
 /// border, so a selected row does not gain a pixel of height and no-colour
 /// users still see the rail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) struct DesktopRowState {
-    pub(super) selected: bool,
-    pub(super) disabled: bool,
-    pub(super) focus_visible: bool,
+pub(crate) struct DesktopRowState {
+    pub(crate) selected: bool,
+    pub(crate) disabled: bool,
+    pub(crate) focus_visible: bool,
 }
 
 /// A full-width row that is itself the action surface.
@@ -492,7 +495,7 @@ pub(super) struct DesktopRowState {
 /// button has to occupy permanent space. Trailing tool actions may be revealed
 /// on hover or focus, but their width is always reserved so revealing them
 /// cannot reflow the row.
-pub(super) struct DesktopActionRow {
+pub(crate) struct DesktopActionRow {
     id: ElementId,
     accessible_label: SharedString,
     expanded: Option<bool>,
@@ -508,7 +511,7 @@ pub(super) struct DesktopActionRow {
 }
 
 impl DesktopActionRow {
-    pub(super) fn new(
+    pub(crate) fn new(
         id: impl Into<ElementId>,
         title: impl Into<SharedString>,
         accessible_label: impl Into<SharedString>,
@@ -527,40 +530,40 @@ impl DesktopActionRow {
         }
     }
 
-    pub(super) const fn state(mut self, state: DesktopRowState) -> Self {
+    pub(crate) const fn state(mut self, state: DesktopRowState) -> Self {
         self.state = state;
         self
     }
 
-    pub(super) const fn size(mut self, size: DesktopControlSize) -> Self {
+    pub(crate) const fn size(mut self, size: DesktopControlSize) -> Self {
         self.size = size;
         self
     }
 
     /// Expose disclosure state on the row's accessible action surface.
-    pub(super) const fn expanded(mut self, expanded: bool) -> Self {
+    pub(crate) const fn expanded(mut self, expanded: bool) -> Self {
         self.expanded = Some(expanded);
         self
     }
 
-    pub(super) fn leading(mut self, leading: impl IntoElement) -> Self {
+    pub(crate) fn leading(mut self, leading: impl IntoElement) -> Self {
         self.leading = Some(leading.into_any_element());
         self
     }
 
-    pub(super) fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+    pub(crate) fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
     /// Attach trailing content and reserve its width unconditionally.
-    pub(super) fn trailing(mut self, trailing: impl IntoElement, reserved_px: f32) -> Self {
+    pub(crate) fn trailing(mut self, trailing: impl IntoElement, reserved_px: f32) -> Self {
         self.trailing = Some(trailing.into_any_element());
         self.trailing_reserved_px = reserved_px;
         self
     }
 
-    pub(super) fn build(self, theme: SemanticTheme) -> Button {
+    pub(crate) fn build(self, theme: SemanticTheme) -> Button {
         let text_color = if self.state.disabled {
             theme.subtle_text
         } else {

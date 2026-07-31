@@ -199,7 +199,7 @@ impl ComposerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::ConversationViewport;
+    use crate::ui::conversation::ConversationViewport;
     use coding_agent::api::view::{
         CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot,
     };

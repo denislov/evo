@@ -1,8 +1,8 @@
-use desktop::shell::DESKTOP_DESIGN_TOKENS;
+use desktop::ui::shell::DESKTOP_DESIGN_TOKENS;
 use gpui::{Styled, px};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesignSpace {
+pub(crate) enum DesignSpace {
     Xs,
     Sm,
     Md,
@@ -11,7 +11,7 @@ pub(super) enum DesignSpace {
 }
 
 impl DesignSpace {
-    pub(super) const fn pixels(self) -> f32 {
+    pub(crate) const fn pixels(self) -> f32 {
         let spacing = DESKTOP_DESIGN_TOKENS.spacing;
         match self {
             Self::Xs => spacing.xs as f32,
@@ -24,7 +24,7 @@ impl DesignSpace {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesignRadius {
+pub(crate) enum DesignRadius {
     Sm,
     Md,
     Lg,
@@ -42,7 +42,7 @@ impl DesignRadius {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesignText {
+pub(crate) enum DesignText {
     Metadata,
     Body,
     Title,
@@ -68,7 +68,7 @@ impl DesignText {
     }
 }
 
-pub(super) trait DesktopStyledExt: Styled + Sized {
+pub(crate) trait DesktopStyledExt: Styled + Sized {
     fn p_token(self, spacing: DesignSpace) -> Self {
         self.p(px(spacing.pixels()))
     }

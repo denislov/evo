@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use coding_agent::api::embedding::CodingAgentThinkingLevel;
 
-use crate::shell::{
+use crate::ui::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH, SESSION_PANEL_MAX_WIDTH,
     SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_WIDTH,
 };
@@ -68,7 +68,7 @@ impl DesktopThinkingLevel {
     pub(crate) fn label(self, default: Option<&str>) -> String {
         match self {
             Self::Default => default
-                .map(|level| format!("default:{}", crate::shell::truncate_label(level, 10)))
+                .map(|level| format!("default:{}", crate::ui::shell::truncate_label(level, 10)))
                 .unwrap_or_else(|| "default".into()),
             Self::Off => "off".into(),
             Self::Minimal => "minimal".into(),

@@ -1,16 +1,16 @@
 use coding_agent::api::embedding::CodingAgentResourceCommand;
-use desktop::shell::{SemanticTheme, truncate_label};
+use desktop::ui::shell::{SemanticTheme, truncate_label};
 use gpui::{IntoElement, ParentElement as _, Render, Role, Styled as _, div, prelude::*, px, rgb};
 use std::sync::Arc;
 
-use super::desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
+use crate::ui::components::style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct SkillsPaneViewModel {
-    pub(super) skills: Arc<[CodingAgentResourceCommand]>,
+pub(crate) struct SkillsPaneViewModel {
+    pub(crate) skills: Arc<[CodingAgentResourceCommand]>,
 }
 
-pub(super) fn view_model(skills: &Arc<[CodingAgentResourceCommand]>) -> SkillsPaneViewModel {
+pub(crate) fn view_model(skills: &Arc<[CodingAgentResourceCommand]>) -> SkillsPaneViewModel {
     SkillsPaneViewModel {
         skills: Arc::clone(skills),
     }
@@ -21,13 +21,13 @@ pub(crate) struct SkillsPane {
 }
 
 impl SkillsPane {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             view_model: SkillsPaneViewModel::default(),
         }
     }
 
-    pub(super) fn set_view_model(&mut self, view_model: SkillsPaneViewModel) {
+    pub(crate) fn set_view_model(&mut self, view_model: SkillsPaneViewModel) {
         self.view_model = view_model;
     }
 }

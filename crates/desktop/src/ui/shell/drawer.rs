@@ -1,11 +1,14 @@
-use desktop::shell::SemanticTheme;
+use desktop::ui::shell::SemanticTheme;
 use gpui::{
     Entity, EventEmitter, IntoElement, MouseButton, ParentElement as _, Render, Role, Styled as _,
     div, prelude::*, px, rgb,
 };
 
-use super::{InspectorPane, NativeDesktopState, SessionsPane, actions};
-use crate::ui::shell::ShellUiState;
+use crate::actions;
+use crate::app::native_shell::NativeDesktopState;
+use crate::ui::{inspector::pane::InspectorPane, sessions::pane::SessionsPane};
+
+use super::ShellUiState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CenterDrawerKind {
@@ -14,18 +17,18 @@ pub(crate) enum CenterDrawerKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CenterDrawerHostEvent {
+pub(crate) enum CenterDrawerHostEvent {
     Dismiss,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct CenterDrawerViewModel {
-    pub(super) active: Option<CenterDrawerKind>,
-    pub(super) sessions_width: u32,
-    pub(super) inspector_width: u32,
+pub(crate) struct CenterDrawerViewModel {
+    pub(crate) active: Option<CenterDrawerKind>,
+    pub(crate) sessions_width: u32,
+    pub(crate) inspector_width: u32,
 }
 
-pub(super) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> CenterDrawerViewModel {
+pub(crate) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> CenterDrawerViewModel {
     CenterDrawerViewModel {
         active: ui.active_drawer,
         sessions_width: app.preferences.sessions_panel_width,
@@ -40,7 +43,7 @@ pub(crate) struct CenterDrawerHost {
 }
 
 impl CenterDrawerHost {
-    pub(super) fn new(
+    pub(crate) fn new(
         sessions_pane: Entity<SessionsPane>,
         inspector_pane: Entity<InspectorPane>,
     ) -> Self {
@@ -51,7 +54,7 @@ impl CenterDrawerHost {
         }
     }
 
-    pub(super) fn set_view_model(&mut self, view_model: CenterDrawerViewModel) {
+    pub(crate) fn set_view_model(&mut self, view_model: CenterDrawerViewModel) {
         self.view_model = Some(view_model);
     }
 }

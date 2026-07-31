@@ -1,9 +1,9 @@
-use super::{
+use crate::app::native_shell::{
     Arc, ClipboardFeedback, Context, ConversationFullMessageView, DesktopModalKind, MAX_COPY_BYTES,
     NativeShell, ScrollStrategy, UiChangeSet, UiRegion, Window, adjacent_conversation_index,
-    conversation_copy_text, conversation_pane, message_conversation_block_id,
-    tool_conversation_block_id,
+    conversation_copy_text, message_conversation_block_id, tool_conversation_block_id,
 };
+use crate::ui::conversation::pane as conversation_pane;
 
 impl NativeShell {
     pub(super) fn copy_selected_conversation(&mut self, cx: &mut Context<Self>) {

@@ -10,7 +10,7 @@ use std::{
 use gpui::{ScrollStrategy, px, size};
 use gpui_component::VirtualListScrollHandle;
 
-use crate::conversation::{
+use super::{
     ConversationBlockKind, ConversationItemKey, ConversationItemKind, ConversationProjection,
     ConversationRowLayoutInput, ConversationRowLayoutState, ConversationRowMeasurement,
     ConversationRowRenderCache, ConversationRowRenderData, ConversationRowRenderSource,
@@ -22,9 +22,9 @@ use desktop::projection::{
     DesktopToolOverlay, DesktopToolStatus,
 };
 
-pub(super) const RESIZE_DEBOUNCE: Duration = Duration::from_millis(67);
-pub(super) const MAX_DIRTY_SEQUENCES: usize = 256;
-pub(super) const MAX_EXPANDED_DETAILS: usize = 256;
+pub(crate) const RESIZE_DEBOUNCE: Duration = Duration::from_millis(67);
+pub(crate) const MAX_DIRTY_SEQUENCES: usize = 256;
+pub(crate) const MAX_EXPANDED_DETAILS: usize = 256;
 
 const COLLAPSED_DETAIL_HEIGHT: f32 = 36.;
 const INITIAL_VISIBLE_ROWS: usize = 8;
@@ -35,7 +35,7 @@ const INITIAL_VISIBLE_ROWS: usize = 8;
 /// reconciliation cannot reach global UI state, preferences or the command
 /// ledger. Every borrow is a projection slice plus the optimistic submitted
 /// prompt overlay that has no durable block yet.
-pub(super) struct ConversationSource<'a> {
+pub(crate) struct ConversationSource<'a> {
     conversation: &'a ConversationProjection,
     submitted: Option<&'a SubmittedPromptPreview>,
     messages: &'a VecDeque<DesktopMessageOverlay>,
@@ -51,7 +51,7 @@ struct ConversationToggleAnchor {
 }
 
 impl<'a> ConversationSource<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         projection: &'a DesktopProjection,
         submitted: Option<&'a SubmittedPromptPreview>,
     ) -> Self {
@@ -63,24 +63,24 @@ impl<'a> ConversationSource<'a> {
         }
     }
 
-    pub(super) const fn conversation(&self) -> &'a ConversationProjection {
+    pub(crate) const fn conversation(&self) -> &'a ConversationProjection {
         self.conversation
     }
 
-    pub(super) fn session_id(&self) -> &'a str {
+    pub(crate) fn session_id(&self) -> &'a str {
         self.conversation.session_id.as_str()
     }
 
-    pub(super) fn durable_count(&self) -> usize {
+    pub(crate) fn durable_count(&self) -> usize {
         self.conversation.blocks().len()
     }
 
-    pub(super) fn submitted_count(&self) -> usize {
+    pub(crate) fn submitted_count(&self) -> usize {
         usize::from(self.submitted.is_some())
     }
 
     /// Durable blocks plus the optimistic submitted row plus live overlays.
-    pub(super) fn visible_count(&self) -> usize {
+    pub(crate) fn visible_count(&self) -> usize {
         self.durable_count() + self.submitted_count() + self.messages.len() + self.tools.len()
     }
 
@@ -92,7 +92,7 @@ impl<'a> ConversationSource<'a> {
     /// message that came after it, and shifts it again on every new message.
     /// Both queues are already ascending in `started_sequence`, so this is a
     /// merge rather than a sort: no allocation, no reordering.
-    pub(super) fn live_overlays(&self) -> LiveOverlayIter<'a> {
+    pub(crate) fn live_overlays(&self) -> LiveOverlayIter<'a> {
         LiveOverlayIter {
             messages: self.messages.iter().peekable(),
             tools: self.tools.iter().peekable(),
@@ -102,7 +102,7 @@ impl<'a> ConversationSource<'a> {
 
 /// One row of the live tail, in event order.
 #[derive(Clone, Copy)]
-pub(super) enum LiveOverlay<'a> {
+pub(crate) enum LiveOverlay<'a> {
     Message(&'a DesktopMessageOverlay),
     Tool(&'a DesktopToolOverlay),
 }
@@ -123,7 +123,7 @@ impl LiveOverlay<'_> {
     }
 }
 
-pub(super) struct LiveOverlayIter<'a> {
+pub(crate) struct LiveOverlayIter<'a> {
     messages: Peekable<vec_deque::Iter<'a, DesktopMessageOverlay>>,
     tools: Peekable<vec_deque::Iter<'a, DesktopToolOverlay>>,
 }
@@ -145,9 +145,9 @@ impl<'a> Iterator for LiveOverlayIter<'a> {
     }
 }
 
-pub(super) struct ConversationController {
+pub(crate) struct ConversationController {
     viewport: ConversationViewport,
-    pub(super) scroll: VirtualListScrollHandle,
+    pub(crate) scroll: VirtualListScrollHandle,
     layout: ConversationRowLayoutState,
     live_layout: ConversationRowLayoutState,
     render_cache: ConversationRowRenderCache,
@@ -192,14 +192,14 @@ impl Default for ConversationController {
 }
 
 #[derive(Clone)]
-pub(super) struct ConversationRenderReader {
+pub(crate) struct ConversationRenderReader {
     rows: Rc<RefCell<Vec<ConversationRowRenderData>>>,
     heights: Rc<RefCell<Vec<f32>>>,
     row_sizes: Rc<RefCell<Rc<Vec<gpui::Size<gpui::Pixels>>>>>,
 }
 
 impl ConversationRenderReader {
-    pub(super) fn row(&self, index: usize) -> Option<(ConversationRowRenderData, f32)> {
+    pub(crate) fn row(&self, index: usize) -> Option<(ConversationRowRenderData, f32)> {
         let rows = self.rows.borrow();
         let row = rows.get(index)?.clone();
         let height = self
@@ -211,27 +211,27 @@ impl ConversationRenderReader {
         Some((row, height))
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.rows.borrow().len()
     }
 
-    pub(super) fn row_sizes(&self) -> Rc<Vec<gpui::Size<gpui::Pixels>>> {
+    pub(crate) fn row_sizes(&self) -> Rc<Vec<gpui::Size<gpui::Pixels>>> {
         self.row_sizes.borrow().clone()
     }
 }
 
 /// A height refresh the Root still has to arm on the GPUI executor.
-pub(super) type ConversationRefresh = Option<(Duration, bool)>;
+pub(crate) type ConversationRefresh = Option<(Duration, bool)>;
 
 /// What the Root must do after the controller consumed a row measurement.
 #[derive(Default)]
-pub(super) struct ConversationMeasurementOutcome {
-    pub(super) refresh: ConversationRefresh,
-    pub(super) pane_dirty: bool,
+pub(crate) struct ConversationMeasurementOutcome {
+    pub(crate) refresh: ConversationRefresh,
+    pub(crate) pane_dirty: bool,
 }
 
 impl ConversationController {
-    pub(super) fn render_reader(&self) -> ConversationRenderReader {
+    pub(crate) fn render_reader(&self) -> ConversationRenderReader {
         ConversationRenderReader {
             rows: Rc::clone(&self.render_rows),
             heights: Rc::clone(&self.render_heights),
@@ -241,38 +241,38 @@ impl ConversationController {
 
     // ---- bounded presentation state readers -------------------------------
 
-    pub(super) fn follow_latest_enabled(&self) -> bool {
+    pub(crate) fn follow_latest_enabled(&self) -> bool {
         self.viewport.follow_latest()
     }
 
-    pub(super) fn unseen_updates(&self) -> usize {
+    pub(crate) fn unseen_updates(&self) -> usize {
         self.viewport.unseen_updates()
     }
 
-    pub(super) fn selected_block_id(&self) -> Option<&str> {
+    pub(crate) fn selected_block_id(&self) -> Option<&str> {
         self.viewport.selected_block_id()
     }
 
-    pub(super) fn expanded_details(&self) -> &HashSet<String> {
+    pub(crate) fn expanded_details(&self) -> &HashSet<String> {
         &self.expanded_details
     }
 
-    pub(super) fn row_count(&self) -> usize {
+    pub(crate) fn row_count(&self) -> usize {
         self.render_rows.borrow().len()
     }
 
-    pub(super) fn row_at(&self, index: usize) -> Option<ConversationRowRenderData> {
+    pub(crate) fn row_at(&self, index: usize) -> Option<ConversationRowRenderData> {
         self.render_rows.borrow().get(index).cloned()
     }
 
-    pub(super) fn row_index(&self, block_id: &str) -> Option<usize> {
+    pub(crate) fn row_index(&self, block_id: &str) -> Option<usize> {
         self.render_rows
             .borrow()
             .iter()
             .position(|row| row.item_key.row_id() == block_id)
     }
 
-    pub(super) fn row_for_block(&self, block_id: &str) -> Option<ConversationRowRenderData> {
+    pub(crate) fn row_for_block(&self, block_id: &str) -> Option<ConversationRowRenderData> {
         self.render_rows
             .borrow()
             .iter()
@@ -280,21 +280,21 @@ impl ConversationController {
             .cloned()
     }
 
-    pub(super) fn copy_selected(&self, conversation: &ConversationProjection) -> Option<String> {
+    pub(crate) fn copy_selected(&self, conversation: &ConversationProjection) -> Option<String> {
         self.viewport.copy_selected(conversation)
     }
 
-    pub(super) const fn active_width_bucket(&self) -> Option<u32> {
+    pub(crate) const fn active_width_bucket(&self) -> Option<u32> {
         self.render_width_bucket
     }
 
-    pub(super) fn needs_row_refresh(&self) -> bool {
+    pub(crate) fn needs_row_refresh(&self) -> bool {
         self.render_full_dirty || self.render_live_dirty
     }
 
     // ---- selection --------------------------------------------------------
 
-    pub(super) fn select_row(
+    pub(crate) fn select_row(
         &mut self,
         block_id: String,
         durable: bool,
@@ -307,11 +307,11 @@ impl ConversationController {
         }
     }
 
-    pub(super) fn scroll_to_row(&self, index: usize, strategy: ScrollStrategy) {
+    pub(crate) fn scroll_to_row(&self, index: usize, strategy: ScrollStrategy) {
         self.scroll.scroll_to_item(index, strategy);
     }
 
-    pub(super) fn reconcile_live_selection(&mut self, live_id: &str, durable_id: &str) {
+    pub(crate) fn reconcile_live_selection(&mut self, live_id: &str, durable_id: &str) {
         self.viewport.reconcile_live_selection(live_id, durable_id);
     }
 
@@ -319,7 +319,7 @@ impl ConversationController {
     ///
     /// The expanded set is bounded; overflowing it collapses everything rather
     /// than retaining unbounded per-row UI state.
-    pub(super) fn toggle_details(&mut self, block_id: &str) {
+    pub(crate) fn toggle_details(&mut self, block_id: &str) {
         let anchor = {
             let rows = self.render_rows.borrow();
             let heights = self.render_heights.borrow();
@@ -355,7 +355,7 @@ impl ConversationController {
     /// delta only records the event sequence so the next frame can reconcile
     /// the live tail without rescanning the whole history; once the bounded
     /// sequence window overflows the tail is rebuilt instead.
-    pub(super) fn apply_projection_delta(
+    pub(crate) fn apply_projection_delta(
         &mut self,
         replaced: bool,
         delta: Option<&DesktopProjectionDelta>,
@@ -384,7 +384,7 @@ impl ConversationController {
     }
 
     /// Reconcile the viewport after the projection replaced the transcript.
-    pub(super) fn reconcile_hydration(
+    pub(crate) fn reconcile_hydration(
         &mut self,
         source: &ConversationSource<'_>,
         content_revision: u64,
@@ -397,7 +397,7 @@ impl ConversationController {
     }
 
     /// Reconcile the viewport after a streaming content change.
-    pub(super) fn reconcile_content(
+    pub(crate) fn reconcile_content(
         &mut self,
         source: &ConversationSource<'_>,
         content_revision: u64,
@@ -415,13 +415,13 @@ impl ConversationController {
         }
     }
 
-    pub(super) fn mark_live_dirty(&mut self) {
+    pub(crate) fn mark_live_dirty(&mut self) {
         self.render_live_dirty = true;
     }
 
     // ---- scrolling --------------------------------------------------------
 
-    pub(super) fn follow_latest(&mut self, visible_count: usize) {
+    pub(crate) fn follow_latest(&mut self, visible_count: usize) {
         self.toggle_anchor = None;
         self.viewport.resume_latest(visible_count);
         self.align_scroll_to_bottom(visible_count);
@@ -434,7 +434,7 @@ impl ConversationController {
     /// different ways. The summed-height path is exact; `scroll_to_item` is the
     /// fallback for when the height table has not caught up with the row count
     /// yet, which is the case mid-way through applying a batch of events.
-    pub(super) fn align_scroll_to_bottom(&self, block_count: usize) {
+    pub(crate) fn align_scroll_to_bottom(&self, block_count: usize) {
         if block_count == 0 {
             let mut offset = self.scroll.offset();
             offset.y = px(0.);
@@ -456,7 +456,7 @@ impl ConversationController {
 
     /// Returns whether follow-latest hysteresis changed and the pane and header
     /// have to be notified.
-    pub(super) fn reconcile_scroll(&mut self) -> bool {
+    pub(crate) fn reconcile_scroll(&mut self) -> bool {
         self.toggle_anchor = None;
         let offset_y = f32::from(self.scroll.offset().y);
         let max_offset_y = f32::from(self.scroll.max_offset().y);
@@ -466,7 +466,7 @@ impl ConversationController {
 
     // ---- measurement ------------------------------------------------------
 
-    pub(super) fn submit_row_measurement(
+    pub(crate) fn submit_row_measurement(
         &mut self,
         source: &ConversationSource<'_>,
         measurement: &ConversationRowMeasurement,
@@ -569,7 +569,7 @@ impl ConversationController {
 
     /// Resolve the width bucket to render at, debouncing live resizes so a drag
     /// does not rebuild the full transcript on every frame.
-    pub(super) fn width_for_render(&mut self, requested: u32) -> (u32, Option<(u32, Instant)>) {
+    pub(crate) fn width_for_render(&mut self, requested: u32) -> (u32, Option<(u32, Instant)>) {
         let Some(active) = self.render_width_bucket else {
             self.width_pending = None;
             return (requested, None);
@@ -597,7 +597,7 @@ impl ConversationController {
     }
 
     /// Commit a debounced width once its timer fired, if it is still pending.
-    pub(super) fn commit_pending_width(&mut self, requested: u32, deadline: Instant) -> bool {
+    pub(crate) fn commit_pending_width(&mut self, requested: u32, deadline: Instant) -> bool {
         if self.width_pending == Some((requested, deadline)) {
             self.render_full_dirty = true;
             true
@@ -606,7 +606,7 @@ impl ConversationController {
         }
     }
 
-    pub(super) fn commit_current_pending_width(&mut self) -> bool {
+    pub(crate) fn commit_current_pending_width(&mut self) -> bool {
         let Some((requested, deadline)) = self.width_pending else {
             return false;
         };
@@ -617,7 +617,7 @@ impl ConversationController {
 
     /// Arm the earliest pending height refresh. Returns the delay the Root has
     /// to wait on when this call owns the new deadline.
-    pub(super) fn arm_height_refresh(
+    pub(crate) fn arm_height_refresh(
         &mut self,
         refresh: ConversationRefresh,
     ) -> Option<(Duration, Instant)> {
@@ -639,7 +639,7 @@ impl ConversationController {
     }
 
     /// Consume an armed height-refresh deadline once its timer fired.
-    pub(super) fn fire_height_refresh(&mut self, deadline: Instant) -> bool {
+    pub(crate) fn fire_height_refresh(&mut self, deadline: Instant) -> bool {
         if self.height_refresh_deadline != Some(deadline) {
             return false;
         }
@@ -653,7 +653,7 @@ impl ConversationController {
         true
     }
 
-    pub(super) fn fire_current_height_refresh(&mut self) -> bool {
+    pub(crate) fn fire_current_height_refresh(&mut self) -> bool {
         let Some(deadline) = self.height_refresh_deadline else {
             return false;
         };
@@ -978,7 +978,7 @@ impl ConversationController {
 
     /// Bring rows, heights and scroll position in line with the projection for
     /// one frame at `layout_width`, and report the next height refresh.
-    pub(super) fn prepare_rows(
+    pub(crate) fn prepare_rows(
         &mut self,
         source: &ConversationSource<'_>,
         layout_width: u32,
@@ -1149,37 +1149,37 @@ impl ConversationController {
 
 #[cfg(test)]
 impl ConversationController {
-    pub(super) fn set_scroll_top_for_tests(&self, scroll_top: f32) {
+    pub(crate) fn set_scroll_top_for_tests(&self, scroll_top: f32) {
         let mut offset = self.scroll.offset();
         offset.y = px(-scroll_top);
         self.scroll.set_offset(offset);
     }
 
-    pub(super) fn scroll_top_for_tests(&self) -> f32 {
+    pub(crate) fn scroll_top_for_tests(&self) -> f32 {
         (-f32::from(self.scroll.offset().y)).max(0.)
     }
 
-    pub(super) fn render_heights_for_tests(&self) -> Rc<RefCell<Vec<f32>>> {
+    pub(crate) fn render_heights_for_tests(&self) -> Rc<RefCell<Vec<f32>>> {
         Rc::clone(&self.render_heights)
     }
 
-    pub(super) fn last_row_id_for_tests(&self) -> Option<String> {
+    pub(crate) fn last_row_id_for_tests(&self) -> Option<String> {
         self.render_rows
             .borrow()
             .last()
             .map(|row| row.item_key.row_id().to_owned())
     }
 
-    pub(super) fn toggle_anchor_active_for_tests(&self) -> bool {
+    pub(crate) fn toggle_anchor_active_for_tests(&self) -> bool {
         self.toggle_anchor.is_some()
     }
 }
 
-pub(super) fn distance_to_bottom(offset_y: f32, max_offset_y: f32) -> f32 {
+pub(crate) fn distance_to_bottom(offset_y: f32, max_offset_y: f32) -> f32 {
     (max_offset_y.max(0.0) + offset_y.min(0.0)).max(0.0)
 }
 
-pub(super) fn minimum_duration(
+pub(crate) fn minimum_duration(
     current: Option<Duration>,
     next: Option<Duration>,
 ) -> Option<Duration> {
@@ -1190,7 +1190,7 @@ pub(super) fn minimum_duration(
     }
 }
 
-pub(super) fn compensate_scroll_top_for_single_row_height(
+pub(crate) fn compensate_scroll_top_for_single_row_height(
     heights: &[f32],
     changed_index: usize,
     measured_height: f32,
@@ -1226,7 +1226,7 @@ pub(super) fn compensate_scroll_top_for_single_row_height(
     }
 }
 
-pub(super) fn row_target_height(
+pub(crate) fn row_target_height(
     row: &ConversationRowRenderData,
     expanded_details: &HashSet<String>,
     panel_width: u32,
@@ -1252,7 +1252,7 @@ pub(super) fn row_target_height(
     })
 }
 
-pub(super) fn row_layout_input(
+pub(crate) fn row_layout_input(
     row: &ConversationRowRenderData,
     expanded_details: &HashSet<String>,
     panel_width: u32,
@@ -1266,7 +1266,7 @@ pub(super) fn row_layout_input(
     }
 }
 
-pub(super) fn upsert_indexed_item<T>(
+pub(crate) fn upsert_indexed_item<T>(
     items: &mut Vec<T>,
     existing_index: Option<usize>,
     mut desired_index: usize,
@@ -1287,13 +1287,13 @@ pub(super) fn upsert_indexed_item<T>(
     desired_index
 }
 
-pub(super) fn message_block_id(message: &DesktopMessageOverlay) -> String {
+pub(crate) fn message_block_id(message: &DesktopMessageOverlay) -> String {
     message.message_id.as_ref().map_or_else(
         || format!("assistant:{}:{}", message.operation_id, message.turn_id),
         |message_id| format!("assistant:{message_id}"),
     )
 }
 
-pub(super) fn tool_block_id(tool: &DesktopToolOverlay) -> String {
+pub(crate) fn tool_block_id(tool: &DesktopToolOverlay) -> String {
     format!("tool:{}", tool.tool_call_id)
 }

@@ -11,12 +11,10 @@ mod actions;
 mod app;
 mod application;
 mod assets;
-mod conversation;
 mod platform;
 mod preferences;
 mod projection;
 mod runtime;
-mod shell;
 mod ui;
 
 #[cfg(test)]

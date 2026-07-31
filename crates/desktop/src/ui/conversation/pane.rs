@@ -14,24 +14,26 @@ use std::{
 };
 use unicode_width::UnicodeWidthChar as _;
 
-use super::{
-    ConversationBlockKind, SessionWorkspace, conversation_block_visual,
-    conversation_controller::ConversationRenderReader,
-    desktop_controls::{
+use super::{ConversationBlockKind, controller::ConversationRenderReader};
+use crate::app::native_shell::{SessionWorkspace, conversation_block_visual};
+use crate::ui::components::streaming_text::{
+    StreamingText, markdown_completion_trace_enabled, trace_markdown_parse,
+};
+use crate::ui::components::{
+    controls::{
         DesktopControlSize, DesktopCriticalButton, DesktopCriticalTone, DesktopIcon,
         DesktopIconButton,
     },
-    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
-    streaming_text::{StreamingText, markdown_completion_trace_enabled, trace_markdown_parse},
+    style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 use crate::ui::shell::ShellUiState;
-use desktop::conversation::{
+use desktop::projection::DesktopRecoveryStatus;
+use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
+use desktop::ui::conversation::{
     ConversationRowMeasurement, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, compact_duration,
     conversation_copy_text,
 };
-use desktop::projection::DesktopRecoveryStatus;
-use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
-use desktop::shell::{
+use desktop::ui::shell::{
     ASSISTANT_MESSAGE_MAX_WIDTH, CONVERSATION_CONTENT_MAX_WIDTH,
     CONVERSATION_ROW_VERTICAL_PADDING_PX, MONOSPACE_FONT_FAMILY, SemanticTheme,
     USER_MESSAGE_MAX_WIDTH,
@@ -39,7 +41,7 @@ use desktop::shell::{
 
 /// Width of the leading rail that carries conversation selection now that
 /// blocks no longer paint a card background.
-pub(super) const CONVERSATION_RAIL_WIDTH: f32 = 2.;
+pub(crate) const CONVERSATION_RAIL_WIDTH: f32 = 2.;
 // The background excludes only the gap and copy control. The card's bottom
 // padding remains inside the bubble, matching its top padding and vertically
 // centering the message body.
@@ -51,7 +53,7 @@ const USER_MESSAGE_COLUMN_WIDTH: f32 = 8.;
 const USER_MESSAGE_MIN_WIDTH: f32 = 64.;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum ConversationPaneEvent {
+pub(crate) enum ConversationPaneEvent {
     Select {
         block_id: String,
         durable: bool,
@@ -79,25 +81,25 @@ pub(super) enum ConversationPaneEvent {
 }
 
 #[derive(Clone)]
-pub(super) struct ConversationPaneViewModel {
-    pub(super) render: ConversationRenderReader,
-    pub(super) scroll: VirtualListScrollHandle,
-    pub(super) visible_count: usize,
-    pub(super) event_count: usize,
-    pub(super) message_count: usize,
-    pub(super) tool_count: usize,
-    pub(super) omitted_count: usize,
-    pub(super) follow_latest: bool,
-    pub(super) unseen_updates: usize,
-    pub(super) selected_block_id: Option<String>,
-    pub(super) expanded_details: Rc<HashSet<String>>,
-    pub(super) full_view_block_id: Option<String>,
-    pub(super) diagnostic_recovery: Option<DesktopRecoveryIdentity>,
+pub(crate) struct ConversationPaneViewModel {
+    pub(crate) render: ConversationRenderReader,
+    pub(crate) scroll: VirtualListScrollHandle,
+    pub(crate) visible_count: usize,
+    pub(crate) event_count: usize,
+    pub(crate) message_count: usize,
+    pub(crate) tool_count: usize,
+    pub(crate) omitted_count: usize,
+    pub(crate) follow_latest: bool,
+    pub(crate) unseen_updates: usize,
+    pub(crate) selected_block_id: Option<String>,
+    pub(crate) expanded_details: Rc<HashSet<String>>,
+    pub(crate) full_view_block_id: Option<String>,
+    pub(crate) diagnostic_recovery: Option<DesktopRecoveryIdentity>,
 }
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConversationPaneSnapshot {
+pub(crate) struct ConversationPaneSnapshot {
     visible_count: usize,
     event_count: usize,
     message_count: usize,
@@ -113,7 +115,7 @@ pub(super) struct ConversationPaneSnapshot {
 
 #[cfg(test)]
 impl ConversationPaneViewModel {
-    pub(super) fn snapshot(&self) -> ConversationPaneSnapshot {
+    pub(crate) fn snapshot(&self) -> ConversationPaneSnapshot {
         ConversationPaneSnapshot {
             visible_count: self.visible_count,
             event_count: self.event_count,
@@ -130,7 +132,7 @@ impl ConversationPaneViewModel {
     }
 }
 
-pub(super) fn view_model(
+pub(crate) fn view_model(
     workspace: &SessionWorkspace,
     ui: &ShellUiState,
 ) -> ConversationPaneViewModel {
@@ -194,7 +196,7 @@ pub(super) fn view_model(
     }
 }
 
-pub(super) fn visible_count(workspace: &SessionWorkspace) -> usize {
+pub(crate) fn visible_count(workspace: &SessionWorkspace) -> usize {
     workspace.projection.as_ref().map_or(0, |projection| {
         projection.conversation().blocks().len()
             + usize::from(workspace.composer.submitted().is_some())
@@ -226,7 +228,7 @@ pub(crate) struct ConversationPane {
 }
 
 impl ConversationPane {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             view_model: None,
             markdown_states: HashMap::new(),
@@ -234,7 +236,7 @@ impl ConversationPane {
         }
     }
 
-    pub(super) fn set_view_model(&mut self, view_model: ConversationPaneViewModel) {
+    pub(crate) fn set_view_model(&mut self, view_model: ConversationPaneViewModel) {
         self.view_model = Some(view_model);
     }
 
@@ -1596,7 +1598,7 @@ fn structured_tool_command(detail: &str, text: &str) -> Option<String> {
     })
 }
 
-pub(super) fn tool_detail_copy_text(title: &str, detail: &str, text: &str) -> String {
+pub(crate) fn tool_detail_copy_text(title: &str, detail: &str, text: &str) -> String {
     match tool_name_from_title(title) {
         "bash" | "shell" => {
             let command = structured_tool_command(detail, text).unwrap_or_default();
@@ -1625,7 +1627,7 @@ mod tests {
         assert!(user_message_width("中文提示") >= user_message_width("test"));
         assert_eq!(
             user_message_width(&"long wrapping prompt ".repeat(200)),
-            desktop::shell::USER_MESSAGE_MAX_WIDTH as f32
+            desktop::ui::shell::USER_MESSAGE_MAX_WIDTH as f32
         );
     }
 

@@ -1,9 +1,9 @@
-use desktop::shell::SemanticTheme;
+use desktop::ui::shell::SemanticTheme;
 use gpui::{IntoElement, ParentElement as _, Render, Role, Styled as _, div, prelude::*, px, rgb};
 
-use super::{
-    desktop_style::{DesignSpace, DesktopStyledExt as _},
-    evo_brand::{EvoBrand, EvoBrandMode},
+use crate::ui::components::{
+    brand::{EvoBrand, EvoBrandMode},
+    style::{DesignSpace, DesktopStyledExt as _},
 };
 
 const HOME_HERO_SHORT_HEIGHT: u32 = 640;
@@ -50,7 +50,7 @@ impl HomeHeroLayout {
 pub(crate) struct HomePane;
 
 impl HomePane {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }

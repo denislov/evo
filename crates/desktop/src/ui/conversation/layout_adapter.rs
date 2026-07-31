@@ -1,4 +1,4 @@
-use super::{
+use crate::app::native_shell::{
     Context, ConversationRefresh, ConversationRowMeasurement, ConversationSource, DesktopModalKind,
     DesktopTimerKind, FocusTarget, NativeShell, UiChangeSet, UiRegion, Window,
 };

@@ -642,26 +642,6 @@ fn assert_leaf_ui_dependencies(path: &Path) {
 
 #[test]
 fn leaf_ui_does_not_import_root_runtime_command_or_preference_authority() {
-    let root = manifest_dir().join("src/app/native_shell");
-    for relative in [
-        "center_drawer_host.rs",
-        "composer_pane.rs",
-        "conversation_header.rs",
-        "conversation_pane.rs",
-        "desktop_controls.rs",
-        "desktop_style.rs",
-        "evo_brand.rs",
-        "home_pane.rs",
-        "inspector_pane.rs",
-        "root_modal_host.rs",
-        "sessions_pane.rs",
-        "skills_pane.rs",
-        "streaming_text.rs",
-        "toast_host.rs",
-    ] {
-        assert_leaf_ui_dependencies(&root.join(relative));
-    }
-
     let ui_root = manifest_dir().join("src/ui");
     for path in rust_files(&ui_root) {
         let relative = path
@@ -669,6 +649,13 @@ fn leaf_ui_does_not_import_root_runtime_command_or_preference_authority() {
             .expect("UI path is under UI root");
         if is_test_only_source(&path)
             || relative == Path::new("mod.rs")
+            || matches!(
+                relative,
+                path if path == Path::new("conversation/adapter.rs")
+                    || path == Path::new("conversation/controller.rs")
+                    || path == Path::new("conversation/layout_adapter.rs")
+                    || path == Path::new("sessions/catalog_adapter.rs")
+            )
             || relative
                 .components()
                 .next()
@@ -677,6 +664,70 @@ fn leaf_ui_does_not_import_root_runtime_command_or_preference_authority() {
             continue;
         }
         assert_leaf_ui_dependencies(&path);
+    }
+}
+
+#[test]
+fn presentation_features_have_single_authority_paths() {
+    let source = manifest_dir().join("src");
+    for removed in [
+        source.join("conversation"),
+        source.join("shell.rs"),
+        source.join("app/native_shell/center_navigation.rs"),
+        source.join("app/native_shell/composer_pane.rs"),
+        source.join("app/native_shell/conversation_controller.rs"),
+        source.join("app/native_shell/conversation_header.rs"),
+        source.join("app/native_shell/conversation_pane.rs"),
+        source.join("app/native_shell/desktop_controls.rs"),
+        source.join("app/native_shell/desktop_style.rs"),
+        source.join("app/native_shell/evo_brand.rs"),
+        source.join("app/native_shell/home_pane.rs"),
+        source.join("app/native_shell/inspector_pane.rs"),
+        source.join("app/native_shell/project_catalog_controller.rs"),
+        source.join("app/native_shell/sessions_pane.rs"),
+        source.join("app/native_shell/skills_pane.rs"),
+        source.join("app/native_shell/streaming_text.rs"),
+    ] {
+        assert!(
+            !removed.exists(),
+            "legacy presentation path must stay deleted: {}",
+            removed.display()
+        );
+    }
+
+    for current in [
+        source.join("ui/components/controls.rs"),
+        source.join("ui/components/streaming_text.rs"),
+        source.join("ui/conversation/controller.rs"),
+        source.join("ui/conversation/pane.rs"),
+        source.join("ui/home.rs"),
+        source.join("ui/inspector/pane.rs"),
+        source.join("ui/inspector/review.rs"),
+        source.join("ui/sessions/catalog_adapter.rs"),
+        source.join("ui/sessions/pane.rs"),
+        source.join("ui/shell/layout.rs"),
+        source.join("ui/shell/state.rs"),
+        source.join("ui/skills.rs"),
+    ] {
+        assert!(
+            current.is_file(),
+            "presentation authority path is missing: {}",
+            current.display()
+        );
+    }
+
+    for pure in [
+        "composer.rs",
+        "copy.rs",
+        "layout.rs",
+        "markdown.rs",
+        "model.rs",
+        "render_cache.rs",
+        "viewport.rs",
+    ] {
+        let path = source.join("ui/conversation").join(pure);
+        let facts = production_facts(&path);
+        assert_paths_exclude(&path, &facts, &[&["gpui"]]);
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::projection::{DesktopProjection, DesktopProjectionLifecycle, DesktopRecoveryStatus};
 use crate::runtime::DesktopRecoveryAction;
-use crate::shell::SemanticStatus;
+use crate::ui::shell::SemanticStatus;
 
 pub(crate) fn semantic_status(projection: Option<&DesktopProjection>) -> SemanticStatus {
     let Some(projection) = projection else {

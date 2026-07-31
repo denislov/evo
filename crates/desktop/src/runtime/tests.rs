@@ -28,12 +28,12 @@ use coding_agent::api::view::CodingAgentSessionTranscriptItem;
 use tokio::sync::{mpsc, watch};
 use tokio::task;
 
-use crate::conversation::{MAX_TRANSCRIPT_BLOCKS, MAX_TRANSCRIPT_BYTES};
 use crate::projection::{
     ContextDirtyFlags, DesktopMessageStatus, DesktopProjection, DesktopProjectionApply,
     DesktopProjectionLifecycle, DesktopToolStatus, MAX_AUTHORIZATION_TEXT_BYTES,
     MAX_DESKTOP_MESSAGE_OVERLAYS, ProjectionEvent,
 };
+use crate::ui::conversation::{MAX_TRANSCRIPT_BLOCKS, MAX_TRANSCRIPT_BYTES};
 
 use super::client::build_desktop_runtime;
 use super::protocol::*;

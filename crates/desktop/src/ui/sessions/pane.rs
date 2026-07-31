@@ -1,5 +1,5 @@
 use coding_agent::api::view::CodingAgentWorkspaceKind;
-use desktop::shell::{SESSION_PANEL_WIDTH, SemanticStatus, SemanticTheme, truncate_label};
+use desktop::ui::shell::{SESSION_PANEL_WIDTH, SemanticStatus, SemanticTheme, truncate_label};
 use gpui::{
     EventEmitter, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, ParentElement as _,
     Render, Role, Styled as _, Subscription, Window, div, prelude::*, px, rgb,
@@ -12,25 +12,25 @@ use gpui_component::{
 use std::sync::Arc;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::{
-    NativeDesktopState,
-    center_drawer_host::CenterDrawerKind,
-    center_navigation::CenterNavigationTarget,
-    desktop_controls::{
-        DesktopActionRow, DesktopControlSize, DesktopIcon, DesktopIconButton, DesktopRowState,
-    },
-    desktop_style::{DesignSpace, DesignText, DesktopStyledExt as _},
-    evo_brand::{EvoBrand, EvoBrandMode},
-    semantic_status_color,
-};
+use crate::app::native_shell::{NativeDesktopState, semantic_status_color};
 use crate::application::catalog::{
     ProjectCatalogGroup, ProjectCatalogState, session_matches_query, workspace_matches_query,
 };
 use crate::application::{commands::DesktopCommandIntent, workspace::WorkspaceKey};
-use crate::ui::shell::{ShellUiState, presentation::semantic_status};
+use crate::ui::components::{
+    brand::{EvoBrand, EvoBrandMode},
+    controls::{
+        DesktopActionRow, DesktopControlSize, DesktopIcon, DesktopIconButton, DesktopRowState,
+    },
+    style::{DesignSpace, DesignText, DesktopStyledExt as _},
+};
+use crate::ui::shell::drawer::CenterDrawerKind;
+use crate::ui::shell::{
+    CenterNavigationTarget, CenterSurface, ShellUiState, presentation::semantic_status,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum SessionsPaneEvent {
+pub(crate) enum SessionsPaneEvent {
     Navigate(CenterNavigationTarget),
     Refresh,
     SetProjectCollapsed { group_id: String, collapsed: bool },
@@ -40,30 +40,30 @@ pub(super) enum SessionsPaneEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SessionRuntimeState {
-    pub(super) session_id: Arc<str>,
-    pub(super) status: desktop::shell::SemanticStatus,
+pub(crate) struct SessionRuntimeState {
+    pub(crate) session_id: Arc<str>,
+    pub(crate) status: desktop::ui::shell::SemanticStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SessionsPaneViewModel {
-    pub(super) panel_width: u32,
-    pub(super) project_groups: Arc<[ProjectCatalogGroup]>,
-    pub(super) omitted_sessions: usize,
-    pub(super) catalog_state: ProjectCatalogState,
-    pub(super) active_session_id: Arc<str>,
-    pub(super) skills_active: bool,
-    pub(super) runtime_states: Arc<[SessionRuntimeState]>,
-    pub(super) composer_running: bool,
-    pub(super) awaiting_prompt_start: bool,
-    pub(super) session_pending: bool,
-    pub(super) active_status: desktop::shell::SemanticStatus,
-    pub(super) keyboard_focus_visible: bool,
-    pub(super) presented_as_drawer: bool,
-    pub(super) reduced_motion: bool,
+pub(crate) struct SessionsPaneViewModel {
+    pub(crate) panel_width: u32,
+    pub(crate) project_groups: Arc<[ProjectCatalogGroup]>,
+    pub(crate) omitted_sessions: usize,
+    pub(crate) catalog_state: ProjectCatalogState,
+    pub(crate) active_session_id: Arc<str>,
+    pub(crate) skills_active: bool,
+    pub(crate) runtime_states: Arc<[SessionRuntimeState]>,
+    pub(crate) composer_running: bool,
+    pub(crate) awaiting_prompt_start: bool,
+    pub(crate) session_pending: bool,
+    pub(crate) active_status: desktop::ui::shell::SemanticStatus,
+    pub(crate) keyboard_focus_visible: bool,
+    pub(crate) presented_as_drawer: bool,
+    pub(crate) reduced_motion: bool,
 }
 
-pub(super) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> SessionsPaneViewModel {
+pub(crate) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> SessionsPaneViewModel {
     let workspace = app.workspaces.active();
     let snapshot = workspace
         .projection
@@ -95,7 +95,7 @@ pub(super) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> Session
                 .map(|snapshot| snapshot.session.session_id.as_str())
                 .unwrap_or_default(),
         ),
-        skills_active: ui.center_surface == super::center_navigation::CenterSurface::Skills,
+        skills_active: ui.center_surface == CenterSurface::Skills,
         runtime_states: Arc::from(runtime_states),
         composer_running,
         awaiting_prompt_start: workspace.composer.submitted().is_some() && !composer_running,
@@ -123,7 +123,7 @@ pub(crate) struct SessionsPane {
 }
 
 impl SessionsPane {
-    pub(super) fn new(
+    pub(crate) fn new(
         focus: FocusHandle,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
@@ -165,7 +165,7 @@ impl SessionsPane {
         }
     }
 
-    pub(super) fn set_view_model(&mut self, view_model: SessionsPaneViewModel) {
+    pub(crate) fn set_view_model(&mut self, view_model: SessionsPaneViewModel) {
         self.view_model = Some(view_model);
     }
 
@@ -199,7 +199,7 @@ impl SessionsPane {
     }
 
     #[cfg(test)]
-    pub(super) fn set_search_value(
+    pub(crate) fn set_search_value(
         &mut self,
         value: &str,
         window: &mut Window,
@@ -210,7 +210,7 @@ impl SessionsPane {
     }
 
     #[cfg(test)]
-    pub(super) fn set_rename_value(
+    pub(crate) fn set_rename_value(
         &mut self,
         value: &str,
         window: &mut Window,
@@ -485,7 +485,7 @@ impl Render for SessionsPane {
                             let semantic_status = if active {
                                 active_semantic_status
                             } else {
-                                row_status.unwrap_or(desktop::shell::SemanticStatus::Idle)
+                                row_status.unwrap_or(desktop::ui::shell::SemanticStatus::Idle)
                             };
                             (
                                 semantic_status.glyph(),

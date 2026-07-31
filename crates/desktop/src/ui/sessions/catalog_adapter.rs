@@ -2,7 +2,7 @@
 use coding_agent::api::view::CodingAgentWorkspaceMigration;
 #[cfg(test)]
 use desktop::runtime::DesktopSessionCatalogEntry;
-use desktop::shell::truncate_label;
+use desktop::ui::shell::truncate_label;
 use gpui::Context;
 
 use super::{MAX_SESSION_WORKSPACES, NativeShell};

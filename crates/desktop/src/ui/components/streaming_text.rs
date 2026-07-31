@@ -1,17 +1,15 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use desktop::conversation::StreamingTextPhase;
+use desktop::ui::conversation::StreamingTextPhase;
 use gpui::{
     AnyElement, ClipboardItem, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, Styled as _, WeakEntity,
 };
 use gpui_component::text::{TextView, TextViewState};
 
-use super::{
-    conversation_pane::{ConversationPane, ConversationPaneEvent},
-    desktop_controls::{DesktopIcon, DesktopIconButton},
-};
+use super::controls::{DesktopIcon, DesktopIconButton};
+use crate::ui::conversation::pane::{ConversationPane, ConversationPaneEvent};
 
 const MARKDOWN_COMPLETION_TRACE_ENV: &str = "EVO_DESKTOP_MARKDOWN_TRACE";
 
@@ -21,7 +19,7 @@ const MARKDOWN_COMPLETION_TRACE_ENV: &str = "EVO_DESKTOP_MARKDOWN_TRACE";
 /// render a [`TextViewState`] the pane owns and feeds, so the parsed document
 /// survives between frames and streaming deltas extend it incrementally on a
 /// background task rather than re-parsing it synchronously in every frame.
-pub(super) struct StreamingText {
+pub(crate) struct StreamingText {
     text: Arc<str>,
     phase: StreamingTextPhase,
     markdown: Option<Entity<TextViewState>>,
@@ -29,7 +27,7 @@ pub(super) struct StreamingText {
 }
 
 impl StreamingText {
-    pub(super) fn new(
+    pub(crate) fn new(
         text: Arc<str>,
         phase: StreamingTextPhase,
         markdown: Option<Entity<TextViewState>>,
@@ -43,7 +41,7 @@ impl StreamingText {
         }
     }
 
-    pub(super) fn into_any_element(self) -> AnyElement {
+    pub(crate) fn into_any_element(self) -> AnyElement {
         match (self.phase, self.markdown) {
             (StreamingTextPhase::StreamingPlainText, _) | (_, None) => gpui::div()
                 .w_full()
@@ -93,7 +91,7 @@ fn markdown_element(
 /// blocking parse cost a frame can absorb, which is what the native performance
 /// gate samples, and it now measures the parse itself rather than a layout
 /// request that happened to contain one.
-pub(super) fn trace_markdown_parse(state_key: &str, bytes: usize, started_at: Instant) {
+pub(crate) fn trace_markdown_parse(state_key: &str, bytes: usize, started_at: Instant) {
     if !markdown_completion_trace_enabled() {
         return;
     }
@@ -115,7 +113,7 @@ pub(super) fn trace_markdown_parse(state_key: &str, bytes: usize, started_at: In
     );
 }
 
-pub(super) fn markdown_completion_trace_enabled() -> bool {
+pub(crate) fn markdown_completion_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var(MARKDOWN_COMPLETION_TRACE_ENV)

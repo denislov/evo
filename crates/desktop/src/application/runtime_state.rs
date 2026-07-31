@@ -6,13 +6,15 @@ use coding_agent::api::{
     view::{CodingAgentWorkspaceMigration, CodingAgentWorkspaceMigrationOutcome},
 };
 use desktop::{
-    conversation::{ComposerAdmission, ComposerState},
     preferences::DesktopThinkingLevel,
     projection::{DesktopProjection, DesktopProjectionDelta, DesktopProjectionLifecycle},
     runtime::{
         DesktopRuntimeCommandKind, DesktopRuntimeHydratedSnapshot, DesktopSessionCatalogEntry,
     },
-    shell::truncate_label,
+    ui::{
+        conversation::{ComposerAdmission, ComposerState},
+        shell::truncate_label,
+    },
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -740,7 +742,7 @@ impl<Presentation: RuntimeWorkspacePresentation>
         (
             matches!(
                 workspace.composer.admission(),
-                desktop::conversation::ComposerAdmission::Pending { .. }
+                desktop::ui::conversation::ComposerAdmission::Pending { .. }
             ),
             workspace
                 .projection

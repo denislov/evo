@@ -442,7 +442,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::conversation::{ConversationBlockKind, ConversationItemKind, MAX_TRANSCRIPT_BLOCKS};
+    use crate::ui::conversation::{
+        ConversationBlockKind, ConversationItemKind, MAX_TRANSCRIPT_BLOCKS,
+    };
 
     fn row_layout(key: &str, target_height: f32, streaming: bool) -> ConversationRowLayoutInput {
         ConversationRowLayoutInput {

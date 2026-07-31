@@ -1,16 +1,15 @@
+pub(crate) mod drawer;
+mod layout;
+pub(crate) mod modal;
 pub(crate) mod presentation;
 mod state;
+pub(crate) mod toast;
 
 use std::collections::VecDeque;
 
 use gpui::{Entity, Subscription};
 
-use crate::app::native_shell::{
-    center_drawer_host::CenterDrawerHost, composer_pane::ComposerPane,
-    conversation_header::ConversationHeader, conversation_pane::ConversationPane,
-    home_pane::HomePane, inspector_pane::InspectorPane, root_modal_host::RootModalHost,
-    sessions_pane::SessionsPane, skills_pane::SkillsPane, toast_host::ToastHost,
-};
+use self::{drawer::CenterDrawerHost, modal::RootModalHost, toast::ToastHost};
 use crate::application::effect::DesktopEffect;
 use crate::application::reducer::DesktopController;
 use crate::platform::preferences::PreferenceWriter;
@@ -19,8 +18,15 @@ use crate::runtime::{
     DesktopRuntimeShutdownGuard, DesktopRuntimeShutdownSignal, DesktopRuntimeUpdate,
     RuntimeCommandClient,
 };
+use crate::ui::conversation::{
+    composer_pane::ComposerPane, header::ConversationHeader, pane::ConversationPane,
+};
+use crate::ui::inspector::pane::InspectorPane;
+use crate::ui::sessions::pane::SessionsPane;
+use crate::ui::{home::HomePane, skills::SkillsPane};
 
-pub(crate) use state::ShellUiState;
+pub(crate) use layout::*;
+pub(crate) use state::{CenterNavigationTarget, CenterSurface, ShellUiState};
 
 /// Child views and the subscriptions that keep their event wiring alive.
 ///

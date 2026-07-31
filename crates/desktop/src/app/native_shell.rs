@@ -6,14 +6,6 @@ use coding_agent::api::embedding::{
 use coding_agent::api::embedding::{CodingAgentResourceCommandKind, CodingAgentThinkingLevel};
 use coding_agent::api::event::CodingAgentRecoveryResolution;
 use coding_agent::api::review::CodingAgentFileReviewRequest;
-#[cfg(test)]
-use desktop::conversation::{
-    ComposerAdmission, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, conversation_block_height,
-};
-use desktop::conversation::{
-    ComposerState, ComposerSubmissionKind, ConversationBlockKind, ConversationRowMeasurement,
-    MAX_COPY_BYTES, conversation_copy_text, conversation_width_bucket,
-};
 use desktop::platform::preferences::{PreferenceWriteResult, PreferenceWriter};
 use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel};
 use desktop::projection::{DesktopProjection, DesktopRecoveryStatus};
@@ -25,14 +17,22 @@ use desktop::runtime::{
     DesktopRecoveryAction, DesktopRecoveryIdentity, DesktopRuntimeBridge,
     DesktopRuntimeSelectionKind, validate_prompt_attachments,
 };
-use desktop::shell::{
+#[cfg(test)]
+use desktop::ui::conversation::{
+    ComposerAdmission, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, conversation_block_height,
+};
+use desktop::ui::conversation::{
+    ComposerState, ComposerSubmissionKind, ConversationBlockKind, ConversationRowMeasurement,
+    MAX_COPY_BYTES, conversation_copy_text, conversation_width_bucket,
+};
+#[cfg(test)]
+use desktop::ui::inspector::review::DesktopFileReviewDocument;
+use desktop::ui::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH,
     CONVERSATION_CONTENT_MAX_WIDTH, FocusTarget, MIN_CONVERSATION_WIDTH, PanelVisibility,
     SESSION_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_WIDTH, SemanticColor,
     SemanticStatus, SemanticTheme, ShellLayout, UI_FONT_FAMILY, truncate_label,
 };
-#[cfg(test)]
-use desktop::ui::inspector::review::DesktopFileReviewDocument;
 use gpui::{
     ClipboardItem, Context, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, ScrollStrategy, Window, WindowBounds, prelude::*, rgb,
@@ -45,14 +45,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub(super) use self::evo_brand::{EvoBrandFixture, EvoBrandMode};
 use crate::actions::{
     self, AbortActiveOperation, AuthorizationAllowForOperation, AuthorizationAllowOnce,
     AuthorizationDeny, CopySelectedConversation, DesktopPaletteCommand, EscapeHierarchy,
     FocusComposer, FocusNextRegion, FocusPreviousRegion, FollowLatestOutput, NewSession,
-    OpenCommandPalette, OpenFileSurface, PALETTE_ENTRIES, PaletteConfirm, PaletteNext,
-    PalettePrevious, SelectNextConversation, SelectPreviousConversation, SubmitComposer,
-    ToggleInspectorPanel, ToggleSelectedConversationDetails, TrapOverlayFocus,
+    OpenCommandPalette, OpenFileSurface, PaletteConfirm, PaletteNext, PalettePrevious,
+    SelectNextConversation, SelectPreviousConversation, SubmitComposer, ToggleInspectorPanel,
+    ToggleSelectedConversationDetails, TrapOverlayFocus,
 };
 #[cfg(test)]
 use crate::application::catalog::ProjectCatalogState;
@@ -78,6 +77,7 @@ use crate::application::{
         admitted_thinking_selection, workspace_selection_from_embedding,
     },
 };
+pub(super) use crate::ui::components::brand::{EvoBrandFixture, EvoBrandMode};
 #[cfg(test)]
 use crate::ui::shell::presentation::{
     recovery_status_label, runtime_state_label, usage_cost_label,
@@ -90,17 +90,17 @@ const MAX_RUNTIME_UPDATES_PER_FRAME: usize = 64;
 const INSPECTOR_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy)]
-struct ConversationBlockVisual {
-    glyph: &'static str,
-    accent: SemanticColor,
-    align_right: bool,
+pub(crate) struct ConversationBlockVisual {
+    pub(crate) glyph: &'static str,
+    pub(crate) accent: SemanticColor,
+    pub(crate) align_right: bool,
 }
 
-fn conversation_focus_accent(focused: bool, theme: SemanticTheme) -> SemanticColor {
+pub(crate) fn conversation_focus_accent(focused: bool, theme: SemanticTheme) -> SemanticColor {
     if focused { theme.accent } else { theme.divider }
 }
 
-fn semantic_status_color(status: SemanticStatus) -> gpui::Rgba {
+pub(crate) fn semantic_status_color(status: SemanticStatus) -> gpui::Rgba {
     let theme = SemanticTheme::GEEK_DARK;
     rgb(match status {
         SemanticStatus::Idle => theme.muted_text.value(),
@@ -117,7 +117,7 @@ fn inspector_telemetry_refresh_delay(last_refresh: Option<Instant>, now: Instant
     })
 }
 
-fn conversation_block_visual(
+pub(crate) fn conversation_block_visual(
     kind: ConversationBlockKind,
     is_error: bool,
     theme: SemanticTheme,
@@ -163,14 +163,14 @@ fn conversation_block_visual(
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum ComposerRunningMode {
+pub(crate) enum ComposerRunningMode {
     #[default]
     SteerNow,
     QueueNext,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum InspectorSection {
+pub(crate) enum InspectorSection {
     #[default]
     Changes,
     Task,
@@ -244,10 +244,10 @@ pub(crate) struct ConversationFullMessageView {
 }
 
 #[derive(Default)]
-pub(super) struct SessionWorkspacePresentation {
-    conversation_controller: ConversationController,
-    inspector_section: InspectorSection,
-    composer_running_mode: ComposerRunningMode,
+pub(crate) struct SessionWorkspacePresentation {
+    pub(crate) conversation_controller: ConversationController,
+    pub(crate) inspector_section: InspectorSection,
+    pub(crate) composer_running_mode: ComposerRunningMode,
 }
 
 impl RuntimeWorkspacePresentation for SessionWorkspacePresentation {
@@ -296,8 +296,8 @@ impl RuntimeWorkspacePresentation for SessionWorkspacePresentation {
     }
 }
 
-pub(super) type SessionWorkspace = WorkspaceState<SessionWorkspacePresentation>;
-pub(super) type NativeDesktopState =
+pub(crate) type SessionWorkspace = WorkspaceState<SessionWorkspacePresentation>;
+pub(crate) type NativeDesktopState =
     DesktopState<SessionWorkspace, ProjectCatalogController, RuntimeWorkspaceDefaults>;
 
 fn build_session_workspace(
@@ -1038,7 +1038,7 @@ mod tests {
 
     use crate::runtime::{DesktopPromptTarget, DesktopRuntimeOwnerTarget};
 
-    use desktop::conversation::{
+    use desktop::ui::conversation::{
         ConversationItemKey, ConversationItemKind, ConversationRowRenderCache,
         ConversationRowRenderSource,
     };
@@ -1064,7 +1064,7 @@ mod tests {
     use gpui::TestAppContext;
     use gpui_component::{Theme, ThemeMode, text::TextViewState};
 
-    use desktop::shell::{
+    use desktop::ui::shell::{
         COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, CONVERSATION_ROW_VERTICAL_PADDING_PX,
     };
 
@@ -4251,7 +4251,7 @@ mod tests {
             "BEGIN FULL MESSAGE\n{}END FULL MESSAGE",
             "完整消息内容 🙂 e\u{301}\n".repeat(24_000)
         );
-        assert!(full_text.len() > desktop::conversation::MAX_MARKDOWN_PREVIEW_BYTES);
+        assert!(full_text.len() > desktop::ui::conversation::MAX_MARKDOWN_PREVIEW_BYTES);
         assert!(full_text.len() < MAX_COPY_BYTES);
         snapshot
             .transcript
@@ -4829,7 +4829,7 @@ mod tests {
         assert_eq!(idle_directory.value.as_ref(), "无项目");
         assert_eq!(
             idle_directory.state,
-            desktop_controls::DesktopProjectDirectoryState::Editable
+            crate::ui::components::controls::DesktopProjectDirectoryState::Editable
         );
 
         for width in [1_300., 700.] {
@@ -4873,7 +4873,7 @@ mod tests {
         );
         assert_eq!(
             session_directory.state,
-            desktop_controls::DesktopProjectDirectoryState::Locked
+            crate::ui::components::controls::DesktopProjectDirectoryState::Locked
         );
         cx.simulate_resize(size(px(700.), px(800.)));
         settle_visual_measurements(cx);
@@ -4909,7 +4909,7 @@ mod tests {
                     .project_directory
                     .state
             }),
-            desktop_controls::DesktopProjectDirectoryState::Pending
+            crate::ui::components::controls::DesktopProjectDirectoryState::Pending
         );
     }
 
@@ -5054,7 +5054,7 @@ mod tests {
 
         initialize_visual_test(cx);
         let projection =
-            visual_performance_projection(desktop::conversation::MAX_TRANSCRIPT_BLOCKS);
+            visual_performance_projection(desktop::ui::conversation::MAX_TRANSCRIPT_BLOCKS);
         let window_rss_before = crate::allocation_probe::resident_bytes();
         let (shell, cx) = add_visual_shell(
             cx,
@@ -5124,7 +5124,7 @@ mod tests {
              window_rss_supported={}\twindow_rss_before_bytes={}\twindow_rss_after_bytes={}\t\
              window_rss_growth_bytes={}",
             std::env::consts::OS,
-            desktop::conversation::MAX_TRANSCRIPT_BLOCKS,
+            desktop::ui::conversation::MAX_TRANSCRIPT_BLOCKS,
             window_rss_before.is_some() && window_rss_after.is_some(),
             window_rss_before.unwrap_or_default(),
             window_rss_after.unwrap_or_default(),
@@ -5188,7 +5188,7 @@ mod tests {
         ];
 
         for (name, payload) in content_cases {
-            let preview = desktop::conversation::bounded_markdown_preview(&payload);
+            let preview = desktop::ui::conversation::bounded_markdown_preview(&payload);
             let bounded_bytes = preview.text.len();
             let mut samples = Vec::with_capacity(SAMPLE_COUNT);
             for _ in 0..SAMPLE_COUNT {
@@ -6351,7 +6351,7 @@ mod tests {
             );
             assert_eq!(
                 directory.state,
-                desktop_controls::DesktopProjectDirectoryState::Locked
+                crate::ui::components::controls::DesktopProjectDirectoryState::Locked
             );
             assert!(!shell.clear_project_directory(cx));
         });
@@ -7032,7 +7032,7 @@ mod tests {
             // Outlast the height throttle so the next revision is free to commit,
             // which is exactly when the collapse used to become visible.
             std::thread::sleep(
-                crate::conversation::STREAMING_ROW_HEIGHT_INTERVAL + Duration::from_millis(5),
+                crate::ui::conversation::STREAMING_ROW_HEIGHT_INTERVAL + Duration::from_millis(5),
             );
         }
 
@@ -7405,7 +7405,8 @@ mod tests {
             "Composer and transcript share the same centered right edge"
         );
         assert!(
-            (f32::from(card.size.width) - desktop::shell::ASSISTANT_MESSAGE_MAX_WIDTH as f32).abs()
+            (f32::from(card.size.width) - desktop::ui::shell::ASSISTANT_MESSAGE_MAX_WIDTH as f32)
+                .abs()
                 <= 1.,
             "Assistant content fills the bounded track interior"
         );
@@ -7454,7 +7455,7 @@ mod tests {
         );
         assert!(
             (f32::from(track.right() - card.right())
-                - desktop::shell::DESKTOP_DESIGN_TOKENS.spacing.lg as f32)
+                - desktop::ui::shell::DESKTOP_DESIGN_TOKENS.spacing.lg as f32)
                 .abs()
                 <= 1.,
             "User bubble remains right-aligned inside the centered track: track={track:?}, card={card:?}"
@@ -7497,7 +7498,7 @@ mod tests {
             .debug_bounds("conversation-last-card")
             .expect("long User card is laid out");
         assert!(
-            (f32::from(card.size.width) - desktop::shell::USER_MESSAGE_MAX_WIDTH as f32).abs()
+            (f32::from(card.size.width) - desktop::ui::shell::USER_MESSAGE_MAX_WIDTH as f32).abs()
                 <= 1.,
             "long User content must stop at the configured maximum width: card={card:?}"
         );
@@ -7643,64 +7644,60 @@ mod tests {
         assert!(!notice.contains(SECRET));
     }
 }
-pub(crate) mod center_drawer_host;
-pub(crate) mod center_navigation;
 mod command_adapter;
 mod commands;
-pub(crate) mod composer_pane;
+#[path = "../ui/conversation/adapter.rs"]
 mod conversation_adapter;
-mod conversation_controller;
-pub(crate) mod conversation_header;
+#[path = "../ui/conversation/layout_adapter.rs"]
 mod conversation_layout_adapter;
-pub(crate) mod conversation_pane;
-mod desktop_controls;
-mod desktop_style;
-mod evo_brand;
-pub(crate) mod home_pane;
-pub(crate) mod inspector_pane;
 mod intent;
+#[path = "../ui/shell/layout_adapter.rs"]
 mod layout_adapter;
+#[path = "../ui/shell/overlay_adapter.rs"]
 mod overlay_adapter;
 mod platform_update;
+#[path = "../ui/sessions/catalog_adapter.rs"]
 mod project_catalog_controller;
 mod review_adapter;
 mod root_actions;
-pub(crate) mod root_modal_host;
 mod root_view;
 mod runtime_adapter;
-pub(crate) mod sessions_pane;
-pub(crate) mod skills_pane;
-mod streaming_text;
-pub(crate) mod toast_host;
 
-use center_drawer_host::{CenterDrawerHost, CenterDrawerHostEvent, CenterDrawerKind};
-use center_navigation::{CenterNavigationTarget, CenterSurface};
 #[cfg(test)]
-use composer_pane::InputRenderLatencyProbe;
-use composer_pane::{ComposerPane, ComposerPaneEvent};
-use conversation_controller::{
+use crate::ui::conversation::composer_pane::InputRenderLatencyProbe;
+use crate::ui::conversation::composer_pane::{ComposerPane, ComposerPaneEvent};
+use crate::ui::conversation::controller::{
     ConversationController, ConversationRefresh, ConversationSource,
     RESIZE_DEBOUNCE as CONVERSATION_RESIZE_DEBOUNCE,
     message_block_id as message_conversation_block_id, tool_block_id as tool_conversation_block_id,
 };
 #[cfg(test)]
-use conversation_controller::{
+use crate::ui::conversation::controller::{
     compensate_scroll_top_for_single_row_height,
     distance_to_bottom as conversation_distance_to_bottom,
     row_target_height as conversation_row_target_height, upsert_indexed_item,
 };
 #[cfg(test)]
-use conversation_header::ConversationHeaderModelWarning;
+use crate::ui::conversation::header::ConversationHeaderModelWarning;
 #[cfg(test)]
-use conversation_header::header_runtime_status_slot_width;
-use conversation_header::{ConversationHeader, ConversationHeaderEvent};
+use crate::ui::conversation::header::header_runtime_status_slot_width;
+use crate::ui::conversation::header::{ConversationHeader, ConversationHeaderEvent};
 #[cfg(test)]
-use conversation_pane::CONVERSATION_RAIL_WIDTH;
-use conversation_pane::{ConversationPane, ConversationPaneEvent};
-use home_pane::HomePane;
-use inspector_pane::{InspectorPane, InspectorPaneEvent};
+use crate::ui::conversation::pane::CONVERSATION_RAIL_WIDTH;
+use crate::ui::conversation::pane::{ConversationPane, ConversationPaneEvent};
+use crate::ui::conversation::{
+    composer_pane, header as conversation_header, pane as conversation_pane,
+};
+use crate::ui::home::HomePane;
+use crate::ui::inspector::pane as inspector_pane;
+use crate::ui::inspector::pane::{InspectorPane, InspectorPaneEvent};
+use crate::ui::sessions::pane as sessions_pane;
+use crate::ui::sessions::pane::{SessionsPane, SessionsPaneEvent};
+use crate::ui::shell::drawer::{CenterDrawerHost, CenterDrawerHostEvent, CenterDrawerKind};
+use crate::ui::shell::modal::{RootModalHost, RootModalHostEvent};
+use crate::ui::shell::toast::{ToastHost, ToastNotice};
+use crate::ui::shell::{CenterNavigationTarget, CenterSurface};
+use crate::ui::shell::{drawer as center_drawer_host, modal as root_modal_host};
+use crate::ui::skills as skills_pane;
+use crate::ui::skills::SkillsPane;
 use intent::UiIntent;
-use root_modal_host::{RootModalHost, RootModalHostEvent};
-use sessions_pane::{SessionsPane, SessionsPaneEvent};
-use skills_pane::SkillsPane;
-use toast_host::{ToastHost, ToastNotice};

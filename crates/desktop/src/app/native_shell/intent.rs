@@ -1,17 +1,18 @@
 use coding_agent::api::authorization::{ToolAuthorizationDecision, ToolAuthorizationIdentity};
 use coding_agent::api::review::CodingAgentFileReviewRequest;
-use desktop::conversation::ConversationRowMeasurement;
 use desktop::preferences::DesktopThinkingLevel;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
+use desktop::ui::conversation::ConversationRowMeasurement;
 use std::sync::Arc;
 
 use super::{
     ComposerRunningMode, DesktopPaletteCommand, InspectorSection,
-    center_drawer_host::CenterDrawerHostEvent, center_navigation::CenterNavigationTarget,
-    composer_pane::ComposerPaneEvent, conversation_header::ConversationHeaderEvent,
-    conversation_pane::ConversationPaneEvent, inspector_pane::InspectorPaneEvent,
-    root_modal_host::RootModalHostEvent, sessions_pane::SessionsPaneEvent,
+    center_drawer_host::CenterDrawerHostEvent, composer_pane::ComposerPaneEvent,
+    conversation_header::ConversationHeaderEvent, conversation_pane::ConversationPaneEvent,
+    inspector_pane::InspectorPaneEvent, root_modal_host::RootModalHostEvent,
+    sessions_pane::SessionsPaneEvent,
 };
+use crate::ui::shell::CenterNavigationTarget;
 
 /// One typed adapter boundary for every child-view event.
 ///

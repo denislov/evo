@@ -484,7 +484,7 @@ mod tests {
         CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot,
     };
 
-    use crate::conversation::*;
+    use crate::ui::conversation::*;
 
     fn transcript(items: Vec<CodingAgentSessionTranscriptItem>) -> CodingAgentTranscriptSnapshot {
         CodingAgentTranscriptSnapshot {

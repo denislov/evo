@@ -1,4 +1,4 @@
-use desktop::shell::{SemanticColor, SemanticTheme};
+use desktop::ui::shell::{SemanticColor, SemanticTheme};
 use gpui::{
     ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
     StatefulInteractiveElement as _, Styled as _, div, px, rgb, svg,
@@ -8,13 +8,13 @@ use crate::assets::{
     EVO_COMPACT_ACCENT_PATH, EVO_COMPACT_PATH, EVO_WORDMARK_ACCENT_PATH, EVO_WORDMARK_PATH,
 };
 
-use super::desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
+use super::style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
 
 const WORDMARK_VIEWBOX_WIDTH: f32 = 360.;
 const WORDMARK_VIEWBOX_HEIGHT: f32 = 128.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EvoBrandVariant {
+pub(crate) enum EvoBrandVariant {
     Wordmark,
     Compact,
 }
@@ -46,7 +46,7 @@ impl EvoBrandMode {
         }
     }
 
-    pub(super) const fn tokens(self) -> EvoBrandTokens {
+    pub(crate) const fn tokens(self) -> EvoBrandTokens {
         match self {
             Self::Dark => EvoBrandTokens {
                 canvas: SemanticTheme::GEEK_DARK.canvas,
@@ -74,15 +74,15 @@ impl EvoBrandMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct EvoBrandTokens {
-    pub(super) canvas: SemanticColor,
-    pub(super) foreground: SemanticColor,
-    pub(super) accent: SemanticColor,
-    pub(super) metadata: SemanticColor,
-    pub(super) border: SemanticColor,
+pub(crate) struct EvoBrandTokens {
+    pub(crate) canvas: SemanticColor,
+    pub(crate) foreground: SemanticColor,
+    pub(crate) accent: SemanticColor,
+    pub(crate) metadata: SemanticColor,
+    pub(crate) border: SemanticColor,
 }
 
-pub(super) struct EvoBrand {
+pub(crate) struct EvoBrand {
     id: ElementId,
     variant: EvoBrandVariant,
     width: f32,
@@ -90,7 +90,7 @@ pub(super) struct EvoBrand {
 }
 
 impl EvoBrand {
-    pub(super) fn wordmark(id: impl Into<ElementId>, width: f32, mode: EvoBrandMode) -> Self {
+    pub(crate) fn wordmark(id: impl Into<ElementId>, width: f32, mode: EvoBrandMode) -> Self {
         Self {
             id: id.into(),
             variant: EvoBrandVariant::Wordmark,
@@ -99,7 +99,7 @@ impl EvoBrand {
         }
     }
 
-    pub(super) fn compact(id: impl Into<ElementId>, side: f32, mode: EvoBrandMode) -> Self {
+    pub(crate) fn compact(id: impl Into<ElementId>, side: f32, mode: EvoBrandMode) -> Self {
         Self {
             id: id.into(),
             variant: EvoBrandVariant::Compact,
@@ -108,7 +108,7 @@ impl EvoBrand {
         }
     }
 
-    pub(super) const fn dimensions(&self) -> (f32, f32) {
+    pub(crate) const fn dimensions(&self) -> (f32, f32) {
         match self.variant {
             EvoBrandVariant::Wordmark => (
                 self.width,
@@ -125,7 +125,7 @@ impl EvoBrand {
         }
     }
 
-    pub(super) fn build(self) -> gpui::Stateful<gpui::Div> {
+    pub(crate) fn build(self) -> gpui::Stateful<gpui::Div> {
         let (width, height) = self.dimensions();
         let (body_path, accent_path) = self.paths();
         let tokens = self.mode.tokens();

@@ -4,10 +4,14 @@
 //! responsibility has a single internal owner.
 
 mod composer;
+pub(crate) mod composer_pane;
+pub(crate) mod controller;
 mod copy;
+pub(crate) mod header;
 mod layout;
 mod markdown;
 mod model;
+pub(crate) mod pane;
 mod render_cache;
 mod viewport;
 

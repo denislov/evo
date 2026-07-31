@@ -411,7 +411,7 @@ mod tests {
         DesktopThinkingLevel, MAX_PERSISTED_SESSION_ID_BYTES,
         MAX_PERSISTED_SESSION_THINKING_LEVELS, WindowGeometry,
     };
-    use crate::shell::{CONTEXT_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH};
+    use crate::ui::shell::{CONTEXT_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH};
 
     #[test]
     fn missing_preferences_return_bounded_defaults() {

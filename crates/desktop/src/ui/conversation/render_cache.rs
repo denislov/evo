@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::markdown::bounded_markdown_preview;
 use super::model::{ConversationBlockKind, ConversationItemKey, MAX_TRANSCRIPT_BLOCKS};
-use crate::shell::{ASSISTANT_MESSAGE_MAX_WIDTH, USER_MESSAGE_MAX_WIDTH};
+use crate::ui::shell::{ASSISTANT_MESSAGE_MAX_WIDTH, USER_MESSAGE_MAX_WIDTH};
 
 pub const STREAMING_MARKDOWN_SETTLE_DELAY: Duration = Duration::from_millis(100);
 pub const MAX_SETTLING_MARKDOWN_BYTES: usize = 64 * 1024;
@@ -399,7 +399,9 @@ mod tests {
         ConversationRowRenderCache, ConversationRowRenderSource, MAX_SETTLING_MARKDOWN_BYTES,
         STREAMING_MARKDOWN_SETTLE_DELAY, StreamingTextPhase, conversation_block_height,
     };
-    use crate::conversation::{ConversationBlockKind, ConversationItemKey, ConversationItemKind};
+    use crate::ui::conversation::{
+        ConversationBlockKind, ConversationItemKey, ConversationItemKind,
+    };
 
     fn render_source<'a>(
         key: &'a str,

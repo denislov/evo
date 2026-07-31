@@ -1,6 +1,6 @@
-use desktop::conversation::ComposerAdmission;
 use desktop::runtime::MAX_PROMPT_ATTACHMENTS;
-use desktop::shell::{
+use desktop::ui::conversation::ComposerAdmission;
+use desktop::ui::shell::{
     COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, CONVERSATION_CONTENT_MAX_WIDTH, SemanticTheme,
 };
 use gpui::{
@@ -17,19 +17,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{
-    ComposerRunningMode, SessionWorkspace,
-    desktop_controls::{
+use crate::app::native_shell::{ComposerRunningMode, SessionWorkspace};
+use crate::ui::components::{
+    controls::{
         DesktopControlSize, DesktopControlWeight, DesktopIcon, DesktopIconButton,
         DesktopProjectDirectoryControl, DesktopProjectDirectoryState, DesktopSelector,
     },
-    desktop_style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
+    style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 
-pub(super) const COMPOSER_PLACEHOLDER: &str = "What do you want to build or improve?";
+pub(crate) const COMPOSER_PLACEHOLDER: &str = "What do you want to build or improve?";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ComposerPaneEvent {
+pub(crate) enum ComposerPaneEvent {
     InputChanged(String),
     Focused,
     AddAttachments,
@@ -43,20 +43,20 @@ pub(super) enum ComposerPaneEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ComposerPaneViewModel {
-    pub(super) composer_pending: bool,
-    pub(super) composer_running: bool,
-    pub(super) awaiting_prompt_start: bool,
-    pub(super) authorization_pending: bool,
-    pub(super) running_mode: ComposerRunningMode,
-    pub(super) project_directory: ComposerProjectDirectoryViewModel,
-    pub(super) attachments: Arc<[ComposerAttachmentViewModel]>,
-    pub(super) attachments_enabled: bool,
-    pub(super) attachment_disabled_reason: Option<Arc<str>>,
-    pub(super) rejection: Option<Arc<str>>,
+pub(crate) struct ComposerPaneViewModel {
+    pub(crate) composer_pending: bool,
+    pub(crate) composer_running: bool,
+    pub(crate) awaiting_prompt_start: bool,
+    pub(crate) authorization_pending: bool,
+    pub(crate) running_mode: ComposerRunningMode,
+    pub(crate) project_directory: ComposerProjectDirectoryViewModel,
+    pub(crate) attachments: Arc<[ComposerAttachmentViewModel]>,
+    pub(crate) attachments_enabled: bool,
+    pub(crate) attachment_disabled_reason: Option<Arc<str>>,
+    pub(crate) rejection: Option<Arc<str>>,
 }
 
-pub(super) fn view_model(workspace: &SessionWorkspace) -> ComposerPaneViewModel {
+pub(crate) fn view_model(workspace: &SessionWorkspace) -> ComposerPaneViewModel {
     let snapshot = workspace
         .projection
         .as_ref()
@@ -112,7 +112,7 @@ pub(super) fn view_model(workspace: &SessionWorkspace) -> ComposerPaneViewModel 
     }
 }
 
-pub(super) fn attachment_disabled_reason(workspace: &SessionWorkspace) -> Option<&'static str> {
+pub(crate) fn attachment_disabled_reason(workspace: &SessionWorkspace) -> Option<&'static str> {
     let supports_images = workspace
         .project
         .models
@@ -140,10 +140,10 @@ pub(super) fn attachment_disabled_reason(workspace: &SessionWorkspace) -> Option
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ComposerProjectDirectoryViewModel {
-    pub(super) value: Arc<str>,
-    pub(super) state: DesktopProjectDirectoryState,
-    pub(super) is_projectless: bool,
+pub(crate) struct ComposerProjectDirectoryViewModel {
+    pub(crate) value: Arc<str>,
+    pub(crate) state: DesktopProjectDirectoryState,
+    pub(crate) is_projectless: bool,
 }
 
 impl ComposerProjectDirectoryViewModel {
@@ -167,13 +167,13 @@ impl ComposerProjectDirectoryViewModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ComposerAttachmentViewModel {
-    pub(super) label: Arc<str>,
-    pub(super) path: Arc<str>,
+pub(crate) struct ComposerAttachmentViewModel {
+    pub(crate) label: Arc<str>,
+    pub(crate) path: Arc<str>,
 }
 
 #[derive(Debug, Default)]
-pub(super) struct InputRenderLatencyProbe {
+pub(crate) struct InputRenderLatencyProbe {
     pending_change: Cell<Option<Instant>>,
     #[cfg(test)]
     last_observed: Cell<Option<Duration>>,
@@ -184,7 +184,7 @@ impl InputRenderLatencyProbe {
         self.mark_changed_at(Instant::now());
     }
 
-    pub(super) fn mark_changed_at(&self, now: Instant) {
+    pub(crate) fn mark_changed_at(&self, now: Instant) {
         self.pending_change.set(Some(now));
     }
 
@@ -192,7 +192,7 @@ impl InputRenderLatencyProbe {
         let _ = self.observe_render_at(Instant::now());
     }
 
-    pub(super) fn observe_render_at(&self, now: Instant) -> Option<Duration> {
+    pub(crate) fn observe_render_at(&self, now: Instant) -> Option<Duration> {
         let latency = now.saturating_duration_since(self.pending_change.take()?);
         tracing::trace!(
             target: "desktop",
@@ -205,17 +205,17 @@ impl InputRenderLatencyProbe {
     }
 
     #[cfg(test)]
-    pub(super) fn pending_is_empty(&self) -> bool {
+    pub(crate) fn pending_is_empty(&self) -> bool {
         self.pending_change.get().is_none()
     }
 
     #[cfg(test)]
-    pub(super) fn last_observed(&self) -> Option<Duration> {
+    pub(crate) fn last_observed(&self) -> Option<Duration> {
         self.last_observed.get()
     }
 
     #[cfg(test)]
-    pub(super) fn clear_last_observed(&self) {
+    pub(crate) fn clear_last_observed(&self) {
         self.last_observed.set(None);
     }
 }
@@ -229,7 +229,7 @@ pub(crate) struct ComposerPane {
 }
 
 impl ComposerPane {
-    pub(super) fn new(window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 8)
@@ -267,11 +267,11 @@ impl ComposerPane {
         }
     }
 
-    pub(super) fn set_view_model(&mut self, view_model: ComposerPaneViewModel) {
+    pub(crate) fn set_view_model(&mut self, view_model: ComposerPaneViewModel) {
         self.view_model = Some(view_model);
     }
 
-    pub(super) fn set_input_value(
+    pub(crate) fn set_input_value(
         &mut self,
         value: String,
         window: &mut Window,
@@ -281,12 +281,12 @@ impl ComposerPane {
             .update(cx, |input, cx| input.set_value(value, window, cx));
     }
 
-    pub(super) fn focus_handle(&self) -> &FocusHandle {
+    pub(crate) fn focus_handle(&self) -> &FocusHandle {
         &self.focus
     }
 
     #[cfg(test)]
-    pub(super) fn latency_probe(&self) -> &InputRenderLatencyProbe {
+    pub(crate) fn latency_probe(&self) -> &InputRenderLatencyProbe {
         &self.latency
     }
 }

@@ -2,13 +2,27 @@ use std::time::Instant;
 
 use gpui::FocusHandle;
 
+use super::drawer::CenterDrawerKind;
 use crate::actions::DesktopCommandPalette;
 use crate::app::native_shell::{
     ConversationFullMessageView, DesktopModalKind, FocusInputModality, PanelResizeState,
-    center_drawer_host::CenterDrawerKind, center_navigation::CenterSurface,
 };
 use crate::application::workspace::WorkspaceKey;
-use crate::shell::{FocusState, FocusTarget};
+use crate::ui::shell::{FocusState, FocusTarget};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CenterNavigationTarget {
+    NewConversation,
+    Skills,
+    Session(String),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum CenterSurface {
+    #[default]
+    Primary,
+    Skills,
+}
 
 /// Window-local interaction state. Product and runtime facts do not belong here.
 pub(crate) struct ShellUiState {
