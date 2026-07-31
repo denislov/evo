@@ -5,10 +5,7 @@ async fn closing_one_active_session_does_not_interrupt_another_prompt() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, mut bridge, first) = start_isolated_runtime(&temp).await;
     let first_session = first.session.session.session_id;
-    bridge
-        .command_client_for_test()
-        .try_create_session(121)
-        .unwrap();
+    runtime_commands(&bridge).try_create_session(121).unwrap();
     let Some(DesktopRuntimeUpdate::SessionChanged {
         snapshot: second, ..
     }) = bridge.next_update().await
@@ -16,26 +13,25 @@ async fn closing_one_active_session_does_not_interrupt_another_prompt() {
         panic!("second session should be created");
     };
     let second_session = second.session.session.session_id;
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             122,
             existing_prompt_target(&first_session),
             "close this prompt",
+            &[],
             None,
         )
         .unwrap();
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             123,
             existing_prompt_target(&second_session),
             "keep this prompt",
+            &[],
             None,
         )
         .unwrap();
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_close_session(124, &first_session)
         .unwrap();
 
@@ -283,9 +279,14 @@ async fn abort_race_is_typed_and_window_close_is_non_blocking() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, mut bridge, initial) = start_isolated_runtime(&temp).await;
     let session_id = initial.session.session.session_id;
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(20, existing_prompt_target(&session_id), "abort race", None)
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
+            20,
+            existing_prompt_target(&session_id),
+            "abort race",
+            &[],
+            None,
+        )
         .unwrap();
 
     let mut saw_control_result = false;
@@ -294,7 +295,9 @@ async fn abort_race_is_typed_and_window_close_is_non_blocking() {
         loop {
             match bridge.next_update().await.unwrap() {
                 DesktopRuntimeUpdate::PromptStarted { .. } => {
-                    bridge.command_client_for_test().try_abort(21).unwrap();
+                    runtime_commands(&bridge)
+                        .try_abort_for_session(21, &session_id)
+                        .unwrap();
                 }
                 DesktopRuntimeUpdate::ControlAccepted { command_id: 21, .. }
                 | DesktopRuntimeUpdate::CommandRejected { command_id: 21, .. } => {
@@ -318,7 +321,9 @@ async fn abort_race_is_typed_and_window_close_is_non_blocking() {
     );
     assert!(saw_prompt_finished);
 
-    bridge.command_client_for_test().try_abort(24).unwrap();
+    runtime_commands(&bridge)
+        .try_abort_for_session(24, &session_id)
+        .unwrap();
     assert!(matches!(
         bridge.next_update().await,
         Some(DesktopRuntimeUpdate::CommandRejected {
@@ -328,12 +333,12 @@ async fn abort_race_is_typed_and_window_close_is_non_blocking() {
         })
     ));
 
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             22,
-            existing_prompt_target(session_id),
+            existing_prompt_target(&session_id),
             "close during prompt",
+            &[],
             None,
         )
         .unwrap();

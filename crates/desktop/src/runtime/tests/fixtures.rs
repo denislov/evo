@@ -59,6 +59,13 @@ fn write_workspace_fixture(project: &std::path::Path, id: &str, thinking: &str) 
     .unwrap();
 }
 
+fn runtime_commands(bridge: &DesktopRuntimeBridge) -> &RuntimeCommandClient {
+    bridge
+        .command_client
+        .as_ref()
+        .expect("test bridge must retain its command client before splitting")
+}
+
 fn cross_adapter_fixture_events() -> Vec<CodingAgentProductEvent> {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -74,8 +81,7 @@ async fn start_runtime(
         .unwrap()
         .wait_blocking()
         .unwrap();
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_create_session(u64::MAX)
         .unwrap();
     let DesktopRuntimeUpdate::SessionChanged { snapshot, .. } = bridge.next_update().await.unwrap()

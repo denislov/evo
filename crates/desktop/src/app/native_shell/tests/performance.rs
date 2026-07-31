@@ -10,7 +10,7 @@ fn desktop_release_gpui_headless_frame_and_input_replay(cx: &mut TestAppContext)
 
     initialize_visual_test(cx);
     let projection =
-        visual_performance_projection(desktop::ui::conversation::MAX_TRANSCRIPT_BLOCKS);
+        visual_performance_projection(desktop::ui::conversation::model::MAX_TRANSCRIPT_BLOCKS);
     let window_rss_before = crate::allocation_probe::resident_bytes();
     let (shell, cx) = add_visual_shell(
         cx,
@@ -79,7 +79,7 @@ fn desktop_release_gpui_headless_frame_and_input_replay(cx: &mut TestAppContext)
              window_rss_supported={}\twindow_rss_before_bytes={}\twindow_rss_after_bytes={}\t\
              window_rss_growth_bytes={}",
         std::env::consts::OS,
-        desktop::ui::conversation::MAX_TRANSCRIPT_BLOCKS,
+        desktop::ui::conversation::model::MAX_TRANSCRIPT_BLOCKS,
         window_rss_before.is_some() && window_rss_after.is_some(),
         window_rss_before.unwrap_or_default(),
         window_rss_after.unwrap_or_default(),
@@ -143,7 +143,7 @@ fn desktop_release_gpui_markdown_parser_matrix(cx: &mut TestAppContext) {
     ];
 
     for (name, payload) in content_cases {
-        let preview = desktop::ui::conversation::bounded_markdown_preview(&payload);
+        let preview = desktop::ui::conversation::markdown::bounded_markdown_preview(&payload);
         let bounded_bytes = preview.text.len();
         let mut samples = Vec::with_capacity(SAMPLE_COUNT);
         for _ in 0..SAMPLE_COUNT {

@@ -743,7 +743,7 @@ fn percentile(samples: &mut [u128], percentile: usize) -> u128 {
 
 fn performance_projection() -> Result<DesktopProjection, String> {
     let payload = "native frame replay 中文 🙂 ".repeat(8);
-    let items = (0..crate::ui::conversation::MAX_TRANSCRIPT_BLOCKS)
+    let items = (0..crate::ui::conversation::model::MAX_TRANSCRIPT_BLOCKS)
         .map(|index| CodingAgentSessionTranscriptItem::User {
             text: format!("message {index}: {payload}"),
         })

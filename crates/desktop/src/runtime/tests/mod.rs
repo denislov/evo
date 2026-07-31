@@ -33,7 +33,7 @@ use crate::projection::{
     DesktopProjectionLifecycle, DesktopToolStatus, MAX_AUTHORIZATION_TEXT_BYTES,
     MAX_DESKTOP_MESSAGE_OVERLAYS, ProjectionEvent,
 };
-use crate::ui::conversation::{MAX_TRANSCRIPT_BLOCKS, MAX_TRANSCRIPT_BYTES};
+use crate::ui::conversation::model::{MAX_TRANSCRIPT_BLOCKS, MAX_TRANSCRIPT_BYTES};
 
 use super::client::build_desktop_runtime;
 use super::protocol::*;

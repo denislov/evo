@@ -367,7 +367,7 @@ pub struct DesktopRecoveryProjection {
 ///
 /// `CodingAgentClientProjection` owns every product fact. This type only
 /// retains desktop presentation state: bounded event markers, transcript
-/// layout, issue notices, and compatibility-shaped overlay DTOs.
+/// layout, issue notices, and bounded desktop overlay DTOs.
 #[derive(Debug, Clone)]
 pub struct DesktopProjection {
     project: CodingAgentEmbeddingSnapshot,

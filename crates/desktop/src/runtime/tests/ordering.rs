@@ -6,12 +6,12 @@ async fn prompt_submission_forwards_product_events_and_returns_the_session_owner
     let (_env, mut bridge, initial) = start_isolated_runtime(&temp).await;
     let session_id = initial.session.session.session_id;
 
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             10,
             existing_prompt_target(&session_id),
             "offline desktop prompt",
+            &[],
             None,
         )
         .unwrap();
@@ -76,10 +76,7 @@ async fn prompt_submission_forwards_product_events_and_returns_the_session_owner
     assert!(finished.is_ok(), "offline prompt did not finish promptly");
     assert!(saw_product_event);
 
-    bridge
-        .command_client_for_test()
-        .try_create_session(11)
-        .unwrap();
+    runtime_commands(&bridge).try_create_session(11).unwrap();
     assert!(matches!(
         bridge.next_update().await,
         Some(DesktopRuntimeUpdate::SessionChanged { command_id: 11, .. })
@@ -92,10 +89,7 @@ async fn concurrent_prompts_route_events_and_completions_to_their_session() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, mut bridge, first) = start_isolated_runtime(&temp).await;
     let first_session = first.session.session.session_id;
-    bridge
-        .command_client_for_test()
-        .try_create_session(101)
-        .unwrap();
+    runtime_commands(&bridge).try_create_session(101).unwrap();
     let Some(DesktopRuntimeUpdate::SessionChanged {
         snapshot: second, ..
     }) = bridge.next_update().await
@@ -104,21 +98,21 @@ async fn concurrent_prompts_route_events_and_completions_to_their_session() {
     };
     let second_session = second.session.session.session_id;
 
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             102,
             existing_prompt_target(&first_session),
             "first concurrent prompt",
+            &[],
             None,
         )
         .unwrap();
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             103,
             existing_prompt_target(&second_session),
             "second concurrent prompt",
+            &[],
             None,
         )
         .unwrap();
@@ -205,9 +199,8 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
         .wait_blocking()
         .unwrap();
 
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             104,
             DesktopPromptTarget::new(
                 CodingAgentWorkspaceSelection::project(&project_a),
@@ -215,12 +208,12 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
                 "project-a",
             ),
             "project a prompt",
+            &[],
             None,
         )
         .unwrap();
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             105,
             DesktopPromptTarget::new(
                 CodingAgentWorkspaceSelection::project(&project_b),
@@ -228,6 +221,7 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
                 "project-b",
             ),
             "project b prompt",
+            &[],
             None,
         )
         .unwrap();
@@ -318,8 +312,7 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
         std::collections::BTreeSet::from([session_a.clone(), session_b.clone()])
     );
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(106, &session_a)
         .unwrap();
     let Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. }) = bridge.next_update().await
@@ -327,8 +320,7 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
         panic!("project A owner should be focusable after prompt completion");
     };
     assert_eq!(snapshot.project.cwd, canonical_a);
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_select_model(107, session_owner_target(&session_a), "gpt-5", None)
         .unwrap();
     assert!(matches!(
@@ -338,8 +330,7 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
                 && metadata.project.selected_model_id == "gpt-5"
     ));
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(108, &session_b)
         .unwrap();
     let Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. }) = bridge.next_update().await
@@ -385,8 +376,7 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
             "low",
         ),
     ] {
-        reopened
-            .command_client_for_test()
+        runtime_commands(&reopened)
             .try_open_session(command_id, session_id)
             .unwrap();
         let Some(DesktopRuntimeUpdate::SessionChanged {
@@ -455,8 +445,7 @@ async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() 
         .wait_blocking()
         .unwrap();
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(112, &first_id)
         .unwrap();
     assert!(matches!(
@@ -464,8 +453,7 @@ async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() 
         Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. })
             if snapshot.project.cwd == project.canonicalize().unwrap()
     ));
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_select_model(113, session_owner_target(&first_id), "gpt-5", None)
         .unwrap();
     assert!(matches!(
@@ -473,8 +461,7 @@ async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() 
         Some(DesktopRuntimeUpdate::SelectionChanged { metadata, .. })
             if metadata.project.selected_model_id == "gpt-5"
     ));
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_select_session_profile(114, session_owner_target(&first_id), "shared-project")
         .unwrap();
     assert!(matches!(
@@ -486,8 +473,7 @@ async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() 
                 .is_some_and(|session| session.session.default_agent_profile_id.as_str()
                     == "shared-project")
     ));
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(115, &second_id)
         .unwrap();
     let Some(DesktopRuntimeUpdate::SessionChanged {
@@ -509,8 +495,7 @@ async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() 
             .as_str(),
         "default"
     );
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(116, &first_id)
         .unwrap();
     assert!(matches!(

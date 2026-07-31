@@ -31,7 +31,10 @@ pub fn conversation_copy_text(text: &str, detail: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::*;
+    use super::*;
+    use crate::ui::conversation::model::{
+        ConversationProjection, MAX_BLOCK_TEXT_BYTES, MAX_TOOL_ARGUMENT_BYTES,
+    };
     use coding_agent::api::view::{
         CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot,
     };

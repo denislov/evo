@@ -484,7 +484,12 @@ mod tests {
         CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot,
     };
 
-    use crate::ui::conversation::*;
+    use super::*;
+    use crate::ui::conversation::markdown::bounded_markdown_preview;
+    use crate::ui::conversation::{
+        ComposerState, ConversationRowRenderCache, ConversationRowRenderSource,
+        ConversationViewport,
+    };
 
     fn transcript(items: Vec<CodingAgentSessionTranscriptItem>) -> CodingAgentTranscriptSnapshot {
         CodingAgentTranscriptSnapshot {

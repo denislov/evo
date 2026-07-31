@@ -45,8 +45,7 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
     assert_eq!(ready.project.selected_model_id, "claude-sonnet-4-5");
     assert!(!sessions_dir.exists());
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_reload(1, home_owner_target())
         .unwrap();
     let Some(DesktopRuntimeUpdate::Reloaded {
@@ -58,10 +57,7 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
     };
     assert!(metadata.session.is_none());
 
-    bridge
-        .command_client_for_test()
-        .try_list_sessions(2)
-        .unwrap();
+    runtime_commands(&bridge).try_list_sessions(2).unwrap();
     let Some(DesktopRuntimeUpdate::SessionsListed {
         command_id: 2,
         sessions,
@@ -72,8 +68,7 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
     };
     assert!(sessions.is_empty());
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_select_model(
             3,
             home_owner_target(),
@@ -99,8 +94,7 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
     assert_eq!(thinking_level, None);
     assert!(thinking_fallback);
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_select_session_profile(30, home_owner_target(), "review")
         .unwrap();
     let Some(DesktopRuntimeUpdate::SelectionChanged {
@@ -115,7 +109,7 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
     assert_eq!(metadata.project.default_agent_profile_id.as_str(), "review");
     assert!(metadata.session.is_none());
 
-    bridge.command_client_for_test().try_resync(4).unwrap();
+    runtime_commands(&bridge).try_resync(4).unwrap();
     assert!(matches!(
         bridge.next_update().await,
         Some(DesktopRuntimeUpdate::CommandRejected {
@@ -186,8 +180,7 @@ async fn sessionless_runtime_opens_an_existing_session_without_an_intermediate_s
         .unwrap();
     assert_eq!(ready.project.selected_model_id, "claude-sonnet-4-5");
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(7, &session_id)
         .unwrap();
     let Some(DesktopRuntimeUpdate::SessionChanged {
@@ -211,10 +204,7 @@ async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
     );
     let initial_session_id = initial.session.session.session_id.clone();
 
-    bridge
-        .command_client_for_test()
-        .try_create_session(1)
-        .unwrap();
+    runtime_commands(&bridge).try_create_session(1).unwrap();
     let DesktopRuntimeUpdate::SessionChanged {
         command_id,
         snapshot,
@@ -225,8 +215,7 @@ async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
     assert_eq!(command_id, 1);
     assert_ne!(snapshot.session.session.session_id, initial_session_id);
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(2, &initial_session_id)
         .unwrap();
     let DesktopRuntimeUpdate::SessionChanged {
@@ -239,8 +228,7 @@ async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
     assert_eq!(command_id, 2);
     assert_eq!(snapshot.session.session.session_id, initial_session_id);
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(3, "missing-session")
         .unwrap();
     let DesktopRuntimeUpdate::CommandRejected {
@@ -254,8 +242,7 @@ async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
     assert_eq!(command_id, 3);
     assert_eq!(command, DesktopRuntimeCommandKind::OpenSession);
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_reload(4, session_owner_target(&initial_session_id))
         .unwrap();
     let DesktopRuntimeUpdate::Reloaded {
@@ -271,7 +258,7 @@ async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
         initial_session_id
     );
 
-    bridge.command_client_for_test().try_resync(5).unwrap();
+    runtime_commands(&bridge).try_resync(5).unwrap();
     let DesktopRuntimeUpdate::Resynced {
         command_id,
         replacement,
@@ -285,10 +272,7 @@ async fn runtime_owns_context_and_switches_sessions_over_bounded_queues() {
     };
     assert_eq!(snapshot.session.session.session_id, initial_session_id);
 
-    bridge
-        .command_client_for_test()
-        .try_list_sessions(6)
-        .unwrap();
+    runtime_commands(&bridge).try_list_sessions(6).unwrap();
     let DesktopRuntimeUpdate::SessionsListed {
         command_id,
         sessions,
@@ -368,8 +352,7 @@ async fn failed_reload_retains_the_previous_runtime_context() {
     )
     .unwrap();
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_reload(6, session_owner_target(&initial.session.session.session_id))
         .unwrap();
     let reload_update = bridge.next_update().await;
@@ -386,7 +369,7 @@ async fn failed_reload_retains_the_previous_runtime_context() {
         "unexpected reload result: {reload_update:?}"
     );
 
-    bridge.command_client_for_test().try_resync(7).unwrap();
+    runtime_commands(&bridge).try_resync(7).unwrap();
     let Some(DesktopRuntimeUpdate::Resynced {
         command_id: 7,
         replacement,
@@ -424,8 +407,7 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     assert_eq!(projection.snapshot(), &product_snapshot);
     assert_eq!(projection.conversation(), &conversation);
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_select_model(
             8,
             session_owner_target(&session_id),
@@ -464,8 +446,7 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     );
     assert_eq!(projection.conversation(), &conversation);
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_select_session_profile(9, session_owner_target(&session_id), "review")
         .unwrap();
     let update = bridge.next_update().await.unwrap();
@@ -502,8 +483,7 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     );
     assert_eq!(projection.conversation(), &conversation);
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_select_model(
             10,
             session_owner_target(&session_id),
@@ -519,8 +499,7 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
             ..
         })
     ));
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_select_session_profile(11, session_owner_target(&session_id), "missing-profile")
         .unwrap();
     assert!(matches!(
@@ -532,7 +511,7 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
         })
     ));
 
-    bridge.command_client_for_test().try_resync(12).unwrap();
+    runtime_commands(&bridge).try_resync(12).unwrap();
     let Some(DesktopRuntimeUpdate::Resynced { replacement, .. }) = bridge.next_update().await
     else {
         panic!("resync must expose the last successful selector state");
@@ -608,8 +587,7 @@ async fn persisted_projectless_session_restores_its_managed_scratch_workspace() 
         .wait_blocking()
         .unwrap();
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(116, &session_id)
         .unwrap();
     let Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. }) = bridge.next_update().await
@@ -659,8 +637,7 @@ async fn deleted_project_session_open_is_recoverably_rejected() {
         .wait_blocking()
         .unwrap();
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(117, &session_id)
         .unwrap();
     assert!(matches!(
@@ -673,7 +650,7 @@ async fn deleted_project_session_open_is_recoverably_rejected() {
         }) if code == "workspace_unavailable"
             && message == "Project workspace directory is unavailable."
     ));
-    bridge.command_client_for_test().try_resync(118).unwrap();
+    runtime_commands(&bridge).try_resync(118).unwrap();
     assert!(matches!(
         bridge.next_update().await,
         Some(DesktopRuntimeUpdate::CommandRejected {
@@ -731,8 +708,7 @@ async fn legacy_session_scope_is_migrated_before_desktop_builds_its_context() {
         .wait_blocking()
         .unwrap();
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_open_session(119, &session_id)
         .unwrap();
     let Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. }) = bridge.next_update().await
@@ -762,8 +738,7 @@ async fn fifth_open_session_is_rejected_without_disturbing_the_existing_four() {
     let (_env, mut bridge, first) = start_isolated_runtime(&temp).await;
     let first_session = first.session.session.session_id;
     for command_id in 111..114 {
-        bridge
-            .command_client_for_test()
+        runtime_commands(&bridge)
             .try_create_session(command_id)
             .unwrap();
         assert!(matches!(
@@ -773,10 +748,7 @@ async fn fifth_open_session_is_rejected_without_disturbing_the_existing_four() {
         ));
     }
 
-    bridge
-        .command_client_for_test()
-        .try_create_session(114)
-        .unwrap();
+    runtime_commands(&bridge).try_create_session(114).unwrap();
     assert!(matches!(
         bridge.next_update().await,
         Some(DesktopRuntimeUpdate::CommandRejected {
@@ -787,8 +759,7 @@ async fn fifth_open_session_is_rejected_without_disturbing_the_existing_four() {
         }) if code == "session_limit_reached"
     ));
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_close_session(115, &first_session)
         .unwrap();
     assert!(matches!(
@@ -810,12 +781,12 @@ async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
         .wait_blocking()
         .unwrap();
 
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             13,
             new_project_prompt_target(&temp),
             "first desktop prompt",
+            &[],
             None,
         )
         .unwrap();
@@ -858,10 +829,7 @@ async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
     .await;
     assert!(finished.is_ok(), "first sessionless prompt did not finish");
 
-    bridge
-        .command_client_for_test()
-        .try_list_sessions(14)
-        .unwrap();
+    runtime_commands(&bridge).try_list_sessions(14).unwrap();
     let Some(DesktopRuntimeUpdate::SessionsListed { sessions, .. }) = bridge.next_update().await
     else {
         panic!("created prompt session should be visible in the catalog");
@@ -1090,12 +1058,12 @@ async fn explicit_new_prompt_target_creates_a_session_when_another_is_open() {
     let (_env, mut bridge, first) = start_isolated_runtime(&temp).await;
     let first_session_id = first.session.session.session_id;
 
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             14,
             new_project_prompt_target(&temp),
             "start a distinct conversation",
+            &[],
             None,
         )
         .unwrap();
@@ -1141,9 +1109,8 @@ async fn projectless_first_prompt_records_the_global_only_scratch_cwd() {
         "scratch-local project settings must not enter a global-only context"
     );
 
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             16,
             DesktopPromptTarget::new(
                 CodingAgentWorkspaceSelection::projectless("workspace-runtime-test"),
@@ -1151,6 +1118,7 @@ async fn projectless_first_prompt_records_the_global_only_scratch_cwd() {
                 "default",
             ),
             "scratch workspace prompt",
+            &[],
             None,
         )
         .unwrap();
@@ -1255,12 +1223,12 @@ async fn session_creation_failure_rejects_the_first_prompt_without_an_active_own
         .wait_blocking()
         .unwrap();
 
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             15,
             new_project_prompt_target(&temp),
             "cannot create this session",
+            &[],
             None,
         )
         .unwrap();
@@ -1272,7 +1240,7 @@ async fn session_creation_failure_rejects_the_first_prompt_without_an_active_own
             ..
         })
     ));
-    bridge.command_client_for_test().try_resync(151).unwrap();
+    runtime_commands(&bridge).try_resync(151).unwrap();
     assert!(matches!(
         bridge.next_update().await,
         Some(DesktopRuntimeUpdate::CommandRejected {
@@ -1373,12 +1341,12 @@ async fn steer_and_follow_up_races_keep_typed_command_association() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, mut bridge, initial) = start_isolated_runtime(&temp).await;
     let session_id = initial.session.session.session_id;
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             25,
-            existing_prompt_target(session_id),
+            existing_prompt_target(&session_id),
             "control association race",
+            &[],
             None,
         )
         .unwrap();
@@ -1391,13 +1359,11 @@ async fn steer_and_follow_up_races_keep_typed_command_association() {
         loop {
             match bridge.next_update().await.unwrap() {
                 DesktopRuntimeUpdate::PromptStarted { .. } if !controls_sent => {
-                    bridge
-                        .command_client_for_test()
-                        .try_steer(26, "steer exactly")
+                    runtime_commands(&bridge)
+                        .try_steer_for_session(26, &session_id, "steer exactly")
                         .unwrap();
-                    bridge
-                        .command_client_for_test()
-                        .try_follow_up(27, "follow up exactly")
+                    runtime_commands(&bridge)
+                        .try_follow_up_for_session(27, &session_id, "follow up exactly")
                         .unwrap();
                     controls_sent = true;
                 }
@@ -1455,8 +1421,7 @@ async fn authorization_decision_is_typed_and_rejected_without_an_active_prompt()
         tool_call_id: "tool-call-31".into(),
         capability_generation: 1,
     };
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_decide_tool_authorization(
             31,
             &identity,
@@ -1486,7 +1451,7 @@ fn runtime_command_client_is_the_single_validation_and_admission_surface() {
         Err(DesktopCommandAdmissionError::InvalidSessionId { .. })
     ));
     assert!(matches!(
-        client.try_steer(905, ""),
+        client.try_steer_for_session(905, "session-control-test", ""),
         Err(DesktopCommandAdmissionError::InvalidControlText { .. })
     ));
     assert!(harness.drain_command_kinds().is_empty());
@@ -1501,8 +1466,7 @@ fn runtime_command_client_is_the_single_validation_and_admission_surface() {
 #[test]
 fn rename_command_is_bounded_trimmed_and_identity_preserving() {
     let (bridge, mut harness) = DesktopRuntimeBridge::instrumented_for_test();
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_rename_session(902, "session-to-rename", Some("  Release plan  "))
         .unwrap();
     assert_eq!(
@@ -1510,8 +1474,7 @@ fn rename_command_is_bounded_trimmed_and_identity_preserving() {
         [("session-to-rename".into(), Some("Release plan".into()))]
     );
     assert!(
-        bridge
-            .command_client_for_test()
+        runtime_commands(&bridge)
             .try_rename_session(
                 903,
                 "session-to-rename",

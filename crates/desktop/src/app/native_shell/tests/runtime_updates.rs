@@ -371,7 +371,8 @@ fn streaming_deltas_do_not_collapse_a_measured_row_to_its_estimate() {
         // Outlast the height throttle so the next revision is free to commit,
         // which is exactly when the collapse used to become visible.
         std::thread::sleep(
-            crate::ui::conversation::STREAMING_ROW_HEIGHT_INTERVAL + Duration::from_millis(5),
+            crate::ui::conversation::layout::STREAMING_ROW_HEIGHT_INTERVAL
+                + Duration::from_millis(5),
         );
     }
 

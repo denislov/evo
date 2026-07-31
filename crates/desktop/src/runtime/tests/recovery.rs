@@ -12,12 +12,12 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
         "transcript_session_mismatch"
     );
     let mut projection = DesktopProjection::new(initial).unwrap();
-    bridge
-        .command_client_for_test()
-        .try_submit_prompt(
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
             40,
             existing_prompt_target(session_id),
             "projection cursor fixture",
+            &[],
             None,
         )
         .unwrap();
@@ -32,7 +32,7 @@ async fn desktop_projection_rejects_gaps_and_association_mismatches_atomically()
             if matches!(update, DesktopRuntimeUpdate::PromptStarted { .. })
                 && !requested_active_resync
             {
-                bridge.command_client_for_test().try_resync(41).unwrap();
+                runtime_commands(&bridge).try_resync(41).unwrap();
                 requested_active_resync = true;
             }
             if let DesktopRuntimeUpdate::Resynced { command_id: 41, .. } = &update {
@@ -626,7 +626,7 @@ fn assert_bounded_streaming_overlays(
     let incremental_counters = overlays.counters();
     assert_eq!(
         incremental_counters.product_view_rebuilds, initial_view_rebuilds,
-        "product events must not rebuild every compatibility view"
+        "product events must not rebuild every derived desktop view"
     );
     assert!(incremental_counters.incremental_message_updates > 1);
     assert_eq!(incremental_counters.incremental_tool_updates, 2);
@@ -749,8 +749,7 @@ async fn recovery_actions_are_identity_bound_and_stale_facts_fail_closed() {
     assert_eq!(recovery.identity.as_ref(), Some(&identity));
     assert_eq!(recovery.attempt_count, 1);
 
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_retry_recovery(32, &identity)
         .unwrap();
     assert!(matches!(
@@ -761,8 +760,7 @@ async fn recovery_actions_are_identity_bound_and_stale_facts_fail_closed() {
             ..
         })
     ));
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_resolve_recovery(33, &identity, CodingAgentRecoveryResolution::Aborted)
         .unwrap();
     assert!(matches!(

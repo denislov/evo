@@ -12,10 +12,10 @@
 //! | Weight | Appearance | Used for |
 //! | --- | --- | --- |
 //! | [`DesktopControlWeight::Tool`] | borderless icon, revealed on hover/focus | copy, expand, overflow |
-//! | [`DesktopControlWeight::Selector`] | current value + chevron | model, profile, thinking |
+//! | [`DesktopSelector`] | current value + chevron | model, profile, thinking |
 //! | [`DesktopActionRow`] | full-width row, state via background | session, changed file |
 //! | [`DesktopControlWeight::Primary`] | filled accent | composer submit |
-//! | [`DesktopControlWeight::Critical`] | semantic colour, always a text label | Deny, Abort, recovery |
+//! | [`DesktopCriticalButton`] | semantic colour, always a text label | Deny, Abort, recovery |
 //!
 //! Two invariants are enforced by construction rather than by review:
 //!
@@ -29,12 +29,6 @@
 //! Primitives here never read `DesktopProjection`, a controller or
 //! `NativeShell`; they take resolved display values only.
 
-// VUI-101 lands the vocabulary; VUI-102 through VUI-106 adopt it pane by pane.
-// Establishing the ladder in one reviewable commit is deliberate: it keeps the
-// control decisions separable from the layout churn that follows, and this task
-// is explicitly not allowed to change Pane rendering.
-#![allow(dead_code)]
-
 use gpui::{
     Context, ElementId, IntoElement, ParentElement as _, Role, SharedString, Styled as _, Window,
     div, prelude::*, px, rgb,
@@ -45,7 +39,7 @@ use gpui_component::{
     menu::{DropdownMenu as _, PopupMenu},
 };
 
-use desktop::ui::shell::{SemanticColor, SemanticTheme};
+use desktop::ui::shell::SemanticTheme;
 
 use super::style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
 
@@ -68,8 +62,6 @@ pub(crate) enum DesktopIcon {
     ChevronDown,
     ChevronRight,
     ChevronUp,
-    /// A value the user can change, as opposed to an action they invoke.
-    SelectorCaret,
     Copy,
     Expand,
     OpenExternal,
@@ -84,7 +76,6 @@ pub(crate) enum DesktopIcon {
     Submit,
     /// In-flight indicator that occupies the same box as the icon it replaces.
     Busy,
-    Warning,
 }
 
 impl DesktopIcon {
@@ -98,7 +89,6 @@ impl DesktopIcon {
             Self::ChevronDown => IconName::ChevronDown,
             Self::ChevronRight => IconName::ChevronRight,
             Self::ChevronUp => IconName::ChevronUp,
-            Self::SelectorCaret => IconName::ChevronsUpDown,
             Self::Copy => IconName::Copy,
             Self::Expand => IconName::Maximize,
             Self::OpenExternal => IconName::ExternalLink,
@@ -110,7 +100,6 @@ impl DesktopIcon {
             Self::ProjectDirectory => IconName::Folder,
             Self::Submit => IconName::ArrowUp,
             Self::Busy => IconName::LoaderCircle,
-            Self::Warning => IconName::TriangleAlert,
         }
     }
 }
@@ -207,11 +196,6 @@ impl DesktopProjectDirectoryControl {
             .into_any_element()
     }
 
-    pub(crate) fn build(self) -> gpui::AnyElement {
-        let button = self.button().into_any_element();
-        self.wrap(button)
-    }
-
     pub(crate) fn build_with_menu(
         self,
         menu: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
@@ -257,12 +241,8 @@ impl DesktopControlSize {
 pub(crate) enum DesktopControlWeight {
     /// Borderless; carries no permanent visual cost.
     Tool,
-    /// Reads as a value, not as an action.
-    Selector,
     /// The one obvious action on a surface.
     Primary,
-    /// Has a business consequence and always keeps a text label.
-    Critical(DesktopCriticalTone),
 }
 
 /// How severe a critical action is, so Deny and Allow-for-operation cannot
@@ -275,16 +255,6 @@ pub(crate) enum DesktopCriticalTone {
     Affirmative,
     /// Widens scope or destroys work.
     Dangerous,
-}
-
-impl DesktopCriticalTone {
-    const fn color(self, theme: SemanticTheme) -> SemanticColor {
-        match self {
-            Self::Neutral => theme.muted_text,
-            Self::Affirmative => theme.accent,
-            Self::Dangerous => theme.danger,
-        }
-    }
 }
 
 /// Text-labelled action with a business consequence.
@@ -419,10 +389,8 @@ impl DesktopIconButton {
             .h(side)
             .flex_none();
         match self.weight {
-            DesktopControlWeight::Tool | DesktopControlWeight::Selector => button.ghost(),
+            DesktopControlWeight::Tool => button.ghost(),
             DesktopControlWeight::Primary => button.primary(),
-            DesktopControlWeight::Critical(DesktopCriticalTone::Dangerous) => button.danger(),
-            DesktopControlWeight::Critical(_) => button.outline(),
         }
     }
 }
@@ -452,11 +420,6 @@ impl DesktopSelector {
             size: DesktopControlSize::Compact,
             disabled: false,
         }
-    }
-
-    pub(crate) const fn size(mut self, size: DesktopControlSize) -> Self {
-        self.size = size;
-        self
     }
 
     pub(crate) const fn disabled(mut self, disabled: bool) -> Self {
@@ -673,7 +636,6 @@ mod tests {
             DesktopIcon::ChevronDown,
             DesktopIcon::ChevronRight,
             DesktopIcon::ChevronUp,
-            DesktopIcon::SelectorCaret,
             DesktopIcon::Copy,
             DesktopIcon::Expand,
             DesktopIcon::OpenExternal,
@@ -685,21 +647,9 @@ mod tests {
             DesktopIcon::ProjectDirectory,
             DesktopIcon::Submit,
             DesktopIcon::Busy,
-            DesktopIcon::Warning,
         ] {
             let _: IconName = icon.name();
         }
-    }
-
-    #[test]
-    fn critical_tones_are_visually_distinct_from_each_other() {
-        let theme = SemanticTheme::GEEK_DARK;
-        let neutral = DesktopCriticalTone::Neutral.color(theme).value();
-        let affirmative = DesktopCriticalTone::Affirmative.color(theme).value();
-        let dangerous = DesktopCriticalTone::Dangerous.color(theme).value();
-        assert_ne!(neutral, affirmative);
-        assert_ne!(neutral, dangerous);
-        assert_ne!(affirmative, dangerous);
     }
 
     #[test]

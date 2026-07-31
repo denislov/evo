@@ -816,14 +816,6 @@ pub(super) fn bounded_utf8_prefix(value: &str, max_bytes: usize) -> String {
     value[..end].to_owned()
 }
 
-#[allow(
-    dead_code,
-    reason = "compatibility entry point for text-only desktop clients"
-)]
-pub(super) fn validate_prompt(prompt: &str) -> Result<(), DesktopCommandAdmissionError> {
-    validate_prompt_with_attachments(prompt, &[])
-}
-
 pub(super) fn validate_prompt_with_attachments(
     prompt: &str,
     attachments: &[PathBuf],

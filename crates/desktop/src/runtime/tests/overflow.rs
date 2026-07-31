@@ -166,9 +166,9 @@ fn command_inputs_and_queue_capacities_are_bounded() {
     assert!(validate_session_id("").is_err());
     assert!(validate_session_id(&"x".repeat(MAX_SESSION_ID_BYTES + 1)).is_err());
     assert!(validate_session_id("session-ok").is_ok());
-    assert!(validate_prompt("").is_err());
-    assert!(validate_prompt(&"x".repeat(MAX_PROMPT_BYTES + 1)).is_err());
-    assert!(validate_prompt("prompt").is_ok());
+    assert!(validate_prompt_with_attachments("", &[]).is_err());
+    assert!(validate_prompt_with_attachments(&"x".repeat(MAX_PROMPT_BYTES + 1), &[]).is_err());
+    assert!(validate_prompt_with_attachments("prompt", &[]).is_ok());
     let attachments = vec![std::path::PathBuf::from("fixture.png"); MAX_PROMPT_ATTACHMENTS];
     assert!(validate_prompt_with_attachments("", &attachments).is_ok());
     let over_limit = vec![std::path::PathBuf::from("fixture.png"); MAX_PROMPT_ATTACHMENTS + 1];
@@ -297,8 +297,7 @@ fn attachment_commands_preserve_bounded_paths_and_session_target() {
         std::path::PathBuf::from("screenshots/one.png"),
         std::path::PathBuf::from("notes/two.txt"),
     ];
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_submit_prompt_with_attachments(
             900,
             existing_prompt_target("session-attachment-test"),
@@ -307,8 +306,7 @@ fn attachment_commands_preserve_bounded_paths_and_session_target() {
             None,
         )
         .unwrap();
-    bridge
-        .command_client_for_test()
+    runtime_commands(&bridge)
         .try_submit_prompt_with_attachments(
             901,
             new_project_prompt_target(&temp),

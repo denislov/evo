@@ -677,12 +677,13 @@ fn truncated_preview_opens_and_copies_the_complete_bounded_message(cx: &mut Test
     initialize_visual_test(cx);
     let mut snapshot = visual_test_snapshot();
     let unit = "完整消息🙂e\u{301}";
-    let repeat_count = desktop::ui::conversation::MAX_MARKDOWN_PREVIEW_BYTES / unit.len() + 1;
+    let repeat_count =
+        desktop::ui::conversation::markdown::MAX_MARKDOWN_PREVIEW_BYTES / unit.len() + 1;
     let full_text = format!(
         "BEGIN FULL MESSAGE\n{}END FULL MESSAGE",
         unit.repeat(repeat_count)
     );
-    assert!(full_text.len() > desktop::ui::conversation::MAX_MARKDOWN_PREVIEW_BYTES);
+    assert!(full_text.len() > desktop::ui::conversation::markdown::MAX_MARKDOWN_PREVIEW_BYTES);
     assert!(full_text.len() < MAX_COPY_BYTES);
     snapshot
         .transcript

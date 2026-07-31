@@ -739,6 +739,61 @@ fn native_replay_authority_is_feature_gated_under_devtools() {
 }
 
 #[test]
+fn migration_debt_and_compatibility_facades_stay_deleted() {
+    let source_root = manifest_dir().join("src");
+    for relative in [
+        "app/command_ledger.rs",
+        "app/native_shell/update.rs",
+        "app/native_shell/preferences.rs",
+        "app/native_shell/file_review.rs",
+        "preferences.rs",
+        "runtime.rs",
+    ] {
+        let path = source_root.join(relative);
+        assert!(
+            !path.exists(),
+            "legacy desktop path must stay deleted: {}",
+            path.display()
+        );
+    }
+
+    for path in rust_files(&source_root) {
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for forbidden in [
+            "TODO(DSK-",
+            "HOME_COMPOSER_SESSION_KEY",
+            "command_owner_session_id",
+            "complete_workspace_command",
+            "reserve_with_id",
+            "command_client_for_test",
+            "try_submit_prompt(",
+            "try_abort(",
+            "try_steer(",
+            "try_follow_up(",
+            "allow(dead_code",
+            "allow(unused_imports",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{} must not restore migration debt token {forbidden}",
+                path.display()
+            );
+        }
+        assert!(
+            !(source.contains("impl Deref") && source.contains("NativeShell")),
+            "{} must not restore NativeShell deref forwarding",
+            path.display()
+        );
+    }
+
+    let commands = fs::read_to_string(source_root.join("app/native_shell/commands.rs"))
+        .expect("native shell command owner is readable");
+    assert!(commands.contains("pub(super) fn reserve_command("));
+    assert!(commands.contains("shell.app.commands.reserve(owner, intent)"));
+}
+
+#[test]
 fn application_layer_has_no_ui_or_effect_executor_dependencies() {
     for path in layer_rust_files("application") {
         if is_test_only_source(&path) {

@@ -232,13 +232,6 @@ impl DesktopRuntimeBridge {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn command_client_for_test(&self) -> &RuntimeCommandClient {
-        self.command_client
-            .as_ref()
-            .expect("test bridge must retain its command client before splitting")
-    }
-
     /// Spawn runtime initialization without waiting for configuration/session I/O.
     pub fn spawn(
         options: CodingAgentEmbeddingOptions,
@@ -721,23 +714,6 @@ impl RuntimeCommandClient {
         })
     }
 
-    #[allow(dead_code, reason = "text-only typed desktop prompt API")]
-    pub fn try_submit_prompt(
-        &self,
-        command_id: u64,
-        target: DesktopPromptTarget,
-        prompt: &str,
-        thinking_level: Option<CodingAgentThinkingLevel>,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(admitted_prompt_command(
-            command_id,
-            target,
-            prompt,
-            &[],
-            thinking_level,
-        )?)
-    }
-
     pub fn try_submit_prompt_with_attachments(
         &self,
         command_id: u64,
@@ -755,14 +731,6 @@ impl RuntimeCommandClient {
         )?)
     }
 
-    #[allow(dead_code, reason = "single-session adapter compatibility")]
-    pub fn try_abort(&self, command_id: u64) -> Result<(), DesktopCommandAdmissionError> {
-        self.try_send(DesktopRuntimeCommand::Abort {
-            command_id,
-            session_id: None,
-        })
-    }
-
     pub fn try_abort_for_session(
         &self,
         command_id: u64,
@@ -772,20 +740,6 @@ impl RuntimeCommandClient {
         self.try_send(DesktopRuntimeCommand::Abort {
             command_id,
             session_id: Some(session_id.to_owned()),
-        })
-    }
-
-    #[allow(dead_code, reason = "single-session adapter compatibility")]
-    pub fn try_steer(
-        &self,
-        command_id: u64,
-        text: &str,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_control_text(text)?;
-        self.try_send(DesktopRuntimeCommand::Steer {
-            command_id,
-            session_id: None,
-            text: text.to_owned(),
         })
     }
 
@@ -800,20 +754,6 @@ impl RuntimeCommandClient {
         self.try_send(DesktopRuntimeCommand::Steer {
             command_id,
             session_id: Some(session_id.to_owned()),
-            text: text.to_owned(),
-        })
-    }
-
-    #[allow(dead_code, reason = "single-session adapter compatibility")]
-    pub fn try_follow_up(
-        &self,
-        command_id: u64,
-        text: &str,
-    ) -> Result<(), DesktopCommandAdmissionError> {
-        validate_control_text(text)?;
-        self.try_send(DesktopRuntimeCommand::FollowUp {
-            command_id,
-            session_id: None,
             text: text.to_owned(),
         })
     }
