@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-762 已完成，下一项 DSK-770）
+> 状态：执行中（DSK-770 已完成，下一项 DSK-771）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1531,6 +1531,27 @@ Gate 与性能记录：
 - Gate A 全部通过：默认与 `desktop-devtools` all-target check、严格 clippy、format/diff check 全绿；desktop lib
   `312 passed / 5 ignored / 0 failed`，18 项 boundary 全绿。20 项 visual golden compare 全部 `RMSE=0`，未更新 golden。
 
+### DSK-770 实际结果
+
+- 全文审计确认旧 `command_ledger.rs`、`native_shell/update.rs`、混合 preferences/file-review、根级 runtime、
+  Home sentinel、`NativeShell` Deref、owner/complete/reserve legacy API、空目录与全部 DSK-D730/731 执行债务均已删除。
+  新增第 19 项 dependency boundary，把上述路径/token 及 `TODO(DSK-*)` 持续锁为不存在。
+- 删除 `RuntimeCommandClient` 的 text-only `try_submit_prompt` 与无 session 的 abort/steer/follow-up 四个 compatibility
+  方法、Bridge 的 `command_client_for_test` façade，以及 protocol 的 text-only `validate_prompt`。Runtime tests 直接通过
+  模块私有 owner 获取 client，所有 prompt 走唯一 attachment-aware admission，控制命令全部携带显式 session；54 项
+  runtime tests 保持 `54 passed / 0 failed`（0.90 秒）。
+- conversation feature surface 删除 29 个没有 production 消费者、此前依赖 `allow(unused_imports)` 保留的常量/type
+  re-export；测试与 devtools 改为从 layout/markdown/model owner 取值。controls 删除模块级 `dead_code` allow、两个未使用
+  icon、两个未构造 weight、无消费者 builder/size 方法及仅为自测存在的 tone→color 映射。
+- 计划全文命令的 legacy symbol 查询为零。`use super::*` 只保留在 `#[cfg(test)]` unit module 与 DSK-760/761 的
+  外置 test subtree，用于访问 private owner；production wildcard import 已由 boundary 拒绝。`native_shell/commands.rs`
+  保留是因为它仍是 command reservation + capacity notice 的唯一真实 owner；默认关闭的 `desktop-devtools` 是 DSK-762
+  建立的稳定显式工具边界，不是 dual-write/fallback。另一个 `allow(deprecated)` 仅包围 macOS libc RSS syscall binding，
+  不属于 deprecated module alias/re-export。
+- Gate A/B 全部通过：默认与 `desktop-devtools` all-target check、严格 clippy、format/diff check 全绿；desktop lib
+  `311 passed / 5 ignored / 0 failed`，19 项 boundary 全绿。减少的 1 项测试只验证已删除、无生产消费者的 tone helper；
+  本任务不改变生产 render/layout/runtime 行为，未运行 performance/visual gate。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1556,7 +1577,7 @@ Gate 与性能记录：
 | DSK-760 | 已完成 | `cf1ef69` | native shell 大测试按 7 类行为 suite + fixtures 外置，纯逻辑下沉 owner；主文件 7,703→1,017 行且仅保留 `mod tests`；lib 墙钟 70.29s→5.19s；Gate A/B、16 项 boundary 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-761 | 已完成 | `3482e8c` | runtime 4,034 行单文件按 6 类状态机 invariant + fixtures 拆分；22 处启动 setup 合并；54 项 runtime tests 保持全绿，Gate A 与 17 项 boundary 全通过；未扩大 production API |
 | DSK-762 | 已完成 | `b15731c` | native replay 迁入 feature-gated devtools，默认构建移除 fixture authority；修复 5 个 perf test 路径；Gate A、两个 performance gate、18 项 boundary 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
-| DSK-770 | 待执行 | — | — |
+| DSK-770 | 已完成 | `de49c2b` | 删除 4 个 runtime compatibility command、Bridge test façade、protocol shim、29 个 unused conversation re-export 与 controls dead vocabulary；legacy 全文审计清零，Gate A/B、54 项 runtime 与 19 项 boundary 全通过 |
 | DSK-771 | 待执行 | — | — |
 
 ---
