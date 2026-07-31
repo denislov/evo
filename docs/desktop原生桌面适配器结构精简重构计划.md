@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-770 已完成，下一项 DSK-771）
+> 状态：已完成（DSK-700～DSK-771 全部验收通过）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1066,16 +1066,36 @@ Gate：Gate A + Gate B。
 
 | 项目 | 基线 | 最终 | 变化 |
 | --- | ---: | ---: | ---: |
-| desktop Rust 总行数 | 39,863 | — | — |
-| `native_shell.rs` 总行数 | 11,150 | — | — |
-| `native_shell.rs` 生产代码 | 5,245 | — | — |
-| `native_shell.rs` 内嵌测试 | 5,905 | — | — |
-| desktop tests passed | 298（lib 289 + boundary 9） | — | — |
-| ignored | 5（均为显式 release performance gate） | — | — |
-| clippy warnings | 初始 1；清理后 0 | — | — |
-| native frame P95/P99 | 4,724 / 4,994 µs | — | — |
-| input-to-post-render P95 | 8,414 µs | — | — |
-| RSS absolute/steady growth | 152,715,264 / 163,840 bytes | — | — |
+| desktop Rust 总行数 | 39,863 | 45,171 | +5,308（+13.3%） |
+| production/support 物理行 | 25,531 | 28,421 | +2,890（+11.3%） |
+| test-owned 物理行 | 14,332 | 16,750 | +2,418（+16.9%） |
+| `app/native_shell` 子树 | 21,345 | 9,844 | -11,501（-53.9%） |
+| `runtime` 子树 | 8,222 | 8,028 | -194（-2.4%） |
+| `native_shell.rs` 总行数 | 11,150 | 1,025 | -10,125（-90.8%） |
+| `native_shell.rs` 生产代码 | 5,245 | 998 | -4,247（-81.0%） |
+| `native_shell.rs` 内嵌测试 | 5,905 | 27 | -5,878（-99.5%） |
+| `NativeShell` fields | 41 | 5 | -36（-87.8%） |
+| `NativeShell` 主文件 methods | 139 | 15（默认生产 10） | -124（-89.2%） |
+| `NativeShell` 全部 impl methods | 145 | 139（默认生产 129） | -6（职责迁入具名 adapter/presenter） |
+| runtime command `try_*` | Bridge 41 个重复 façade | Client 18 个；Bridge 0 | 重复 façade 清零 |
+| prompt validation helpers/shim | 5 / 1 | 4 / 0 | 单一 protocol authority |
+| production `use super::*` | 2 | 0 | 清零 |
+| application GPUI references | 0 | 0 | 保持边界 |
+| desktop tests passed | 298（lib 289 + boundary 9） | 330（lib 311 + boundary 19） | +32 |
+| workspace Gate C passed | — | 713 | 0 failed |
+| ignored | 5（均为显式 release performance gate） | 5 | 不变 |
+| clippy warnings | 初始 1；清理后 0 | 0 | 严格 desktop clippy |
+| headless frame/input/change P95 | 2,662 / 5,753 / 352 µs | 2,669 / 5,897 / 362 µs | 均在预算内 |
+| headless window RSS growth | 24,281,088 bytes | 24,555,520 bytes | +274,432（+1.1%） |
+| native frame P95/P99 | 4,724 / 4,994 µs | 4,874 / 5,433 µs | +150 / +439 µs |
+| input-to-post-render P95 | 8,414 µs | 8,344 µs | -70 µs |
+| RSS absolute/steady growth | 152,715,264 / 163,840 bytes | 152,514,560 / 143,360 bytes | -200,704 / -20,480 bytes |
+| production Markdown P95 | 135 µs | 109 µs | -26 µs |
+
+行数口径可复现：统计 `crates/desktop/**/*.rs` 物理行；`tests/`、`tests.rs`、整文件
+`#[cfg(test)]` 与文件尾 `#[cfg(test)] mod tests` 计入 test-owned，其余计入 production/support。
+该口径不把零散的 test-only helper 从 mixed source 中二次切割。method 数由 `ast-grep outline`
+按 `NativeShell` 的 direct members 统计；“默认生产”扣除 `cfg(test)` 与 `desktop-devtools` members。
 
 Gate 与性能记录：
 
@@ -1552,6 +1572,29 @@ Gate 与性能记录：
   `311 passed / 5 ignored / 0 failed`，19 项 boundary 全绿。减少的 1 项测试只验证已删除、无生产消费者的 tone helper；
   本任务不改变生产 render/layout/runtime 行为，未运行 performance/visual gate。
 
+### DSK-771 实际结果
+
+- Gate C 在最终代码 `de49c2b` 上完整执行并通过：`cargo fmt --all --check`、
+  `cargo clippy -p desktop --all-targets -- -D warnings`、`cargo test --workspace --all-targets --quiet`、
+  headless perf、native perf 与 visual golden compare 均为成功。workspace tests 合计
+  `713 passed / 5 ignored / 0 failed`；其中 desktop 为 `311` 项 lib tests 与 `19` 项 dependency
+  boundary tests。workspace test build 仍打印 `coding-agent` test-configuration 的既有 dead-code
+  warnings，不属于本计划的 desktop strict-clippy 范围；desktop clippy warnings 为 0。
+- 最终 headless gate 的 10 MiB hydration 为 14,572 µs、30,015 allocations、retained
+  13,108,890 bytes；GPUI frame/input roundtrip/input-change-to-render P95 分别为
+  2,669/5,897/362 µs，window RSS growth 24,555,520 bytes。Markdown matrix P95 为
+  84,419/20,033/4,664/6,367/4,928 µs（256 KiB Markdown/reasoning/bash/table/code），全部在预算内。
+- 最终 native gate 的 200-frame GPU present P95/P99 为 4,874/5,433 µs，input dispatch→post-render
+  P95/P99 为 8,344/8,362 µs；RSS warmup 后/最终为 152,371,200/152,514,560 bytes，startup/steady
+  growth 为 120,184,832/143,360 bytes；production Markdown parse→layout P95 为 109 µs，全部通过预算。
+- 20 项 visual fixture compare 全部 `RMSE=0`，未运行 `--review`、未更新 golden。最终结构指标已按上表
+  的可复现口径回填；新增总行数主要来自 application/runtime invariant 与专项测试显式化，
+  `native_shell.rs`、其子树、fields 与主文件 methods 均达到收敛目标。
+- `docs/architecture.md` 已在 `794c790` 更新 desktop 最终目录、UiIntent/DesktopEvent 两类数据流、
+  reducer/effect/change-set owner、runtime/platform/UI dependency rules、测试路径与默认关闭的
+  `desktop-devtools` 边界。最终审计确认执行债务表全部已清理，worktree 不含生成 artifact、无关修改
+  或未评审 golden；目标目录下的 perf 日志仍仅位于 git-ignored `target/desktop-perf/`。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1578,8 +1621,8 @@ Gate 与性能记录：
 | DSK-761 | 已完成 | `3482e8c` | runtime 4,034 行单文件按 6 类状态机 invariant + fixtures 拆分；22 处启动 setup 合并；54 项 runtime tests 保持全绿，Gate A 与 17 项 boundary 全通过；未扩大 production API |
 | DSK-762 | 已完成 | `b15731c` | native replay 迁入 feature-gated devtools，默认构建移除 fixture authority；修复 5 个 perf test 路径；Gate A、两个 performance gate、18 项 boundary 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-770 | 已完成 | `de49c2b` | 删除 4 个 runtime compatibility command、Bridge test façade、protocol shim、29 个 unused conversation re-export 与 controls dead vocabulary；legacy 全文审计清零，Gate A/B、54 项 runtime 与 19 项 boundary 全通过 |
-| DSK-771 | 待执行 | — | — |
+| DSK-771 | 已完成 | `794c790` | Gate C 全通过；workspace 713 passed/5 ignored；最终结构/性能指标与 architecture 已回填；20 项 visual RMSE=0，未更新 golden；执行债务和 workspace artifact 审计清零 |
 
 ---
 
-<sub>文档版本：1.0 | 调研基线：7766b06（dirty worktree）</sub>
+<sub>文档版本：1.1 | 调研基线：7766b06（dirty worktree）| 正式执行基线：01920b8 | 最终代码：de49c2b</sub>
