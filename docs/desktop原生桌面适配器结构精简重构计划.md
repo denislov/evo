@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-751 已完成，下一项 DSK-752）
+> 状态：执行中（DSK-752 已完成，下一项 DSK-753）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1439,6 +1439,28 @@ Gate 与性能记录：
   `13 passed`），all-target check、严格 clippy、format 与 diff check 全部通过。任务不改变 render/layout/
   ViewModel 或像素语义，未运行、未更新 visual golden。
 
+### DSK-752 实际结果
+
+- 删除根级 `runtime.rs` 与历史 `runtime/{bridge,driver,dispatch}.rs` 路径，不保留 deprecated module alias 或
+  re-export façade。新的 `runtime/mod.rs` 只声明 `client/protocol/worker` 并 re-export production 实际消费的
+  Desktop runtime contract；同时删除 9 个仅靠 `allow(unused_imports)` 留存的 bootstrap/queue/limit/error
+  re-export，根 contract 在严格 warning 模式下保持干净。
+- `runtime/client.rs` 成为 bootstrap、non-blocking `RuntimeCommandClient` admission、priority/data ordered event
+  stream、shutdown signal/guard 与 runtime-thread join/reaper 的唯一 owner。`runtime/protocol.rs` 只保留 bounded
+  command/update DTO、limits、validation、safe error projection 与 kind labels，不依赖 UI/platform 或执行
+  process/storage/thread authority。
+- 原 driver state machine 迁入 `runtime/worker/mod.rs`，继续唯一持有 home/session runtime state、active prompt、
+  reconnect source、ProductEvent pump、overflow→resync、shutdown deadline 与 session cleanup；独立的 typed
+  command→update 分派器迁入 `runtime/worker/dispatch.rs`。两者通过 worker 内部窄可见性协作，client 不持有
+  `RuntimeState/ActivePrompt/CodingAgentSession`，worker 不持有 bootstrap/event-stream/shutdown/client authority。
+- dependency boundary 增至 14 项：四个旧路径必须保持删除，五个新 authority path 必须存在；protocol 禁止
+  client/worker/process/UI/storage 权限，client 禁止 session worker 权限，worker 禁止 client 权限。54 项 runtime
+  tests 全绿，覆盖 queue closed/full、data overflow、priority ordering、explicit shutdown、sender loss/join、runtime
+  panic、shutdown deadline、multi-session isolation 与 reconnect gap/lag/exhaustion。
+- Gate A 通过：desktop lib `319 passed / 5 ignored / 0 failed`，dependency boundary `14 passed`，all-target check、
+  严格 clippy、format 与 diff check 全部通过。任务只重组内部路径与 contract export，没有改变 channel/poll/
+  shutdown 行为或 UI 像素语义，未运行 performance gate 与 visual golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1459,7 +1481,7 @@ Gate 与性能记录：
 | DSK-743 | 已完成 | `e321170` | 唯一 typed refresh authority；root Render/adapter 按职责拆分，生产区降至 1,035 行；typed panel preferences transition；清理 DSK-D730-03；Gate A/B、headless perf 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-750 | 已完成 | `0332676` | preferences model 与 platform store/writer/workspace resolver 分权；application 无文件/线程/path authority；Gate A、16 项 preference 与 3 项 scratch 定向测试、12 项 boundary 全通过；未更新 golden |
 | DSK-751 | 已完成 | `847b2a4` | review presentation 与 external-editor platform 分权；runtime 仅重校验 opaque target；typed launch result 回 reducer；Gate A/B、4 项 review bounds、5 项 editor/platform 定向测试与 13 项 boundary 全通过；未更新 golden |
-| DSK-752 | 待执行 | — | — |
+| DSK-752 | 已完成 | `43af5ca` | runtime contract/client/worker/dispatch 单一 authority 路径；删除旧 module path 与 9 个 unused re-export；Gate A、54 项 runtime 与 14 项 boundary 全通过；未运行 perf/visual gate |
 | DSK-753 | 待执行 | — | — |
 | DSK-760 | 待执行 | — | — |
 | DSK-761 | 待执行 | — | — |
