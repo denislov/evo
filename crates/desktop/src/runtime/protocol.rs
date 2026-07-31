@@ -16,8 +16,6 @@ use coding_agent::api::view::{
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::file_review::{DesktopExternalEditorConfig, DesktopExternalEditorLaunchError};
-
 pub const DESKTOP_COMMAND_QUEUE_CAPACITY: usize = 64;
 pub const DESKTOP_UPDATE_QUEUE_CAPACITY: usize = 128;
 pub const DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY: usize = 64;
@@ -124,7 +122,6 @@ pub(super) enum DesktopRuntimeCommand {
         command_id: u64,
         session_id: String,
         target: CodingAgentExternalEditorTarget,
-        editor: DesktopExternalEditorConfig,
     },
 }
 
@@ -459,19 +456,11 @@ pub(super) enum DesktopBridgeError {
     WorkspaceUnavailable { message: String },
     #[error("{0}")]
     Product(CodingAgentPublicError),
-    #[error("external editor launch failed")]
-    ExternalEditor,
 }
 
 impl From<CodingAgentPublicError> for DesktopBridgeError {
     fn from(error: CodingAgentPublicError) -> Self {
         Self::Product(error)
-    }
-}
-
-impl From<DesktopExternalEditorLaunchError> for DesktopBridgeError {
-    fn from(_: DesktopExternalEditorLaunchError) -> Self {
-        Self::ExternalEditor
     }
 }
 
@@ -580,9 +569,9 @@ pub enum DesktopRuntimeUpdate {
         command_id: u64,
         review: CodingAgentFileReview,
     },
-    ExternalEditorOpened {
+    ExternalEditorTargetValidated {
         command_id: u64,
-        project_relative_path: String,
+        target: CodingAgentExternalEditorTarget,
     },
     PromptFinished {
         command_id: u64,
@@ -632,7 +621,7 @@ impl DesktopRuntimeUpdate {
             Self::AuthorizationDecisionAccepted { .. } => "authorization_decision_accepted",
             Self::RecoveryChanged { .. } => "recovery_changed",
             Self::FileReviewed { .. } => "file_reviewed",
-            Self::ExternalEditorOpened { .. } => "external_editor_opened",
+            Self::ExternalEditorTargetValidated { .. } => "external_editor_target_validated",
             Self::PromptFinished { .. } => "prompt_finished",
             Self::CommandRejected { .. } => "command_rejected",
             Self::RuntimeFailed { .. } => "runtime_failed",
@@ -677,8 +666,6 @@ pub enum DesktopCommandAdmissionError {
     InvalidSelectionId { message: String },
     #[error("invalid changed-file review request: {message}")]
     InvalidFileReview { message: String },
-    #[error("invalid external editor configuration: {message}")]
-    InvalidExternalEditor { message: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -727,10 +714,6 @@ impl DesktopRuntimeErrorSource for DesktopBridgeError {
             DesktopBridgeError::WorkspaceUnavailable { message } => {
                 local_runtime_error("workspace_unavailable", message)
             }
-            DesktopBridgeError::ExternalEditor => local_runtime_error(
-                "external_editor_unavailable",
-                "The configured external editor could not be started.",
-            ),
         }
     }
 }

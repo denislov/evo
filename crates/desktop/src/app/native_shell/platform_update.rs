@@ -1,6 +1,7 @@
 use super::{
     CodingAgentWorkspaceSelection, DesktopCommandIntent, Instant, NativeShell, PathBuf,
-    PlatformUpdatePort, SessionWorkspace, WorkspaceKey, validate_prompt_attachments,
+    PlatformUpdatePort, SessionWorkspace, WorkspaceKey, truncate_label,
+    validate_prompt_attachments,
 };
 
 impl PlatformUpdatePort for NativeShell {
@@ -108,6 +109,34 @@ impl PlatformUpdatePort for NativeShell {
         let _ = self.app.commands.complete(command_id, owner, &intent);
         if let Some(workspace) = self.app.workspaces.get_mut(owner) {
             workspace.set_preference_notice(message);
+        }
+    }
+
+    fn complete_external_editor_launch(
+        &mut self,
+        owner: &WorkspaceKey,
+        command_id: u64,
+        project_relative_path: &str,
+        failure: Option<String>,
+    ) {
+        let intent = DesktopCommandIntent::ExternalEditor {
+            project_relative_path: project_relative_path.to_owned(),
+        };
+        if self
+            .app
+            .commands
+            .complete(command_id, owner, &intent)
+            .is_err()
+        {
+            return;
+        }
+        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
+            workspace.set_preference_notice(failure.unwrap_or_else(|| {
+                format!(
+                    "Opened {} in the configured editor.",
+                    truncate_label(project_relative_path, 48)
+                )
+            }));
         }
     }
 }

@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use coding_agent::api::embedding::CodingAgentThinkingLevel;
 
-use crate::file_review::DesktopExternalEditorConfig;
 use crate::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH, SESSION_PANEL_MAX_WIDTH,
     SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_WIDTH,
@@ -16,6 +15,16 @@ pub(crate) const PREFERENCES_SCHEMA_VERSION: u16 = 1;
 const MAX_WORKSPACE_ID_BYTES: usize = 64;
 pub(crate) const MAX_PERSISTED_SESSION_ID_BYTES: usize = 256;
 pub(crate) const MAX_PERSISTED_SESSION_THINKING_LEVELS: usize = 128;
+
+/// Serializable user preference only. Platform validation turns this raw DTO
+/// into an executable external-editor configuration at the launch boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalEditorPreference {
+    pub(crate) program: String,
+    #[serde(default)]
+    pub(crate) args: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,7 +125,7 @@ pub struct DesktopPreferences {
     pub reduced_motion: bool,
     pub ui_scale: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) external_editor: Option<DesktopExternalEditorConfig>,
+    pub(crate) external_editor: Option<ExternalEditorPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) scratch_workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -155,13 +164,6 @@ impl DesktopPreferences {
             self.ui_scale = 1.0;
         }
         self.ui_scale = self.ui_scale.clamp(0.75, 2.0);
-        if self
-            .external_editor
-            .as_ref()
-            .is_some_and(|editor| editor.validate().is_err())
-        {
-            self.external_editor = None;
-        }
         if self
             .scratch_workspace_id
             .as_deref()

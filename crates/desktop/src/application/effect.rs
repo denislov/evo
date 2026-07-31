@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
-use desktop::preferences::DesktopPreferences;
+use desktop::preferences::{DesktopPreferences, ExternalEditorPreference};
 
 use super::workspace::WorkspaceKey;
 
@@ -54,6 +54,29 @@ pub(crate) enum ClipboardFeedback {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalEditorLaunchTarget {
+    path: PathBuf,
+    project_relative_path: String,
+}
+
+impl ExternalEditorLaunchTarget {
+    pub(crate) fn new(path: PathBuf, project_relative_path: String) -> Self {
+        Self {
+            path,
+            project_relative_path,
+        }
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub(crate) fn project_relative_path(&self) -> &str {
+        &self.project_relative_path
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DesktopTimer {
     identity: EffectIdentity,
     kind: DesktopTimerKind,
@@ -99,6 +122,10 @@ pub(crate) enum PlatformResult {
         identity: EffectIdentity,
         outcome: PlatformOutcome<()>,
     },
+    ExternalEditorLaunched {
+        identity: EffectIdentity,
+        outcome: PlatformOutcome<()>,
+    },
 }
 
 impl PlatformResult {
@@ -107,7 +134,8 @@ impl PlatformResult {
             Self::PathsPicked { identity, .. }
             | Self::ClipboardWritten { identity, .. }
             | Self::PreferencesWritten { identity, .. }
-            | Self::ResyncRequested { identity, .. } => identity,
+            | Self::ResyncRequested { identity, .. }
+            | Self::ExternalEditorLaunched { identity, .. } => identity,
         }
     }
 }
@@ -131,6 +159,12 @@ pub(crate) enum DesktopEffect {
         identity: EffectIdentity,
         command_id: u64,
     },
+    LaunchExternalEditor {
+        identity: EffectIdentity,
+        command_id: u64,
+        preference: ExternalEditorPreference,
+        target: ExternalEditorLaunchTarget,
+    },
     ScheduleTimer {
         timer: DesktopTimer,
         delay: Duration,
@@ -143,7 +177,8 @@ impl DesktopEffect {
             Self::PickPaths { identity, .. }
             | Self::WriteClipboard { identity, .. }
             | Self::WritePreferences { identity, .. }
-            | Self::RequestResync { identity, .. } => identity,
+            | Self::RequestResync { identity, .. }
+            | Self::LaunchExternalEditor { identity, .. } => identity,
             Self::ScheduleTimer { timer, .. } => timer.identity(),
         }
     }
@@ -169,6 +204,9 @@ impl DesktopEffect {
             ) | (
                 Self::RequestResync { .. },
                 PlatformResult::ResyncRequested { .. }
+            ) | (
+                Self::LaunchExternalEditor { .. },
+                PlatformResult::ExternalEditorLaunched { .. }
             )
         )
     }

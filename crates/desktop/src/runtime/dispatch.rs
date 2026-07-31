@@ -353,19 +353,13 @@ async fn dispatch_command_inner(
             Ok(DesktopRuntimeUpdate::FileReviewed { command_id, review })
         }
         DesktopRuntimeCommand::OpenExternalEditor {
-            session_id,
-            target,
-            editor,
-            ..
+            session_id, target, ..
         } => {
             let session_id = resolve_idle_target(state, active, Some(&session_id))?;
-            let project_relative_path = state
-                .open_external_editor(&session_id, target, editor)
+            let target = state
+                .validate_external_editor_target(&session_id, target)
                 .await?;
-            Ok(DesktopRuntimeUpdate::ExternalEditorOpened {
-                command_id,
-                project_relative_path,
-            })
+            Ok(DesktopRuntimeUpdate::ExternalEditorTargetValidated { command_id, target })
         }
         command @ (DesktopRuntimeCommand::Abort { .. }
         | DesktopRuntimeCommand::Steer { .. }

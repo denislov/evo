@@ -4,7 +4,7 @@ use coding_agent::api::{
     authorization::ToolAuthorizationDecision, embedding::CodingAgentThinkingLevel,
     review::CodingAgentFileReviewRequest,
 };
-use desktop::preferences::DesktopPreferences;
+use desktop::preferences::{DesktopPreferences, ExternalEditorPreference};
 use desktop::runtime::{
     DesktopRecoveryAction, DesktopRuntimeCommandKind, DesktopRuntimeError,
     DesktopRuntimeResyncSnapshot, DesktopRuntimeSelectionKind, DesktopRuntimeUpdate,
@@ -18,7 +18,8 @@ use super::{
     commands::DesktopCommandIntent,
     effect::{
         ClipboardFeedback, DesktopEffect, DesktopPickerKind, DesktopTimer, DesktopTimerKind,
-        EffectIdentity, EffectRequestId, PlatformOutcome, PlatformResult,
+        EffectIdentity, EffectRequestId, ExternalEditorLaunchTarget, PlatformOutcome,
+        PlatformResult,
     },
     runtime_state::{ProjectionUpdateResult, RuntimeWorkspacePresentation},
     state::DesktopState,
@@ -54,7 +55,7 @@ pub(crate) enum RuntimeUpdateKind {
     AuthorizationDecisionAccepted,
     RecoveryChanged,
     FileReviewed,
-    ExternalEditorOpened,
+    ExternalEditorTargetValidated,
     PromptFinished,
     CommandRejected,
     RuntimeFailed,
@@ -82,7 +83,7 @@ impl RuntimeUpdateKind {
         Self::AuthorizationDecisionAccepted,
         Self::RecoveryChanged,
         Self::FileReviewed,
-        Self::ExternalEditorOpened,
+        Self::ExternalEditorTargetValidated,
         Self::PromptFinished,
         Self::CommandRejected,
         Self::RuntimeFailed,
@@ -110,7 +111,7 @@ impl RuntimeUpdateKind {
             Self::AuthorizationDecisionAccepted => "authorization_decision_accepted",
             Self::RecoveryChanged => "recovery_changed",
             Self::FileReviewed => "file_reviewed",
-            Self::ExternalEditorOpened => "external_editor_opened",
+            Self::ExternalEditorTargetValidated => "external_editor_target_validated",
             Self::PromptFinished => "prompt_finished",
             Self::CommandRejected => "command_rejected",
             Self::RuntimeFailed => "runtime_failed",
@@ -145,8 +146,8 @@ pub(crate) const fn runtime_update_kind(update: &DesktopRuntimeUpdate) -> Runtim
         }
         DesktopRuntimeUpdate::RecoveryChanged { .. } => RuntimeUpdateKind::RecoveryChanged,
         DesktopRuntimeUpdate::FileReviewed { .. } => RuntimeUpdateKind::FileReviewed,
-        DesktopRuntimeUpdate::ExternalEditorOpened { .. } => {
-            RuntimeUpdateKind::ExternalEditorOpened
+        DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. } => {
+            RuntimeUpdateKind::ExternalEditorTargetValidated
         }
         DesktopRuntimeUpdate::PromptFinished { .. } => RuntimeUpdateKind::PromptFinished,
         DesktopRuntimeUpdate::CommandRejected { .. } => RuntimeUpdateKind::CommandRejected,
@@ -185,7 +186,7 @@ pub(crate) fn runtime_update_hydrated_snapshot(
         | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
         | DesktopRuntimeUpdate::RecoveryChanged { .. }
         | DesktopRuntimeUpdate::FileReviewed { .. }
-        | DesktopRuntimeUpdate::ExternalEditorOpened { .. }
+        | DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. }
         | DesktopRuntimeUpdate::CommandRejected { .. }
         | DesktopRuntimeUpdate::RuntimeFailed { .. }
         | DesktopRuntimeUpdate::Stopped => None,
@@ -209,7 +210,7 @@ pub(crate) const fn runtime_update_command_id(update: &DesktopRuntimeUpdate) -> 
         | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { command_id, .. }
         | DesktopRuntimeUpdate::RecoveryChanged { command_id, .. }
         | DesktopRuntimeUpdate::FileReviewed { command_id, .. }
-        | DesktopRuntimeUpdate::ExternalEditorOpened { command_id, .. }
+        | DesktopRuntimeUpdate::ExternalEditorTargetValidated { command_id, .. }
         | DesktopRuntimeUpdate::PromptFinished { command_id, .. }
         | DesktopRuntimeUpdate::CommandRejected { command_id, .. } => Some(*command_id),
         DesktopRuntimeUpdate::SessionNameObserved { .. }
@@ -262,7 +263,7 @@ pub(crate) fn runtime_update_observed_workspace_key(
         | DesktopRuntimeUpdate::ControlAccepted { .. }
         | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
         | DesktopRuntimeUpdate::FileReviewed { .. }
-        | DesktopRuntimeUpdate::ExternalEditorOpened { .. }
+        | DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. }
         | DesktopRuntimeUpdate::CommandRejected { .. }
         | DesktopRuntimeUpdate::RuntimeFailed { .. }
         | DesktopRuntimeUpdate::Stopped => None,
@@ -290,6 +291,13 @@ pub(crate) trait PlatformUpdatePort {
         &mut self,
         owner: &WorkspaceKey,
         command_id: u64,
+        failure: Option<String>,
+    );
+    fn complete_external_editor_launch(
+        &mut self,
+        owner: &WorkspaceKey,
+        command_id: u64,
+        project_relative_path: &str,
         failure: Option<String>,
     );
 }
@@ -484,33 +492,62 @@ fn reduce_runtime_update<Presentation: RuntimeWorkspacePresentation>(
             let foreground = state.workspaces.active_key().clone();
             return workspace_update_transition(&foreground, &owner, changes);
         }
-        DesktopRuntimeUpdate::ExternalEditorOpened {
+        DesktopRuntimeUpdate::ExternalEditorTargetValidated {
             command_id,
-            project_relative_path,
+            target: validated_target,
         } => {
+            let project_relative_path = validated_target.project_relative_path().to_owned();
             let owner = state
                 .commands
                 .owner(command_id)
                 .cloned()
                 .unwrap_or(target.clone());
-            if state.complete_runtime_command(
-                command_id,
-                &owner,
-                &DesktopCommandIntent::ExternalEditor {
-                    project_relative_path: project_relative_path.clone(),
-                },
-            ) {
+            let intent = DesktopCommandIntent::ExternalEditor {
+                project_relative_path: project_relative_path.clone(),
+            };
+            if !state.commands.matches(command_id, &owner, &intent) {
+                return Transition::default();
+            }
+            let Some(preference) = state.preferences.external_editor.clone() else {
+                let _ = state.commands.complete(command_id, &owner, &intent);
                 state.set_runtime_notice(
                     &owner,
-                    format!(
-                        "Opened {} in the configured editor.",
-                        truncate_label(&project_relative_path, 48)
-                    ),
+                    "The external editor is no longer configured.".into(),
                 );
                 changes.insert(UiRegion::Inspector);
-            }
+                let foreground = state.workspaces.active_key().clone();
+                return workspace_update_transition(&foreground, &owner, changes);
+            };
+            let effect = match controller.launch_external_editor(
+                owner.clone(),
+                command_id,
+                preference,
+                ExternalEditorLaunchTarget::new(
+                    validated_target.path().to_path_buf(),
+                    project_relative_path.clone(),
+                ),
+            ) {
+                Ok(effect) => effect,
+                Err(error) => {
+                    let _ = state.commands.complete(command_id, &owner, &intent);
+                    state.set_runtime_notice(&owner, error.to_string());
+                    changes.insert(UiRegion::Inspector);
+                    let foreground = state.workspaces.active_key().clone();
+                    return workspace_update_transition(&foreground, &owner, changes);
+                }
+            };
+            state.set_runtime_notice(
+                &owner,
+                format!(
+                    "Launching {} in the configured editor…",
+                    truncate_label(&project_relative_path, 48)
+                ),
+            );
+            changes.insert(UiRegion::Inspector);
             let foreground = state.workspaces.active_key().clone();
-            return workspace_update_transition(&foreground, &owner, changes);
+            let mut transition = workspace_update_transition(&foreground, &owner, changes);
+            transition.merge(effect);
+            return transition;
         }
         DesktopRuntimeUpdate::SessionsListed {
             command_id,
@@ -674,7 +711,7 @@ pub(crate) fn projection_event(update: DesktopRuntimeUpdate) -> Option<Projectio
         | DesktopRuntimeUpdate::ControlAccepted { .. }
         | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
         | DesktopRuntimeUpdate::FileReviewed { .. }
-        | DesktopRuntimeUpdate::ExternalEditorOpened { .. } => None,
+        | DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. } => None,
     }
 }
 
@@ -967,7 +1004,7 @@ fn reduce_pre_projection_update<Presentation: RuntimeWorkspacePresentation>(
         | DesktopRuntimeUpdate::ResyncRequired { .. }
         | DesktopRuntimeUpdate::RecoveryChanged { .. }
         | DesktopRuntimeUpdate::FileReviewed { .. }
-        | DesktopRuntimeUpdate::ExternalEditorOpened { .. }
+        | DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. }
         | DesktopRuntimeUpdate::ControlAccepted { .. } => {}
     }
 }
@@ -1414,6 +1451,22 @@ impl DesktopController {
         }))
     }
 
+    pub(crate) fn launch_external_editor(
+        &mut self,
+        owner: WorkspaceKey,
+        command_id: u64,
+        preference: ExternalEditorPreference,
+        target: ExternalEditorLaunchTarget,
+    ) -> Result<Transition, EffectIdentityError> {
+        let identity = self.reserve_effect_identity(owner)?;
+        Ok(self.register_effect(DesktopEffect::LaunchExternalEditor {
+            identity,
+            command_id,
+            preference,
+            target,
+        }))
+    }
+
     pub(crate) fn schedule_timer(
         &mut self,
         owner: WorkspaceKey,
@@ -1519,6 +1572,16 @@ fn effect_supersedes(next: &DesktopEffect, pending: &DesktopEffect) -> bool {
             },
         ) => next_identity.owner() == pending_identity.owner(),
         (
+            DesktopEffect::LaunchExternalEditor {
+                identity: next_identity,
+                ..
+            },
+            DesktopEffect::LaunchExternalEditor {
+                identity: pending_identity,
+                ..
+            },
+        ) => next_identity.owner() == pending_identity.owner(),
+        (
             DesktopEffect::ScheduleTimer {
                 timer: next_timer, ..
             },
@@ -1599,6 +1662,30 @@ fn reduce_platform_result(
             } else {
                 Transition::default()
             }
+        }
+        (
+            DesktopEffect::LaunchExternalEditor {
+                command_id, target, ..
+            },
+            PlatformResult::ExternalEditorLaunched { outcome, .. },
+        ) => {
+            let project_relative_path = target.project_relative_path().to_owned();
+            let failure = match outcome {
+                PlatformOutcome::Completed(()) => None,
+                PlatformOutcome::Cancelled => Some("external editor launch was cancelled".into()),
+                PlatformOutcome::Failed(message) => Some(message),
+            };
+            port.complete_external_editor_launch(
+                &owner,
+                command_id,
+                &project_relative_path,
+                failure,
+            );
+            foreground_changes(
+                port,
+                &owner,
+                &[UiRegion::Inspector, UiRegion::Root, UiRegion::Toast],
+            )
         }
         _ => unreachable!("platform result was matched to its exact pending effect"),
     }
@@ -1712,7 +1799,7 @@ fn foreground_changes(
 mod tests {
     use std::{collections::HashMap, path::PathBuf, time::Duration};
 
-    use desktop::preferences::DesktopPreferences;
+    use desktop::preferences::{DesktopPreferences, ExternalEditorPreference};
 
     use super::{
         CatalogIntent, DesktopController, DesktopEvent, PlatformUpdatePort, RuntimeUpdateKind,
@@ -1723,7 +1810,7 @@ mod tests {
         commands::CommandTracker,
         effect::{
             ClipboardFeedback, DesktopEffect, DesktopPickerKind, DesktopTimer, DesktopTimerKind,
-            EffectIdentity, PlatformOutcome, PlatformResult,
+            EffectIdentity, ExternalEditorLaunchTarget, PlatformOutcome, PlatformResult,
         },
         state::DesktopState,
         workspace::{WorkspaceKey, WorkspaceStore},
@@ -1835,6 +1922,19 @@ mod tests {
                 self.set_notice(owner, message);
             }
         }
+
+        fn complete_external_editor_launch(
+            &mut self,
+            owner: &WorkspaceKey,
+            _command_id: u64,
+            project_relative_path: &str,
+            failure: Option<String>,
+        ) {
+            self.set_notice(
+                owner,
+                failure.unwrap_or_else(|| format!("opened {project_relative_path}")),
+            );
+        }
     }
 
     fn emitted_identity(transition: &Transition) -> EffectIdentity {
@@ -1870,7 +1970,7 @@ mod tests {
                 "authorization_decision_accepted",
                 "recovery_changed",
                 "file_reviewed",
-                "external_editor_opened",
+                "external_editor_target_validated",
                 "prompt_finished",
                 "command_rejected",
                 "runtime_failed",
@@ -1962,6 +2062,45 @@ mod tests {
         };
         assert_eq!(timer_effect.identity(), &identity);
         assert_eq!(timer_effect.identity().owner(), &WorkspaceKey::Home);
+    }
+
+    #[test]
+    fn external_editor_launch_failure_returns_through_typed_platform_result() {
+        let mut controller = DesktopController::new();
+        let owner = WorkspaceKey::Home;
+        let transition = controller
+            .launch_external_editor(
+                owner.clone(),
+                41,
+                ExternalEditorPreference {
+                    program: "missing-editor".into(),
+                    args: Vec::new(),
+                },
+                ExternalEditorLaunchTarget::new(
+                    PathBuf::from("/project/src/lib.rs"),
+                    "src/lib.rs".into(),
+                ),
+            )
+            .unwrap();
+        let identity = emitted_identity(&transition);
+        let mut port = TestPlatformPort::new(owner.clone());
+
+        let completion = controller.reduce_platform(
+            &mut port,
+            PlatformResult::ExternalEditorLaunched {
+                identity,
+                outcome: PlatformOutcome::Failed(
+                    "external editor executable is unavailable".into(),
+                ),
+            },
+        );
+
+        assert_eq!(
+            port.notices.get(&owner).map(String::as_str),
+            Some("external editor executable is unavailable")
+        );
+        assert!(completion.changes().contains(UiRegion::Inspector));
+        assert!(completion.changes().contains(UiRegion::Toast));
     }
 
     #[test]

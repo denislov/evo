@@ -32,8 +32,6 @@ use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{mpsc, watch};
 use tokio::task;
 
-use crate::file_review::{DesktopExternalEditorConfig, launch_external_editor};
-
 use super::dispatch::dispatch_command_with_updates;
 use super::protocol::{
     DESKTOP_UPDATE_QUEUE_CAPACITY, DesktopBridgeError, DesktopRecoveryIdentity,
@@ -269,12 +267,11 @@ impl RuntimeState {
             .map_err(DesktopBridgeError::from)
     }
 
-    pub(super) async fn open_external_editor(
+    pub(super) async fn validate_external_editor_target(
         &self,
         session_id: &str,
         target: CodingAgentExternalEditorTarget,
-        editor: DesktopExternalEditorConfig,
-    ) -> Result<String, DesktopBridgeError> {
+    ) -> Result<CodingAgentExternalEditorTarget, DesktopBridgeError> {
         let workspace =
             self.workspaces
                 .get(session_id)
@@ -285,11 +282,7 @@ impl RuntimeState {
             .session
             .revalidate_external_editor_target(&target)
             .await?;
-        let project_relative_path = target.project_relative_path().to_owned();
-        task::spawn_blocking(move || launch_external_editor(&editor, &target))
-            .await
-            .map_err(|_| DesktopBridgeError::ExternalEditor)??;
-        Ok(project_relative_path)
+        Ok(target)
     }
 
     pub(super) fn retry_recovery(

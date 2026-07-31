@@ -118,14 +118,14 @@ impl NativeShell {
     }
 
     pub(super) fn open_review_in_external_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.app.preferences.external_editor.clone() else {
+        if self.app.preferences.external_editor.is_none() {
             self.app.workspaces.active_mut().set_preference_notice(
                 "Configure desktop.external_editor with a program and literal argv first.".into(),
             );
             self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
             cx.notify();
             return;
-        };
+        }
         let DesktopFileReviewState::Ready(document) =
             self.app.workspaces.active_mut().file_review.as_ref()
         else {
@@ -179,7 +179,7 @@ impl NativeShell {
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
             .and_then(|runtime| {
                 runtime
-                    .try_open_external_editor(command_id, &session_id, &target, &editor)
+                    .try_open_external_editor(command_id, &session_id, &target)
                     .map_err(|error| error.to_string())
             });
         match admission {

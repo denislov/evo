@@ -6,6 +6,7 @@ use super::{
     WorkspaceKey, center_drawer_host, composer_pane, conversation_header, conversation_pane,
     inspector_pane, inspector_telemetry_refresh_delay, root_modal_host, sessions_pane, skills_pane,
 };
+use crate::platform::external_editor::launch_external_editor;
 
 impl NativeShell {
     pub(super) fn with_controller<T>(
@@ -164,6 +165,21 @@ impl NativeShell {
                 );
                 self.dispatch_platform_result(
                     PlatformResult::ResyncRequested { identity, outcome },
+                    cx,
+                );
+            }
+            DesktopEffect::LaunchExternalEditor {
+                identity,
+                preference,
+                target,
+                ..
+            } => {
+                let outcome = launch_external_editor(&preference, target.path()).map_or_else(
+                    |error| PlatformOutcome::Failed(error.to_string()),
+                    |()| PlatformOutcome::Completed(()),
+                );
+                self.dispatch_platform_result(
+                    PlatformResult::ExternalEditorLaunched { identity, outcome },
                     cx,
                 );
             }

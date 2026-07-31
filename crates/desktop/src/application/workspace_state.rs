@@ -11,10 +11,10 @@ use coding_agent::api::{
     review::CodingAgentFileReviewRequest,
 };
 use desktop::conversation::{ComposerAdmission, ComposerState};
-use desktop::file_review::DesktopFileReviewDocument;
 use desktop::preferences::DesktopThinkingLevel;
 use desktop::projection::DesktopProjection;
 use desktop::runtime::{DesktopPromptTarget, DesktopRuntimeOwnerTarget};
+use desktop::ui::inspector::review::DesktopFileReviewDocument;
 
 pub(crate) const MAX_SESSION_WORKSPACES: usize = 4;
 

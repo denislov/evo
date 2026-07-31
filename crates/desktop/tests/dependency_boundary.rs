@@ -721,3 +721,53 @@ fn runtime_and_platform_layers_do_not_depend_on_presentation() {
         assert_paths_exclude(&path, &facts, &[&["ui"]]);
     }
 }
+
+#[test]
+fn file_review_presentation_and_external_editor_platform_stay_isolated() {
+    let root = manifest_dir().join("src");
+    assert!(
+        !root.join("file_review.rs").exists(),
+        "the former mixed review/process module must stay deleted"
+    );
+
+    let review = root.join("ui/inspector/review.rs");
+    let review_facts = production_facts(&review);
+    assert_paths_exclude(
+        &review,
+        &review_facts,
+        &[
+            &["gpui"],
+            &["platform"],
+            &["std", "process"],
+            &["std", "thread"],
+            &["std", "fs"],
+        ],
+    );
+
+    let editor = root.join("platform/external_editor.rs");
+    let editor_facts = production_facts(&editor);
+    assert_paths_exclude(
+        &editor,
+        &editor_facts,
+        &[&["gpui"], &["ui"], &["runtime"], &["coding_agent"]],
+    );
+
+    for path in layer_rust_files("runtime") {
+        if is_test_only_source(&path) {
+            continue;
+        }
+        let facts = production_facts(&path);
+        for forbidden in [
+            "ExternalEditorPreference",
+            "ExternalEditorConfig",
+            "ExternalEditorConfigError",
+            "ExternalEditorLaunchError",
+        ] {
+            assert!(
+                !facts.identifiers.contains(forbidden),
+                "{} runtime module must not own external-editor platform type {forbidden}",
+                path.display()
+            );
+        }
+    }
+}

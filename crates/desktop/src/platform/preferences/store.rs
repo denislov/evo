@@ -9,6 +9,7 @@ use std::thread::{self, JoinHandle};
 
 use futures::channel::oneshot;
 
+use crate::platform::external_editor::validate_external_editor_preference;
 use crate::preferences::{DesktopPreferences, PREFERENCES_SCHEMA_VERSION};
 
 const MAX_PREFERENCES_BYTES: u64 = 64 * 1024;
@@ -223,7 +224,7 @@ impl PreferenceStore {
             )));
         }
         Ok(PreferenceLoad {
-            preferences: preferences.normalized(),
+            preferences: normalize_platform_preferences(preferences),
             recovery: None,
         })
     }
@@ -242,7 +243,7 @@ impl PreferenceStore {
             }
         }
 
-        let normalized = preferences.clone().normalized();
+        let normalized = normalize_platform_preferences(preferences.clone());
         let bytes = serde_json::to_vec_pretty(&normalized)?;
         debug_assert!((bytes.len() as u64) <= MAX_PREFERENCES_BYTES);
 
@@ -301,6 +302,18 @@ impl PreferenceStore {
         sync_directory(&self.directory)?;
         Ok(())
     }
+}
+
+fn normalize_platform_preferences(preferences: DesktopPreferences) -> DesktopPreferences {
+    let mut preferences = preferences.normalized();
+    if preferences
+        .external_editor
+        .as_ref()
+        .is_some_and(|editor| validate_external_editor_preference(editor).is_err())
+    {
+        preferences.external_editor = None;
+    }
+    preferences
 }
 
 fn reject_symlink(path: &Path, metadata: &fs::Metadata) -> Result<(), PreferenceStoreError> {
@@ -393,7 +406,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use crate::file_review::DesktopExternalEditorConfig;
+    use crate::preferences::ExternalEditorPreference;
     use crate::preferences::{
         DesktopThinkingLevel, MAX_PERSISTED_SESSION_ID_BYTES,
         MAX_PERSISTED_SESSION_THINKING_LEVELS, WindowGeometry,
@@ -522,7 +535,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = PreferenceStore::new(temp.path());
         let mut preferences = DesktopPreferences {
-            external_editor: Some(DesktopExternalEditorConfig {
+            external_editor: Some(ExternalEditorPreference {
                 program: "code".into(),
                 args: vec!["--reuse-window".into(), "literal;argument".into()],
             }),
@@ -533,11 +546,11 @@ mod tests {
         assert_eq!(saved.external_editor, preferences.external_editor);
         assert_eq!(store.load().unwrap().preferences, saved);
 
-        preferences.external_editor = Some(DesktopExternalEditorConfig {
+        preferences.external_editor = Some(ExternalEditorPreference {
             program: "/bin/sh".into(),
             args: vec!["-c".into()],
         });
-        assert!(preferences.normalized().external_editor.is_none());
+        assert!(store.save(&preferences).unwrap().external_editor.is_none());
     }
 
     #[test]

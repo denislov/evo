@@ -13,8 +13,6 @@ use tokio::runtime;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument as _;
 
-use crate::file_review::DesktopExternalEditorConfig;
-
 #[cfg(test)]
 use super::protocol::DesktopRuntimeCommandKind;
 use super::protocol::{
@@ -895,19 +893,12 @@ impl RuntimeCommandClient {
         command_id: u64,
         session_id: &str,
         target: &CodingAgentExternalEditorTarget,
-        editor: &DesktopExternalEditorConfig,
     ) -> Result<(), DesktopCommandAdmissionError> {
         validate_session_id(session_id)?;
-        editor.validate().map_err(
-            |error| DesktopCommandAdmissionError::InvalidExternalEditor {
-                message: error.to_string(),
-            },
-        )?;
         self.try_send(DesktopRuntimeCommand::OpenExternalEditor {
             command_id,
             session_id: session_id.to_owned(),
             target: target.clone(),
-            editor: editor.clone(),
         })
     }
 

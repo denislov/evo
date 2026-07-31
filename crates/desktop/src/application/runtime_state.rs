@@ -387,7 +387,7 @@ impl<Presentation: RuntimeWorkspacePresentation>
     ) {
         if let Some(workspace) = self.workspaces.get_mut(owner) {
             workspace.file_review = Arc::new(DesktopFileReviewState::Ready(
-                desktop::file_review::DesktopFileReviewDocument::from_product(review),
+                desktop::ui::inspector::review::DesktopFileReviewDocument::from_product(review),
             ));
         }
     }

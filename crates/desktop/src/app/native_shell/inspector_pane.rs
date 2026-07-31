@@ -1,10 +1,10 @@
 use coding_agent::api::review::CodingAgentFileReviewRequest;
-use desktop::file_review::{DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES};
 use desktop::projection::DesktopRecoveryStatus;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
 use desktop::shell::{
     CONTEXT_PANEL_WIDTH, MONOSPACE_FONT_FAMILY, SemanticColor, SemanticTheme, truncate_label,
 };
+use desktop::ui::inspector::review::{DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES};
 use gpui::{
     EventEmitter, FocusHandle, IntoElement, KeyDownEvent, ParentElement as _, Render, Role,
     ScrollHandle, Styled as _, Window, div, prelude::*, px, rgb,

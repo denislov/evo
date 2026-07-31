@@ -2,7 +2,8 @@ mod model;
 
 pub use model::DesktopPreferences;
 pub(crate) use model::{
-    DesktopThinkingLevel, PREFERENCES_SCHEMA_VERSION, valid_scratch_workspace_id,
+    DesktopThinkingLevel, ExternalEditorPreference, PREFERENCES_SCHEMA_VERSION,
+    valid_scratch_workspace_id,
 };
 #[cfg(test)]
 pub(crate) use model::{

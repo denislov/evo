@@ -14,8 +14,6 @@ use desktop::conversation::{
     ComposerState, ComposerSubmissionKind, ConversationBlockKind, ConversationRowMeasurement,
     MAX_COPY_BYTES, conversation_copy_text, conversation_width_bucket,
 };
-#[cfg(test)]
-use desktop::file_review::DesktopFileReviewDocument;
 use desktop::platform::preferences::{PreferenceWriteResult, PreferenceWriter};
 use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel};
 use desktop::projection::{DesktopProjection, DesktopRecoveryStatus};
@@ -33,6 +31,8 @@ use desktop::shell::{
     SESSION_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_WIDTH, SemanticColor,
     SemanticStatus, SemanticTheme, ShellLayout, UI_FONT_FAMILY, truncate_label,
 };
+#[cfg(test)]
+use desktop::ui::inspector::review::DesktopFileReviewDocument;
 use gpui::{
     ClipboardItem, Context, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, ScrollStrategy, Window, WindowBounds, prelude::*, rgb,

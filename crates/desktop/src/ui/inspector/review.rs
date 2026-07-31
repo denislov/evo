@@ -1,14 +1,8 @@
-//! Bounded, adapter-local presentation for product-authorized file reviews.
-
-use std::ffi::OsString;
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::thread;
+//! Bounded, GPUI-independent presentation for product-authorized file reviews.
 
 use coding_agent::api::review::{
     CodingAgentExternalEditorTarget, CodingAgentFileReview, CodingAgentFileReviewRequest,
 };
-use serde::{Deserialize, Serialize};
 
 pub(crate) const MAX_VISIBLE_FILE_CHANGES: usize = 64;
 pub(crate) const MAX_REVIEW_ROWS: usize = 480;
@@ -16,123 +10,6 @@ pub(crate) const MAX_REVIEW_LINE_BYTES: usize = 2 * 1024;
 pub(crate) const MAX_REVIEW_RENDER_BYTES: usize = 160 * 1024;
 pub(crate) const MAX_REVIEW_CLIPBOARD_BYTES: usize = 128 * 1024;
 const MAX_REVIEW_PATH_BYTES: usize = 4 * 1024;
-const MAX_EDITOR_PROGRAM_BYTES: usize = 4 * 1024;
-const MAX_EDITOR_ARGUMENTS: usize = 32;
-const MAX_EDITOR_ARGUMENT_BYTES: usize = 4 * 1024;
-const MAX_EDITOR_ARGUMENT_TOTAL_BYTES: usize = 16 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DesktopExternalEditorConfig {
-    pub(crate) program: String,
-    #[serde(default)]
-    pub(crate) args: Vec<String>,
-}
-
-impl DesktopExternalEditorConfig {
-    pub(crate) fn validate(&self) -> Result<(), DesktopExternalEditorConfigError> {
-        if self.program.trim().is_empty() {
-            return Err(DesktopExternalEditorConfigError::EmptyProgram);
-        }
-        if self.program.len() > MAX_EDITOR_PROGRAM_BYTES || self.program.contains('\0') {
-            return Err(DesktopExternalEditorConfigError::InvalidProgram);
-        }
-        let executable = Path::new(&self.program)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(self.program.as_str())
-            .to_ascii_lowercase();
-        if matches!(
-            executable.as_str(),
-            "sh" | "bash" | "zsh" | "fish" | "cmd" | "cmd.exe" | "powershell" | "pwsh"
-        ) {
-            return Err(DesktopExternalEditorConfigError::ShellProgram);
-        }
-        if self.args.len() > MAX_EDITOR_ARGUMENTS {
-            return Err(DesktopExternalEditorConfigError::TooManyArguments);
-        }
-        let mut total = 0usize;
-        for argument in &self.args {
-            if argument.len() > MAX_EDITOR_ARGUMENT_BYTES || argument.contains('\0') {
-                return Err(DesktopExternalEditorConfigError::InvalidArgument);
-            }
-            total = total
-                .checked_add(argument.len())
-                .ok_or(DesktopExternalEditorConfigError::ArgumentsTooLarge)?;
-            if total > MAX_EDITOR_ARGUMENT_TOTAL_BYTES {
-                return Err(DesktopExternalEditorConfigError::ArgumentsTooLarge);
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum DesktopExternalEditorConfigError {
-    #[error("external editor program must not be empty")]
-    EmptyProgram,
-    #[error("external editor program is invalid or oversized")]
-    InvalidProgram,
-    #[error("external editor must be an editor executable, not a command shell")]
-    ShellProgram,
-    #[error("external editor has too many arguments")]
-    TooManyArguments,
-    #[error("external editor argument is invalid or oversized")]
-    InvalidArgument,
-    #[error("external editor arguments exceed the aggregate limit")]
-    ArgumentsTooLarge,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DesktopExternalEditorInvocation {
-    program: OsString,
-    args: Vec<OsString>,
-}
-
-fn editor_invocation(
-    config: &DesktopExternalEditorConfig,
-    validated_path: &Path,
-) -> Result<DesktopExternalEditorInvocation, DesktopExternalEditorConfigError> {
-    config.validate()?;
-    let mut args = config.args.iter().map(OsString::from).collect::<Vec<_>>();
-    args.push(validated_path.as_os_str().to_owned());
-    Ok(DesktopExternalEditorInvocation {
-        program: OsString::from(&config.program),
-        args,
-    })
-}
-
-pub(crate) fn launch_external_editor(
-    config: &DesktopExternalEditorConfig,
-    target: &CodingAgentExternalEditorTarget,
-) -> Result<(), DesktopExternalEditorLaunchError> {
-    let invocation = editor_invocation(config, target.path())?;
-    let mut child = Command::new(invocation.program)
-        .args(invocation.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| DesktopExternalEditorLaunchError::Unavailable)?;
-    thread::Builder::new()
-        .name("evo-desktop-editor-reaper".into())
-        .spawn(move || {
-            let _ = child.wait();
-        })
-        .map_err(|_| DesktopExternalEditorLaunchError::ReaperUnavailable)?;
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum DesktopExternalEditorLaunchError {
-    #[error(transparent)]
-    Configuration(#[from] DesktopExternalEditorConfigError),
-    #[error("external editor executable is unavailable")]
-    Unavailable,
-    #[error("external editor process reaper is unavailable")]
-    ReaperUnavailable,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DesktopReviewLineKind {
     FileHeader,
@@ -159,6 +36,7 @@ pub(crate) struct DesktopClipboardExport {
 pub(crate) struct DesktopFileReviewDocument {
     pub(crate) request: CodingAgentFileReviewRequest,
     pub(crate) display_path: String,
+    pub(crate) display_path_truncated: bool,
     pub(crate) mutation_kind: String,
     pub(crate) total_bytes: usize,
     pub(crate) total_lines: usize,
@@ -172,7 +50,8 @@ pub(crate) struct DesktopFileReviewDocument {
 impl DesktopFileReviewDocument {
     pub(crate) fn from_product(review: CodingAgentFileReview) -> Self {
         let request = CodingAgentFileReviewRequest::new(review.change, review.revision);
-        let display_path = truncate_utf8(&review.display_path, MAX_REVIEW_PATH_BYTES).0;
+        let (display_path, display_path_truncated) =
+            truncate_utf8(&review.display_path, MAX_REVIEW_PATH_BYTES);
         let using_diff = review.diff.is_some();
         let (rows, rows_truncated) = match review.diff.as_deref() {
             Some(diff) => project_unified_diff(diff),
@@ -185,6 +64,7 @@ impl DesktopFileReviewDocument {
         Self {
             request,
             display_path,
+            display_path_truncated,
             mutation_kind: truncate_utf8(&review.mutation_kind, 64).0,
             total_bytes: review.total_bytes,
             total_lines: review.line_count,
@@ -221,7 +101,10 @@ impl DesktopFileReviewDocument {
 
     pub(crate) fn path_clipboard_export(&self) -> DesktopClipboardExport {
         let (text, truncated) = truncate_utf8(&self.display_path, MAX_REVIEW_PATH_BYTES);
-        DesktopClipboardExport { text, truncated }
+        DesktopClipboardExport {
+            text,
+            truncated: self.display_path_truncated || truncated,
+        }
     }
 }
 
@@ -366,7 +249,6 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
 mod tests {
     use super::*;
     use coding_agent::api::review::{CodingAgentFileChangeIdentity, CodingAgentFileRevision};
-    use std::path::PathBuf;
 
     fn review(content: String, diff: Option<String>) -> CodingAgentFileReview {
         CodingAgentFileReview {
@@ -446,49 +328,20 @@ mod tests {
     }
 
     #[test]
-    fn editor_configuration_keeps_every_argument_and_path_separate() {
-        let config = DesktopExternalEditorConfig {
-            program: "code".into(),
-            args: vec!["--reuse-window".into(), "$(touch should-not-run)".into()],
-        };
-        let path = PathBuf::from("project/odd;name $(still-an-argument).rs");
-        let invocation = editor_invocation(&config, &path).unwrap();
-        assert_eq!(invocation.program, OsString::from("code"));
-        assert_eq!(
-            invocation.args,
-            vec![
-                OsString::from("--reuse-window"),
-                OsString::from("$(touch should-not-run)"),
-                path.into_os_string(),
-            ]
-        );
-    }
+    fn display_path_and_path_clipboard_export_share_the_utf8_safe_bound() {
+        let mut product = review("bounded\n".into(), None);
+        product.display_path = "界".repeat(MAX_REVIEW_PATH_BYTES);
+        let document = DesktopFileReviewDocument::from_product(product);
 
-    #[test]
-    fn editor_configuration_rejects_shells_nuls_and_argument_pressure() {
-        let shell = DesktopExternalEditorConfig {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into()],
-        };
-        assert_eq!(
-            shell.validate(),
-            Err(DesktopExternalEditorConfigError::ShellProgram)
+        assert!(document.display_path.len() <= MAX_REVIEW_PATH_BYTES);
+        assert!(
+            document
+                .display_path
+                .is_char_boundary(document.display_path.len())
         );
-        let nul = DesktopExternalEditorConfig {
-            program: "code".into(),
-            args: vec!["bad\0argument".into()],
-        };
-        assert_eq!(
-            nul.validate(),
-            Err(DesktopExternalEditorConfigError::InvalidArgument)
-        );
-        let pressure = DesktopExternalEditorConfig {
-            program: "code".into(),
-            args: vec!["argument".into(); MAX_EDITOR_ARGUMENTS + 1],
-        };
-        assert_eq!(
-            pressure.validate(),
-            Err(DesktopExternalEditorConfigError::TooManyArguments)
-        );
+        let export = document.path_clipboard_export();
+        assert!(export.truncated);
+        assert!(export.text.len() <= MAX_REVIEW_PATH_BYTES);
+        assert!(export.text.is_char_boundary(export.text.len()));
     }
 }
