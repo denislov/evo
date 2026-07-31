@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-742 已完成，下一项 DSK-743）
+> 状态：执行中（DSK-743 已完成，下一项 DSK-750）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1018,7 +1018,7 @@ Gate：Gate A + Gate B。
 | --- | --- | --- | --- | --- | --- |
 | DSK-D730-01 | DSK-730 | 尚未接入的 root event/transition 分支使用模块级 `dead_code` allow | `application/reducer.rs` | DSK-733 | 已清理（`582d3ae`）；runtime、platform 与 timer 分支均由生产 root reducer 消费，模块级 allow 已删除 |
 | DSK-D730-02 | DSK-730 | typed platform effect/result contract 尚未由 executor 消费，使用模块级 `dead_code` allow | `application/effect.rs` | DSK-733 | 已清理（`582d3ae`）；picker、clipboard、preferences、resync 与四类 timer 均通过 typed executor/result，模块级 allow 已删除 |
-| DSK-D730-03 | DSK-730 | `UiChangeSet` 预定义 region 尚未全部进入 refresh routing，使用模块级 `dead_code` allow | `application/change_set.rs` | DSK-743 | 待清理；统一 selective refresh 后删除 allow |
+| DSK-D730-03 | DSK-730 | `UiChangeSet` 预定义 region 尚未全部进入 refresh routing，使用模块级 `dead_code` allow | `application/change_set.rs` | DSK-743 | 已清理（`e321170`）；Conversation/Header/Composer/Sessions/Inspector/Telemetry/Skills/Modal/Drawer/Toast 全部进入唯一 `refresh_views` routing，模块级 allow 已删除 |
 | DSK-D731-01 | DSK-731 | `DesktopProjection` 仍直接接收宽 `DesktopRuntimeUpdate`，projection apply、conversation/file-review post-reconcile 与 delta dirty 转换暂由 adapter 的单一 port method 承接 | `app/native_shell.rs::apply_projection_update_for`、`application/reducer.rs::RuntimeUpdatePort::apply_projection_update` | DSK-732 | 已清理（`93a0586`）；projection 只接收窄 `ProjectionEvent`，application reducer 负责提取事件和 `DesktopProjectionDelta -> UiChangeSet`，旧 broad method 与 `native_shell/update.rs` 已删除 |
 | DSK-D731-02 | DSK-731 | projection 触发的 resync command admission 暂由 reducer 决策后通过 port 同步发送，尚未形成 typed runtime effect/executor 边界 | `app/native_shell.rs::request_resync_for`、`application/reducer.rs::RuntimeUpdatePort::request_resync_if_needed` | DSK-733 | 已清理（`582d3ae`）；旧 direct-send port 已删除，resync command reservation、`RequestResync` effect、admission result 与失败 completion 全部回流 reducer |
 | DSK-D731-03 | DSK-731 | `SessionWorkspace`/catalog concrete type 仍位于 GPUI adapter，application reducer 通过窄 `RuntimeUpdatePort` 执行显式 owner 的原子 mutation | `application/reducer.rs::RuntimeUpdatePort`、`app/native_shell.rs` | DSK-741 | 已清理（`c3a9f2f`）；application 直接拥有 `WorkspaceState`、catalog 与 runtime mutation，root reducer 直接接收 typed `DesktopState`；旧 `RuntimeUpdatePort` 及 `NativeShell` bridge impl 已删除，只保留 feature-owned presentation extension；无 alias、dual write 或 compatibility façade |
@@ -1375,6 +1375,28 @@ Gate 与性能记录：
   check、严格 clippy、format 与 diff check 全部通过。任务不改变 render/layout/ViewModel 或像素语义，未运行、
   未更新 visual golden。
 
+### DSK-743 实际结果
+
+- 建立唯一 `refresh_views(UiChangeSet)` authority，构造期初始化、runtime projection dirty routing、feature
+  interaction、modal/drawer/toast host coordination 全部通过 typed region 集合进入同一刷新入口。删除全部
+  `notify_*` 与重复 `set_view_model` 序列；新增 Skills/Drawer region，并清除 `application/change_set.rs` 的
+  DSK-D730-03 模块级 `dead_code` allow。
+- root `Render` 下放到 `root_view.rs`，其 `render` 本体只消费 `prepare_root_view` 的 layout/theme 并组合
+  sidebar、center、inspector 与 overlay hosts，不调用 feature presenter 或构造 ViewModel。原 root 业务按
+  runtime/effects、layout/focus、commands、conversation、conversation layout、review、overlay、root actions、
+  platform update 等真实职责拆入 10 个 adapter 模块；`native_shell.rs` 生产区由约 4,100 行降到 1,035 行。
+- modal 与 drawer 继续保持不同 focus restore semantic，但 activate/dismiss 各自成为单一 state transition
+  入口；相关 Sessions/Inspector/Header/Modal/Drawer/Toast refresh 在一个 change set 内协调，避免 host
+  重复更新。panel resize 新增 typed `PreferencesIntent::SetPanelWidth`，drag/double-click 不再直接写 store，
+  由 application reducer delegation 原子更新 preferences 并返回 Root/feature/Header change set。
+- 新增 GPUI panel preferences transition 回归，以及 dependency guard：持续约束 root 生产区不超过 1,200
+  行、root 不得调用 feature presenter/`set_view_model`、全 adapter 只能存在一个 `refresh_views` 且禁止
+  `notify_*` authority。DSK-D730-03 在 `e321170` 清零，无 compatibility alias、dual write 或空壳模块。
+- Gate A/B 通过：desktop all-targets `314 passed / 5 ignored / 0 failed`，dependency boundary `11 passed`，
+  all-target check、严格 clippy、format 与 diff check 全部通过。最终 headless perf：10k block CPU frame P95
+  `2,525 µs`、input roundtrip P95 `6,016 µs`、input-change-to-render P95 `384 µs`、window RSS growth
+  `24,424,448 bytes`。`scripts/desktop-visual-golden.sh` 的 20 个 fixture 全部 `RMSE=0`，未更新 golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1392,7 +1414,7 @@ Gate 与性能记录：
 | DSK-740 | 已完成 | `9ac1a57` | `ShellViews/ShellUiState/ShellConnection/ShellRuntimeExecutor` 聚合，Shell 41→7 fields；typed Home/Session init；Gate A 与 focus/modal/drawer 定向测试通过；DSK-D731-03 调整到 DSK-741 与 presenter 输入切分一起清理 |
 | DSK-741 | 已完成 | `c3a9f2f` | feature presenters 下放；application-owned workspace/catalog/runtime mutation；删除 `RuntimeUpdatePort` 与 DSK-D731-03；Gate A、ViewModel equality 及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-742 | 已完成 | `6ad465c` | 7 类 child event 穷尽映射为单一 typed `UiIntent`；subscriptions 仅 normalize+dispatch；Gate A 与 keyboard/action/pane interaction tests 全通过；未更新 golden |
-| DSK-743 | 待执行 | — | — |
+| DSK-743 | 已完成 | `e321170` | 唯一 typed refresh authority；root Render/adapter 按职责拆分，生产区降至 1,035 行；typed panel preferences transition；清理 DSK-D730-03；Gate A/B、headless perf 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-750 | 待执行 | — | — |
 | DSK-751 | 待执行 | — | — |
 | DSK-752 | 待执行 | — | — |
