@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-750 已完成，下一项 DSK-751）
+> 状态：执行中（DSK-751 已完成，下一项 DSK-752）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1417,6 +1417,28 @@ Gate 与性能记录：
   preference 定向测试与 3 项 workspace resolver 测试通过；all-target check、严格 clippy、format 与 diff check
   全部通过。任务不改变 render/layout/ViewModel 或像素语义，未运行、未更新 visual golden。
 
+### DSK-751 实际结果
+
+- 删除混合 review presentation、editor config 与 process launch 的根级 `file_review.rs`，没有保留 re-export
+  façade。`DesktopFileReviewDocument`、diff/content row projection、path/review clipboard export 与全部
+  path/line/render/clipboard hard limits 迁入无 GPUI 依赖的 `ui/inspector/review.rs`；补充 display-path truncation
+  状态，使复制提示不会丢失 product path 已被截断的事实。
+- preference model 仅保留可序列化的 `ExternalEditorPreference` DTO；program/argv bounds、shell 拒绝、NUL 与
+  aggregate argument validation、literal `Command` invocation、null stdio、child reaper 和 typed launch error
+  全部归入 `platform/external_editor.rs`。PreferenceStore 在 load/save platform boundary 使用同一 validator，
+  application/runtime 不依赖 platform config/process 类型。
+- external-editor command 仍由 runtime session 在启动前重新校验 product-issued opaque target，成功后只返回
+  `ExternalEditorTargetValidated`；runtime protocol/bridge/driver 不再携带 review presentation 或 editor config，
+  也不再启动本地进程。application 随后发出 identity/owner-bound `LaunchExternalEditor` effect，platform 以
+  `ExternalEditorLaunched` result 回 reducer，原 command pending 直到 typed success/failure completion 才清除。
+- dependency boundary 增至 13 项：旧混合文件必须保持删除；review presentation 禁止 GPUI/platform/process/
+  thread/filesystem authority；external-editor platform 禁止 UI/runtime/coding-agent 依赖；runtime 禁止 editor
+  preference/config/launch 类型。新增 UTF-8 path、diff/line/render/clipboard bounds、literal argv、shell/NUL/
+  pressure validation、missing executable typed error、preference roundtrip 与 reducer typed failure tests。
+- Gate A/B 通过：desktop all-targets `332 passed / 5 ignored / 0 failed`（lib `319 passed / 5 ignored`，boundary
+  `13 passed`），all-target check、严格 clippy、format 与 diff check 全部通过。任务不改变 render/layout/
+  ViewModel 或像素语义，未运行、未更新 visual golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1436,7 +1458,7 @@ Gate 与性能记录：
 | DSK-742 | 已完成 | `6ad465c` | 7 类 child event 穷尽映射为单一 typed `UiIntent`；subscriptions 仅 normalize+dispatch；Gate A 与 keyboard/action/pane interaction tests 全通过；未更新 golden |
 | DSK-743 | 已完成 | `e321170` | 唯一 typed refresh authority；root Render/adapter 按职责拆分，生产区降至 1,035 行；typed panel preferences transition；清理 DSK-D730-03；Gate A/B、headless perf 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-750 | 已完成 | `0332676` | preferences model 与 platform store/writer/workspace resolver 分权；application 无文件/线程/path authority；Gate A、16 项 preference 与 3 项 scratch 定向测试、12 项 boundary 全通过；未更新 golden |
-| DSK-751 | 待执行 | — | — |
+| DSK-751 | 已完成 | `847b2a4` | review presentation 与 external-editor platform 分权；runtime 仅重校验 opaque target；typed launch result 回 reducer；Gate A/B、4 项 review bounds、5 项 editor/platform 定向测试与 13 项 boundary 全通过；未更新 golden |
 | DSK-752 | 待执行 | — | — |
 | DSK-753 | 待执行 | — | — |
 | DSK-760 | 待执行 | — | — |
