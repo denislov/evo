@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "DSK-730 contract regions are consumed incrementally through DSK-743"
-)]
-
 use desktop::projection::{ContextDirtyFlags, DesktopProjectionDelta};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +10,9 @@ pub(crate) enum UiRegion {
     Sessions,
     Inspector,
     InspectorTelemetry,
+    Skills,
     Modal,
+    Drawer,
     Toast,
 }
 
@@ -25,6 +22,14 @@ pub(crate) struct UiChangeSet(u16);
 impl UiChangeSet {
     pub(crate) const fn one(region: UiRegion) -> Self {
         Self(1 << region as u8)
+    }
+
+    pub(crate) fn from_regions(regions: &[UiRegion]) -> Self {
+        let mut changes = Self::default();
+        for &region in regions {
+            changes.insert(region);
+        }
+        changes
     }
 
     pub(crate) const fn contains(self, region: UiRegion) -> bool {
@@ -103,8 +108,7 @@ mod tests {
 
     #[test]
     fn merge_is_idempotent_and_preserves_every_changed_region() {
-        let mut changes = UiChangeSet::one(UiRegion::Conversation);
-        changes.insert(UiRegion::Composer);
+        let mut changes = UiChangeSet::from_regions(&[UiRegion::Conversation, UiRegion::Composer]);
         changes.merge(UiChangeSet::one(UiRegion::Sessions));
         changes.merge(UiChangeSet::one(UiRegion::Conversation));
 

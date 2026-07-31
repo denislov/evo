@@ -35,17 +35,17 @@ use desktop::shell::{
     SemanticStatus, SemanticTheme, ShellLayout, UI_FONT_FAMILY, truncate_label,
 };
 use gpui::{
-    ClipboardItem, Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, PathPromptOptions, Render, Role, ScrollStrategy, Styled as _,
-    Window, WindowBounds, div, prelude::*, px, rgb,
+    ClipboardItem, Context, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathPromptOptions, ScrollStrategy, Window, WindowBounds, prelude::*, rgb,
 };
+#[cfg(test)]
+use gpui::{Role, div, px};
 use std::path::PathBuf;
 #[cfg(test)]
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use self::desktop_style::{DesignText, DesktopStyledExt as _};
 pub(super) use self::evo_brand::{EvoBrandFixture, EvoBrandMode};
 use crate::actions::{
     self, AbortActiveOperation, AuthorizationAllowForOperation, AuthorizationAllowOnce,
@@ -58,18 +58,19 @@ use crate::actions::{
 #[cfg(test)]
 use crate::application::catalog::ProjectCatalogState;
 #[cfg(test)]
-use crate::application::change_set::UiChangeSet;
-#[cfg(test)]
 use crate::application::reducer::safe_runtime_rejection_notice;
 use crate::application::{
     catalog::ProjectCatalogController,
-    change_set::UiRegion,
+    change_set::{UiChangeSet, UiRegion},
     commands::{CommandTracker, DesktopCommandIntent},
     effect::{
         ClipboardFeedback, DesktopEffect, DesktopPickerKind, DesktopTimer, DesktopTimerKind,
         PlatformOutcome, PlatformResult,
     },
-    reducer::{CatalogIntent, DesktopController, DesktopEvent, PlatformUpdatePort, Transition},
+    reducer::{
+        CatalogIntent, DesktopController, DesktopEvent, PlatformUpdatePort, PreferencePanel,
+        PreferencesIntent, Transition,
+    },
     runtime_state::{RuntimeProjectionPresentation, RuntimeWorkspacePresentation},
     state::DesktopState,
     workspace::{SessionId, WorkspaceKey, WorkspaceStore},
@@ -565,7 +566,7 @@ impl NativeShell {
                 projectless_selection: projectless_workspace_selection,
             },
         );
-        let shell = Self {
+        let mut shell = Self {
             connection,
             app,
             global_skills,
@@ -593,53 +594,20 @@ impl NativeShell {
             ),
         };
         debug_assert!(shell.views.subscription_count() > 0);
-        shell.notify_toast_host(cx);
-        let conversation_header_view_model = conversation_header::view_model(&shell.app, &shell.ui);
-        shell
-            .views
-            .conversation_header
-            .update(cx, |conversation_header, _| {
-                conversation_header.set_view_model(conversation_header_view_model);
-            });
-        let sessions_pane_view_model = sessions_pane::view_model(&shell.app, &shell.ui);
-        shell.views.sessions_pane.update(cx, |sessions_pane, _| {
-            sessions_pane.set_view_model(sessions_pane_view_model);
-        });
-        let composer_pane_view_model = composer_pane::view_model(shell.app.workspaces.active());
-        shell.views.composer_pane.update(cx, |composer_pane, _| {
-            composer_pane.set_view_model(composer_pane_view_model);
-        });
-        let skills_pane_view_model = skills_pane::view_model(&shell.global_skills);
-        shell.views.skills_pane.update(cx, |skills_pane, _| {
-            skills_pane.set_view_model(skills_pane_view_model);
-        });
-        let conversation_pane_view_model =
-            conversation_pane::view_model(shell.app.workspaces.active(), &shell.ui);
-        shell
-            .views
-            .conversation_pane
-            .update(cx, |conversation_pane, _| {
-                conversation_pane.set_view_model(conversation_pane_view_model);
-            });
-        let inspector_pane_view_model =
-            inspector_pane::view_model(&shell.app, &shell.ui, shell.global_skills.len());
-        shell.views.inspector_pane.update(cx, |inspector_pane, _| {
-            inspector_pane.set_view_model(inspector_pane_view_model);
-        });
-        let root_modal_view_model = root_modal_host::view_model(&shell.app, &shell.ui);
-        shell
-            .views
-            .root_modal_host
-            .update(cx, |root_modal_host, _| {
-                root_modal_host.set_view_model(root_modal_view_model);
-            });
-        let center_drawer_view_model = center_drawer_host::view_model(&shell.app, &shell.ui);
-        shell
-            .views
-            .center_drawer_host
-            .update(cx, |center_drawer_host, _| {
-                center_drawer_host.set_view_model(center_drawer_view_model);
-            });
+        shell.refresh_views(
+            UiChangeSet::from_regions(&[
+                UiRegion::Conversation,
+                UiRegion::ConversationHeader,
+                UiRegion::Composer,
+                UiRegion::Sessions,
+                UiRegion::Inspector,
+                UiRegion::Skills,
+                UiRegion::Modal,
+                UiRegion::Drawer,
+                UiRegion::Toast,
+            ]),
+            cx,
+        );
         shell
     }
 
@@ -678,7 +646,7 @@ impl NativeShell {
                     },
                 );
                 if transition.changes().contains(UiRegion::Sessions) {
-                    self.notify_sessions_pane(cx);
+                    self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
                     cx.notify();
                 }
             }
@@ -702,7 +670,7 @@ impl NativeShell {
             UiIntent::Abort => self.abort_active_operation(cx),
             UiIntent::ComposerInputChanged(value) => {
                 self.app.workspaces.active_mut().composer.edit(value);
-                self.notify_composer_pane(cx);
+                self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
             }
             UiIntent::ComposerFocused => self.record_focus(FocusTarget::Composer, window, cx),
             UiIntent::AddAttachments => self.choose_composer_attachments(cx),
@@ -731,8 +699,8 @@ impl NativeShell {
                     durable,
                     projection.conversation(),
                 );
-                self.notify_conversation_pane(cx);
-                self.notify_conversation_header(cx);
+                self.refresh_views(UiChangeSet::one(UiRegion::Conversation), cx);
+                self.refresh_views(UiChangeSet::one(UiRegion::ConversationHeader), cx);
             }
             UiIntent::ConversationScrolled => {
                 cx.defer_in(window, |this, _, cx| {
@@ -765,7 +733,7 @@ impl NativeShell {
                     .active_mut()
                     .presentation
                     .inspector_section = section;
-                self.notify_inspector_pane(cx);
+                self.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
             }
             UiIntent::ExecutePalette(command) => {
                 self.ui.command_palette.close();
@@ -821,7 +789,7 @@ impl NativeShell {
                 self.ui.center_surface = CenterSurface::Skills;
                 self.dismiss_drawer(window, cx, false);
                 self.focus_target(FocusTarget::CenterBody, window, cx);
-                self.notify_sessions_pane(cx);
+                self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
                 cx.notify();
             }
             CenterNavigationTarget::Session(session_id) => {
@@ -838,7 +806,7 @@ impl NativeShell {
                         projection.snapshot().session.session_id == session_id
                     })
                 {
-                    self.notify_sessions_pane(cx);
+                    self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
                     cx.notify();
                 } else {
                     self.open_session(session_id, cx);
@@ -854,12 +822,12 @@ impl NativeShell {
 
         self.dismiss_drawer(window, cx, true);
         self.record_focus(FocusTarget::Composer, window, cx);
-        self.notify_sessions_pane(cx);
-        self.notify_composer_pane(cx);
-        self.notify_conversation_pane(cx);
-        self.notify_conversation_header(cx);
-        self.notify_inspector_pane(cx);
-        self.notify_root_modal_host(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Conversation), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::ConversationHeader), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Modal), cx);
         cx.notify();
     }
 
@@ -893,7 +861,7 @@ impl NativeShell {
                     .workspaces
                     .active_mut()
                     .set_preference_notice(error);
-                self.notify_sessions_pane(cx);
+                self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
                 return;
             }
         };
@@ -917,7 +885,7 @@ impl NativeShell {
                 .active_mut()
                 .set_preference_notice(error);
         }
-        self.notify_sessions_pane(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
     }
 
     pub(super) fn install_native_visual_catalog_fixture(
@@ -963,7 +931,7 @@ impl NativeShell {
                 self.app.catalog.replace_catalog(Vec::new(), 0);
             }
         }
-        self.notify_sessions_pane(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         cx.notify();
     }
 
@@ -977,10 +945,10 @@ impl NativeShell {
             NativeVisualDrawerFixture::Inspector => CenterDrawerKind::Inspector,
         });
         self.ui.drawer_restore_focus = Some(self.ui.focus.active());
-        self.notify_sessions_pane(cx);
-        self.notify_inspector_pane(cx);
-        self.notify_conversation_header(cx);
-        self.notify_center_drawer_host(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::ConversationHeader), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Drawer), cx);
         cx.notify();
     }
 
@@ -992,7 +960,7 @@ impl NativeShell {
         debug_assert!(self.app.workspaces.active_mut().projection.is_none());
         self.app.workspaces.active_mut().draft_workspace_selection =
             CodingAgentWorkspaceSelection::project(path);
-        self.notify_composer_pane(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
         cx.notify();
     }
 
@@ -1011,215 +979,8 @@ impl NativeShell {
         }
         self.app.workspaces.active_mut().thinking_selection = DesktopThinkingLevel::High;
         self.reconcile_thinking_selection_with_project();
-        self.notify_conversation_header(cx);
-        self.notify_composer_pane(cx);
-        cx.notify();
-    }
-
-    fn visibility(&self) -> PanelVisibility {
-        PanelVisibility {
-            sessions: self.app.preferences.sessions_panel_visible,
-            context: self.app.preferences.context_panel_visible,
-        }
-    }
-
-    fn layout(&self, window: &Window) -> ShellLayout {
-        let viewport = window.viewport_size();
-        self.resolve_layout(
-            u32::from(viewport.width),
-            u32::from(viewport.height),
-            self.visibility(),
-        )
-    }
-
-    fn resolve_layout(&self, width: u32, height: u32, visibility: PanelVisibility) -> ShellLayout {
-        ShellLayout::resolve_with_panel_widths(
-            width,
-            height,
-            visibility,
-            self.app.preferences.sessions_panel_width,
-            self.app.preferences.context_panel_width,
-        )
-    }
-
-    fn begin_panel_resize(
-        &mut self,
-        panel: ResizablePanel,
-        event: &MouseDownEvent,
-        cx: &mut Context<Self>,
-    ) {
-        if event.click_count >= 2 {
-            self.ui.panel_resize = None;
-            match panel {
-                ResizablePanel::Sessions => {
-                    self.app.preferences.sessions_panel_width = SESSION_PANEL_WIDTH;
-                    self.notify_sessions_pane(cx);
-                    self.notify_conversation_header(cx);
-                }
-                ResizablePanel::Context => {
-                    self.app.preferences.context_panel_width = CONTEXT_PANEL_WIDTH;
-                    self.notify_inspector_pane(cx);
-                    self.notify_conversation_header(cx);
-                }
-            }
-            self.schedule_preferences();
-            cx.notify();
-            return;
-        }
-
-        self.ui.panel_resize = Some(PanelResizeState {
-            panel,
-            pointer_origin_x: f32::from(event.position.x),
-            width_origin: match panel {
-                ResizablePanel::Sessions => self.app.preferences.sessions_panel_width,
-                ResizablePanel::Context => self.app.preferences.context_panel_width,
-            },
-        });
-    }
-
-    fn update_panel_resize(
-        &mut self,
-        event: &MouseMoveEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(resize) = self.ui.panel_resize else {
-            return;
-        };
-        let delta = f32::from(event.position.x) - resize.pointer_origin_x;
-        let desired = match resize.panel {
-            ResizablePanel::Sessions => resize.width_origin as f32 + delta,
-            ResizablePanel::Context => resize.width_origin as f32 - delta,
-        };
-        let layout = self.layout(window);
-        let (minimum, configured_maximum, other_width) = match resize.panel {
-            ResizablePanel::Sessions => (
-                SESSION_PANEL_MIN_WIDTH,
-                SESSION_PANEL_MAX_WIDTH,
-                layout.inspector.map_or(0, |bounds| bounds.width),
-            ),
-            ResizablePanel::Context => (
-                CONTEXT_PANEL_MIN_WIDTH,
-                CONTEXT_PANEL_MAX_WIDTH,
-                layout.sidebar.map_or(0, |bounds| bounds.width),
-            ),
-        };
-        let viewport_width = u32::from(window.viewport_size().width);
-        let maximum = configured_maximum.min(
-            viewport_width
-                .saturating_sub(MIN_CONVERSATION_WIDTH)
-                .saturating_sub(other_width)
-                .max(minimum),
-        );
-        let width = (desired.round() as i64).clamp(i64::from(minimum), i64::from(maximum)) as u32;
-
-        match resize.panel {
-            ResizablePanel::Sessions if self.app.preferences.sessions_panel_width != width => {
-                self.app.preferences.sessions_panel_width = width;
-                self.notify_sessions_pane(cx);
-                self.notify_conversation_header(cx);
-                cx.notify();
-            }
-            ResizablePanel::Context if self.app.preferences.context_panel_width != width => {
-                self.app.preferences.context_panel_width = width;
-                self.notify_inspector_pane(cx);
-                self.notify_conversation_header(cx);
-                cx.notify();
-            }
-            _ => {}
-        }
-    }
-
-    fn finish_panel_resize(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.ui.panel_resize.take().is_some() {
-            self.schedule_preferences();
-            self.flush_queued_effects(cx);
-        }
-    }
-
-    fn set_focus_input_modality(&mut self, modality: FocusInputModality, cx: &mut Context<Self>) {
-        if self.ui.focus_input_modality == modality {
-            return;
-        }
-        self.ui.focus_input_modality = modality;
-        self.notify_sessions_pane(cx);
-        self.notify_conversation_header(cx);
-        self.notify_composer_pane(cx);
-        self.notify_inspector_pane(cx);
-        self.notify_toast_host(cx);
-        cx.notify();
-    }
-
-    fn note_pointer_input(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_focus_input_modality(FocusInputModality::Pointer, cx);
-    }
-
-    fn note_keyboard_input(&mut self, _: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_focus_input_modality(FocusInputModality::Keyboard, cx);
-    }
-
-    fn record_focus(&mut self, target: FocusTarget, window: &mut Window, cx: &mut Context<Self>) {
-        let layout = self.layout(window);
-        let previous = self.ui.focus.active();
-        if self.ui.focus.request(target, layout) {
-            if self.ui.active_drawer.is_some() {
-                self.ui.drawer_restore_focus = Some(target);
-            }
-            cx.notify();
-        }
-        if previous == FocusTarget::Sidebar || target == FocusTarget::Sidebar {
-            self.notify_sessions_pane(cx);
-        }
-        if previous == FocusTarget::CenterHeader || target == FocusTarget::CenterHeader {
-            self.notify_conversation_header(cx);
-        }
-        if previous == FocusTarget::Composer || target == FocusTarget::Composer {
-            self.notify_composer_pane(cx);
-        }
-        if previous == FocusTarget::Inspector || target == FocusTarget::Inspector {
-            self.notify_inspector_pane(cx);
-        }
-    }
-
-    fn window_bounds_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let bounds = window.window_bounds();
-        let restore = bounds.get_bounds();
-        self.app.preferences.window.x = f32::from(restore.origin.x).round() as i32;
-        self.app.preferences.window.y = f32::from(restore.origin.y).round() as i32;
-        self.app.preferences.window.width = u32::from(restore.size.width);
-        self.app.preferences.window.height = u32::from(restore.size.height);
-        self.app.preferences.window.maximized = matches!(bounds, WindowBounds::Maximized(_));
-
-        let viewport = window.viewport_size();
-        let forced_layout = self.resolve_layout(
-            u32::from(viewport.width),
-            u32::from(viewport.height),
-            PanelVisibility::default(),
-        );
-        let drawer_became_dockable = match self.ui.active_drawer {
-            Some(CenterDrawerKind::Sessions) if forced_layout.sidebar.is_some() => {
-                self.app.preferences.sessions_panel_visible = true;
-                true
-            }
-            Some(CenterDrawerKind::Inspector) if forced_layout.inspector.is_some() => {
-                self.app.preferences.context_panel_visible = true;
-                true
-            }
-            _ => false,
-        };
-        if drawer_became_dockable {
-            self.dismiss_drawer(window, cx, true);
-        }
-        let layout = self.layout(window);
-        let previous_focus = self.ui.focus.active();
-        self.ui.focus.reconcile_layout(layout);
-        if self.ui.focus.active() != previous_focus {
-            self.focus_composer_input(window, cx);
-        }
-        self.schedule_preferences();
-        self.notify_inspector_pane(cx);
-        self.notify_conversation_header(cx);
-        self.notify_center_drawer_host(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::ConversationHeader), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
         cx.notify();
     }
 
@@ -1241,2868 +1002,6 @@ impl NativeShell {
         if let Some(session_id) = session_id.as_deref() {
             self.remember_thinking_selection(session_id, selection);
         }
-    }
-
-    fn with_controller<T>(
-        &mut self,
-        reduce: impl FnOnce(&mut DesktopController, &mut Self) -> T,
-    ) -> T {
-        let mut controller = std::mem::take(&mut self.connection.controller);
-        let result = reduce(&mut controller, self);
-        self.connection.controller = controller;
-        result
-    }
-
-    fn dispatch_platform_result(&mut self, result: PlatformResult, cx: &mut Context<Self>) {
-        let transition = self.with_controller(|controller, this| {
-            controller.reduce_async(this, DesktopEvent::Platform(result))
-        });
-        self.apply_transition(transition, cx);
-    }
-
-    fn dispatch_timer(&mut self, timer: DesktopTimer, cx: &mut Context<Self>) {
-        let transition = self.with_controller(|controller, this| {
-            controller.reduce_async(this, DesktopEvent::Timer(timer))
-        });
-        self.apply_transition(transition, cx);
-    }
-
-    fn queue_transition(&mut self, transition: Transition) {
-        let (changes, effects) = transition.into_parts();
-        assert!(
-            changes.is_empty(),
-            "queued transitions cannot hide UI changes"
-        );
-        self.connection.queued_effects.extend(effects);
-    }
-
-    fn apply_transition(&mut self, transition: Transition, cx: &mut Context<Self>) {
-        let (changes, effects) = transition.into_parts();
-        self.refresh_runtime_changes(changes, cx);
-        self.connection.queued_effects.extend(effects);
-        self.flush_queued_effects(cx);
-    }
-
-    fn flush_queued_effects(&mut self, cx: &mut Context<Self>) {
-        while let Some(effect) = self.connection.queued_effects.pop_front() {
-            self.execute_effect(effect, cx);
-        }
-    }
-
-    fn execute_effect(&mut self, effect: DesktopEffect, cx: &mut Context<Self>) {
-        match effect {
-            DesktopEffect::PickPaths { identity, picker } => {
-                let options = match picker {
-                    DesktopPickerKind::Attachments => PathPromptOptions {
-                        files: true,
-                        directories: false,
-                        multiple: true,
-                        prompt: Some("Attach files or images".into()),
-                    },
-                    DesktopPickerKind::ProjectDirectory => PathPromptOptions {
-                        files: false,
-                        directories: true,
-                        multiple: false,
-                        prompt: Some("Choose a project directory".into()),
-                    },
-                };
-                let selection = cx.prompt_for_paths(options);
-                cx.spawn(async move |this, cx| {
-                    let outcome = match selection.await {
-                        Ok(Ok(Some(paths))) => PlatformOutcome::Completed(paths),
-                        Ok(Ok(None)) => PlatformOutcome::Cancelled,
-                        Ok(Err(_)) | Err(_) => PlatformOutcome::Failed(match picker {
-                            DesktopPickerKind::Attachments => {
-                                "The file picker could not be opened.".into()
-                            }
-                            DesktopPickerKind::ProjectDirectory => {
-                                "The directory picker could not be opened.".into()
-                            }
-                        }),
-                    };
-                    let _ = this.update(cx, |this, cx| {
-                        this.dispatch_platform_result(
-                            PlatformResult::PathsPicked {
-                                identity,
-                                picker,
-                                outcome,
-                            },
-                            cx,
-                        );
-                    });
-                })
-                .detach();
-            }
-            DesktopEffect::WriteClipboard { identity, text, .. } => {
-                if let Some(text) = text {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                }
-                self.dispatch_platform_result(
-                    PlatformResult::ClipboardWritten {
-                        identity,
-                        outcome: PlatformOutcome::Completed(()),
-                    },
-                    cx,
-                );
-            }
-            DesktopEffect::WritePreferences {
-                identity,
-                preferences,
-            } => {
-                let Some(writer) = self.connection.preference_writer.as_ref() else {
-                    self.dispatch_platform_result(
-                        PlatformResult::PreferencesWritten {
-                            identity,
-                            outcome: PlatformOutcome::Failed(
-                                "Desktop preference writer is unavailable.".into(),
-                            ),
-                        },
-                        cx,
-                    );
-                    return;
-                };
-                let completion = writer.schedule(preferences);
-                cx.spawn(async move |this, cx| {
-                    let outcome = match completion.await {
-                        Ok(PreferenceWriteResult::Written) => PlatformOutcome::Completed(()),
-                        Ok(PreferenceWriteResult::Superseded) => PlatformOutcome::Cancelled,
-                        Ok(PreferenceWriteResult::Failed(message)) => {
-                            PlatformOutcome::Failed(message)
-                        }
-                        Err(_) => PlatformOutcome::Failed(
-                            "Desktop preference writer stopped before completion.".into(),
-                        ),
-                    };
-                    let _ = this.update(cx, |this, cx| {
-                        this.dispatch_platform_result(
-                            PlatformResult::PreferencesWritten { identity, outcome },
-                            cx,
-                        );
-                    });
-                })
-                .detach();
-            }
-            DesktopEffect::RequestResync {
-                identity,
-                command_id,
-            } => {
-                let outcome = self.connection.runtime_client.as_ref().map_or_else(
-                    || PlatformOutcome::Failed("desktop runtime is stopped".into()),
-                    |runtime| match runtime.try_resync(command_id) {
-                        Ok(()) => PlatformOutcome::Completed(()),
-                        Err(error) => PlatformOutcome::Failed(error.to_string()),
-                    },
-                );
-                self.dispatch_platform_result(
-                    PlatformResult::ResyncRequested { identity, outcome },
-                    cx,
-                );
-            }
-            DesktopEffect::ScheduleTimer { timer, delay } => {
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(delay).await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.dispatch_timer(timer, cx);
-                    });
-                })
-                .detach();
-            }
-        }
-    }
-
-    fn poll_runtime(&mut self) -> RuntimePoll {
-        if self.connection.runtime_client.is_none() {
-            return RuntimePoll {
-                transition: Transition::default(),
-                running: false,
-            };
-        }
-        let mut transition = Transition::default();
-        let mut applied = 0;
-        while applied < MAX_RUNTIME_UPDATES_PER_FRAME {
-            let Some(update) = self.connection.runtime_updates.pop_front() else {
-                break;
-            };
-            let reduced = self.with_controller(|controller, this| {
-                controller.reduce_runtime(&mut this.app, update)
-            });
-            transition.merge(reduced);
-            if self.app.take_runtime_preferences_dirty() {
-                self.schedule_preferences();
-            }
-            applied += 1;
-        }
-        RuntimePoll {
-            transition,
-            running: self.app.active_runtime_is_running(),
-        }
-    }
-
-    fn apply_runtime_poll(&mut self, mut poll: RuntimePoll, cx: &mut Context<Self>) -> bool {
-        let conversation_needs_refresh = self
-            .app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .needs_row_refresh();
-        if conversation_needs_refresh && !self.refresh_conversation_rows_at_current_width(cx) {
-            poll.transition.merge(Transition::changed(UiRegion::Root));
-        }
-        self.apply_transition(poll.transition, cx);
-        poll.running
-    }
-
-    #[cfg(test)]
-    fn poll_runtime_for_test(&mut self, cx: &mut Context<Self>) -> bool {
-        let poll = self.poll_runtime();
-        self.apply_runtime_poll(poll, cx)
-    }
-
-    fn refresh_runtime_changes(
-        &mut self,
-        changes: crate::application::change_set::UiChangeSet,
-        cx: &mut Context<Self>,
-    ) {
-        #[cfg(test)]
-        if !changes.is_empty() {
-            self.ui.runtime_ui_notification_count += 1;
-        }
-        if changes.contains(UiRegion::Root) {
-            cx.notify();
-        }
-        if changes.contains(UiRegion::Sessions) {
-            self.notify_sessions_pane(cx);
-        }
-        if changes.contains(UiRegion::Composer) {
-            self.notify_composer_pane(cx);
-        }
-        if changes.contains(UiRegion::Conversation) {
-            self.notify_conversation_pane(cx);
-        }
-        if changes.contains(UiRegion::Inspector) {
-            self.notify_inspector_pane(cx);
-        } else if changes.contains(UiRegion::InspectorTelemetry) {
-            self.schedule_inspector_telemetry_refresh(cx);
-        }
-        if changes.contains(UiRegion::Toast) {
-            self.notify_toast_host(cx);
-        }
-        if changes.contains(UiRegion::ConversationHeader) {
-            self.notify_conversation_header(cx);
-        }
-        if changes.contains(UiRegion::Modal) {
-            self.notify_root_modal_host(cx);
-        }
-    }
-
-    fn notify_sessions_pane(&self, cx: &mut Context<Self>) {
-        let view_model = sessions_pane::view_model(&self.app, &self.ui);
-        self.views.sessions_pane.update(cx, |pane, cx| {
-            pane.set_view_model(view_model);
-            cx.notify();
-        });
-        self.notify_toast_host(cx);
-        self.notify_root_modal_host(cx);
-    }
-
-    fn active_composer_running_mode(&self) -> ComposerRunningMode {
-        self.app
-            .workspaces
-            .active()
-            .presentation
-            .composer_running_mode
-    }
-
-    fn set_active_composer_running_mode(
-        &mut self,
-        mode: ComposerRunningMode,
-        cx: &mut Context<Self>,
-    ) {
-        self.app
-            .workspaces
-            .active_mut()
-            .presentation
-            .composer_running_mode = mode;
-        self.notify_composer_pane(cx);
-    }
-
-    fn notify_composer_pane(&self, cx: &mut Context<Self>) {
-        let view_model = composer_pane::view_model(self.app.workspaces.active());
-        self.views.composer_pane.update(cx, |pane, cx| {
-            pane.set_view_model(view_model);
-            cx.notify();
-        });
-    }
-
-    fn notify_inspector_pane(&mut self, cx: &mut Context<Self>) {
-        self.ui.inspector_telemetry_last_refresh = Some(Instant::now());
-        self.ui.inspector_telemetry_refresh_deadline = None;
-        self.push_inspector_pane_view_model(cx);
-        self.notify_toast_host(cx);
-    }
-
-    fn push_inspector_pane_view_model(&self, cx: &mut Context<Self>) {
-        let view_model = inspector_pane::view_model(&self.app, &self.ui, self.global_skills.len());
-        self.views.inspector_pane.update(cx, |pane, cx| {
-            pane.set_view_model(view_model);
-            cx.notify();
-        });
-    }
-
-    fn schedule_inspector_telemetry_refresh(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
-        let delay =
-            inspector_telemetry_refresh_delay(self.ui.inspector_telemetry_last_refresh, now);
-        if delay.is_zero() {
-            self.ui.inspector_telemetry_last_refresh = Some(now);
-            self.ui.inspector_telemetry_refresh_deadline = None;
-            self.push_inspector_pane_view_model(cx);
-            return;
-        }
-
-        let deadline = now + delay;
-        if self
-            .ui
-            .inspector_telemetry_refresh_deadline
-            .is_some_and(|scheduled| scheduled <= deadline)
-        {
-            return;
-        }
-        self.ui.inspector_telemetry_refresh_deadline = Some(deadline);
-        let owner = self.app.workspaces.active_key().clone();
-        match self.connection.controller.schedule_timer(
-            owner,
-            DesktopTimerKind::InspectorTelemetryRefresh,
-            delay,
-        ) {
-            Ok(transition) => self.apply_transition(transition, cx),
-            Err(error) => {
-                self.ui.inspector_telemetry_refresh_deadline = None;
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(error.to_string());
-                self.notify_toast_host(cx);
-            }
-        }
-    }
-
-    fn notify_toast_host(&self, cx: &mut Context<Self>) {
-        let notice_owner: Arc<str> = match self.app.workspaces.active_key() {
-            WorkspaceKey::Home => Arc::from("workspace:home"),
-            WorkspaceKey::Session(session_id) => {
-                Arc::from(format!("session:{}", session_id.as_str()))
-            }
-        };
-        let notice = self
-            .app
-            .workspaces
-            .active()
-            .preference_notice
-            .as_ref()
-            .map(|message| ToastNotice {
-                session_id: notice_owner,
-                revision: self.app.workspaces.active().preference_notice_revision,
-                message: Arc::from(message.as_str()),
-            });
-        self.views.toast_host.update(cx, |host, cx| {
-            host.observe_notice(notice, cx);
-        });
-    }
-
-    fn notify_conversation_header(&self, cx: &mut Context<Self>) {
-        let view_model = conversation_header::view_model(&self.app, &self.ui);
-        self.views
-            .conversation_header
-            .update(cx, |conversation_header, cx| {
-                conversation_header.set_view_model(view_model);
-                cx.notify();
-            });
-    }
-
-    fn notify_root_modal_host(&self, cx: &mut Context<Self>) {
-        let view_model = root_modal_host::view_model(&self.app, &self.ui);
-        self.views.root_modal_host.update(cx, |host, cx| {
-            host.set_view_model(view_model);
-            cx.notify();
-        });
-    }
-
-    fn notify_center_drawer_host(&self, cx: &mut Context<Self>) {
-        let view_model = center_drawer_host::view_model(&self.app, &self.ui);
-        self.views.center_drawer_host.update(cx, |host, cx| {
-            host.set_view_model(view_model);
-            cx.notify();
-        });
-    }
-
-    fn schedule_preferences(&mut self) {
-        if self.connection.preference_writer.is_none() {
-            return;
-        }
-        let owner = self.app.workspaces.active_key().clone();
-        match self
-            .connection
-            .controller
-            .write_preferences(owner, self.app.preferences.clone())
-        {
-            Ok(transition) => self.queue_transition(transition),
-            Err(error) => self
-                .app
-                .workspaces
-                .active_mut()
-                .set_preference_notice(error.to_string()),
-        }
-    }
-
-    fn remember_thinking_selection(&mut self, session_id: &str, selection: DesktopThinkingLevel) {
-        if self
-            .app
-            .preferences
-            .set_thinking_level_for_session(session_id, selection)
-        {
-            self.schedule_preferences();
-        }
-    }
-
-    fn reconcile_thinking_selection_with_project(&mut self) {
-        let owner = self.app.workspaces.active_key().clone();
-        self.reconcile_thinking_selection_for(&owner);
-    }
-
-    fn toggle_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let viewport = window.viewport_size();
-        let dockable = self
-            .resolve_layout(
-                u32::from(viewport.width),
-                u32::from(viewport.height),
-                PanelVisibility {
-                    sessions: true,
-                    context: self.app.preferences.context_panel_visible,
-                },
-            )
-            .sidebar
-            .is_some();
-        if !dockable {
-            if self.ui.active_drawer == Some(CenterDrawerKind::Sessions) {
-                self.dismiss_drawer(window, cx, true);
-            } else {
-                self.activate_drawer(CenterDrawerKind::Sessions, window, cx);
-            }
-            return;
-        }
-        self.app.preferences.sessions_panel_visible = !self.app.preferences.sessions_panel_visible;
-        let layout = self.layout(window);
-        self.ui.focus.reconcile_layout(layout);
-        if self.ui.focus.active() == FocusTarget::Composer {
-            self.focus_composer_input(window, cx);
-        }
-        self.schedule_preferences();
-        self.notify_inspector_pane(cx);
-        self.notify_conversation_header(cx);
-        cx.notify();
-    }
-
-    fn toggle_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let viewport = window.viewport_size();
-        let dockable = self
-            .resolve_layout(
-                u32::from(viewport.width),
-                u32::from(viewport.height),
-                PanelVisibility {
-                    sessions: self.app.preferences.sessions_panel_visible,
-                    context: true,
-                },
-            )
-            .inspector
-            .is_some();
-        if !dockable {
-            if self.ui.active_drawer == Some(CenterDrawerKind::Inspector) {
-                self.dismiss_drawer(window, cx, true);
-            } else {
-                self.activate_drawer(CenterDrawerKind::Inspector, window, cx);
-            }
-            return;
-        }
-        self.app.preferences.context_panel_visible = !self.app.preferences.context_panel_visible;
-        let layout = self.layout(window);
-        self.ui.focus.reconcile_layout(layout);
-        if self.ui.focus.active() == FocusTarget::Composer {
-            self.focus_composer_input(window, cx);
-        }
-        self.schedule_preferences();
-        self.notify_conversation_header(cx);
-        cx.notify();
-    }
-
-    fn reserve_command(&mut self, intent: DesktopCommandIntent) -> Option<u64> {
-        commands::reserve_command(self, intent)
-    }
-
-    fn submit_composer(&mut self, cx: &mut Context<Self>) {
-        let selected_model_supports_images = {
-            let workspace = self.app.workspaces.active();
-            workspace
-                .project
-                .models
-                .iter()
-                .find(|model| model.id == workspace.project.selected_model_id)
-                .is_some_and(|model| model.supports_images)
-        };
-        if !self.app.workspaces.active().composer_attachments.is_empty()
-            && !selected_model_supports_images
-        {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Selected model does not support image attachments; the draft was retained.".into(),
-            );
-            self.notify_composer_pane(cx);
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        let intent = DesktopCommandIntent::Prompt;
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let has_attachments = !self
-            .app
-            .workspaces
-            .active_mut()
-            .composer_attachments
-            .is_empty();
-        let payload = match self
-            .app
-            .workspaces
-            .active_mut()
-            .composer
-            .begin_submit_with_attachments(
-                command_id,
-                ComposerSubmissionKind::Prompt,
-                has_attachments,
-            ) {
-            Ok(payload) => payload.to_owned(),
-            Err(error) => {
-                self.complete_active_command(command_id, &intent);
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(error.to_string());
-                self.notify_composer_pane(cx);
-                self.notify_toast_host(cx);
-                cx.notify();
-                return;
-            }
-        };
-        let thinking_level = self
-            .app
-            .workspaces
-            .active_mut()
-            .thinking_selection
-            .explicit();
-        let target = self.app.workspaces.active_mut().prompt_target();
-        let admission = self.connection.runtime_client.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                runtime
-                    .try_submit_prompt_with_attachments(
-                        command_id,
-                        target,
-                        &payload,
-                        &self.app.workspaces.active_mut().composer_attachments,
-                        thinking_level,
-                    )
-                    .map_err(|error| error.to_string())
-            },
-        );
-        if let Err(message) = admission {
-            self.complete_active_command(command_id, &intent);
-            let _ = self
-                .app
-                .workspaces
-                .active_mut()
-                .composer
-                .rejected(command_id, message);
-        }
-        self.notify_composer_pane(cx);
-        self.notify_inspector_pane(cx);
-        self.notify_conversation_header(cx);
-        cx.notify();
-    }
-
-    fn submit_primary_composer(&mut self, cx: &mut Context<Self>) {
-        if self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
-        {
-            self.submit_active_control(self.active_composer_running_mode().submission_kind(), cx);
-        } else {
-            self.submit_composer(cx);
-        }
-    }
-
-    fn choose_composer_attachments(&mut self, cx: &mut Context<Self>) {
-        if let Some(reason) =
-            composer_pane::attachment_disabled_reason(self.app.workspaces.active())
-        {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice(reason.to_string());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        let owner = self.app.workspaces.active_key().clone();
-        match self
-            .connection
-            .controller
-            .pick_paths(owner, DesktopPickerKind::Attachments)
-        {
-            Ok(transition) => self.apply_transition(transition, cx),
-            Err(error) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(error.to_string());
-                self.notify_toast_host(cx);
-            }
-        }
-    }
-
-    fn choose_project_directory(&mut self, cx: &mut Context<Self>) {
-        if !self
-            .app
-            .workspaces
-            .active_mut()
-            .project_directory_editable()
-        {
-            return;
-        }
-        let owner = self.app.workspaces.active_key().clone();
-        match self
-            .connection
-            .controller
-            .pick_paths(owner, DesktopPickerKind::ProjectDirectory)
-        {
-            Ok(transition) => self.apply_transition(transition, cx),
-            Err(error) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(error.to_string());
-                self.notify_toast_host(cx);
-            }
-        }
-    }
-
-    fn clear_project_directory(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self
-            .app
-            .workspaces
-            .active_mut()
-            .project_directory_editable()
-        {
-            return false;
-        }
-        let projectless_selection = self.app.workspace_defaults.projectless_selection.clone();
-        self.app.workspaces.active_mut().draft_workspace_selection = projectless_selection;
-        self.notify_composer_pane(cx);
-        cx.notify();
-        true
-    }
-
-    fn remove_composer_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.app.workspaces.active_mut().composer_attachments.len() {
-            self.app
-                .workspaces
-                .active_mut()
-                .composer_attachments
-                .remove(index);
-            self.notify_composer_pane(cx);
-            cx.notify();
-        }
-    }
-
-    fn submit_active_control(&mut self, kind: ComposerSubmissionKind, cx: &mut Context<Self>) {
-        if !self
-            .app
-            .workspaces
-            .active_mut()
-            .composer_attachments
-            .is_empty()
-        {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Attachments cannot be added to a running operation; the draft was retained."
-                    .into(),
-            );
-            self.notify_composer_pane(cx);
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        if kind == ComposerSubmissionKind::Prompt {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Prompt submissions must use the idle composer action.".into(),
-            );
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        let intent = match kind {
-            ComposerSubmissionKind::Steer => DesktopCommandIntent::Steer,
-            ComposerSubmissionKind::FollowUp => DesktopCommandIntent::FollowUp,
-            ComposerSubmissionKind::Prompt => {
-                unreachable!("prompt submission was rejected before command reservation")
-            }
-        };
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let payload = match self
-            .app
-            .workspaces
-            .active_mut()
-            .composer
-            .begin_submit(command_id, kind)
-        {
-            Ok(payload) => payload.to_owned(),
-            Err(error) => {
-                self.complete_active_command(command_id, &intent);
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(error.to_string());
-                self.notify_composer_pane(cx);
-                self.notify_toast_host(cx);
-                cx.notify();
-                return;
-            }
-        };
-        let session_id = self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .map(|projection| projection.snapshot().session.session_id.clone());
-        let admission = self.connection.runtime_client.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                let Some(session_id) = session_id.as_deref() else {
-                    return Err("desktop session is unavailable".to_owned());
-                };
-                let result = match kind {
-                    ComposerSubmissionKind::Steer => {
-                        runtime.try_steer_for_session(command_id, session_id, &payload)
-                    }
-                    ComposerSubmissionKind::FollowUp => {
-                        runtime.try_follow_up_for_session(command_id, session_id, &payload)
-                    }
-                    ComposerSubmissionKind::Prompt => {
-                        unreachable!("prompt submission was rejected before runtime admission")
-                    }
-                };
-                result.map_err(|error| error.to_string())
-            },
-        );
-        if let Err(message) = admission {
-            self.complete_active_command(command_id, &intent);
-            let _ = self
-                .app
-                .workspaces
-                .active_mut()
-                .composer
-                .rejected(command_id, message);
-        }
-        self.notify_composer_pane(cx);
-        self.notify_inspector_pane(cx);
-        self.notify_conversation_header(cx);
-        cx.notify();
-    }
-
-    fn abort_active_operation(&mut self, cx: &mut Context<Self>) {
-        if self.active_command_contains_where(|intent| {
-            matches!(intent, DesktopCommandIntent::Abort { .. })
-        }) {
-            return;
-        }
-        let Some(operation_id) = self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .and_then(|projection| projection.snapshot().active_operation.clone())
-        else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("No active operation is available to abort.".into());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let session_id = self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .expect("an active operation always belongs to a session projection")
-            .snapshot()
-            .session
-            .session_id
-            .clone();
-        let intent = DesktopCommandIntent::Abort { operation_id };
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let admission = self.connection.runtime_client.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                runtime
-                    .try_abort_for_session(command_id, &session_id)
-                    .map_err(|error| error.to_string())
-            },
-        );
-        match admission {
-            Ok(()) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice("Abort requested…".into());
-            }
-            Err(message) => {
-                self.complete_active_command(command_id, &intent);
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(message);
-            }
-        }
-        self.notify_toast_host(cx);
-        self.notify_conversation_header(cx);
-        cx.notify();
-    }
-
-    fn reload_local_resources(&mut self, cx: &mut Context<Self>) {
-        let intent = DesktopCommandIntent::Reload;
-        if self.active_command_contains(&intent) {
-            return;
-        }
-        if self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
-            || self
-                .app
-                .workspaces
-                .active_mut()
-                .composer
-                .submitted()
-                .is_some()
-        {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Reload is available only while the runtime is idle.".into(),
-            );
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let target = self.app.workspaces.active_mut().runtime_owner_target();
-        let admission = self.connection.runtime_client.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                runtime
-                    .try_reload(command_id, target)
-                    .map_err(|error| error.to_string())
-            },
-        );
-        match admission {
-            Ok(()) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice("Reloading local resources…".into());
-            }
-            Err(message) => {
-                self.complete_active_command(command_id, &intent);
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(message);
-            }
-        }
-        self.notify_toast_host(cx);
-        self.notify_conversation_header(cx);
-        cx.notify();
-    }
-
-    fn submit_recovery_action(
-        &mut self,
-        identity: DesktopRecoveryIdentity,
-        action: DesktopRecoveryAction,
-        cx: &mut Context<Self>,
-    ) {
-        if self.active_command_contains_where(|intent| {
-            matches!(intent, DesktopCommandIntent::Recovery { .. })
-        }) {
-            return;
-        }
-        if self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
-            || self
-                .app
-                .workspaces
-                .active_mut()
-                .composer
-                .submitted()
-                .is_some()
-        {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Recovery actions are available only while the runtime is idle.".into(),
-            );
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        let intent = DesktopCommandIntent::Recovery {
-            recovery_id: identity.recovery_id.clone(),
-            action,
-        };
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            cx.notify();
-            return;
-        };
-        let admission = self.connection.runtime_client.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                let result = match action {
-                    DesktopRecoveryAction::Retry => {
-                        runtime.try_retry_recovery(command_id, &identity)
-                    }
-                    DesktopRecoveryAction::MarkFailed => runtime.try_resolve_recovery(
-                        command_id,
-                        &identity,
-                        CodingAgentRecoveryResolution::Failed,
-                    ),
-                    DesktopRecoveryAction::Abort => runtime.try_resolve_recovery(
-                        command_id,
-                        &identity,
-                        CodingAgentRecoveryResolution::Aborted,
-                    ),
-                };
-                result.map_err(|error| error.to_string())
-            },
-        );
-        match admission {
-            Ok(()) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(format!(
-                        "Submitting recovery {}…",
-                        recovery_action_label(action)
-                    ));
-            }
-            Err(message) => {
-                self.complete_active_command(command_id, &intent);
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(message);
-            }
-        }
-        self.notify_inspector_pane(cx);
-        cx.notify();
-    }
-
-    fn submit_selection(
-        &mut self,
-        selection: DesktopRuntimeSelectionKind,
-        id: String,
-        cx: &mut Context<Self>,
-    ) {
-        let selected_profile_id = {
-            let workspace = self.app.workspaces.active();
-            workspace
-                .projection
-                .as_ref()
-                .map(|projection| {
-                    projection
-                        .snapshot()
-                        .session
-                        .default_agent_profile_id
-                        .as_str()
-                })
-                .unwrap_or(workspace.project.default_agent_profile_id.as_str())
-                .to_owned()
-        };
-        let already_selected = match selection {
-            DesktopRuntimeSelectionKind::Model => {
-                id == self.app.workspaces.active_mut().project.selected_model_id
-            }
-            DesktopRuntimeSelectionKind::SessionProfile => id == selected_profile_id,
-        };
-        if already_selected {
-            return;
-        }
-        if self.active_command_contains_where(|intent| {
-            matches!(intent, DesktopCommandIntent::Selection(_))
-        }) {
-            return;
-        }
-        if self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
-            || self
-                .app
-                .workspaces
-                .active_mut()
-                .composer
-                .submitted()
-                .is_some()
-        {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Model and profile selection is available only while idle.".into(),
-            );
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        let intent = DesktopCommandIntent::Selection(selection);
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let target = self.app.workspaces.active_mut().runtime_owner_target();
-        let admission = self.connection.runtime_client.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                let result = match selection {
-                    DesktopRuntimeSelectionKind::Model => runtime.try_select_model(
-                        command_id,
-                        target,
-                        &id,
-                        self.app
-                            .workspaces
-                            .active_mut()
-                            .thinking_selection
-                            .explicit(),
-                    ),
-                    DesktopRuntimeSelectionKind::SessionProfile => {
-                        runtime.try_select_session_profile(command_id, target, &id)
-                    }
-                };
-                result.map_err(|error| error.to_string())
-            },
-        );
-        match admission {
-            Ok(()) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice("Applying selection…".into());
-            }
-            Err(message) => {
-                self.complete_active_command(command_id, &intent);
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(message);
-            }
-        }
-        self.notify_toast_host(cx);
-        self.notify_conversation_header(cx);
-        cx.notify();
-    }
-
-    fn select_thinking_level(&mut self, selection: DesktopThinkingLevel, cx: &mut Context<Self>) {
-        let options = {
-            let workspace = self.app.workspaces.active();
-            conversation_header::thinking_menu(
-                workspace
-                    .project
-                    .models
-                    .iter()
-                    .find(|model| model.id == workspace.project.selected_model_id),
-            )
-        };
-        if !options.iter().any(|option| option.selection == selection) {
-            return;
-        }
-        if self.app.workspaces.active_mut().thinking_selection == selection {
-            return;
-        }
-        self.app.workspaces.active_mut().thinking_selection = selection;
-        self.app.workspaces.active_mut().thinking_hint = None;
-        let session_id = self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .map(|projection| projection.snapshot().session.session_id.clone());
-        if let Some(session_id) = session_id.as_deref() {
-            self.remember_thinking_selection(session_id, selection);
-        }
-        let label = self.app.workspaces.active_mut().thinking_selection.label(
-            self.app
-                .workspaces
-                .active_mut()
-                .project
-                .settings
-                .default_thinking_level
-                .as_deref(),
-        );
-        self.app
-            .workspaces
-            .active_mut()
-            .set_preference_notice(format!(
-                "{} will use thinking {label}.",
-                if session_id.is_some() {
-                    "This session"
-                } else {
-                    "The next session"
-                }
-            ));
-        self.notify_toast_host(cx);
-        self.notify_conversation_header(cx);
-        self.push_inspector_pane_view_model(cx);
-        cx.notify();
-    }
-
-    fn cycle_thinking_selection(&mut self, cx: &mut Context<Self>) {
-        let options = {
-            let workspace = self.app.workspaces.active();
-            conversation_header::thinking_menu(
-                workspace
-                    .project
-                    .models
-                    .iter()
-                    .find(|model| model.id == workspace.project.selected_model_id),
-            )
-        };
-        let Some(next) = options
-            .iter()
-            .position(|option| {
-                option.selection == self.app.workspaces.active_mut().thinking_selection
-            })
-            .map(|index| options[(index + 1) % options.len()].selection)
-            .or_else(|| options.first().map(|option| option.selection))
-        else {
-            return;
-        };
-        self.select_thinking_level(next, cx);
-    }
-
-    fn decide_tool_authorization(
-        &mut self,
-        identity: ToolAuthorizationIdentity,
-        decision: ToolAuthorizationDecision,
-        cx: &mut Context<Self>,
-    ) {
-        if self.active_command_contains_where(|intent| {
-            matches!(intent, DesktopCommandIntent::Authorization { .. })
-        }) {
-            return;
-        }
-        let intent = DesktopCommandIntent::Authorization {
-            authorization_id: identity.authorization_id.clone(),
-            operation_id: identity.operation_id.clone(),
-        };
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let admission = self.connection.runtime_client.as_ref().map_or_else(
-            || Err("desktop runtime is stopped".to_owned()),
-            |runtime| {
-                runtime
-                    .try_decide_tool_authorization(command_id, &identity, decision)
-                    .map_err(|error| error.to_string())
-            },
-        );
-        match admission {
-            Ok(()) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice("Authorization decision pending…".into());
-            }
-            Err(message) => {
-                self.complete_active_command(command_id, &intent);
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(message);
-            }
-        }
-        self.notify_toast_host(cx);
-        self.notify_root_modal_host(cx);
-        cx.notify();
-    }
-
-    fn copy_selected_conversation(&mut self, cx: &mut Context<Self>) {
-        let workspace = self.app.workspaces.active_mut();
-        let Some(projection) = workspace.projection.as_ref() else {
-            return;
-        };
-        let Some(text) = workspace
-            .presentation
-            .conversation_controller
-            .copy_selected(projection.conversation())
-        else {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Select a committed conversation block before copying.".into(),
-            );
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        self.write_clipboard(
-            Some(text),
-            ClipboardFeedback::ConversationAnnouncement("Selected message copied.".into()),
-            cx,
-        );
-    }
-
-    fn conversation_full_message_view(
-        &self,
-        block_id: &str,
-    ) -> Option<ConversationFullMessageView> {
-        let projection = self.app.workspaces.active().projection.as_ref()?;
-        if let Some(block) = projection.conversation().block(block_id) {
-            return Some(ConversationFullMessageView {
-                block_id: block_id.to_owned(),
-                title: Arc::from(block.title.as_str()),
-                text: Arc::from(block.copy_text()),
-                source_truncated: block.truncated
-                    || block.text.len().saturating_add(block.detail.len()) > MAX_COPY_BYTES,
-            });
-        }
-        if let Some(message) = self
-            .app
-            .workspaces
-            .active()
-            .projection
-            .as_ref()?
-            .messages()
-            .iter()
-            .find(|message| message_conversation_block_id(message) == block_id)
-        {
-            return Some(ConversationFullMessageView {
-                block_id: block_id.to_owned(),
-                title: Arc::from("Assistant · live"),
-                text: Arc::from(conversation_copy_text(&message.text, &message.thinking)),
-                source_truncated: message.truncated
-                    || message.text.len().saturating_add(message.thinking.len()) > MAX_COPY_BYTES,
-            });
-        }
-        if let Some(tool) = projection
-            .tools()
-            .iter()
-            .find(|tool| tool_conversation_block_id(tool) == block_id)
-        {
-            return Some(ConversationFullMessageView {
-                block_id: block_id.to_owned(),
-                title: Arc::from(format!("Tool · {}", tool.name)),
-                text: Arc::from(conversation_copy_text(&tool.detail, &tool.arguments)),
-                source_truncated: tool.truncated
-                    || tool.detail.len().saturating_add(tool.arguments.len()) > MAX_COPY_BYTES,
-            });
-        }
-        self.app
-            .workspaces
-            .active()
-            .presentation
-            .conversation_controller
-            .row_for_block(block_id)
-            .map(|row| ConversationFullMessageView {
-                block_id: block_id.to_owned(),
-                title: Arc::clone(&row.title),
-                text: Arc::from(conversation_copy_text(&row.text, &row.detail)),
-                source_truncated: row.preview_truncated,
-            })
-    }
-
-    fn copy_conversation_row(&mut self, block_id: &str, cx: &mut Context<Self>) {
-        let Some(message) = self.conversation_full_message_view(block_id) else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("Message is no longer available to copy.".into());
-            self.notify_toast_host(cx);
-            return;
-        };
-        self.write_clipboard(
-            Some(message.text.to_string()),
-            ClipboardFeedback::ConversationAnnouncement("Message copied.".into()),
-            cx,
-        );
-    }
-
-    fn copy_tool_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
-        let Some(row) = self
-            .app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .row_for_block(block_id)
-        else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("Tool details are no longer available to copy.".into());
-            self.notify_toast_host(cx);
-            return;
-        };
-        self.write_clipboard(
-            Some(conversation_pane::tool_detail_copy_text(
-                &row.title,
-                &row.detail,
-                &row.text,
-            )),
-            ClipboardFeedback::ConversationAnnouncement("Tool details copied.".into()),
-            cx,
-        );
-    }
-
-    fn announce_conversation_copy(&mut self, message: &str, cx: &mut Context<Self>) {
-        self.write_clipboard(
-            None,
-            ClipboardFeedback::ConversationAnnouncement(message.into()),
-            cx,
-        );
-    }
-
-    fn write_clipboard(
-        &mut self,
-        text: Option<String>,
-        feedback: ClipboardFeedback,
-        cx: &mut Context<Self>,
-    ) {
-        let owner = self.app.workspaces.active_key().clone();
-        match self
-            .connection
-            .controller
-            .write_clipboard(owner, text, feedback)
-        {
-            Ok(transition) => self.apply_transition(transition, cx),
-            Err(error) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(error.to_string());
-                self.notify_toast_host(cx);
-            }
-        }
-    }
-
-    fn open_full_conversation_message(
-        &mut self,
-        block_id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(message) = self.conversation_full_message_view(block_id) else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("Message is no longer available to open.".into());
-            self.notify_toast_host(cx);
-            return;
-        };
-        tracing::trace!(
-            target: "desktop",
-            event = "message_full_view_open",
-            block_id = message.block_id,
-            bytes = message.text.len(),
-        );
-        self.ui.conversation_full_message = Some(message);
-        self.activate_modal(DesktopModalKind::FullMessage, window, cx);
-    }
-
-    fn close_full_conversation_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ui.conversation_full_message = None;
-        self.dismiss_modal(window, cx);
-    }
-
-    fn toggle_conversation_details(&mut self, block_id: &str, cx: &mut Context<Self>) {
-        self.app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .toggle_details(block_id);
-        if !self.refresh_conversation_rows_at_current_width(cx) {
-            cx.notify();
-        }
-    }
-
-    pub(super) fn select_adjacent_conversation(&mut self, reverse: bool, cx: &mut Context<Self>) {
-        let workspace = &mut self.app.workspaces.active_mut();
-        let Some(projection) = workspace.projection.as_ref() else {
-            return;
-        };
-        let row_count = workspace.presentation.conversation_controller.row_count();
-        if row_count == 0 {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("The conversation is empty.".into());
-            self.notify_toast_host(cx);
-            return;
-        }
-        let current_index = workspace
-            .presentation
-            .conversation_controller
-            .selected_block_id()
-            .map(str::to_owned)
-            .and_then(|selected| {
-                workspace
-                    .presentation
-                    .conversation_controller
-                    .row_index(&selected)
-            });
-        let next_index = adjacent_conversation_index(row_count, current_index, reverse)
-            .expect("non-empty conversation has an adjacent selection");
-        let row = workspace
-            .presentation
-            .conversation_controller
-            .row_at(next_index)
-            .expect("adjacent index is inside the rendered rows");
-        workspace.presentation.conversation_controller.select_row(
-            row.item_key.row_id().to_owned(),
-            row.durable,
-            projection.conversation(),
-        );
-        workspace
-            .presentation
-            .conversation_controller
-            .scroll_to_row(
-                next_index,
-                if reverse {
-                    ScrollStrategy::Top
-                } else {
-                    ScrollStrategy::Bottom
-                },
-            );
-        self.notify_conversation_pane(cx);
-        self.notify_conversation_header(cx);
-    }
-
-    fn copy_keyboard_selected_conversation(&mut self, cx: &mut Context<Self>) {
-        let Some(block_id) = self
-            .app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .selected_block_id()
-            .map(str::to_owned)
-        else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("Select a conversation message before copying.".into());
-            self.notify_toast_host(cx);
-            return;
-        };
-        self.copy_conversation_row(&block_id, cx);
-    }
-
-    fn toggle_keyboard_selected_conversation_details(&mut self, cx: &mut Context<Self>) {
-        let Some(block_id) = self
-            .app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .selected_block_id()
-            .map(str::to_owned)
-        else {
-            return;
-        };
-        let has_details = self
-            .app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .row_for_block(&block_id)
-            .is_some_and(|row| !row.detail.is_empty());
-        if has_details {
-            self.toggle_conversation_details(&block_id, cx);
-        }
-    }
-
-    fn request_file_review(
-        &mut self,
-        request: CodingAgentFileReviewRequest,
-        cx: &mut Context<Self>,
-    ) {
-        let intent = DesktopCommandIntent::FileReview {
-            request: request.clone(),
-        };
-        if self.active_command_contains_where(|pending| {
-            matches!(pending, DesktopCommandIntent::FileReview { .. })
-        }) {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("Another file review is already pending.".into());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let Some(session_id) = self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .map(|projection| projection.snapshot().session.session_id.clone())
-        else {
-            self.complete_active_command(command_id, &intent);
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("File review requires an open session.".into());
-            self.notify_inspector_pane(cx);
-            cx.notify();
-            return;
-        };
-        let admission = self
-            .connection
-            .runtime_client
-            .as_ref()
-            .ok_or_else(|| "desktop runtime is unavailable".to_owned())
-            .and_then(|runtime| {
-                runtime
-                    .try_review_changed_file(command_id, &session_id, &request)
-                    .map_err(|error| error.to_string())
-            });
-        match admission {
-            Ok(()) => {
-                self.app.workspaces.active_mut().file_review =
-                    Arc::new(DesktopFileReviewState::Loading(request));
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice("Loading changed-file review…".into());
-            }
-            Err(message) => {
-                self.complete_active_command(command_id, &intent);
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(message);
-            }
-        }
-        self.notify_inspector_pane(cx);
-        cx.notify();
-    }
-
-    fn copy_review_path(&mut self, cx: &mut Context<Self>) {
-        let DesktopFileReviewState::Ready(document) =
-            self.app.workspaces.active_mut().file_review.as_ref()
-        else {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Load a changed-file review before copying its path.".into(),
-            );
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let export = document.path_clipboard_export();
-        let notice = if export.truncated {
-            "Bounded changed-file path copied (truncated).".into()
-        } else {
-            "Changed-file path copied.".into()
-        };
-        self.write_clipboard(Some(export.text), ClipboardFeedback::Notice(notice), cx);
-    }
-
-    fn copy_file_review(&mut self, cx: &mut Context<Self>) {
-        let DesktopFileReviewState::Ready(document) =
-            self.app.workspaces.active_mut().file_review.as_ref()
-        else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("Load a changed-file review before copying it.".into());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let export = document.clipboard_export();
-        let notice = if export.truncated {
-            "Bounded file review copied (truncated at the clipboard limit).".into()
-        } else {
-            "File review copied.".into()
-        };
-        self.write_clipboard(Some(export.text), ClipboardFeedback::Notice(notice), cx);
-    }
-
-    fn open_review_in_external_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.app.preferences.external_editor.clone() else {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Configure desktop.external_editor with a program and literal argv first.".into(),
-            );
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let DesktopFileReviewState::Ready(document) =
-            self.app.workspaces.active_mut().file_review.as_ref()
-        else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("Load a changed-file review before opening it.".into());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let Some(target) = document.external_editor_target.clone() else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("This review has no external-editor target.".into());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let project_relative_path = target.project_relative_path().to_owned();
-        let intent = DesktopCommandIntent::ExternalEditor {
-            project_relative_path: project_relative_path.clone(),
-        };
-        let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        let Some(session_id) = self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .map(|projection| projection.snapshot().session.session_id.clone())
-        else {
-            self.complete_active_command(command_id, &intent);
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("External editor requires an open session.".into());
-            self.notify_inspector_pane(cx);
-            cx.notify();
-            return;
-        };
-        let admission = self
-            .connection
-            .runtime_client
-            .as_ref()
-            .ok_or_else(|| "desktop runtime is unavailable".to_owned())
-            .and_then(|runtime| {
-                runtime
-                    .try_open_external_editor(command_id, &session_id, &target, &editor)
-                    .map_err(|error| error.to_string())
-            });
-        match admission {
-            Ok(()) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(format!(
-                        "Validating {} before editor launch…",
-                        truncate_label(&project_relative_path, 48)
-                    ));
-            }
-            Err(message) => {
-                self.complete_active_command(command_id, &intent);
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(message);
-            }
-        }
-        self.notify_inspector_pane(cx);
-        cx.notify();
-    }
-
-    fn activate_modal(
-        &mut self,
-        modal: DesktopModalKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.dismiss_drawer(window, cx, false);
-        if self.ui.active_modal.is_none() {
-            self.ui.focus.open_modal();
-        }
-        self.ui.active_modal = Some(modal);
-        match modal {
-            DesktopModalKind::Authorization => self.ui.authorization_focus.focus(window, cx),
-            DesktopModalKind::CommandPalette => self.ui.command_palette_focus.focus(window, cx),
-            DesktopModalKind::FullMessage => self.ui.full_message_focus.focus(window, cx),
-        }
-        self.notify_conversation_header(cx);
-        self.notify_root_modal_host(cx);
-        cx.notify();
-    }
-
-    fn dismiss_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ui.active_modal = None;
-        self.ui.focus.close_modal(self.layout(window));
-        self.focus_active_target(window, cx);
-        self.notify_conversation_header(cx);
-        self.notify_root_modal_host(cx);
-        cx.notify();
-    }
-
-    fn activate_drawer(
-        &mut self,
-        drawer: CenterDrawerKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.ui.active_modal.is_some() {
-            self.focus_active_target(window, cx);
-            return;
-        }
-        if self.ui.active_drawer.is_none() {
-            self.ui.drawer_restore_focus = Some(self.ui.focus.active());
-        }
-        self.ui.active_drawer = Some(drawer);
-        match drawer {
-            CenterDrawerKind::Sessions => self.ui.sidebar_focus.focus(window, cx),
-            CenterDrawerKind::Inspector => self.ui.inspector_focus.focus(window, cx),
-        }
-        self.notify_sessions_pane(cx);
-        self.notify_inspector_pane(cx);
-        self.notify_conversation_header(cx);
-        self.notify_center_drawer_host(cx);
-        cx.notify();
-    }
-
-    fn dismiss_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>, restore_focus: bool) {
-        if self.ui.active_drawer.take().is_none() {
-            if !restore_focus {
-                self.ui.drawer_restore_focus = None;
-            }
-            return;
-        }
-        let restore_target = self.ui.drawer_restore_focus.take();
-        if restore_focus {
-            let layout = self.layout(window);
-            let restored =
-                restore_target.is_some_and(|target| self.ui.focus.request(target, layout));
-            if !restored {
-                let _ = self.ui.focus.request(FocusTarget::Composer, layout);
-            }
-            self.focus_active_target(window, cx);
-        }
-        self.notify_sessions_pane(cx);
-        self.notify_inspector_pane(cx);
-        self.notify_conversation_header(cx);
-        self.notify_center_drawer_host(cx);
-        cx.notify();
-    }
-
-    fn reconcile_authorization_modal(
-        &mut self,
-        authorization_present: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if authorization_present {
-            self.ui.command_palette.close();
-            self.ui.conversation_full_message = None;
-            if self.ui.active_modal != Some(DesktopModalKind::Authorization) {
-                self.activate_modal(DesktopModalKind::Authorization, window, cx);
-            }
-        } else if self.ui.active_modal == Some(DesktopModalKind::Authorization) {
-            self.dismiss_modal(window, cx);
-        }
-    }
-
-    fn focus_target(&mut self, target: FocusTarget, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ui.active_modal.is_some() {
-            return;
-        }
-        let layout = self.layout(window);
-        if target == FocusTarget::Sidebar && !layout.is_visible(target) {
-            self.activate_drawer(CenterDrawerKind::Sessions, window, cx);
-            return;
-        }
-        if target == FocusTarget::Inspector && !layout.is_visible(target) {
-            self.activate_drawer(CenterDrawerKind::Inspector, window, cx);
-            return;
-        }
-        if !self.ui.focus.request(target, layout) {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice(format!(
-                    "{} is unavailable at the current window width.",
-                    focus_target_label(target)
-                ));
-            cx.notify();
-            return;
-        }
-        self.focus_active_target(window, cx);
-        cx.notify();
-    }
-
-    fn cycle_focus(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ui.active_modal.is_some() {
-            self.focus_active_target(window, cx);
-            return;
-        }
-        self.ui.focus.cycle(self.layout(window), reverse);
-        self.focus_active_target(window, cx);
-        cx.notify();
-    }
-
-    fn root_action_blocked_by_modal(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(modal) = self.ui.active_modal else {
-            return false;
-        };
-        self.app.workspaces.active_mut().set_preference_notice(
-            match modal {
-                DesktopModalKind::Authorization => {
-                    "Resolve the authorization dialog before using workspace shortcuts."
-                }
-                DesktopModalKind::CommandPalette => {
-                    "Choose a typed command or close the command palette first."
-                }
-                DesktopModalKind::FullMessage => {
-                    "Close the full message viewer before using workspace shortcuts."
-                }
-            }
-            .into(),
-        );
-        self.focus_active_target(window, cx);
-        cx.notify();
-        true
-    }
-
-    fn follow_latest(&mut self, cx: &mut Context<Self>) {
-        let visible_count = conversation_pane::visible_count(self.app.workspaces.active());
-        self.app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .follow_latest(visible_count);
-        self.notify_conversation_pane(cx);
-        self.notify_conversation_header(cx);
-    }
-
-    fn reconcile_conversation_scroll(&mut self, cx: &mut Context<Self>) {
-        if self
-            .app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .reconcile_scroll()
-        {
-            self.notify_conversation_pane(cx);
-            self.notify_conversation_header(cx);
-        }
-    }
-
-    fn review_next_file(&mut self, cx: &mut Context<Self>) {
-        let Some(projection) = self.app.workspaces.active().projection.as_ref() else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("No session is open for file review.".into());
-            cx.notify();
-            return;
-        };
-        let changes = &projection.snapshot().context.changes;
-        if changes.is_empty() {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("No changed file is available for review.".into());
-            cx.notify();
-            return;
-        }
-        let current = match self.app.workspaces.active().file_review.as_ref() {
-            DesktopFileReviewState::Empty => None,
-            DesktopFileReviewState::Loading(request)
-            | DesktopFileReviewState::Failed { request, .. } => Some(&request.change),
-            DesktopFileReviewState::Ready(document) => Some(&document.request.change),
-        };
-        let next = current
-            .and_then(|current| {
-                changes.iter().position(|change| {
-                    change.operation_id == current.operation_id
-                        && change.tool_call_id == current.tool_call_id
-                        && change.path == current.path
-                })
-            })
-            .map_or(0, |index| (index + 1) % changes.len());
-        let request = CodingAgentFileReviewRequest::from(&changes[next]);
-        self.request_file_review(request, cx);
-    }
-
-    fn submit_latest_recovery(&mut self, action: DesktopRecoveryAction, cx: &mut Context<Self>) {
-        let identity = self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .and_then(|projection| {
-                projection.recoveries().iter().find(|recovery| {
-                    recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative
-                })
-            })
-            .and_then(|recovery| recovery.identity.clone());
-        let Some(identity) = identity else {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("No authoritative pending recovery is available.".into());
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        };
-        self.submit_recovery_action(identity, action, cx);
-    }
-
-    fn execute_palette_command(
-        &mut self,
-        command: DesktopPaletteCommand,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match command {
-            DesktopPaletteCommand::NewSession => self.create_session(cx),
-            DesktopPaletteCommand::SwitchNextSession => self.switch_next_session(cx),
-            DesktopPaletteCommand::ToggleSessions => self.toggle_sessions(window, cx),
-            DesktopPaletteCommand::ToggleInspector => self.toggle_context(window, cx),
-            DesktopPaletteCommand::FocusSessions => {
-                self.focus_target(FocusTarget::Sidebar, window, cx);
-            }
-            DesktopPaletteCommand::FocusConversation => {
-                self.focus_target(FocusTarget::CenterBody, window, cx);
-            }
-            DesktopPaletteCommand::FocusComposer => {
-                self.focus_target(FocusTarget::Composer, window, cx);
-            }
-            DesktopPaletteCommand::FocusInspector => {
-                self.focus_target(FocusTarget::Inspector, window, cx);
-            }
-            DesktopPaletteCommand::SubmitPrompt => {
-                if self
-                    .app
-                    .workspaces
-                    .active_mut()
-                    .projection
-                    .as_ref()
-                    .is_some_and(|projection| projection.snapshot().active_operation.is_some())
-                {
-                    self.submit_active_control(ComposerSubmissionKind::Steer, cx);
-                } else {
-                    self.submit_composer(cx);
-                }
-            }
-            DesktopPaletteCommand::SteerOperation => {
-                self.submit_active_control(ComposerSubmissionKind::Steer, cx);
-            }
-            DesktopPaletteCommand::FollowUpOperation => {
-                self.submit_active_control(ComposerSubmissionKind::FollowUp, cx);
-            }
-            DesktopPaletteCommand::AbortOperation => self.abort_active_operation(cx),
-            DesktopPaletteCommand::FollowLatest => self.follow_latest(cx),
-            DesktopPaletteCommand::ReloadResources => self.reload_local_resources(cx),
-            DesktopPaletteCommand::CopyConversation => self.copy_selected_conversation(cx),
-            DesktopPaletteCommand::CycleThinking => self.cycle_thinking_selection(cx),
-            DesktopPaletteCommand::ReviewNextFile => self.review_next_file(cx),
-            DesktopPaletteCommand::CopyReviewPath => self.copy_review_path(cx),
-            DesktopPaletteCommand::CopyFileReview => self.copy_file_review(cx),
-            DesktopPaletteCommand::OpenExternalEditor => self.open_review_in_external_editor(cx),
-            DesktopPaletteCommand::RetryRecovery => {
-                self.submit_latest_recovery(DesktopRecoveryAction::Retry, cx);
-            }
-            DesktopPaletteCommand::MarkRecoveryFailed => {
-                self.submit_latest_recovery(DesktopRecoveryAction::MarkFailed, cx);
-            }
-            DesktopPaletteCommand::AbortRecovery => {
-                self.submit_latest_recovery(DesktopRecoveryAction::Abort, cx);
-            }
-            DesktopPaletteCommand::ToggleReducedMotion => {
-                self.app.preferences.reduced_motion = !self.app.preferences.reduced_motion;
-                self.schedule_preferences();
-                let notice = if self.app.preferences.reduced_motion {
-                    "Reduced motion enabled; desktop transitions remain static.".into()
-                } else {
-                    "Reduced motion disabled; idle presentation remains static.".into()
-                };
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(notice);
-                self.notify_toast_host(cx);
-                cx.notify();
-            }
-        }
-    }
-
-    fn on_open_command_palette(
-        &mut self,
-        _: &OpenCommandPalette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .is_some_and(|projection| !projection.snapshot().pending_authorizations.is_empty())
-        {
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("Resolve authorization before opening commands.".into());
-            self.ui.authorization_focus.focus(window, cx);
-            self.notify_toast_host(cx);
-            cx.notify();
-            return;
-        }
-        self.ui.command_palette.open();
-        self.activate_modal(DesktopModalKind::CommandPalette, window, cx);
-    }
-
-    fn on_open_file_surface(
-        &mut self,
-        _: &OpenFileSurface,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.review_next_file(cx);
-        self.focus_target(FocusTarget::Inspector, window, cx);
-    }
-
-    fn on_new_session(&mut self, _: &NewSession, window: &mut Window, cx: &mut Context<Self>) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.create_session(cx);
-    }
-
-    fn on_focus_composer(
-        &mut self,
-        _: &FocusComposer,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.focus_target(FocusTarget::Composer, window, cx);
-    }
-
-    fn on_submit_composer(
-        &mut self,
-        _: &SubmitComposer,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.submit_primary_composer(cx);
-    }
-
-    fn on_abort_active_operation(
-        &mut self,
-        _: &AbortActiveOperation,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.abort_active_operation(cx);
-    }
-
-    fn on_escape_hierarchy(
-        &mut self,
-        _: &EscapeHierarchy,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(modal) = self.ui.active_modal {
-            match modal {
-                DesktopModalKind::Authorization => {
-                    self.app.workspaces.active_mut().set_preference_notice(
-                        "Authorization requires Deny, Allow once, or Allow for operation.".into(),
-                    );
-                    self.ui.authorization_focus.focus(window, cx);
-                    cx.notify();
-                }
-                DesktopModalKind::CommandPalette => {
-                    self.ui.command_palette.close();
-                    self.dismiss_modal(window, cx);
-                }
-                DesktopModalKind::FullMessage => {
-                    self.close_full_conversation_message(window, cx);
-                }
-            }
-            return;
-        }
-        if self.ui.active_drawer.is_some() {
-            self.dismiss_drawer(window, cx, true);
-        } else if !matches!(
-            self.app.workspaces.active_mut().file_review.as_ref(),
-            DesktopFileReviewState::Empty
-        ) {
-            self.app.workspaces.active_mut().file_review = Arc::new(DesktopFileReviewState::Empty);
-            self.app
-                .workspaces
-                .active_mut()
-                .set_preference_notice("Closed the changed-file review.".into());
-            cx.notify();
-        } else {
-            self.focus_target(FocusTarget::Composer, window, cx);
-        }
-    }
-
-    fn on_follow_latest_output(
-        &mut self,
-        _: &FollowLatestOutput,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.follow_latest(cx);
-    }
-
-    fn on_toggle_inspector_panel(
-        &mut self,
-        _: &ToggleInspectorPanel,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.toggle_context(window, cx);
-    }
-
-    fn on_focus_next_region(
-        &mut self,
-        _: &FocusNextRegion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.cycle_focus(false, window, cx);
-    }
-
-    fn on_focus_previous_region(
-        &mut self,
-        _: &FocusPreviousRegion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.cycle_focus(true, window, cx);
-    }
-
-    fn on_select_previous_conversation(
-        &mut self,
-        _: &SelectPreviousConversation,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.root_action_blocked_by_modal(window, cx) {
-            self.select_adjacent_conversation(true, cx);
-        }
-    }
-
-    fn on_select_next_conversation(
-        &mut self,
-        _: &SelectNextConversation,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.root_action_blocked_by_modal(window, cx) {
-            self.select_adjacent_conversation(false, cx);
-        }
-    }
-
-    fn on_copy_selected_conversation(
-        &mut self,
-        _: &CopySelectedConversation,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.root_action_blocked_by_modal(window, cx) {
-            self.copy_keyboard_selected_conversation(cx);
-        }
-    }
-
-    fn on_toggle_selected_conversation_details(
-        &mut self,
-        _: &ToggleSelectedConversationDetails,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.root_action_blocked_by_modal(window, cx) {
-            self.toggle_keyboard_selected_conversation_details(cx);
-        }
-    }
-
-    fn on_palette_previous(&mut self, _: &PalettePrevious, _: &mut Window, cx: &mut Context<Self>) {
-        self.ui.command_palette.move_selection(true);
-        self.notify_root_modal_host(cx);
-        cx.notify();
-    }
-
-    fn on_palette_next(&mut self, _: &PaletteNext, _: &mut Window, cx: &mut Context<Self>) {
-        self.ui.command_palette.move_selection(false);
-        self.notify_root_modal_host(cx);
-        cx.notify();
-    }
-
-    fn on_palette_confirm(
-        &mut self,
-        _: &PaletteConfirm,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(command) = self.ui.command_palette.selected_command() else {
-            return;
-        };
-        self.ui.command_palette.close();
-        self.dismiss_modal(window, cx);
-        self.execute_palette_command(command, window, cx);
-    }
-
-    fn decide_current_authorization(
-        &mut self,
-        decision: ToolAuthorizationDecision,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(request) = self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .and_then(|projection| projection.snapshot().pending_authorizations.first())
-            .cloned()
-        else {
-            return;
-        };
-        self.decide_tool_authorization(request.identity(), decision, cx);
-    }
-
-    fn on_authorization_deny(
-        &mut self,
-        _: &AuthorizationDeny,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.decide_current_authorization(
-            ToolAuthorizationDecision::Deny {
-                reason: Some("denied from native desktop keyboard action".into()),
-            },
-            cx,
-        );
-    }
-
-    fn on_authorization_allow_once(
-        &mut self,
-        _: &AuthorizationAllowOnce,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.decide_current_authorization(ToolAuthorizationDecision::AllowOnce, cx);
-    }
-
-    fn on_authorization_allow_for_operation(
-        &mut self,
-        _: &AuthorizationAllowForOperation,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.decide_current_authorization(ToolAuthorizationDecision::AllowForOperation, cx);
-    }
-
-    fn on_trap_overlay_focus(
-        &mut self,
-        _: &TrapOverlayFocus,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.focus_active_target(window, cx);
-    }
-
-    fn submit_conversation_row_measurement(
-        &mut self,
-        measurement: &ConversationRowMeasurement,
-        cx: &mut Context<Self>,
-    ) {
-        let workspace = &mut self.app.workspaces.active_mut();
-        let Some(projection) = workspace.projection.as_ref() else {
-            return;
-        };
-        let source = ConversationSource::new(projection, workspace.composer.submitted());
-        let outcome = workspace
-            .presentation
-            .conversation_controller
-            .submit_row_measurement(&source, measurement);
-        self.schedule_conversation_height_refresh(outcome.refresh, cx);
-        if outcome.pane_dirty {
-            self.notify_conversation_pane(cx);
-        }
-    }
-
-    fn refresh_conversation_rows_at_width(&mut self, layout_width: u32, cx: &mut Context<Self>) {
-        let workspace = &mut self.app.workspaces.active_mut();
-        let Some(projection) = workspace.projection.as_ref() else {
-            return;
-        };
-        let pane_dirty = workspace
-            .presentation
-            .conversation_controller
-            .needs_row_refresh()
-            || workspace
-                .presentation
-                .conversation_controller
-                .active_width_bucket()
-                != Some(layout_width);
-        let source = ConversationSource::new(projection, workspace.composer.submitted());
-        let refresh = workspace
-            .presentation
-            .conversation_controller
-            .prepare_rows(&source, layout_width);
-        if pane_dirty {
-            self.notify_conversation_pane(cx);
-        }
-        self.schedule_conversation_height_refresh(refresh, cx);
-    }
-
-    fn refresh_conversation_rows_at_current_width(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(layout_width) = self
-            .app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .active_width_bucket()
-        else {
-            return false;
-        };
-        self.refresh_conversation_rows_at_width(layout_width, cx);
-        true
-    }
-
-    fn schedule_conversation_height_refresh(
-        &mut self,
-        refresh: ConversationRefresh,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((delay, _deadline)) = self
-            .app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .arm_height_refresh(refresh)
-        else {
-            return;
-        };
-        let owner = self.app.workspaces.active_key().clone();
-        match self.connection.controller.schedule_timer(
-            owner,
-            DesktopTimerKind::ConversationHeightRefresh,
-            delay,
-        ) {
-            Ok(transition) => self.apply_transition(transition, cx),
-            Err(error) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(error.to_string());
-                self.notify_toast_host(cx);
-            }
-        }
-    }
-
-    pub(super) fn focus_composer_input(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = self.views.composer_pane.read(cx).focus_handle().clone();
-        focus.focus(window, cx);
-    }
-
-    fn focus_active_target(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.ui.focus.active() {
-            FocusTarget::CenterHeader => self.ui.center_header_focus.focus(window, cx),
-            FocusTarget::Sidebar => self.ui.sidebar_focus.focus(window, cx),
-            FocusTarget::CenterBody => self.ui.center_body_focus.focus(window, cx),
-            FocusTarget::Composer => self.focus_composer_input(window, cx),
-            FocusTarget::Inspector => self.ui.inspector_focus.focus(window, cx),
-            FocusTarget::Modal => match self.ui.active_modal {
-                Some(DesktopModalKind::Authorization) => {
-                    self.ui.authorization_focus.focus(window, cx)
-                }
-                Some(DesktopModalKind::CommandPalette) => {
-                    self.ui.command_palette_focus.focus(window, cx);
-                }
-                Some(DesktopModalKind::FullMessage) => self.ui.full_message_focus.focus(window, cx),
-                None => self.focus_composer_input(window, cx),
-            },
-        }
-    }
-
-    fn notify_conversation_pane(&self, cx: &mut Context<Self>) {
-        let view_model = conversation_pane::view_model(self.app.workspaces.active(), &self.ui);
-        self.views.conversation_pane.update(cx, |pane, cx| {
-            pane.set_view_model(view_model);
-            cx.notify();
-        });
-    }
-}
-
-impl PlatformUpdatePort for NativeShell {
-    fn active_workspace_key(&self) -> WorkspaceKey {
-        self.app.workspaces.active_key().clone()
-    }
-
-    fn workspace_exists(&self, owner: &WorkspaceKey) -> bool {
-        self.app.workspaces.contains(owner)
-    }
-
-    fn project_directory_editable(&self, owner: &WorkspaceKey) -> bool {
-        self.app
-            .workspaces
-            .get(owner)
-            .is_some_and(SessionWorkspace::project_directory_editable)
-    }
-
-    fn set_project_directory(&mut self, owner: &WorkspaceKey, path: PathBuf) -> bool {
-        let Some(workspace) = self.app.workspaces.get_mut(owner) else {
-            return false;
-        };
-        if !workspace.project_directory_editable() {
-            return false;
-        }
-        workspace.draft_workspace_selection = CodingAgentWorkspaceSelection::project(path);
-        true
-    }
-
-    fn add_composer_attachments(
-        &mut self,
-        owner: &WorkspaceKey,
-        paths: Vec<PathBuf>,
-    ) -> Result<bool, String> {
-        let Some(workspace) = self.app.workspaces.get_mut(owner) else {
-            return Ok(false);
-        };
-        let mut candidate = workspace.composer_attachments.clone();
-        for path in paths {
-            if !candidate.contains(&path) {
-                candidate.push(path);
-            }
-        }
-        validate_prompt_attachments(&candidate).map_err(|error| error.to_string())?;
-        if candidate == workspace.composer_attachments {
-            return Ok(false);
-        }
-        workspace.composer_attachments = candidate;
-        Ok(true)
-    }
-
-    fn set_notice(&mut self, owner: &WorkspaceKey, notice: String) {
-        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
-            workspace.set_preference_notice(notice);
-        }
-    }
-
-    fn show_conversation_announcement(&mut self, owner: &WorkspaceKey, message: String) {
-        self.ui.announce_conversation(owner.clone(), message);
-    }
-
-    fn clear_conversation_announcement(&mut self, owner: &WorkspaceKey) -> bool {
-        self.ui.clear_conversation_announcement(owner)
-    }
-
-    fn fire_conversation_height_refresh(&mut self, owner: &WorkspaceKey) -> bool {
-        self.app.workspaces.get_mut(owner).is_some_and(|workspace| {
-            workspace
-                .presentation
-                .conversation_controller
-                .fire_current_height_refresh()
-        })
-    }
-
-    fn commit_conversation_width(&mut self, owner: &WorkspaceKey) -> bool {
-        self.app.workspaces.get_mut(owner).is_some_and(|workspace| {
-            workspace
-                .presentation
-                .conversation_controller
-                .commit_current_pending_width()
-        })
-    }
-
-    fn refresh_inspector_telemetry(&mut self, owner: &WorkspaceKey) -> bool {
-        if self.app.workspaces.active_key() != owner
-            || self.ui.inspector_telemetry_refresh_deadline.is_none()
-        {
-            return false;
-        }
-        self.ui.inspector_telemetry_refresh_deadline = None;
-        self.ui.inspector_telemetry_last_refresh = Some(Instant::now());
-        true
-    }
-
-    fn complete_resync_admission(
-        &mut self,
-        owner: &WorkspaceKey,
-        command_id: u64,
-        failure: Option<String>,
-    ) {
-        let Some(message) = failure else {
-            return;
-        };
-        let intent = DesktopCommandIntent::Resync;
-        let _ = self.app.commands.complete(command_id, owner, &intent);
-        if let Some(workspace) = self.app.workspaces.get_mut(owner) {
-            workspace.set_preference_notice(message);
-        }
-    }
-}
-
-impl Render for NativeShell {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _span = tracing::trace_span!("desktop.render").entered();
-        self.flush_queued_effects(cx);
-        if self.app.workspaces.active_mut().composer_needs_sync {
-            let draft = self.app.workspaces.active_mut().composer.draft().to_owned();
-            self.views.composer_pane.update(cx, |pane, cx| {
-                pane.set_input_value(draft, window, cx);
-            });
-            self.app.workspaces.active_mut().composer_needs_sync = false;
-        }
-        let theme = SemanticTheme::GEEK_DARK;
-        let layout = self.layout(window);
-        self.ui.focus.reconcile_layout(layout);
-        if self.app.workspaces.active_mut().projection.is_some() {
-            let requested_layout_width =
-                conversation_width_bucket(layout.center.width.min(CONVERSATION_CONTENT_MAX_WIDTH));
-            let (layout_width, width_refresh) = self
-                .app
-                .workspaces
-                .active_mut()
-                .presentation
-                .conversation_controller
-                .width_for_render(requested_layout_width);
-            if width_refresh.is_some() {
-                let owner = self.app.workspaces.active_key().clone();
-                if let Ok(transition) = self.connection.controller.schedule_timer(
-                    owner,
-                    DesktopTimerKind::ConversationWidthCommit,
-                    CONVERSATION_RESIZE_DEBOUNCE,
-                ) {
-                    self.apply_transition(transition, cx);
-                }
-            }
-            self.refresh_conversation_rows_at_width(layout_width, cx);
-        }
-        let authorization_present = self
-            .app
-            .workspaces
-            .active_mut()
-            .projection
-            .as_ref()
-            .is_some_and(|projection| !projection.snapshot().pending_authorizations.is_empty());
-        self.reconcile_authorization_modal(authorization_present, window, cx);
-        let sidebar_panel = layout.sidebar.map(|bounds| {
-            div()
-                .relative()
-                .flex_none()
-                .w(px(bounds.width as f32))
-                .h_full()
-                .child(self.views.sessions_pane.clone())
-                .child(
-                    div()
-                        .id("sessions-resize-handle")
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .bottom_0()
-                        .w(px(4.))
-                        .cursor_ew_resize()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event, _, cx| {
-                                this.begin_panel_resize(ResizablePanel::Sessions, event, cx);
-                            }),
-                        ),
-                )
-        });
-
-        let inspector_panel = layout.inspector.map(|bounds| {
-            div()
-                .relative()
-                .flex_none()
-                .w(px(bounds.width as f32))
-                .h_full()
-                .child(self.views.inspector_pane.clone())
-                .child(
-                    div()
-                        .id("inspector-resize-handle")
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .bottom_0()
-                        .w(px(4.))
-                        .cursor_ew_resize()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event, _, cx| {
-                                this.begin_panel_resize(ResizablePanel::Context, event, cx);
-                            }),
-                        ),
-                )
-        });
-
-        let center = if self.ui.center_surface == CenterSurface::Skills {
-            div()
-                .id("skills-workspace")
-                .role(Role::Main)
-                .aria_label("Skills workspace")
-                .debug_selector(|| "desktop-skills-workspace".into())
-                .flex_none()
-                .w(px(layout.center.width as f32))
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .bg(rgb(theme.canvas.value()))
-                .child(self.views.conversation_header.clone())
-                .child(
-                    div()
-                        .id("center-body")
-                        .debug_selector(|| "desktop-center-body".into())
-                        .relative()
-                        .track_focus(&self.ui.center_body_focus)
-                        .flex_1()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .child(self.views.skills_pane.clone())
-                        .child(self.views.center_drawer_host.clone()),
-                )
-        } else if self.app.workspaces.active_mut().projection.is_some() {
-            div()
-                .id("conversation-panel")
-                .role(Role::Main)
-                .aria_label("Conversation workspace")
-                .aria_description(
-                    "Conversation history and message composer. Use Up and Down to select messages.",
-                )
-                .debug_selector(|| "desktop-conversation-panel".into())
-                .flex_none()
-                .w(px(layout.center.width as f32))
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .bg(rgb(theme.canvas.value()))
-                .child(self.views.conversation_header.clone())
-                .child(
-                    div()
-                        .id("center-body")
-                        .debug_selector(|| "desktop-center-body".into())
-                        .relative()
-                        .key_context(actions::CONVERSATION_KEY_CONTEXT)
-                        .track_focus(&self.ui.center_body_focus)
-                        .flex_1()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .child(self.views.conversation_pane.clone())
-                        .child(self.views.composer_pane.clone())
-                        .child(self.views.center_drawer_host.clone()),
-                )
-        } else {
-            div()
-                .id("home-workspace")
-                .role(Role::Main)
-                .aria_label("Home workspace")
-                .debug_selector(|| "desktop-home-workspace".into())
-                .flex_none()
-                .w(px(layout.center.width as f32))
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .bg(rgb(theme.canvas.value()))
-                .child(self.views.conversation_header.clone())
-                .child(
-                    div()
-                        .id("center-body")
-                        .debug_selector(|| "desktop-center-body".into())
-                        .relative()
-                        .track_focus(&self.ui.center_body_focus)
-                        .flex_1()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .child(self.views.home_pane.clone())
-                        .child(
-                            div()
-                                .w_full()
-                                .max_w(px(900.))
-                                .mx_auto()
-                                .px_6()
-                                .pb_8()
-                                .child(self.views.composer_pane.clone()),
-                        )
-                        .child(self.views.center_drawer_host.clone()),
-                )
-        };
-
-        let root_modal_host = self.views.root_modal_host.clone();
-        let toast_host = self.views.toast_host.clone();
-        let conversation_announcement = self
-            .ui
-            .conversation_announcement
-            .as_ref()
-            .map(|(_, _, message)| message.clone());
-
-        div()
-            .id("desktop-application")
-            .role(Role::Application)
-            .aria_label("Evo native coding agent")
-            .key_context(actions::ROOT_KEY_CONTEXT)
-            .on_action(cx.listener(Self::on_open_command_palette))
-            .on_action(cx.listener(Self::on_open_file_surface))
-            .on_action(cx.listener(Self::on_new_session))
-            .on_action(cx.listener(Self::on_focus_composer))
-            .on_action(cx.listener(Self::on_submit_composer))
-            .on_action(cx.listener(Self::on_abort_active_operation))
-            .on_action(cx.listener(Self::on_escape_hierarchy))
-            .on_action(cx.listener(Self::on_follow_latest_output))
-            .on_action(cx.listener(Self::on_toggle_inspector_panel))
-            .on_action(cx.listener(Self::on_focus_next_region))
-            .on_action(cx.listener(Self::on_focus_previous_region))
-            .on_action(cx.listener(Self::on_select_previous_conversation))
-            .on_action(cx.listener(Self::on_select_next_conversation))
-            .on_action(cx.listener(Self::on_copy_selected_conversation))
-            .on_action(cx.listener(Self::on_toggle_selected_conversation_details))
-            .on_action(cx.listener(Self::on_palette_previous))
-            .on_action(cx.listener(Self::on_palette_next))
-            .on_action(cx.listener(Self::on_palette_confirm))
-            .on_action(cx.listener(Self::on_authorization_deny))
-            .on_action(cx.listener(Self::on_authorization_allow_once))
-            .on_action(cx.listener(Self::on_authorization_allow_for_operation))
-            .on_action(cx.listener(Self::on_trap_overlay_focus))
-            .capture_any_mouse_down(cx.listener(Self::note_pointer_input))
-            .capture_key_down(cx.listener(Self::note_keyboard_input))
-            .on_mouse_move(cx.listener(Self::update_panel_resize))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::finish_panel_resize))
-            .relative()
-            .size_full()
-            .flex()
-            .flex_col()
-            .font_family(UI_FONT_FAMILY)
-            .text_token(DesignText::Body)
-            .bg(rgb(theme.canvas.value()))
-            .text_color(rgb(theme.text.value()))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .children(sidebar_panel)
-                    .child(center)
-                    .children(inspector_panel),
-            )
-            .child(root_modal_host)
-            .child(toast_host)
-            .when_some(conversation_announcement, |app, message| {
-                app.child(
-                    div()
-                        .id("conversation-copy-announcement")
-                        .debug_selector(|| "desktop-conversation-copy-announcement".into())
-                        .role(Role::Status)
-                        .aria_label(message.clone())
-                        .absolute()
-                        .top_4()
-                        .right_4()
-                        .rounded_token(desktop_style::DesignRadius::Md)
-                        .border_1()
-                        .border_color(rgb(theme.success.value()))
-                        .bg(rgb(theme.elevated.value()))
-                        .px_token(desktop_style::DesignSpace::Md)
-                        .py_token(desktop_style::DesignSpace::Sm)
-                        .text_color(rgb(theme.text.value()))
-                        .child(message),
-                )
-            })
     }
 }
 
@@ -4654,6 +1553,21 @@ mod tests {
     }
 
     #[gpui::test]
+    fn panel_resize_commits_through_the_typed_preferences_transition(cx: &mut TestAppContext) {
+        initialize_visual_test(cx);
+        let (shell, cx) = add_idle_visual_shell(cx);
+
+        shell.update(cx, |shell, cx| {
+            shell.apply_panel_width(ResizablePanel::Sessions, SESSION_PANEL_MIN_WIDTH, cx);
+            assert_eq!(
+                shell.app.preferences.sessions_panel_width,
+                SESSION_PANEL_MIN_WIDTH
+            );
+            assert!(shell.ui.runtime_ui_notification_count > 0);
+        });
+    }
+
+    #[gpui::test]
     fn idle_session_catalog_is_loaded_only_by_explicit_refresh(cx: &mut TestAppContext) {
         initialize_visual_test(cx);
         let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
@@ -4887,7 +1801,7 @@ mod tests {
 
         shell.update(cx, |shell, cx| {
             shell.app.catalog.replace_catalog(Vec::new(), 0);
-            shell.notify_sessions_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("desktop-projects-state-empty").is_some());
@@ -4903,7 +1817,7 @@ mod tests {
                 }],
                 4,
             );
-            shell.notify_sessions_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("desktop-projects-state-empty").is_none());
@@ -4951,7 +1865,7 @@ mod tests {
                 ],
                 0,
             );
-            shell.notify_sessions_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         });
 
         cx.simulate_resize(size(px(1_300.), px(900.)));
@@ -5199,7 +2113,7 @@ mod tests {
 
         shell.update(cx, |shell, cx| {
             shell.app.catalog.begin_refresh();
-            shell.notify_sessions_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -5216,7 +2130,7 @@ mod tests {
                 }],
                 0,
             );
-            shell.notify_sessions_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -5267,7 +2181,7 @@ mod tests {
                 }],
                 0,
             );
-            shell.notify_sessions_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         });
         cx.simulate_resize(size(px(700.), px(800.)));
         cx.run_until_parked();
@@ -5313,7 +2227,7 @@ mod tests {
                 }],
                 0,
             );
-            shell.notify_sessions_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         });
         cx.simulate_resize(size(px(1_300.), px(900.)));
         cx.run_until_parked();
@@ -5391,13 +2305,13 @@ mod tests {
                 .workspaces
                 .active_mut()
                 .set_preference_notice("Repeated notice".into());
-            shell.notify_toast_host(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
             shell
                 .app
                 .workspaces
                 .active_mut()
                 .set_preference_notice("Repeated notice".into());
-            shell.notify_toast_host(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
 
             let repeated = shell.views.toast_host.read(cx).messages();
             assert_eq!(
@@ -5415,13 +2329,13 @@ mod tests {
                 .workspaces
                 .active_mut()
                 .set_preference_notice("Third notice".into());
-            shell.notify_toast_host(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
             shell
                 .app
                 .workspaces
                 .active_mut()
                 .set_preference_notice("Fourth notice".into());
-            shell.notify_toast_host(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
 
             let bounded = shell.views.toast_host.read(cx).messages();
             assert_eq!(bounded.len(), 3);
@@ -6357,7 +3271,7 @@ mod tests {
                     .active_mut()
                     .presentation
                     .inspector_section = InspectorSection::Runtime;
-                shell.notify_inspector_pane(cx);
+                shell.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
             });
             cx.run_until_parked();
             let runtime = cx
@@ -7469,7 +4383,7 @@ mod tests {
                 ],
                 0,
             );
-            shell.notify_sessions_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         });
 
         for width in [1_300., 700.] {
@@ -7521,7 +4435,7 @@ mod tests {
                 ],
                 0,
             );
-            shell.notify_sessions_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("desktop-session-row-0").is_some());
@@ -7988,7 +4902,7 @@ mod tests {
                 .composer
                 .begin_submit(401, ComposerSubmissionKind::Prompt)
                 .expect("Home draft enters pending admission");
-            shell.notify_composer_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
         });
         assert_eq!(
             pending_shell.read_with(cx, |shell, _| {
@@ -8098,7 +5012,7 @@ mod tests {
                     "The submitted draft was rejected and remains available for editing.",
                 )
                 .expect("matching rejection is applied");
-            shell.notify_composer_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
         });
         cx.simulate_resize(size(px(700.), px(800.)));
         settle_visual_measurements(cx);
@@ -8712,7 +5626,7 @@ mod tests {
                         external_editor_target: None,
                     }),
                 ));
-            shell.notify_inspector_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
         });
         cx.run_until_parked();
         for selector in [
@@ -9612,7 +6526,7 @@ mod tests {
         let (shell, cx) = add_idle_visual_shell(cx);
         shell.update(cx, |shell, cx| {
             shell.app.workspaces.active_mut().project.selected_model_id = "adjacent-model".into();
-            shell.notify_composer_pane(cx);
+            shell.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
         });
         cx.run_until_parked();
 
@@ -10732,10 +7646,13 @@ mod tests {
 }
 pub(crate) mod center_drawer_host;
 pub(crate) mod center_navigation;
+mod command_adapter;
 mod commands;
 pub(crate) mod composer_pane;
+mod conversation_adapter;
 mod conversation_controller;
 pub(crate) mod conversation_header;
+mod conversation_layout_adapter;
 pub(crate) mod conversation_pane;
 mod desktop_controls;
 mod desktop_style;
@@ -10743,8 +7660,15 @@ mod evo_brand;
 pub(crate) mod home_pane;
 pub(crate) mod inspector_pane;
 mod intent;
+mod layout_adapter;
+mod overlay_adapter;
+mod platform_update;
 mod project_catalog_controller;
+mod review_adapter;
+mod root_actions;
 pub(crate) mod root_modal_host;
+mod root_view;
+mod runtime_adapter;
 pub(crate) mod sessions_pane;
 pub(crate) mod skills_pane;
 mod streaming_text;

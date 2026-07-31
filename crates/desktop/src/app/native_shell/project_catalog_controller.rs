@@ -8,6 +8,7 @@ use gpui::Context;
 use super::{MAX_SESSION_WORKSPACES, NativeShell};
 #[cfg(test)]
 use crate::application::catalog::{ProjectCatalogController, ProjectCatalogState};
+use crate::application::change_set::{UiChangeSet, UiRegion};
 use crate::application::commands::DesktopCommandIntent;
 use crate::application::workspace::WorkspaceKey;
 #[cfg(test)]
@@ -24,7 +25,7 @@ impl NativeShell {
                 .set_preference_notice(format!(
                     "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
                 ));
-            self.notify_sessions_pane(cx);
+            self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
             return;
         }
         if self
@@ -52,7 +53,7 @@ impl NativeShell {
         }
         let intent = DesktopCommandIntent::CreateSession;
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
+            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
             cx.notify();
             return;
         };
@@ -78,7 +79,7 @@ impl NativeShell {
                     .set_preference_notice(message);
             }
         }
-        self.notify_sessions_pane(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         cx.notify();
     }
 
@@ -88,7 +89,7 @@ impl NativeShell {
         }
         let intent = DesktopCommandIntent::ListSessions;
         let Some(command_id) = self.reserve_command(intent.clone()) else {
-            self.notify_toast_host(cx);
+            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
             cx.notify();
             return;
         };
@@ -108,9 +109,9 @@ impl NativeShell {
                 .workspaces
                 .active_mut()
                 .set_preference_notice(message);
-            self.notify_toast_host(cx);
+            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
         }
-        self.notify_sessions_pane(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         cx.notify();
     }
 
@@ -131,7 +132,7 @@ impl NativeShell {
                     .workspaces
                     .active_mut()
                     .set_preference_notice(error.to_string());
-                self.notify_toast_host(cx);
+                self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
                 return;
             }
         };
@@ -150,9 +151,9 @@ impl NativeShell {
                 .workspaces
                 .active_mut()
                 .set_preference_notice(message);
-            self.notify_toast_host(cx);
+            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
         }
-        self.notify_sessions_pane(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         cx.notify();
     }
 
@@ -168,7 +169,7 @@ impl NativeShell {
                 .set_preference_notice(format!(
                     "Up to {MAX_SESSION_WORKSPACES} sessions can stay open; close one first."
                 ));
-            self.notify_sessions_pane(cx);
+            self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
             return;
         }
         if self
@@ -255,7 +256,7 @@ impl NativeShell {
                     .set_preference_notice(message);
             }
         }
-        self.notify_sessions_pane(cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
         cx.notify();
     }
 
@@ -270,7 +271,7 @@ impl NativeShell {
             self.app.workspaces.active_mut().set_preference_notice(
                 "Refresh the session catalog before switching sessions.".into(),
             );
-            self.notify_toast_host(cx);
+            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
             cx.notify();
             return;
         };
@@ -279,7 +280,7 @@ impl NativeShell {
                 .workspaces
                 .active_mut()
                 .set_preference_notice("No other project session is available.".into());
-            self.notify_toast_host(cx);
+            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
             cx.notify();
             return;
         }

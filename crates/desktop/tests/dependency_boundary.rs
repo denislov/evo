@@ -504,6 +504,52 @@ fn production_sources_use_explicit_imports() {
 }
 
 #[test]
+fn native_shell_root_and_refresh_authority_stay_bounded() {
+    let shell = manifest_dir().join("src/app/native_shell.rs");
+    let source = fs::read_to_string(&shell).expect("native shell source is readable");
+    let production = source
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .expect("native shell has a production section");
+    assert!(
+        production.lines().count() <= 1_200,
+        "NativeShell production adapter exceeded 1,200 lines"
+    );
+    assert!(
+        !production.contains("set_view_model("),
+        "root adapter must not construct feature ViewModels"
+    );
+    assert!(
+        !production.contains("::view_model("),
+        "root adapter must not invoke feature presenters"
+    );
+
+    let native_shell_dir = manifest_dir().join("src/app/native_shell");
+    let mut refresh_authorities = production.matches("fn refresh_views(").count();
+    assert!(
+        !production.contains("fn notify_"),
+        "legacy notify authority returned in {}",
+        shell.display()
+    );
+    for path in rust_files(native_shell_dir) {
+        if is_test_only_source(&path) {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("native shell module is readable");
+        refresh_authorities += source.matches("fn refresh_views(").count();
+        assert!(
+            !source.contains("fn notify_"),
+            "legacy notify authority returned in {}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        refresh_authorities, 1,
+        "refresh_views must have one authority"
+    );
+}
+
+#[test]
 fn application_layer_has_no_ui_or_effect_executor_dependencies() {
     for path in layer_rust_files("application") {
         if is_test_only_source(&path) {

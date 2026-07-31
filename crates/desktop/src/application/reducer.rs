@@ -1246,9 +1246,21 @@ pub(crate) enum CatalogIntent {
     SetProjectCollapsed { group_id: String, collapsed: bool },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreferencePanel {
+    Sessions,
+    Context,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreferencesIntent {
+    SetPanelWidth { panel: PreferencePanel, width: u32 },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum DesktopEvent {
     Ui(CatalogIntent),
+    Preferences(PreferencesIntent),
     Platform(PlatformResult),
     Timer(DesktopTimer),
 }
@@ -1442,7 +1454,7 @@ impl DesktopController {
         match event {
             DesktopEvent::Platform(result) => self.reduce_platform(port, result),
             DesktopEvent::Timer(timer) => self.reduce_timer(port, timer),
-            DesktopEvent::Ui(_) => {
+            DesktopEvent::Ui(_) | DesktopEvent::Preferences(_) => {
                 debug_assert!(false, "UI intents use their typed feature reducer");
                 Transition::default()
             }
