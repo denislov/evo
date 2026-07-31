@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-752 已完成，下一项 DSK-753）
+> 状态：执行中（DSK-753 已完成，下一项 DSK-760）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1461,6 +1461,26 @@ Gate 与性能记录：
   严格 clippy、format 与 diff check 全部通过。任务只重组内部路径与 contract export，没有改变 channel/poll/
   shutdown 行为或 UI 像素语义，未运行 performance gate 与 visual golden。
 
+### DSK-753 实际结果
+
+- 删除根级 `conversation/`、`shell.rs` 以及 22 个旧 `app/native_shell/` presentation 文件，不保留 deprecated
+  module alias 或旧路径 re-export。纯 conversation projection/composer/layout/markdown/render cache/viewport 与
+  实际 pane/controller/header/composer 统一进入 `ui/conversation/`；纯模型文件继续禁止 GPUI 依赖。
+- sessions pane 与 catalog adapter 进入 `ui/sessions/`，inspector pane 与 review presentation 统一进入
+  `ui/inspector/`；controls/style/brand/streaming text 进入 `ui/components/`；Home 与 Skills 按真实职责保留为
+  `ui/home.rs`、`ui/skills.rs` 单文件，不创建 model/controller/view 空模板。
+- 原 shell presentation state/layout 进入 `ui/shell/{state,layout}.rs`，drawer/modal/toast chrome 与
+  layout/overlay adapter 同步归位。仅声明两个 enum 的 `center_navigation.rs` 已删除并合并进 `ShellUiState`
+  owner；直接扩展 `NativeShell` 的私有 inherent-impl adapter 由 composition root 从 feature 物理路径声明，
+  避免为目录移动扩大 root field authority。
+- dependency boundary 增至 15 项：新 feature authority path 必须存在，全部旧路径与空目录必须持续删除；
+  leaf UI 禁止 root runtime/command/preference authority，feature adapter/controller 明确与 leaf view 分开；
+  七个纯 conversation 文件额外禁止 `gpui` import。提交前 rename 审计确认除 `center_navigation.rs` 合并外，
+  presentation 文件均为高相似度移动，未混入算法改写。
+- Gate A/B 全部通过：desktop lib `319 passed / 5 ignored / 0 failed`，dependency boundary `15 passed`，
+  all-target check、严格 clippy、format 与 diff check 全部通过。20 项 visual golden compare 全部 `RMSE=0`，
+  未更新 golden；任务未改变 render/layout/ViewModel、refresh routing 或 runtime channel，因此未运行 performance gate。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1482,7 +1502,7 @@ Gate 与性能记录：
 | DSK-750 | 已完成 | `0332676` | preferences model 与 platform store/writer/workspace resolver 分权；application 无文件/线程/path authority；Gate A、16 项 preference 与 3 项 scratch 定向测试、12 项 boundary 全通过；未更新 golden |
 | DSK-751 | 已完成 | `847b2a4` | review presentation 与 external-editor platform 分权；runtime 仅重校验 opaque target；typed launch result 回 reducer；Gate A/B、4 项 review bounds、5 项 editor/platform 定向测试与 13 项 boundary 全通过；未更新 golden |
 | DSK-752 | 已完成 | `43af5ca` | runtime contract/client/worker/dispatch 单一 authority 路径；删除旧 module path 与 9 个 unused re-export；Gate A、54 项 runtime 与 14 项 boundary 全通过；未运行 perf/visual gate |
-| DSK-753 | 待执行 | — | — |
+| DSK-753 | 已完成 | `eb7c090` | presentation 按 conversation/sessions/inspector/components/shell feature 归位；合并 center navigation；旧路径/空目录守卫、Gate A/B 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-760 | 待执行 | — | — |
 | DSK-761 | 待执行 | — | — |
 | DSK-762 | 待执行 | — | — |
