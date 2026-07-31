@@ -48,17 +48,34 @@ fn estimated_text_rows(text: &str, columns: usize) -> usize {
     rows.max(1)
 }
 
+/// The width a row's card actually lays out at, after its per-kind clamp.
+///
+/// Cards stop growing at `USER_MESSAGE_MAX_WIDTH` / `ASSISTANT_MESSAGE_MAX_WIDTH`,
+/// so a panel resize above that cap re-flows nothing. Keying height invalidation
+/// on the raw panel bucket threw away every measured height for a resize the
+/// cards never saw, and the coarse estimate that replaced it was visible as a
+/// one-frame jump. This is the identity every width-sensitive height decision
+/// compares on instead.
+pub const fn conversation_effective_width(kind: ConversationBlockKind, panel_width: u32) -> u32 {
+    let maximum = if matches!(kind, ConversationBlockKind::User) {
+        USER_MESSAGE_MAX_WIDTH
+    } else {
+        ASSISTANT_MESSAGE_MAX_WIDTH
+    };
+    if panel_width < maximum {
+        panel_width
+    } else {
+        maximum
+    }
+}
+
 pub fn conversation_block_height(
     kind: ConversationBlockKind,
     text: &str,
     detail: &str,
     panel_width: u32,
 ) -> f32 {
-    let effective_width = if kind == ConversationBlockKind::User {
-        panel_width.min(USER_MESSAGE_MAX_WIDTH)
-    } else {
-        panel_width.min(ASSISTANT_MESSAGE_MAX_WIDTH)
-    };
+    let effective_width = conversation_effective_width(kind, panel_width);
     let columns = (effective_width.saturating_sub(128) as usize / 8).max(24);
     let main_rows = estimated_text_rows(text, columns);
     let detail_rows = estimated_text_rows(detail, columns.saturating_sub(4).max(20));
@@ -127,7 +144,9 @@ impl StreamingTextPhase {
 /// Cheaply cloned render input for a conversation row.
 ///
 /// Completed Markdown and its stable GPUI state keys remain frozen until the
-/// source revision changes. Width changes only invalidate the measured height.
+/// source revision changes. Width changes only invalidate the measured height,
+/// and only when the row's *effective* width moved — `width_bucket` holds
+/// `conversation_effective_width`, not the raw panel bucket.
 #[derive(Debug, Clone)]
 pub struct ConversationRowRenderData {
     pub item_key: ConversationItemKey,
@@ -210,15 +229,15 @@ impl ConversationRowRenderCache {
     pub fn resolve(
         &mut self,
         source: ConversationRowRenderSource<'_>,
-        width_bucket: u32,
+        panel_width: u32,
     ) -> ConversationRowRenderData {
-        self.resolve_at(source, width_bucket, Instant::now())
+        self.resolve_at(source, panel_width, Instant::now())
     }
 
     fn resolve_at(
         &mut self,
         source: ConversationRowRenderSource<'_>,
-        width_bucket: u32,
+        panel_width: u32,
         now: Instant,
     ) -> ConversationRowRenderData {
         if let Some(entry) = self.entries.get_mut(&source.item_key)
@@ -246,13 +265,14 @@ impl ConversationRowRenderCache {
                         Some(STREAMING_MARKDOWN_SETTLE_DELAY.saturating_sub(elapsed));
                 }
             }
-            if entry.data.width_bucket != width_bucket {
-                entry.data.width_bucket = width_bucket;
+            let effective_width = conversation_effective_width(entry.data.kind, panel_width);
+            if entry.data.width_bucket != effective_width {
+                entry.data.width_bucket = effective_width;
                 entry.data.estimated_height = conversation_block_height(
                     entry.data.kind,
                     &entry.data.text,
                     &entry.data.detail,
-                    width_bucket,
+                    effective_width,
                 );
             }
             return entry.data.clone();
@@ -293,6 +313,7 @@ impl ConversationRowRenderCache {
                 false,
             )
         };
+        let effective_width = conversation_effective_width(source.kind, panel_width);
         let data = ConversationRowRenderData {
             markdown_state_key: source.item_key.markdown_state_key(false, source.done),
             detail_markdown_state_key: source.item_key.markdown_state_key(true, source.done),
@@ -309,7 +330,12 @@ impl ConversationRowRenderCache {
             source_revision: source.source_revision,
             sanitized_revision: source.source_revision,
             title: Arc::from(source.title.as_ref()),
-            estimated_height: conversation_block_height(source.kind, &text, &detail, width_bucket),
+            estimated_height: conversation_block_height(
+                source.kind,
+                &text,
+                &detail,
+                effective_width,
+            ),
             text,
             detail,
             kind: source.kind,
@@ -320,7 +346,7 @@ impl ConversationRowRenderCache {
             preview_truncated,
             media_neutralized,
             durable: source.durable,
-            width_bucket,
+            width_bucket: effective_width,
         };
         let retained_bytes = data.retained_bytes();
         let entry = ConversationRowRenderCacheEntry {

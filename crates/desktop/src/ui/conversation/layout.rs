@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::{model::ConversationItemKey, render_cache::StreamingTextPhase};
+use super::{
+    model::{ConversationBlockKind, ConversationItemKey},
+    render_cache::{StreamingTextPhase, conversation_effective_width},
+};
 
 pub const STREAMING_ROW_HEIGHT_INTERVAL: Duration = Duration::from_millis(67);
 pub const CONVERSATION_WIDTH_BUCKET_PX: u32 = 24;
@@ -47,6 +50,7 @@ pub struct ConversationRowMeasurement {
 pub struct ConversationRowLayoutInput {
     pub item_key: ConversationItemKey,
     pub source_revision: u64,
+    pub kind: ConversationBlockKind,
     pub text_phase: StreamingTextPhase,
     pub details_expanded: bool,
     pub estimated_height: f32,
@@ -67,12 +71,24 @@ pub struct ConversationRowLayoutSingleResolution {
     pub next_refresh_after: Option<Duration>,
 }
 
+/// A height GPUI actually laid the row's card out at.
+///
+/// `stale` marks a measurement whose width identity has moved on but whose
+/// content has not. It is still by far the best available height — the row is
+/// almost always about to measure to the same value — so it stays the commit
+/// target while the fresh measurement is in flight.
+#[derive(Debug, Clone, Copy)]
+struct RowMeasurement {
+    height: f32,
+    stale: bool,
+}
+
 #[derive(Debug, Clone)]
 struct ConversationRowHeight {
     committed: f32,
     estimate: f32,
-    measured_collapsed: Option<f32>,
-    measured_expanded: Option<f32>,
+    measured_collapsed: Option<RowMeasurement>,
+    measured_expanded: Option<RowMeasurement>,
     source_revision: u64,
     width_bucket: u32,
     text_phase: StreamingTextPhase,
@@ -82,7 +98,7 @@ struct ConversationRowHeight {
 }
 
 impl ConversationRowHeight {
-    fn measured(&self, details_expanded: bool) -> Option<f32> {
+    const fn measured(&self, details_expanded: bool) -> Option<RowMeasurement> {
         if details_expanded {
             self.measured_expanded
         } else {
@@ -91,16 +107,38 @@ impl ConversationRowHeight {
     }
 
     fn set_measured(&mut self, details_expanded: bool, height: f32) {
+        let measurement = RowMeasurement {
+            height,
+            stale: false,
+        };
         if details_expanded {
-            self.measured_expanded = Some(height);
+            self.measured_expanded = Some(measurement);
         } else {
-            self.measured_collapsed = Some(height);
+            self.measured_collapsed = Some(measurement);
         }
     }
 
     fn clear_measurements(&mut self) {
         self.measured_collapsed = None;
         self.measured_expanded = None;
+    }
+
+    /// Keep both disclosure measurements as provisional heights.
+    ///
+    /// A width change used to discard them outright, which dropped every row
+    /// back to `estimated_height` — a coarse character-grid guess that is
+    /// nowhere near a laid-out Markdown card. The estimate was committed
+    /// unthrottled, then the very next prepaint measured the row and snapped it
+    /// back, so a resize that re-flowed nothing still cost one visibly wrong
+    /// frame. Off-screen rows never re-measure at all and used to keep the
+    /// estimate indefinitely, shifting every scroll offset above the viewport.
+    fn mark_measurements_stale(&mut self) {
+        for measurement in [&mut self.measured_collapsed, &mut self.measured_expanded]
+            .into_iter()
+            .flatten()
+        {
+            measurement.stale = true;
+        }
     }
 
     /// Whether a revision bump at `phase` can have replaced the row's content.
@@ -130,12 +168,14 @@ impl ConversationRowLayoutState {
     pub fn resolve_one(
         &mut self,
         input: ConversationRowLayoutInput,
-        width_bucket: u32,
+        panel_width: u32,
         now: Instant,
     ) -> ConversationRowLayoutSingleResolution {
+        let row_width = conversation_effective_width(input.kind, panel_width);
         let _span = tracing::trace_span!(
             "desktop.list.height_update",
-            width_bucket,
+            panel_width,
+            row_width,
             streaming = input.text_phase == StreamingTextPhase::StreamingPlainText
         )
         .entered();
@@ -155,26 +195,28 @@ impl ConversationRowLayoutState {
                 measured_collapsed: None,
                 measured_expanded: None,
                 source_revision: input.source_revision,
-                width_bucket,
+                width_bucket: row_width,
                 text_phase: input.text_phase,
                 details_expanded: input.details_expanded,
                 last_commit_at: now,
                 last_commit_source: ConversationRowHeightSource::Estimated,
             });
-        let width_changed = row.width_bucket != width_bucket;
+        let width_changed = row.width_bucket != row_width;
         let phase_changed = row.text_phase != input.text_phase;
         let details_changed = row.details_expanded != input.details_expanded;
         let revision_changed = row.source_revision != input.source_revision;
-        if width_changed
-            || phase_changed
+        if phase_changed
             || (revision_changed
                 && ConversationRowHeight::revision_invalidates_measurements(input.text_phase))
         {
             row.clear_measurements();
+        } else if width_changed {
+            row.mark_measurements_stale();
+            row.last_commit_source = ConversationRowHeightSource::Estimated;
         }
         row.estimate = estimate;
         let measured_target = row.measured(input.details_expanded);
-        let target_height = measured_target.unwrap_or(row.estimate);
+        let target_height = measured_target.map_or(row.estimate, |measured| measured.height);
         let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
         let mut next_refresh_after = None;
         if target_changed {
@@ -189,17 +231,13 @@ impl ConversationRowLayoutState {
             {
                 row.committed = target_height;
                 row.last_commit_at = now;
-                row.last_commit_source = if measured_target.is_some() {
-                    ConversationRowHeightSource::Measured
-                } else {
-                    ConversationRowHeightSource::Estimated
-                };
+                row.last_commit_source = commit_source(measured_target);
             } else {
                 next_refresh_after = Some(STREAMING_ROW_HEIGHT_INTERVAL.saturating_sub(elapsed));
             }
         }
         row.source_revision = input.source_revision;
-        row.width_bucket = width_bucket;
+        row.width_bucket = row_width;
         row.text_phase = input.text_phase;
         row.details_expanded = input.details_expanded;
         if is_new {
@@ -207,14 +245,7 @@ impl ConversationRowLayoutState {
         }
         ConversationRowLayoutSingleResolution {
             height: row.committed,
-            source: if row
-                .measured(input.details_expanded)
-                .is_some_and(|height| (row.committed - height).abs() <= 0.5)
-            {
-                ConversationRowHeightSource::Measured
-            } else {
-                ConversationRowHeightSource::Estimated
-            },
+            source: committed_source(row, input.details_expanded),
             height_changed: target_changed && (row.committed - target_height).abs() <= f32::EPSILON,
             next_refresh_after,
         }
@@ -296,16 +327,13 @@ impl ConversationRowLayoutState {
     pub fn resolve(
         &mut self,
         inputs: Vec<ConversationRowLayoutInput>,
-        width_bucket: u32,
+        panel_width: u32,
         now: Instant,
         paused_scroll_top: Option<f32>,
     ) -> ConversationRowLayoutResolution {
-        let _span = tracing::trace_span!(
-            "desktop.list.layout",
-            width_bucket,
-            row_count = inputs.len()
-        )
-        .entered();
+        let _span =
+            tracing::trace_span!("desktop.list.layout", panel_width, row_count = inputs.len())
+                .entered();
         #[cfg(test)]
         {
             self.full_input_visits = self.full_input_visits.saturating_add(inputs.len());
@@ -320,33 +348,36 @@ impl ConversationRowLayoutState {
         for input in inputs {
             let key = input.item_key.stable_id().to_owned();
             let estimate = sanitize_row_height(input.estimated_height);
+            let row_width = conversation_effective_width(input.kind, panel_width);
             let mut row = previous_rows.remove(&key).unwrap_or(ConversationRowHeight {
                 committed: estimate,
                 estimate,
                 measured_collapsed: None,
                 measured_expanded: None,
                 source_revision: input.source_revision,
-                width_bucket,
+                width_bucket: row_width,
                 text_phase: input.text_phase,
                 details_expanded: input.details_expanded,
                 last_commit_at: now,
                 last_commit_source: ConversationRowHeightSource::Estimated,
             });
 
-            let width_changed = row.width_bucket != width_bucket;
+            let width_changed = row.width_bucket != row_width;
             let phase_changed = row.text_phase != input.text_phase;
             let details_changed = row.details_expanded != input.details_expanded;
             let revision_changed = row.source_revision != input.source_revision;
-            if width_changed
-                || phase_changed
+            if phase_changed
                 || (revision_changed
                     && ConversationRowHeight::revision_invalidates_measurements(input.text_phase))
             {
                 row.clear_measurements();
+            } else if width_changed {
+                row.mark_measurements_stale();
+                row.last_commit_source = ConversationRowHeightSource::Estimated;
             }
             row.estimate = estimate;
             let measured_target = row.measured(input.details_expanded);
-            let target_height = measured_target.unwrap_or(row.estimate);
+            let target_height = measured_target.map_or(row.estimate, |measured| measured.height);
             let target_changed = (row.committed - target_height).abs() > f32::EPSILON;
             if target_changed {
                 let elapsed = now
@@ -360,11 +391,7 @@ impl ConversationRowLayoutState {
                 {
                     row.committed = target_height;
                     row.last_commit_at = now;
-                    row.last_commit_source = if measured_target.is_some() {
-                        ConversationRowHeightSource::Measured
-                    } else {
-                        ConversationRowHeightSource::Estimated
-                    };
+                    row.last_commit_source = commit_source(measured_target);
                 } else {
                     let remaining = STREAMING_ROW_HEIGHT_INTERVAL.saturating_sub(elapsed);
                     next_refresh_after = Some(
@@ -374,7 +401,7 @@ impl ConversationRowLayoutState {
             }
 
             row.source_revision = input.source_revision;
-            row.width_bucket = width_bucket;
+            row.width_bucket = row_width;
             row.text_phase = input.text_phase;
             row.details_expanded = input.details_expanded;
             heights.push(row.committed);
@@ -437,6 +464,32 @@ fn sanitize_row_height(height: f32) -> f32 {
     }
 }
 
+/// What a freshly committed height came from.
+///
+/// A stale measurement reports `Estimated` so `submit_measurement` treats the
+/// next real measurement as superseding a guess and commits it without waiting
+/// out the streaming throttle.
+const fn commit_source(measured: Option<RowMeasurement>) -> ConversationRowHeightSource {
+    match measured {
+        Some(measured) if !measured.stale => ConversationRowHeightSource::Measured,
+        _ => ConversationRowHeightSource::Estimated,
+    }
+}
+
+fn committed_source(
+    row: &ConversationRowHeight,
+    details_expanded: bool,
+) -> ConversationRowHeightSource {
+    if row
+        .measured(details_expanded)
+        .is_some_and(|measured| !measured.stale && (row.committed - measured.height).abs() <= 0.5)
+    {
+        ConversationRowHeightSource::Measured
+    } else {
+        ConversationRowHeightSource::Estimated
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -453,6 +506,7 @@ mod tests {
                 key,
             ),
             source_revision: 1,
+            kind: ConversationBlockKind::Assistant,
             text_phase: if streaming {
                 StreamingTextPhase::StreamingPlainText
             } else {
@@ -704,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn geometry_identity_changes_clear_both_disclosure_measurements() {
+    fn width_changes_hold_the_previous_measurement_until_the_row_is_remeasured() {
         let started = Instant::now();
         let mut layout = ConversationRowLayoutState::default();
         let item_key = detail_layout("assistant:identity", 100., false).item_key;
@@ -733,7 +787,7 @@ mod tests {
         );
         layout.submit_measurement(
             &ConversationRowMeasurement {
-                item_key,
+                item_key: item_key.clone(),
                 source_revision: 1,
                 width_bucket: 600,
                 text_phase: StreamingTextPhase::FinalMarkdown,
@@ -743,20 +797,126 @@ mod tests {
             started + Duration::from_millis(3),
         );
 
+        // The estimate is a character-grid guess that no laid-out Markdown card
+        // matches. Dropping to it on resize painted one visibly wrong frame that
+        // the next prepaint immediately undid, so the measurement is held as a
+        // provisional height instead and the row simply keeps its geometry.
         let resized = layout.resolve(
             vec![detail_layout("assistant:identity", 300., true)],
             624,
             started + Duration::from_millis(4),
             None,
         );
-        assert_eq!(resized.heights, vec![300.]);
+        assert_eq!(resized.heights, vec![280.]);
+
+        // A measurement still carrying the pre-resize width is stale and must not
+        // land, but the first one at the new width supersedes the held value
+        // without waiting out a throttle window.
+        assert!(
+            layout
+                .submit_measurement(
+                    &ConversationRowMeasurement {
+                        item_key: item_key.clone(),
+                        source_revision: 1,
+                        width_bucket: 600,
+                        text_phase: StreamingTextPhase::FinalMarkdown,
+                        details_expanded: true,
+                        height: 999.,
+                    },
+                    started + Duration::from_millis(5),
+                )
+                .is_none()
+        );
+        let remeasured = layout
+            .submit_measurement(
+                &ConversationRowMeasurement {
+                    item_key: item_key.clone(),
+                    source_revision: 1,
+                    width_bucket: 624,
+                    text_phase: StreamingTextPhase::FinalMarkdown,
+                    details_expanded: true,
+                    height: 296.,
+                },
+                started + Duration::from_millis(6),
+            )
+            .expect("the row is current at the new width");
+        assert_eq!(remeasured.height, 296.);
+        assert!(remeasured.height_changed);
+        assert_eq!(remeasured.source, ConversationRowHeightSource::Measured);
+
+        // The collapsed slot was never re-measured at 624, so it holds its own
+        // pre-resize value rather than falling back to the estimate.
         let collapsed_after_resize = layout.resolve(
             vec![detail_layout("assistant:identity", 108., false)],
             624,
-            started + Duration::from_millis(5),
+            started + Duration::from_millis(7),
             None,
         );
-        assert_eq!(collapsed_after_resize.heights, vec![108.]);
+        assert_eq!(collapsed_after_resize.heights, vec![120.]);
+    }
+
+    #[test]
+    fn panel_resizes_above_the_card_cap_do_not_touch_row_heights() {
+        let started = Instant::now();
+        let mut layout = ConversationRowLayoutState::default();
+        let item_key = row_layout("assistant:capped", 100., false).item_key;
+        // Cards stop growing at `ASSISTANT_MESSAGE_MAX_WIDTH`, so both panels lay
+        // the row out at exactly the same width and nothing re-flows.
+        assert_eq!(
+            conversation_effective_width(ConversationBlockKind::Assistant, 1_200),
+            conversation_effective_width(ConversationBlockKind::Assistant, 1_800),
+        );
+        assert_eq!(
+            conversation_effective_width(ConversationBlockKind::User, 1_000),
+            conversation_effective_width(ConversationBlockKind::User, 1_800),
+        );
+
+        layout.resolve(
+            vec![row_layout("assistant:capped", 100., false)],
+            1_200,
+            started,
+            None,
+        );
+        let measured_width = conversation_effective_width(ConversationBlockKind::Assistant, 1_200);
+        layout
+            .submit_measurement(
+                &ConversationRowMeasurement {
+                    item_key: item_key.clone(),
+                    source_revision: 1,
+                    width_bucket: measured_width,
+                    text_phase: StreamingTextPhase::FinalMarkdown,
+                    details_expanded: false,
+                    height: 640.,
+                },
+                started + Duration::from_millis(1),
+            )
+            .expect("the row is current");
+
+        let widened = layout.resolve_one(
+            row_layout("assistant:capped", 180., false),
+            1_800,
+            started + Duration::from_millis(2),
+        );
+        assert_eq!(widened.height, 640.);
+        assert_eq!(widened.source, ConversationRowHeightSource::Measured);
+
+        // The identity a measurement carries is the capped width too, so a
+        // callback issued across the resize is still current.
+        let across_resize = layout
+            .submit_measurement(
+                &ConversationRowMeasurement {
+                    item_key,
+                    source_revision: 1,
+                    width_bucket: measured_width,
+                    text_phase: StreamingTextPhase::FinalMarkdown,
+                    details_expanded: false,
+                    height: 640.,
+                },
+                started + Duration::from_millis(3),
+            )
+            .expect("the capped width is unchanged, so the measurement is current");
+        assert!(!across_resize.height_changed);
+        assert_eq!(across_resize.height, 640.);
     }
 
     #[test]

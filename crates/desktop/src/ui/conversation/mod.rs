@@ -29,6 +29,6 @@ pub use model::{
 };
 pub use render_cache::{
     ConversationRowRenderCache, ConversationRowRenderData, ConversationRowRenderSource,
-    StreamingTextPhase, conversation_block_height,
+    StreamingTextPhase, conversation_block_height, conversation_effective_width,
 };
 pub use viewport::ConversationViewport;

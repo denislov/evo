@@ -15,7 +15,7 @@ use super::{
     ConversationRowLayoutInput, ConversationRowLayoutState, ConversationRowMeasurement,
     ConversationRowRenderCache, ConversationRowRenderData, ConversationRowRenderSource,
     ConversationViewport, SubmittedPromptPreview, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT,
-    conversation_block_height,
+    conversation_block_height, conversation_effective_width,
 };
 use desktop::projection::{
     DesktopMessageOverlay, DesktopMessageStatus, DesktopProjection, DesktopProjectionDelta,
@@ -1248,7 +1248,7 @@ pub(crate) fn row_target_height(
     panel_width: u32,
 ) -> f32 {
     if expanded_details.contains(row.item_key.row_id()) {
-        return if row.width_bucket == panel_width {
+        return if row.width_bucket == conversation_effective_width(row.kind, panel_width) {
             row.estimated_height
         } else {
             conversation_block_height(row.kind, &row.text, &row.detail, panel_width)
@@ -1276,6 +1276,7 @@ pub(crate) fn row_layout_input(
     ConversationRowLayoutInput {
         item_key: row.item_key.clone(),
         source_revision: row.source_revision,
+        kind: row.kind,
         text_phase: row.text_phase,
         details_expanded: expanded_details.contains(row.item_key.row_id()),
         estimated_height: row_target_height(row, expanded_details, panel_width),

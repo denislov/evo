@@ -448,6 +448,81 @@ fn tool_content_aligns_with_assistant_and_selection_has_no_focus_rail(cx: &mut T
 }
 
 #[gpui::test]
+fn width_refresh_holds_measured_row_heights_instead_of_reverting_to_estimates(
+    cx: &mut TestAppContext,
+) {
+    initialize_visual_test(cx);
+    let (shell, cx) = add_visual_shell(
+        cx,
+        DesktopRuntimeBridge::disconnected_for_test(),
+        clipping_regression_projection(),
+    );
+    cx.simulate_resize(size(px(1_000.), px(800.)));
+    settle_visual_measurements(cx);
+
+    let (measured, active_width) = cx.update(|_, app| {
+        let controller = &shell
+            .read(app)
+            .app
+            .workspaces
+            .active()
+            .presentation
+            .conversation_controller;
+        (
+            controller.render_heights_for_tests().borrow().clone(),
+            controller.active_width_bucket(),
+        )
+    });
+    let active_width = active_width.expect("the transcript has rendered at a width");
+    assert!(
+        measured
+            .iter()
+            .any(|height| *height > TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT),
+        "the fixture must contain a card far taller than its character-grid estimate: {measured:?}"
+    );
+
+    // One bucket narrower, read back without an intervening frame. This is the
+    // frame that used to paint the whole transcript at `conversation_block_height`
+    // — a coarse guess no laid-out Markdown card matches — before the next
+    // prepaint measured the rows and snapped them back.
+    let narrower = conversation_width_bucket(active_width - 1);
+    assert_ne!(narrower, active_width);
+    let held = shell.update(cx, |shell, cx| {
+        shell.refresh_conversation_rows_at_width(narrower, cx);
+        shell
+            .app
+            .workspaces
+            .active()
+            .presentation
+            .conversation_controller
+            .render_heights_for_tests()
+            .borrow()
+            .clone()
+    });
+    assert_eq!(
+        held, measured,
+        "a width refresh must hold each row's measured height until the row is measured again"
+    );
+
+    // The held heights are provisional, not frozen: the rows still re-measure at
+    // the new width and the virtual row keeps matching the painted card.
+    settle_visual_measurements(cx);
+    let row = cx
+        .debug_bounds("conversation-last-row")
+        .expect("final virtual row is mounted after the width refresh");
+    let card = cx
+        .debug_bounds("conversation-last-card")
+        .expect("final conversation card is laid out after the width refresh");
+    assert!(
+        (f32::from(row.size.height)
+            - (f32::from(card.size.height) + CONVERSATION_ROW_VERTICAL_PADDING_PX as f32))
+            .abs()
+            <= 1.,
+        "re-measured row must match actual card bounds: row={row:?}, card={card:?}"
+    );
+}
+
+#[gpui::test]
 fn assistant_reasoning_expands_downward_without_moving_its_top(cx: &mut TestAppContext) {
     initialize_visual_test(cx);
     let (shell, cx) = add_visual_shell(
