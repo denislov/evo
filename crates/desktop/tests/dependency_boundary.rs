@@ -604,6 +604,63 @@ fn native_shell_tests_are_external_and_grouped_by_behavior() {
 }
 
 #[test]
+fn runtime_tests_are_grouped_by_state_machine_invariant() {
+    let runtime = manifest_dir().join("src/runtime");
+    assert!(
+        !runtime.join("tests.rs").exists(),
+        "runtime tests must not return to one large source file"
+    );
+
+    let tests = runtime.join("tests");
+    for suite in [
+        "admission.rs",
+        "fixtures.rs",
+        "mod.rs",
+        "ordering.rs",
+        "overflow.rs",
+        "reconnect.rs",
+        "recovery.rs",
+        "shutdown.rs",
+    ] {
+        let path = tests.join(suite);
+        assert!(
+            path.is_file(),
+            "runtime test suite is missing: {}",
+            path.display()
+        );
+    }
+
+    let test_root = fs::read_to_string(tests.join("mod.rs")).expect("test root is readable");
+    assert!(test_root.contains("include!(\"fixtures.rs\");"));
+    for suite in [
+        "admission",
+        "ordering",
+        "overflow",
+        "reconnect",
+        "recovery",
+        "shutdown",
+    ] {
+        assert!(
+            test_root.contains(&format!("mod {suite};")),
+            "runtime test root must declare {suite}"
+        );
+    }
+
+    let fixtures =
+        fs::read_to_string(tests.join("fixtures.rs")).expect("runtime fixtures are readable");
+    assert!(
+        !fixtures.contains("#[test]") && !fixtures.contains("#[tokio::test]"),
+        "runtime fixtures must contain construction only, not test cases"
+    );
+    assert!(
+        !fixtures.contains("assert!(")
+            && !fixtures.contains("assert_eq!(")
+            && !fixtures.contains("assert_ne!("),
+        "runtime fixtures must not hide behavioral assertions"
+    );
+}
+
+#[test]
 fn application_layer_has_no_ui_or_effect_executor_dependencies() {
     for path in layer_rust_files("application") {
         if is_test_only_source(&path) {
