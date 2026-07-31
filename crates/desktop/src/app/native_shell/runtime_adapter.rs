@@ -4,9 +4,19 @@ use super::{
     MAX_RUNTIME_UPDATES_PER_FRAME, NativeShell, PathPromptOptions, PlatformOutcome, PlatformResult,
     PreferenceWriteResult, RuntimePoll, ToastNotice, Transition, UiChangeSet, UiRegion,
     WorkspaceKey, center_drawer_host, composer_pane, conversation_header, conversation_pane,
-    inspector_pane, inspector_telemetry_refresh_delay, root_modal_host, sessions_pane, skills_pane,
+    inspector_pane, root_modal_host, sessions_pane, skills_pane,
 };
 use crate::platform::external_editor::launch_external_editor;
+
+fn inspector_telemetry_refresh_delay(
+    last_refresh: Option<Instant>,
+    now: Instant,
+) -> std::time::Duration {
+    last_refresh.map_or(std::time::Duration::ZERO, |last_refresh| {
+        super::INSPECTOR_TELEMETRY_REFRESH_INTERVAL
+            .saturating_sub(now.saturating_duration_since(last_refresh))
+    })
+}
 
 impl NativeShell {
     pub(super) fn with_controller<T>(
@@ -450,5 +460,28 @@ impl NativeShell {
     pub(super) fn reconcile_thinking_selection_with_project(&mut self) {
         let owner = self.app.workspaces.active_key().clone();
         self.reconcile_thinking_selection_for(&owner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inspector_telemetry_refresh_delay;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn inspector_telemetry_refresh_is_immediate_then_throttled() {
+        let start = Instant::now();
+        assert_eq!(
+            inspector_telemetry_refresh_delay(None, start),
+            Duration::ZERO
+        );
+        assert_eq!(
+            inspector_telemetry_refresh_delay(Some(start), start + Duration::from_millis(50)),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            inspector_telemetry_refresh_delay(Some(start), start + Duration::from_millis(250)),
+            Duration::ZERO
+        );
     }
 }

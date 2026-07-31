@@ -57,3 +57,56 @@ pub(crate) fn usage_cost_label(cost: Option<f64>) -> String {
         .map(|cost| format!("${cost:.4}"))
         .unwrap_or_else(|| "—".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_recovery_and_usage_labels_are_exhaustive_and_bounded() {
+        assert_eq!(
+            runtime_state_label(DesktopProjectionLifecycle::Running, false),
+            "connected · idle"
+        );
+        assert_eq!(
+            runtime_state_label(DesktopProjectionLifecycle::Running, true),
+            "connected · active"
+        );
+        assert_eq!(
+            runtime_state_label(DesktopProjectionLifecycle::NeedsResync, false),
+            "resync required"
+        );
+        assert_eq!(
+            runtime_state_label(DesktopProjectionLifecycle::Failed, false),
+            "failed"
+        );
+        assert_eq!(
+            runtime_state_label(DesktopProjectionLifecycle::Stopped, false),
+            "stopped"
+        );
+        assert_eq!(
+            recovery_status_label(DesktopRecoveryStatus::Pending),
+            "pending"
+        );
+        assert_eq!(
+            recovery_status_label(DesktopRecoveryStatus::Resolved),
+            "resolved"
+        );
+        assert_eq!(
+            recovery_status_label(DesktopRecoveryStatus::Recovered),
+            "recovered"
+        );
+        assert_eq!(recovery_action_label(DesktopRecoveryAction::Retry), "retry");
+        assert_eq!(
+            recovery_action_label(DesktopRecoveryAction::MarkFailed),
+            "mark-failed"
+        );
+        assert_eq!(recovery_action_label(DesktopRecoveryAction::Abort), "abort");
+
+        assert_eq!(usage_cost_label(Some(1.25)), "$1.2500");
+        assert_eq!(usage_cost_label(None), "—");
+        assert_eq!(usage_cost_label(Some(f64::NAN)), "—");
+        assert_eq!(usage_cost_label(Some(f64::INFINITY)), "—");
+        assert_eq!(usage_cost_label(Some(-0.01)), "—");
+    }
+}

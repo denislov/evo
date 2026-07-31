@@ -815,3 +815,171 @@ impl Render for ConversationHeader {
             .into_any_element()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coding_agent::api::embedding::CodingAgentThinkingCapability;
+
+    fn model_fixture(
+        id: &str,
+        name: &str,
+        provider: &str,
+        configured: bool,
+        supports_text: bool,
+    ) -> CodingAgentModelChoice {
+        CodingAgentModelChoice {
+            id: id.into(),
+            name: name.into(),
+            provider: provider.into(),
+            reasoning: false,
+            thinking_capability: CodingAgentThinkingCapability::default(),
+            supports_text,
+            supports_images: !supports_text,
+            context_window: 32_000,
+            max_output_tokens: 4_000,
+            configured,
+            selected: false,
+        }
+    }
+
+    #[test]
+    fn model_menu_filters_and_stably_orders_provider_groups_and_rows() {
+        let models = vec![
+            model_fixture("z-current", "Zulu Current", "z-provider", true, true),
+            model_fixture("a-second", "Second Alpha", "a-provider", true, true),
+            model_fixture(
+                "unconfigured",
+                "Unavailable Alpha",
+                "a-provider",
+                false,
+                true,
+            ),
+            model_fixture("image-only", "Image Alpha", "a-provider", true, false),
+            model_fixture("a-first", "First Alpha", "a-provider", true, true),
+        ];
+
+        let (groups, warning) = model_menu(&models, "z-current");
+        assert!(warning.is_none());
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.provider.as_ref())
+                .collect::<Vec<_>>(),
+            ["a-provider", "z-provider"]
+        );
+        assert_eq!(
+            groups[0]
+                .options
+                .iter()
+                .map(|option| option.id.as_ref())
+                .collect::<Vec<_>>(),
+            ["a-first", "a-second"]
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .flat_map(|group| group.options.iter())
+                .map(|option| option.id.as_ref())
+                .collect::<Vec<_>>(),
+            ["a-first", "a-second", "z-current"]
+        );
+
+        let mut reordered = models;
+        reordered.reverse();
+        let (reordered_groups, _) = model_menu(&reordered, "z-current");
+        assert_eq!(groups, reordered_groups);
+    }
+
+    #[test]
+    fn model_menu_bounds_long_names_and_isolates_unavailable_current_model() {
+        let long_name =
+            "A deliberately very long model name used to prove bounded popup rows ".repeat(3);
+        let models = vec![
+            model_fixture(
+                "lost-auth-model",
+                "Lost Authentication",
+                "z-provider",
+                false,
+                true,
+            ),
+            model_fixture(
+                "configured-model-with-a-very-long-identifier-that-remains-typed",
+                &long_name,
+                "a-provider",
+                true,
+                true,
+            ),
+        ];
+
+        let (groups, warning) = model_menu(&models, "lost-auth-model");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].options.len(), 1);
+        assert_eq!(groups[0].options[0].name.as_ref(), long_name);
+        assert_ne!(groups[0].options[0].display_name.as_ref(), long_name);
+        assert!(groups[0].options[0].display_name.ends_with('…'));
+        assert_eq!(
+            warning,
+            Some(ConversationHeaderModelWarning {
+                id: Arc::from("lost-auth-model"),
+                name: Arc::from("Lost Authentication"),
+                reason: Arc::from("Authentication required"),
+            })
+        );
+
+        let unavailable = models
+            .into_iter()
+            .map(|mut model| {
+                model.configured = false;
+                model
+            })
+            .collect::<Vec<_>>();
+        let (empty_groups, warning) = model_menu(&unavailable, "lost-auth-model");
+        assert!(empty_groups.is_empty());
+        assert!(warning.is_some());
+    }
+
+    #[test]
+    fn thinking_menu_exactly_matches_the_product_capability() {
+        let mut model = model_fixture("reasoner", "Reasoner", "fixture", true, true);
+        model.thinking_capability = CodingAgentThinkingCapability {
+            supported: true,
+            explicit_levels: vec![
+                CodingAgentThinkingLevel::High,
+                CodingAgentThinkingLevel::Low,
+                CodingAgentThinkingLevel::High,
+                CodingAgentThinkingLevel::Off,
+            ],
+            can_disable: false,
+        };
+        let options = thinking_menu(Some(&model));
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| (option.selection, option.label))
+                .collect::<Vec<_>>(),
+            [
+                (DesktopThinkingLevel::Default, "Auto"),
+                (DesktopThinkingLevel::High, "High"),
+                (DesktopThinkingLevel::Low, "Low"),
+            ]
+        );
+
+        model.thinking_capability.can_disable = true;
+        assert_eq!(
+            thinking_menu(Some(&model))
+                .iter()
+                .map(|option| option.selection)
+                .collect::<Vec<_>>(),
+            [
+                DesktopThinkingLevel::Default,
+                DesktopThinkingLevel::Off,
+                DesktopThinkingLevel::High,
+                DesktopThinkingLevel::Low,
+            ]
+        );
+        assert!(thinking_menu(None).is_empty());
+        model.thinking_capability = CodingAgentThinkingCapability::default();
+        assert!(thinking_menu(Some(&model)).is_empty());
+    }
+}

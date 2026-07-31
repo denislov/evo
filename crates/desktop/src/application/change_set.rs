@@ -146,4 +146,37 @@ mod tests {
         assert!(usage_changes.contains(UiRegion::InspectorTelemetry));
         assert!(!usage_changes.contains(UiRegion::Inspector));
     }
+
+    #[test]
+    fn streaming_dirty_routing_updates_only_conversation_until_product_facts_change() {
+        let mut streaming = DesktopProjectionDelta {
+            cursor: true,
+            conversation: true,
+            tools: true,
+            ..DesktopProjectionDelta::default()
+        };
+        let changes = UiChangeSet::for_projection(false, Some(&streaming));
+        assert!(changes.contains(UiRegion::Conversation));
+        for untouched in [
+            UiRegion::Root,
+            UiRegion::Inspector,
+            UiRegion::ConversationHeader,
+            UiRegion::Modal,
+        ] {
+            assert!(!changes.contains(untouched));
+        }
+        assert!(UiChangeSet::for_projection(true, Some(&streaming)).contains(UiRegion::Root));
+
+        streaming.diagnostics = true;
+        assert!(UiChangeSet::for_projection(false, Some(&streaming)).contains(UiRegion::Inspector));
+        streaming.lifecycle = true;
+        assert!(
+            UiChangeSet::for_projection(false, Some(&streaming))
+                .contains(UiRegion::ConversationHeader)
+        );
+        streaming.authorizations = true;
+        let authorization_changes = UiChangeSet::for_projection(false, Some(&streaming));
+        assert!(authorization_changes.contains(UiRegion::Root));
+        assert!(authorization_changes.contains(UiRegion::Modal));
+    }
 }

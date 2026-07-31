@@ -550,6 +550,60 @@ fn native_shell_root_and_refresh_authority_stay_bounded() {
 }
 
 #[test]
+fn native_shell_tests_are_external_and_grouped_by_behavior() {
+    let source_root = manifest_dir().join("src/app");
+    let shell = source_root.join("native_shell.rs");
+    let shell_source = fs::read_to_string(&shell).expect("native shell source is readable");
+    assert_eq!(
+        shell_source.matches("#[cfg(test)]").count(),
+        1,
+        "native_shell.rs should keep cfg(test) only for its external test-module declaration"
+    );
+    assert_eq!(shell_source.matches("#[cfg(test)]\nmod tests;").count(), 1);
+    assert!(
+        !shell_source.contains("#[cfg(test)]\nmod tests {"),
+        "native_shell.rs must not regain a large inline test module"
+    );
+
+    let tests = source_root.join("native_shell/tests");
+    for suite in [
+        "commands.rs",
+        "fixtures.rs",
+        "focus.rs",
+        "mod.rs",
+        "overlays.rs",
+        "performance.rs",
+        "responsive.rs",
+        "runtime_updates.rs",
+        "workspace.rs",
+    ] {
+        let path = tests.join(suite);
+        assert!(
+            path.is_file(),
+            "native shell test suite is missing: {}",
+            path.display()
+        );
+    }
+
+    let test_root = fs::read_to_string(tests.join("mod.rs")).expect("test root is readable");
+    assert!(test_root.contains("include!(\"fixtures.rs\");"));
+    for suite in [
+        "commands",
+        "focus",
+        "overlays",
+        "performance",
+        "responsive",
+        "runtime_updates",
+        "workspace",
+    ] {
+        assert!(
+            test_root.contains(&format!("mod {suite};")),
+            "native shell test root must declare {suite}"
+        );
+    }
+}
+
+#[test]
 fn application_layer_has_no_ui_or_effect_executor_dependencies() {
     for path in layer_rust_files("application") {
         if is_test_only_source(&path) {

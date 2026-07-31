@@ -157,6 +157,21 @@ mod tests {
     }
 
     #[test]
+    fn closing_background_session_preserves_the_active_owner() {
+        let mut store = WorkspaceStore::new("home");
+        let active = SessionId::from_dto("session-active");
+        let background = SessionId::from_dto("session-background");
+        store.insert_session(active.clone(), "active");
+        store.insert_session(background.clone(), "background");
+        assert!(store.activate(&WorkspaceKey::Session(active.clone())));
+
+        assert_eq!(store.remove_session(&background), Some("background"));
+        assert_eq!(store.active_key(), &WorkspaceKey::Session(active));
+        assert_eq!(store.active(), &"active");
+        assert_eq!(store.get(&WorkspaceKey::Home), Some(&"home"));
+    }
+
+    #[test]
     fn promoting_home_preserves_its_state_and_installs_a_fresh_home() {
         let mut store = WorkspaceStore::new("submitted draft");
         let session = SessionId::from_dto("session-created");

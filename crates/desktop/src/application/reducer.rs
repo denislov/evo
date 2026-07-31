@@ -1803,7 +1803,7 @@ mod tests {
 
     use super::{
         CatalogIntent, DesktopController, DesktopEvent, PlatformUpdatePort, RuntimeUpdateKind,
-        Transition,
+        Transition, safe_runtime_rejection_notice,
     };
     use crate::application::{
         change_set::UiRegion,
@@ -2223,5 +2223,15 @@ mod tests {
             port.timer_fires[&DesktopTimerKind::ConversationHeightRefresh],
             1
         );
+    }
+
+    #[test]
+    fn runtime_rejection_notice_never_includes_an_untrusted_body() {
+        const SECRET: &str = "desktop-secret-canary";
+        let notice = safe_runtime_rejection_notice(
+            desktop::runtime::DesktopRuntimeCommandKind::DecideToolAuthorization,
+            "authorization_not_pending",
+        );
+        assert!(!notice.contains(SECRET));
     }
 }

@@ -701,4 +701,22 @@ mod tests {
             "项目目录：无项目。按 Enter 或 Space 选择目录。"
         );
     }
+
+    #[test]
+    fn input_render_latency_uses_latest_change_and_consumes_it_once() {
+        let probe = InputRenderLatencyProbe::default();
+        let started = Instant::now();
+        probe.mark_changed_at(started);
+        probe.mark_changed_at(started + Duration::from_millis(3));
+
+        assert_eq!(
+            probe.observe_render_at(started + Duration::from_millis(8)),
+            Some(Duration::from_millis(5))
+        );
+        assert_eq!(probe.last_observed(), Some(Duration::from_millis(5)));
+        assert_eq!(
+            probe.observe_render_at(started + Duration::from_millis(9)),
+            None
+        );
+    }
 }

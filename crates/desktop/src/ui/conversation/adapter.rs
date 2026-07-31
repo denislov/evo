@@ -1,8 +1,9 @@
 use crate::app::native_shell::{
     Arc, ClipboardFeedback, Context, ConversationFullMessageView, DesktopModalKind, MAX_COPY_BYTES,
-    NativeShell, ScrollStrategy, UiChangeSet, UiRegion, Window, adjacent_conversation_index,
-    conversation_copy_text, message_conversation_block_id, tool_conversation_block_id,
+    NativeShell, ScrollStrategy, UiChangeSet, UiRegion, Window, conversation_copy_text,
+    message_conversation_block_id, tool_conversation_block_id,
 };
+use crate::ui::conversation::controller::adjacent_conversation_index;
 use crate::ui::conversation::pane as conversation_pane;
 
 impl NativeShell {
