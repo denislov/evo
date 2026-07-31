@@ -1,356 +1,20 @@
-//! Bounded client-local preference persistence for the desktop adapter.
+//! Bounded atomic preference persistence and coalescing writer thread.
 
-use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::channel::oneshot;
-use serde::{Deserialize, Serialize};
 
-use coding_agent::api::embedding::CodingAgentThinkingLevel;
+use crate::preferences::{DesktopPreferences, PREFERENCES_SCHEMA_VERSION};
 
-use crate::file_review::DesktopExternalEditorConfig;
-use crate::shell::{
-    CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH, SESSION_PANEL_MAX_WIDTH,
-    SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_WIDTH,
-};
-
-const PREFERENCES_SCHEMA_VERSION: u16 = 1;
 const MAX_PREFERENCES_BYTES: u64 = 64 * 1024;
 const DESKTOP_DIRECTORY: &str = "desktop";
 const PREFERENCES_FILE: &str = "preferences.json";
-const SCRATCH_DIRECTORY: &str = "scratch";
-const MAX_WORKSPACE_ID_BYTES: usize = 64;
-const MAX_PERSISTED_SESSION_ID_BYTES: usize = 256;
-const MAX_PERSISTED_SESSION_THINKING_LEVELS: usize = 128;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-static WORKSPACE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum DesktopThinkingLevel {
-    Off,
-    Minimal,
-    Low,
-    Medium,
-    High,
-    XHigh,
-    #[default]
-    #[serde(other)]
-    Default,
-}
-
-impl DesktopThinkingLevel {
-    pub(crate) const fn explicit(self) -> Option<CodingAgentThinkingLevel> {
-        match self {
-            Self::Default => None,
-            Self::Off => Some(CodingAgentThinkingLevel::Off),
-            Self::Minimal => Some(CodingAgentThinkingLevel::Minimal),
-            Self::Low => Some(CodingAgentThinkingLevel::Low),
-            Self::Medium => Some(CodingAgentThinkingLevel::Medium),
-            Self::High => Some(CodingAgentThinkingLevel::High),
-            Self::XHigh => Some(CodingAgentThinkingLevel::XHigh),
-        }
-    }
-
-    pub(crate) const fn from_explicit(level: Option<CodingAgentThinkingLevel>) -> Self {
-        match level {
-            None => Self::Default,
-            Some(CodingAgentThinkingLevel::Off) => Self::Off,
-            Some(CodingAgentThinkingLevel::Minimal) => Self::Minimal,
-            Some(CodingAgentThinkingLevel::Low) => Self::Low,
-            Some(CodingAgentThinkingLevel::Medium) => Self::Medium,
-            Some(CodingAgentThinkingLevel::High) => Self::High,
-            Some(CodingAgentThinkingLevel::XHigh) => Self::XHigh,
-        }
-    }
-
-    pub(crate) fn label(self, default: Option<&str>) -> String {
-        match self {
-            Self::Default => default
-                .map(|level| format!("default:{}", crate::shell::truncate_label(level, 10)))
-                .unwrap_or_else(|| "default".into()),
-            Self::Off => "off".into(),
-            Self::Minimal => "minimal".into(),
-            Self::Low => "low".into(),
-            Self::Medium => "medium".into(),
-            Self::High => "high".into(),
-            Self::XHigh => "xhigh".into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WindowGeometry {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub maximized: bool,
-}
-
-impl Default for WindowGeometry {
-    fn default() -> Self {
-        Self {
-            x: 80,
-            y: 60,
-            width: 1_280,
-            height: 840,
-            maximized: false,
-        }
-    }
-}
-
-impl WindowGeometry {
-    fn normalize(&mut self) {
-        self.x = self.x.clamp(-32_768, 32_767);
-        self.y = self.y.clamp(-32_768, 32_767);
-        self.width = self.width.clamp(640, 7_680);
-        self.height = self.height.clamp(480, 4_320);
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DesktopPreferences {
-    pub schema_version: u16,
-    pub window: WindowGeometry,
-    pub sessions_panel_visible: bool,
-    pub context_panel_visible: bool,
-    #[serde(default = "default_sessions_panel_width")]
-    pub sessions_panel_width: u32,
-    #[serde(default = "default_context_panel_width")]
-    pub context_panel_width: u32,
-    pub reduced_motion: bool,
-    pub ui_scale: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) external_editor: Option<DesktopExternalEditorConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) scratch_workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) session_thinking_levels: BTreeMap<String, DesktopThinkingLevel>,
-}
-
-impl Default for DesktopPreferences {
-    fn default() -> Self {
-        Self {
-            schema_version: PREFERENCES_SCHEMA_VERSION,
-            window: WindowGeometry::default(),
-            sessions_panel_visible: true,
-            context_panel_visible: false,
-            sessions_panel_width: SESSION_PANEL_WIDTH,
-            context_panel_width: CONTEXT_PANEL_WIDTH,
-            reduced_motion: false,
-            ui_scale: 1.0,
-            external_editor: None,
-            scratch_workspace_id: None,
-            session_thinking_levels: BTreeMap::new(),
-        }
-    }
-}
-
-impl DesktopPreferences {
-    pub fn normalized(mut self) -> Self {
-        self.schema_version = PREFERENCES_SCHEMA_VERSION;
-        self.window.normalize();
-        self.sessions_panel_width = self
-            .sessions_panel_width
-            .clamp(SESSION_PANEL_MIN_WIDTH, SESSION_PANEL_MAX_WIDTH);
-        self.context_panel_width = self
-            .context_panel_width
-            .clamp(CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_MAX_WIDTH);
-        if !self.ui_scale.is_finite() {
-            self.ui_scale = 1.0;
-        }
-        self.ui_scale = self.ui_scale.clamp(0.75, 2.0);
-        if self
-            .external_editor
-            .as_ref()
-            .is_some_and(|editor| editor.validate().is_err())
-        {
-            self.external_editor = None;
-        }
-        if self
-            .scratch_workspace_id
-            .as_deref()
-            .is_some_and(|id| !valid_workspace_id(id))
-        {
-            self.scratch_workspace_id = None;
-        }
-        self.session_thinking_levels.retain(|session_id, level| {
-            valid_persisted_session_id(session_id) && *level != DesktopThinkingLevel::Default
-        });
-        while self.session_thinking_levels.len() > MAX_PERSISTED_SESSION_THINKING_LEVELS {
-            self.session_thinking_levels.pop_last();
-        }
-        self
-    }
-
-    pub(crate) fn thinking_level_for_session(&self, session_id: &str) -> DesktopThinkingLevel {
-        self.session_thinking_levels
-            .get(session_id)
-            .copied()
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn set_thinking_level_for_session(
-        &mut self,
-        session_id: &str,
-        level: DesktopThinkingLevel,
-    ) -> bool {
-        if !valid_persisted_session_id(session_id) {
-            return false;
-        }
-        if level == DesktopThinkingLevel::Default {
-            return self.session_thinking_levels.remove(session_id).is_some();
-        }
-        if self.session_thinking_levels.get(session_id) == Some(&level) {
-            return false;
-        }
-        if !self.session_thinking_levels.contains_key(session_id)
-            && self.session_thinking_levels.len() >= MAX_PERSISTED_SESSION_THINKING_LEVELS
-        {
-            self.session_thinking_levels.pop_first();
-        }
-        self.session_thinking_levels
-            .insert(session_id.to_owned(), level);
-        true
-    }
-}
-
-fn valid_persisted_session_id(session_id: &str) -> bool {
-    !session_id.is_empty() && session_id.len() <= MAX_PERSISTED_SESSION_ID_BYTES
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ScratchWorkspaceError {
-    #[error("scratch workspace path is a symbolic link: {path}")]
-    SymbolicLink { path: PathBuf },
-    #[error("scratch workspace path is not a directory: {path}")]
-    NotDirectory { path: PathBuf },
-    #[error("scratch workspace I/O failed at {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-}
-
-/// Resolve the stable projectless workspace below the product-owned global root.
-///
-/// Empty workspaces are deliberately retained: the id is persistent adapter
-/// state and the directory may later receive agent-created files. Reclamation
-/// is therefore tied to an explicit preference reset, never to window close.
-pub fn resolve_scratch_workspace(
-    global_config_dir: &Path,
-    preferences: &mut DesktopPreferences,
-) -> Result<PathBuf, ScratchWorkspaceError> {
-    let root = global_config_dir.join(SCRATCH_DIRECTORY);
-    ensure_scratch_directory(&root)?;
-
-    if let Some(id) = preferences.scratch_workspace_id.as_deref() {
-        let workspace = root.join(id);
-        ensure_scratch_directory(&workspace)?;
-        return Ok(workspace);
-    }
-
-    loop {
-        let id = generate_workspace_id();
-        let workspace = root.join(&id);
-        match fs::create_dir(&workspace) {
-            Ok(()) => {
-                preferences.scratch_workspace_id = Some(id);
-                return Ok(workspace);
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(source) => {
-                return Err(ScratchWorkspaceError::Io {
-                    path: workspace,
-                    source,
-                });
-            }
-        }
-    }
-}
-
-fn ensure_scratch_directory(path: &Path) -> Result<(), ScratchWorkspaceError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(ScratchWorkspaceError::SymbolicLink {
-                    path: path.to_path_buf(),
-                });
-            }
-            if !metadata.is_dir() {
-                return Err(ScratchWorkspaceError::NotDirectory {
-                    path: path.to_path_buf(),
-                });
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).map_err(|source| ScratchWorkspaceError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            let metadata =
-                fs::symlink_metadata(path).map_err(|source| ScratchWorkspaceError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-            if metadata.file_type().is_symlink() {
-                return Err(ScratchWorkspaceError::SymbolicLink {
-                    path: path.to_path_buf(),
-                });
-            }
-            if !metadata.is_dir() {
-                return Err(ScratchWorkspaceError::NotDirectory {
-                    path: path.to_path_buf(),
-                });
-            }
-        }
-        Err(source) => {
-            return Err(ScratchWorkspaceError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    }
-    Ok(())
-}
-
-fn valid_workspace_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_WORKSPACE_ID_BYTES
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-}
-
-fn generate_workspace_id() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let sequence = WORKSPACE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "workspace-{timestamp:x}-{:x}-{sequence:x}",
-        std::process::id()
-    )
-}
-
-const fn default_sessions_panel_width() -> u32 {
-    SESSION_PANEL_WIDTH
-}
-
-const fn default_context_panel_width() -> u32 {
-    CONTEXT_PANEL_WIDTH
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreferenceRecovery {
@@ -727,13 +391,14 @@ fn sync_directory(_directory: &Path) -> Result<(), PreferenceStoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
-    #[test]
-    fn fresh_preferences_open_sidebar_and_close_inspector() {
-        let preferences = DesktopPreferences::default();
-        assert!(preferences.sessions_panel_visible);
-        assert!(!preferences.context_panel_visible);
-    }
+    use crate::file_review::DesktopExternalEditorConfig;
+    use crate::preferences::{
+        DesktopThinkingLevel, MAX_PERSISTED_SESSION_ID_BYTES,
+        MAX_PERSISTED_SESSION_THINKING_LEVELS, WindowGeometry,
+    };
+    use crate::shell::{CONTEXT_PANEL_MAX_WIDTH, SESSION_PANEL_MIN_WIDTH};
 
     #[test]
     fn missing_preferences_return_bounded_defaults() {
@@ -741,36 +406,6 @@ mod tests {
         let loaded = PreferenceStore::new(temp.path()).load().unwrap();
         assert_eq!(loaded.preferences, DesktopPreferences::default());
         assert_eq!(loaded.recovery, None);
-    }
-
-    #[test]
-    fn scratch_workspace_id_is_created_once_and_reused_from_preferences() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut preferences = DesktopPreferences::default();
-
-        let first = resolve_scratch_workspace(temp.path(), &mut preferences).unwrap();
-        let id = preferences
-            .scratch_workspace_id
-            .clone()
-            .expect("workspace resolution persists its id");
-        let second = resolve_scratch_workspace(temp.path(), &mut preferences).unwrap();
-
-        assert_eq!(first, temp.path().join("scratch").join(&id));
-        assert_eq!(second, first);
-        assert!(first.is_dir());
-        assert!(valid_workspace_id(&id));
-    }
-
-    #[test]
-    fn untrusted_scratch_workspace_ids_are_discarded_before_path_resolution() {
-        for invalid in ["", "../escape", "nested/path", "x\\y", &"x".repeat(65)] {
-            let preferences = DesktopPreferences {
-                scratch_workspace_id: Some(invalid.to_owned()),
-                ..DesktopPreferences::default()
-            }
-            .normalized();
-            assert!(preferences.scratch_workspace_id.is_none());
-        }
     }
 
     #[test]
@@ -814,25 +449,6 @@ mod tests {
         let loaded = store.load().unwrap();
         assert_eq!(loaded.preferences, saved);
         assert_eq!(loaded.recovery, None);
-    }
-
-    #[test]
-    fn legacy_preferences_gain_default_panel_widths() {
-        let legacy = serde_json::json!({
-            "schema_version": PREFERENCES_SCHEMA_VERSION,
-            "window": {
-                "x": 0, "y": 0, "width": 1200, "height": 800, "maximized": false
-            },
-            "sessions_panel_visible": true,
-            "context_panel_visible": true,
-            "reduced_motion": false,
-            "ui_scale": 1.0
-        });
-        let preferences: DesktopPreferences = serde_json::from_value(legacy).unwrap();
-        assert_eq!(preferences.sessions_panel_width, SESSION_PANEL_WIDTH);
-        assert_eq!(preferences.context_panel_width, CONTEXT_PANEL_WIDTH);
-        assert!(preferences.scratch_workspace_id.is_none());
-        assert!(preferences.session_thinking_levels.is_empty());
     }
 
     #[test]

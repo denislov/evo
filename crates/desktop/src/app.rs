@@ -15,10 +15,11 @@ use gpui_component::{Root, Theme, ThemeMode};
 use gpui_platform::application;
 
 use self::native_shell::{NativeShell, NativeShellInit, NativeShellWorkspaceInit};
-use crate::preferences::{
-    DesktopPreferences, PreferenceLoad, PreferenceRecovery, PreferenceStore, PreferenceWriter,
-    resolve_scratch_workspace,
+use crate::platform::preferences::{
+    PreferenceLoad, PreferenceRecovery, PreferenceStore, PreferenceWriter,
 };
+use crate::platform::workspace::resolve_scratch_workspace;
+use crate::preferences::DesktopPreferences;
 use crate::projection::DesktopProjection;
 use crate::runtime::{
     DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot, DesktopRuntimeStartError,

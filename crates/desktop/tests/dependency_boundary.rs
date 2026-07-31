@@ -561,12 +561,61 @@ fn application_layer_has_no_ui_or_effect_executor_dependencies() {
             &facts,
             &[
                 &["gpui"],
+                &["platform"],
                 &["std", "fs"],
                 &["std", "process"],
                 &["std", "thread"],
                 &["tokio"],
             ],
         );
+        for forbidden in [
+            "PreferenceLoad",
+            "PreferenceRecovery",
+            "PreferenceStore",
+            "PreferenceStoreError",
+            "PreferenceWriter",
+            "ScratchWorkspaceError",
+        ] {
+            assert!(
+                !facts.identifiers.contains(forbidden),
+                "{} application module must not depend on platform preference authority {forbidden}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn preference_model_has_no_storage_workspace_or_thread_authority() {
+    for path in layer_rust_files("preferences") {
+        if is_test_only_source(&path) {
+            continue;
+        }
+        let facts = production_facts(&path);
+        assert_paths_exclude(
+            &path,
+            &facts,
+            &[
+                &["platform"],
+                &["std", "fs"],
+                &["std", "io"],
+                &["std", "thread"],
+                &["futures"],
+            ],
+        );
+        for forbidden in [
+            "PreferenceLoad",
+            "PreferenceRecovery",
+            "PreferenceStore",
+            "PreferenceWriter",
+            "ScratchWorkspaceError",
+        ] {
+            assert!(
+                !facts.identifiers.contains(forbidden),
+                "{} preference model must not own platform authority {forbidden}",
+                path.display()
+            );
+        }
     }
 }
 

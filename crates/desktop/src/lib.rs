@@ -13,6 +13,7 @@ mod application;
 mod assets;
 mod conversation;
 mod file_review;
+mod platform;
 mod preferences;
 mod projection;
 mod runtime;

@@ -13,7 +13,7 @@ use crate::app::native_shell::{
 };
 use crate::application::effect::DesktopEffect;
 use crate::application::reducer::DesktopController;
-use crate::preferences::PreferenceWriter;
+use crate::platform::preferences::PreferenceWriter;
 use crate::runtime::{
     DesktopRuntimeBridge, DesktopRuntimeEventStream, DesktopRuntimeShutdownError,
     DesktopRuntimeShutdownGuard, DesktopRuntimeShutdownSignal, DesktopRuntimeUpdate,

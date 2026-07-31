@@ -16,9 +16,8 @@ use desktop::conversation::{
 };
 #[cfg(test)]
 use desktop::file_review::DesktopFileReviewDocument;
-use desktop::preferences::{
-    DesktopPreferences, DesktopThinkingLevel, PreferenceWriteResult, PreferenceWriter,
-};
+use desktop::platform::preferences::{PreferenceWriteResult, PreferenceWriter};
+use desktop::preferences::{DesktopPreferences, DesktopThinkingLevel};
 use desktop::projection::{DesktopProjection, DesktopRecoveryStatus};
 #[cfg(test)]
 use desktop::projection::{DesktopProjectionLifecycle, ProjectionEvent};
