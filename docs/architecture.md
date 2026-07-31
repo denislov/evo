@@ -393,60 +393,92 @@ crates/tui/src/
 
 ### 3.6 `desktop` — 原生桌面应用
 
-**定位**：基于 Zed 的 `gpui` 框架的原生 GUI 适配器，通过通道与 `coding-agent` 运行时通信。
+**定位**：基于 Zed `gpui` 的原生 GUI 适配器。它以 application reducer 作为桌面状态
+权威，通过 typed effect 隔离 runtime/platform 副作用，并以 `UiChangeSet` 驱动选择性刷新。
 
 ```
 crates/desktop/src/
-├── lib.rs                         # 唯一公开面：DesktopApplicationOptions + run()
-├── main.rs                        # 桌面应用二进制入口
-├── app.rs                         # gpui bootstrap、窗口与 runtime 生命周期
-├── app/native_shell.rs            # 根布局、typed event 协调与 workspace 切换
-├── app/native_shell/              # Header/Pane/Modal/Drawer 等 bounded child entity
-├── runtime.rs                     # runtime facade 与稳定 re-export
-├── runtime/{protocol,bridge}.rs   # typed command/update 协议与有界 channel
-├── runtime/{driver,dispatch}.rs   # per-session owner、事件泵与 command dispatch
-├── projection.rs                  # 产品 snapshot/event → DesktopProjection
-├── conversation/                  # row model、Markdown、layout、cache、viewport
-├── actions.rs                     # typed action、key context 与 Command Palette
-├── shell.rs                       # 纯 ShellLayout/Focus 几何
-├── file_review.rs                 # bounded review 与外部编辑器启动器
-├── preferences.rs                 # Desktop-only 持久化偏好
-└── command_ledger.rs              # per-workspace command intent 分类账
+├── lib.rs                              # 唯一公开面：DesktopApplicationOptions + run()
+├── main.rs                             # 桌面应用二进制入口
+├── app.rs                              # GPUI bootstrap、窗口与 runtime 生命周期
+├── app/
+│   ├── native_shell.rs                 # composition root 与 UiIntent 总入口
+│   ├── native_shell/                   # runtime/command/platform/review adapters
+│   │   └── tests/                      # GPUI shell 行为 suites 与 fixtures
+│   └── devtools/native_replay.rs       # desktop-devtools feature 下的视觉/性能 replay
+├── application/                        # 纯状态、reducer、command tracker、effect/change set
+├── runtime/
+│   ├── protocol.rs                     # typed command/update 与唯一 admission validation
+│   ├── client.rs                       # connection/client/event-stream/shutdown owners
+│   ├── worker/                         # session owner、dispatch 与优先级事件泵
+│   └── tests/                          # admission/ordering/overflow/reconnect/recovery/shutdown
+├── platform/
+│   ├── preferences/store.rs            # 偏好 I/O 与 background writer
+│   ├── external_editor.rs              # 安全的外部进程启动
+│   └── workspace.rs                    # workspace/path 解析
+├── preferences/model.rs                # 无 I/O 的 DesktopPreferences model
+├── ui/
+│   ├── conversation/                   # pane、composer、Markdown、layout、cache、viewport
+│   ├── sessions/                       # session catalog presentation 与 pane
+│   ├── inspector/                      # review presentation 与 inspector pane
+│   ├── shell/                          # layout、focus、drawer、modal、toast presentation
+│   └── components/                     # brand、controls、style、streaming text
+├── projection.rs                       # 产品 snapshot/event → DesktopProjection
+├── actions.rs                          # typed action、key context 与 Command Palette
+└── assets.rs                           # 字体与静态资源
 ```
 
 **核心架构模式**：
 
 ```
-                     Tokio runtime（后台线程）
-┌──────────────────────────────────────────────────────────┐
-│ RuntimeState                                             │
-│ ├── home: HomeRuntimeContext                             │
-│ └── workspaces: HashMap<session_id, RuntimeSessionWorkspace>
-│      └── workspace scope + 独立 EmbeddingContext/Session │
-│                                                          │
-│ DesktopRuntimeCommand ── typed owner/prompt target ──────┤
-│ DesktopRuntimeUpdate  ── session identity + sequence ────┤
-└───────────────────────────┬──────────────────────────────┘
-                            │ bounded priority/data channels
-                            ▼
-                     gpui GUI 线程
-┌──────────────────────────────────────────────────────────┐
-│ NativeShell                                              │
-│ ├── active_workspace: SessionWorkspace                   │
-│ ├── workspaces: HashMap<session_id, SessionWorkspace>    │
-│ ├── command reconciliation + selective dirty routing     │
-│ └── bounded child entities                               │
-│      Sessions | Header | Conversation | Composer         │
-│      Inspector | Toast | RootModalHost | CenterDrawerHost│
-└──────────────────────────────────────────────────────────┘
+GPUI child event
+      │
+      ▼
+   UiIntent → NativeShell（presentation/navigation/command adapter）
+                  │                              │
+                  ▼                              ▼
+           refresh_views                 RuntimeCommandClient
+            (UiChangeSet)                        │
+                  │                      bounded command queue
+                  ▼                              ▼
+            GPUI entities                  runtime worker
+                                                  │
+                                  bounded priority/data update channels
+                                                  │
+                                                  ▼
+runtime/platform/async/timer result → DesktopEvent → DesktopController::reduce
+                                                      │
+                                           Transition { changes, effects }
+                                                ┌─────┴─────┐
+                                                ▼           ▼
+                                         refresh_views  execute_effect
 ```
 
-每个已打开 session 在 runtime 和 GUI 两侧都有独立 owner。`DesktopPromptTarget::New`
-携带 `CodingAgentWorkspaceSelection`、model 与 profile，用于原子创建新的 runtime
-workspace；`DesktopPromptTarget::Existing` 只携带 durable `session_id`，类型上无法注入
-新的 cwd。Project、Projectless 和 legacy migration 都由 `coding-agent` 解析为 typed
-workspace scope，Desktop 不通过 cwd 字符串猜测身份，也不共享一个可变
-`EmbeddingContext` 给多个 session。
+`DesktopState` 聚合稳定的 `WorkspaceStore`、全局 `CommandTracker`、catalog 与 runtime
+状态；runtime update、platform result、command completion 与 timer 的状态决策由 application
+reducer 统一解释。一次 reducer transition 同时给出区域级 `UiChangeSet` 和可枚举的
+`DesktopEffect`。composition root 执行 effect，将 completion 重新包装成 `DesktopEvent` 回流
+reducer，不会在 callback 中平行解释同一更新。所有 entity notification 都经过唯一的
+`refresh_views(UiChangeSet)` 路径。
+
+每个已打开 session 在 runtime 和 GUI 两侧都有独立 owner。`DesktopPromptTarget::New` 携带
+`CodingAgentWorkspaceSelection`、model 与 profile，用于原子创建新的 runtime workspace；
+`DesktopPromptTarget::Existing` 只携带 durable `session_id`。`RuntimeCommandClient` 是唯一可
+clone 的 command-side API；`DesktopRuntimeEventStream` 和 shutdown guard 分别拥有 update 与
+关闭生命周期。command admission 使用 bounded `try_send` 和 typed error，prompt/path validation
+只由 `runtime/protocol.rs` 解释。priority 与 data update channel 分离，GUI 每次 poll 有明确预算，
+gap、lag、overflow、reconnect 与 shutdown 都由 runtime 状态机测试固定。
+
+目录依赖与 authority 规则如下：
+
+- `application` 不依赖 GPUI、filesystem、process、thread/Tokio owner，也不执行外部副作用。
+- `runtime` 不依赖 GPUI、`ui` 或 presentation type；`platform` 不依赖 `ui`。
+- leaf UI 不持有 runtime client、command tracker 或 preference store；child event 先变为
+  `UiIntent`，presenter 只读取 state 并生成 ViewModel。
+- `app/native_shell` 是允许连接 application、runtime、platform 与 GPUI 的 composition root，
+  不是第二套 reducer；`NativeShell` 只聚合 connection、application state、skills、views 与 UI state。
+- 生产模块禁止 wildcard import。上述规则由 `tests/dependency_boundary.rs` 的 AST/import/manifest
+  守卫验证，不通过固定文件清单维持。
 
 `ShellLayout` 对 Home、Skills 与已有 Session 使用同一三列几何：
 
@@ -716,6 +748,19 @@ version = "0.7.2"
 | **RPC 协议测试** | JSONL 与 typed event 协议 | `cli/src/protocol/*_tests.rs` |
 | **组件测试** | UI 组件行为 | `tui/tests/components.rs` 及其子模块 |
 | **依赖/模块边界测试** | 解析 manifest 与 Rust AST，验证公开面、child module graph 和 authority 方向；不搜索实现字符串 | `desktop/tests/dependency_boundary.rs` |
+
+Desktop 的测试按 owner 与风险拆分：
+
+- application reducer、workspace、command completion、effect 与 dirty routing 使用纯 unit tests；
+- `runtime/tests/` 按 admission、ordering、overflow、reconnect、recovery、shutdown 状态机组织，
+  共享启动与 command fixture，不复制生产 façade；
+- `app/native_shell/tests/` 只覆盖需要真实 GPUI entity/hit-test/focus/render/responsive 的行为；
+- `scripts/desktop-perf-gate.sh` 覆盖 headless layout/input/Markdown，
+  `scripts/desktop-native-perf-gate.sh` 覆盖原生窗口 frame/input/RSS；
+- `scripts/desktop-visual-golden.sh` 默认只 compare 20 个 fixture。更新 golden 必须显式 review，
+  结构重构不得用 golden update 掩盖视觉回归；
+- replay fixture 与原生性能入口只在默认关闭的 `desktop-devtools` feature 中编译，默认生产构建
+  不包含 fixture 安装 API。
 
 ### 8.2 Test-Support 机制
 
