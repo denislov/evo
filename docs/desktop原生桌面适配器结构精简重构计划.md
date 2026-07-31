@@ -1,6 +1,6 @@
 # desktop 原生桌面适配器结构精简重构计划
 
-> 状态：执行中（DSK-743 已完成，下一项 DSK-750）
+> 状态：执行中（DSK-750 已完成，下一项 DSK-751）
 > 决策日期：2026-07-31
 > 最近更新：2026-07-31
 > 调研基线 commit：`7766b06974b861565dcc31bf0aa011c7ba6643e6`
@@ -1397,6 +1397,26 @@ Gate 与性能记录：
   `2,525 µs`、input roundtrip P95 `6,016 µs`、input-change-to-render P95 `384 µs`、window RSS growth
   `24,424,448 bytes`。`scripts/desktop-visual-golden.sh` 的 20 个 fixture 全部 `RMSE=0`，未更新 golden。
 
+### DSK-750 实际结果
+
+- 删除混合 model/filesystem/thread/workspace policy 的单文件 `preferences.rs`。schema version、window/panel
+  defaults、untrusted normalization、scratch ID validation、session thinking map 与 thinking-level mapping 迁入
+  `preferences/model.rs`；不再持有 filesystem、I/O、thread、future 或 platform authority。
+- `PreferenceStore`、load recovery、64 KiB cap、atomic temp-write/rename/fsync、symlink/no-follow 防护与 coalescing
+  writer thread 迁入 `platform/preferences/store.rs`；`PreferenceWriter` 只由 bootstrap/UI adapter 持有，
+  application 继续只拥有 normalized `DesktopPreferences` snapshot 与 typed `WritePreferences` effect。
+- scratch workspace ID/path 创建、目录类型与 symlink 检查迁入 `platform/workspace.rs`。resolver 在 path boundary
+  再次使用 model 的唯一 ID validator 检查不可信 ID，非法 `../escape` 会被替换为新的 bounded ID，不能越出
+  product global config root。bootstrap 显式组合 store/load、workspace resolver、writer 与 runtime selection；旧
+  storage API 没有从 `preferences` re-export，也没有 compatibility façade。
+- dependency boundary 增至 12 项：application 禁止依赖 `platform` 与 Store/Writer/Load/Recovery/Scratch 类型；
+  preference model 禁止 filesystem、I/O、thread、future 与 platform 依赖。新增 scratch path-boundary revalidation
+  与 symlink-root 回归；既有 corruption、oversize、schema、roundtrip、atomic writer、writer failure、store symlink、
+  session thinking 与 projectless runtime restore tests 全部通过。
+- Gate A 通过：desktop lib `316 passed / 5 ignored / 0 failed`，dependency boundary `12 passed`，16 项
+  preference 定向测试与 3 项 workspace resolver 测试通过；all-target check、严格 clippy、format 与 diff check
+  全部通过。任务不改变 render/layout/ViewModel 或像素语义，未运行、未更新 visual golden。
+
 ### 任务状态
 
 | 任务 | 状态 | commit | Gate/偏差 |
@@ -1415,7 +1435,7 @@ Gate 与性能记录：
 | DSK-741 | 已完成 | `c3a9f2f` | feature presenters 下放；application-owned workspace/catalog/runtime mutation；删除 `RuntimeUpdatePort` 与 DSK-D731-03；Gate A、ViewModel equality 及 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
 | DSK-742 | 已完成 | `6ad465c` | 7 类 child event 穷尽映射为单一 typed `UiIntent`；subscriptions 仅 normalize+dispatch；Gate A 与 keyboard/action/pane interaction tests 全通过；未更新 golden |
 | DSK-743 | 已完成 | `e321170` | 唯一 typed refresh authority；root Render/adapter 按职责拆分，生产区降至 1,035 行；typed panel preferences transition；清理 DSK-D730-03；Gate A/B、headless perf 与 20 项 visual compare 全通过，RMSE 全为 0；未更新 golden |
-| DSK-750 | 待执行 | — | — |
+| DSK-750 | 已完成 | `0332676` | preferences model 与 platform store/writer/workspace resolver 分权；application 无文件/线程/path authority；Gate A、16 项 preference 与 3 项 scratch 定向测试、12 项 boundary 全通过；未更新 golden |
 | DSK-751 | 待执行 | — | — |
 | DSK-752 | 待执行 | — | — |
 | DSK-753 | 待执行 | — | — |
