@@ -28,7 +28,7 @@ use gpui::{
 };
 use gpui_component::Root;
 
-use super::native_shell::{
+use super::super::native_shell::{
     EvoBrandFixture, EvoBrandMode, NativeShell, NativeShellInit, NativeShellWorkspaceInit,
     NativeVisualCatalogFixture, NativeVisualDrawerFixture,
 };

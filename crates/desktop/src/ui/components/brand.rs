@@ -1,13 +1,16 @@
 use desktop::ui::shell::{SemanticColor, SemanticTheme};
 use gpui::{
-    ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
-    StatefulInteractiveElement as _, Styled as _, div, px, rgb, svg,
+    ElementId, InteractiveElement as _, ParentElement as _, Role, StatefulInteractiveElement as _,
+    Styled as _, div, px, rgb, svg,
 };
+#[cfg(any(test, feature = "desktop-devtools"))]
+use gpui::{IntoElement, Render};
 
 use crate::assets::{
     EVO_COMPACT_ACCENT_PATH, EVO_COMPACT_PATH, EVO_WORDMARK_ACCENT_PATH, EVO_WORDMARK_PATH,
 };
 
+#[cfg(any(test, feature = "desktop-devtools"))]
 use super::style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
 
 const WORDMARK_VIEWBOX_WIDTH: f32 = 360.;
@@ -22,11 +25,14 @@ pub(crate) enum EvoBrandVariant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvoBrandMode {
     Dark,
+    #[cfg(any(test, feature = "desktop-devtools"))]
     Light,
+    #[cfg(any(test, feature = "desktop-devtools"))]
     Monochrome,
 }
 
 impl EvoBrandMode {
+    #[cfg(any(test, feature = "desktop-devtools"))]
     pub(crate) const fn key(self) -> &'static str {
         match self {
             Self::Dark => "dark",
@@ -35,6 +41,7 @@ impl EvoBrandMode {
         }
     }
 
+    #[cfg(any(test, feature = "desktop-devtools"))]
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
         match value {
             "dark" => Ok(Self::Dark),
@@ -55,6 +62,7 @@ impl EvoBrandMode {
                 metadata: SemanticTheme::GEEK_DARK.muted_text,
                 border: SemanticTheme::GEEK_DARK.border,
             },
+            #[cfg(any(test, feature = "desktop-devtools"))]
             Self::Light => EvoBrandTokens {
                 canvas: SemanticColor::rgb(0xf8fafc),
                 foreground: SemanticColor::rgb(0x172033),
@@ -62,6 +70,7 @@ impl EvoBrandMode {
                 metadata: SemanticColor::rgb(0x526174),
                 border: SemanticColor::rgb(0xd7dee8),
             },
+            #[cfg(any(test, feature = "desktop-devtools"))]
             Self::Monochrome => EvoBrandTokens {
                 canvas: SemanticColor::rgb(0xffffff),
                 foreground: SemanticColor::rgb(0x111111),
@@ -163,16 +172,19 @@ impl EvoBrand {
 
 /// Deterministic board used by the VUI-411 capture script. Every mark is
 /// rendered by the same production component at an exact contract size.
+#[cfg(any(test, feature = "desktop-devtools"))]
 pub(crate) struct EvoBrandFixture {
     mode: EvoBrandMode,
 }
 
+#[cfg(any(test, feature = "desktop-devtools"))]
 impl EvoBrandFixture {
     pub(crate) const fn new(mode: EvoBrandMode) -> Self {
         Self { mode }
     }
 }
 
+#[cfg(any(test, feature = "desktop-devtools"))]
 impl Render for EvoBrandFixture {
     fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
         let mode = self.mode;

@@ -661,6 +661,84 @@ fn runtime_tests_are_grouped_by_state_machine_invariant() {
 }
 
 #[test]
+fn native_replay_authority_is_feature_gated_under_devtools() {
+    let app = manifest_dir().join("src/app");
+    assert!(
+        !app.join("native_perf.rs").exists(),
+        "native replay must not return to the app root"
+    );
+    assert!(app.join("devtools/mod.rs").is_file());
+    assert!(app.join("devtools/native_replay.rs").is_file());
+
+    let desktop_manifest = manifest();
+    let features = desktop_manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .expect("desktop manifest must declare features");
+    assert!(features.contains_key("desktop-devtools"));
+
+    let app_source = fs::read_to_string(app.join("../app.rs")).expect("app source is readable");
+    assert!(app_source.contains("#[cfg(feature = \"desktop-devtools\")]\nmod devtools;"));
+    assert!(app_source.contains(
+        "#[cfg(feature = \"desktop-devtools\")]\n            if devtools::open_requested(cx)"
+    ));
+
+    let shell = fs::read_to_string(app.join("native_shell.rs")).expect("shell source is readable");
+    for fixture in [
+        "NativeVisualCatalogFixture",
+        "NativeVisualDrawerFixture",
+        "install_native_visual_catalog_fixture",
+        "install_native_visual_drawer_fixture",
+        "install_native_visual_home_project_fixture",
+        "install_native_visual_non_reasoning_fixture",
+    ] {
+        let offset = shell
+            .find(fixture)
+            .unwrap_or_else(|| panic!("native replay fixture is missing: {fixture}"));
+        let prefix = &shell[offset.saturating_sub(180)..offset];
+        assert!(
+            prefix.contains("#[cfg(feature = \"desktop-devtools\")]"),
+            "native replay fixture must be feature gated: {fixture}"
+        );
+    }
+
+    let scripts = workspace_root().join("scripts");
+    for script in [
+        "desktop-native-perf-gate.sh",
+        "desktop-native-perf-gate.ps1",
+        "desktop-click-to-photon.sh",
+        "desktop-click-to-photon.ps1",
+        "desktop-brand-visual-fixtures.sh",
+        "desktop-visual-golden.sh",
+    ] {
+        let source = fs::read_to_string(scripts.join(script))
+            .unwrap_or_else(|error| panic!("failed to read {script}: {error}"));
+        assert!(
+            source.contains("--features desktop-devtools"),
+            "native replay script must enable desktop-devtools: {script}"
+        );
+    }
+
+    let test_paths = [
+        "ui::conversation::model::tests::desktop_release_empty_conversation_baseline",
+        "ui::conversation::model::tests::desktop_release_ten_mib_interaction_baseline",
+        "ui::conversation::model::tests::desktop_release_scale_content_and_streaming_matrix",
+        "app::native_shell::tests::performance::desktop_release_gpui_headless_frame_and_input_replay",
+        "app::native_shell::tests::performance::desktop_release_gpui_markdown_parser_matrix",
+    ];
+    for script in ["desktop-perf-gate.sh", "desktop-perf-gate.ps1"] {
+        let source = fs::read_to_string(scripts.join(script))
+            .unwrap_or_else(|error| panic!("failed to read {script}: {error}"));
+        for test_path in test_paths {
+            assert!(
+                source.contains(test_path),
+                "performance script must use the current test path {test_path}: {script}"
+            );
+        }
+    }
+}
+
+#[test]
 fn application_layer_has_no_ui_or_effect_executor_dependencies() {
     for path in layer_rust_files("application") {
         if is_test_only_source(&path) {

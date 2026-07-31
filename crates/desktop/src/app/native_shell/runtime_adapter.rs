@@ -457,6 +457,7 @@ impl NativeShell {
         }
     }
 
+    #[cfg(feature = "desktop-devtools")]
     pub(super) fn reconcile_thinking_selection_with_project(&mut self) {
         let owner = self.app.workspaces.active_key().clone();
         self.reconcile_thinking_selection_for(&owner);

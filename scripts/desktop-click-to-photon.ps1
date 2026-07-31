@@ -15,7 +15,7 @@ $binary = Join-Path $repositoryRoot "target/release/$binaryName"
 New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 Set-Location $repositoryRoot
 
-& cargo build -p desktop --release
+& cargo build -p desktop --release --features desktop-devtools
 if ($LASTEXITCODE -ne 0) {
     throw "release desktop build failed with exit code $LASTEXITCODE"
 }

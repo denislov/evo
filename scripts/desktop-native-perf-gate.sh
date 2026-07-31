@@ -17,7 +17,7 @@ samples_file="$(mktemp)"
 markdown_samples_file="$(mktemp)"
 trap 'rm -f "${samples_file}" "${markdown_samples_file}"' EXIT
 
-cargo build -p desktop --release
+cargo build -p desktop --release --features desktop-devtools
 env ZED_MEASUREMENTS=1 EVO_DESKTOP_NATIVE_PERF_REPLAY=1 EVO_DESKTOP_MARKDOWN_TRACE=1 \
     "${repository_root}/target/release/desktop" 2>&1 | tee "${log_file}"
 

@@ -390,7 +390,7 @@ capture_layout() {
     evaluate_image "${layout}" "${current_png}"
 }
 
-cargo build -p desktop --release
+cargo build -p desktop --release --features desktop-devtools
 
 # The first GPU window after a fresh release build can populate driver/font
 # caches with measurably different edge antialiasing. Exercise and discard one

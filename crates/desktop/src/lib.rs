@@ -113,6 +113,7 @@ mod allocation_probe {
     pub(crate) use crate::resident_memory::resident_bytes;
 }
 
+#[cfg(any(test, feature = "desktop-devtools"))]
 mod resident_memory {
     #[cfg(target_os = "linux")]
     pub(crate) fn resident_bytes() -> Option<u64> {

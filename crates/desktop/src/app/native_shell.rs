@@ -57,6 +57,7 @@ use crate::application::{
         admitted_thinking_selection, workspace_selection_from_embedding,
     },
 };
+#[cfg(feature = "desktop-devtools")]
 pub(super) use crate::ui::components::brand::{EvoBrandFixture, EvoBrandMode};
 use crate::ui::shell::{
     ShellConnection, ShellUiState, ShellViews, presentation::recovery_action_label,
@@ -153,6 +154,7 @@ pub(crate) enum InspectorSection {
 /// variant drives the same [`ProjectCatalogController`] transitions used by
 /// runtime updates, so reviewed images exercise production state rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "desktop-devtools")]
 pub(super) enum NativeVisualCatalogFixture {
     NotLoaded,
     Loading,
@@ -163,6 +165,7 @@ pub(super) enum NativeVisualCatalogFixture {
 
 /// Responsive drawer selected by a deterministic native visual replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "desktop-devtools")]
 pub(super) enum NativeVisualDrawerFixture {
     Sessions,
     Inspector,
@@ -842,6 +845,7 @@ impl NativeShell {
         self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
     }
 
+    #[cfg(feature = "desktop-devtools")]
     pub(super) fn install_native_visual_catalog_fixture(
         &mut self,
         fixture: NativeVisualCatalogFixture,
@@ -889,6 +893,7 @@ impl NativeShell {
         cx.notify();
     }
 
+    #[cfg(feature = "desktop-devtools")]
     pub(super) fn install_native_visual_drawer_fixture(
         &mut self,
         fixture: NativeVisualDrawerFixture,
@@ -906,6 +911,7 @@ impl NativeShell {
         cx.notify();
     }
 
+    #[cfg(feature = "desktop-devtools")]
     pub(super) fn install_native_visual_home_project_fixture(
         &mut self,
         path: PathBuf,
@@ -918,6 +924,7 @@ impl NativeShell {
         cx.notify();
     }
 
+    #[cfg(feature = "desktop-devtools")]
     pub(super) fn install_native_visual_non_reasoning_fixture(&mut self, cx: &mut Context<Self>) {
         debug_assert!(self.app.workspaces.active_mut().projection.is_none());
         self.app.workspaces.active_mut().project.selected_model_id = "review-fixture".into();
@@ -938,6 +945,7 @@ impl NativeShell {
         cx.notify();
     }
 
+    #[cfg(feature = "desktop-devtools")]
     fn reconcile_thinking_selection_for(&mut self, owner: &WorkspaceKey) {
         let Some(workspace) = self.app.workspaces.get_mut(owner) else {
             return;

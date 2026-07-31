@@ -1,4 +1,5 @@
-mod native_perf;
+#[cfg(feature = "desktop-devtools")]
+mod devtools;
 pub(crate) mod native_shell;
 
 use std::sync::Arc;
@@ -64,7 +65,6 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
         projectless,
         session_id,
     } = options;
-    let native_replay = native_perf::request();
     // Product-owned Evo vectors and bundled Lucide controls share one explicit
     // application asset boundary. Without it GPUI's SVG elements render
     // nothing.
@@ -75,18 +75,8 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
             crate::actions::bind_keys(cx);
             Theme::change(ThemeMode::Dark, None, cx);
 
-            if let Some(request) = match native_replay {
-                Ok(request) => request,
-                Err(error) => {
-                    eprintln!("desktop: native replay configuration failed: {error}");
-                    cx.quit();
-                    return;
-                }
-            } {
-                if let Err(error) = native_perf::open(cx, request) {
-                    eprintln!("desktop: native replay failed: {error}");
-                    cx.quit();
-                }
+            #[cfg(feature = "desktop-devtools")]
+            if devtools::open_requested(cx) {
                 return;
             }
 

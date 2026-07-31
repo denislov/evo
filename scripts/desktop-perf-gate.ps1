@@ -26,11 +26,11 @@ function Invoke-CargoGate {
 }
 
 $releaseTests = @(
-    "conversation::model::tests::desktop_release_empty_conversation_baseline",
-    "conversation::model::tests::desktop_release_ten_mib_interaction_baseline",
-    "conversation::model::tests::desktop_release_scale_content_and_streaming_matrix",
-    "app::native_shell::tests::desktop_release_gpui_headless_frame_and_input_replay",
-    "app::native_shell::tests::desktop_release_gpui_markdown_parser_matrix"
+    "ui::conversation::model::tests::desktop_release_empty_conversation_baseline",
+    "ui::conversation::model::tests::desktop_release_ten_mib_interaction_baseline",
+    "ui::conversation::model::tests::desktop_release_scale_content_and_streaming_matrix",
+    "app::native_shell::tests::performance::desktop_release_gpui_headless_frame_and_input_replay",
+    "app::native_shell::tests::performance::desktop_release_gpui_markdown_parser_matrix"
 )
 
 Set-Content -Path $logFile -Value ""

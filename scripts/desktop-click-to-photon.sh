@@ -178,7 +178,7 @@ drive_replay_window() {
     trap - EXIT
 }
 
-cargo build -p desktop --release
+cargo build -p desktop --release --features desktop-devtools
 if (( drive_replay )); then
     echo "Driving the replay without a sensor: this validates the harness and the app-side"
     echo "input-received-to-post-render half only, and is not a click-to-photon measurement."

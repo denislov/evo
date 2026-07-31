@@ -173,6 +173,7 @@ impl DesktopRuntimeBridge {
     ///
     /// The command and update peers are deliberately closed so the shell can
     /// exercise its real window/render path without starting a product runtime.
+    #[cfg(any(test, feature = "desktop-devtools"))]
     pub(crate) fn disconnected_for_replay() -> Self {
         let (commands, command_rx) = mpsc::channel(DESKTOP_COMMAND_QUEUE_CAPACITY);
         drop(command_rx);

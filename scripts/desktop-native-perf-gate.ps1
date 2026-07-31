@@ -43,7 +43,7 @@ function Get-TabMetric {
     return $null
 }
 
-& cargo build -p desktop --release
+& cargo build -p desktop --release --features desktop-devtools
 if ($LASTEXITCODE -ne 0) {
     throw "release desktop build failed with exit code $LASTEXITCODE"
 }

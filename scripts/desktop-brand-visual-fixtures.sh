@@ -115,7 +115,7 @@ capture_mode() {
     stop_fixture
 }
 
-cargo build -p desktop --release
+cargo build -p desktop --release --features desktop-devtools
 capture_mode dark
 capture_mode light
 capture_mode monochrome
