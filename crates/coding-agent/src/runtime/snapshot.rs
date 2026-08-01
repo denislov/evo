@@ -123,7 +123,6 @@ pub(crate) struct ClientRecord {
     pending_abort_operation_id: Option<String>,
     pub(crate) submitted_operation: Option<SubmittedOperationStatus>,
     pub(crate) control_receipts: HashMap<String, String>,
-    pub(crate) control_receipt_order: VecDeque<String>,
 }
 
 impl ClientRecord {
@@ -139,7 +138,6 @@ impl ClientRecord {
             pending_abort_operation_id: None,
             submitted_operation: None,
             control_receipts: HashMap::new(),
-            control_receipt_order: VecDeque::new(),
         }
     }
 }
@@ -607,7 +605,6 @@ impl SnapshotCoordinator {
             }
         }
         record.control_receipts.insert(key.clone(), signature);
-        record.control_receipt_order.push_back(key);
         let queue = match kind {
             crate::runtime::client::connection::CodingAgentControlKind::Steer => {
                 Some(&mut record.steer_drafts)
@@ -1138,6 +1135,19 @@ impl SnapshotCoordinator {
         Ok(())
     }
 
+
+    /// Drop control receipts belonging to an operation that reached a
+    /// terminal state. Receipts only exist to deduplicate control requests
+    /// against a live operation; without this cleanup long-lived sessions
+    /// exhaust MAX_RECEIPTS and lose steering/abort for every later
+    /// operation.
+    fn clear_control_receipts_for(record: &mut ClientRecord, operation_id: &str) {
+        let prefix = format!("{operation_id}:");
+        record
+            .control_receipts
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+
     pub(crate) fn abandon_prepared_submission(&self, handle: &ClientHandle, operation_id: &str) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -1564,6 +1574,7 @@ impl SnapshotCoordinator {
         ) {
             return;
         }
+        Self::clear_control_receipts_for(record, operation_id);
         record.submitted_operation = Some(SubmittedOperationStatus::Terminal {
             operation_id: operation_id.to_owned(),
             kind: descriptor.submitted_kind,
@@ -1645,6 +1656,7 @@ impl SnapshotCoordinator {
         ) {
             return Err(ClientRegistryError::SubmittedRegression);
         }
+        Self::clear_control_receipts_for(record, &operation_id);
         record.submitted_operation = Some(SubmittedOperationStatus::Terminal {
             operation_id: operation_id.clone(),
             kind,
@@ -1706,6 +1718,7 @@ impl SnapshotCoordinator {
                         } => SubmittedEventDurability::Uncertain,
                         _ => SubmittedEventDurability::Durable,
                     };
+                    Self::clear_control_receipts_for(record, operation_id);
                     record.submitted_operation = Some(SubmittedOperationStatus::Terminal {
                         operation_id: operation_id.to_owned(),
                         kind: descriptor.submitted_kind,
@@ -1754,6 +1767,7 @@ impl SnapshotCoordinator {
                 descriptor: stored_descriptor,
                 ..
             }) if stored_id == operation_id && *stored_descriptor == descriptor => {
+                Self::clear_control_receipts_for(record, operation_id);
                 record.submitted_operation = Some(SubmittedOperationStatus::Terminal {
                     operation_id: operation_id.to_owned(),
                     kind: descriptor.submitted_kind,
