@@ -125,20 +125,31 @@ impl AgentTurnContext {
         request
     }
 
-    pub(crate) fn apply_to_state(&mut self, state: &mut AgentState) {
+    pub(crate) fn apply_to_state(&mut self, state: &mut AgentState, discard_queues: bool) {
         state.messages = std::mem::take(&mut self.messages);
+        // Only the fields a turn can mutate are written back; everything else
+        // in `AgentConfig` is immutable for the lifetime of a turn.
         state.config.model = self.config.model.clone();
         state.config.stream_options = self.config.stream_options.clone();
         state.config.thinking_level = self.config.thinking_level;
         state.cancel_token = self.cancel_token.clone();
 
-        let mut steering_queue = std::mem::take(&mut self.steering_queue);
-        steering_queue.extend(state.steering_queue.drain(..));
-        state.steering_queue = steering_queue;
+        if discard_queues {
+            // The caller asked to clear all queued input; drop what the turn
+            // already synced and whatever arrived on the live queues.
+            self.steering_queue.clear();
+            self.follow_up_queue.clear();
+            state.steering_queue.clear();
+            state.follow_up_queue.clear();
+        } else {
+            let mut steering_queue = std::mem::take(&mut self.steering_queue);
+            steering_queue.extend(state.steering_queue.drain(..));
+            state.steering_queue = steering_queue;
 
-        let mut follow_up_queue = std::mem::take(&mut self.follow_up_queue);
-        follow_up_queue.extend(state.follow_up_queue.drain(..));
-        state.follow_up_queue = follow_up_queue;
+            let mut follow_up_queue = std::mem::take(&mut self.follow_up_queue);
+            follow_up_queue.extend(state.follow_up_queue.drain(..));
+            state.follow_up_queue = follow_up_queue;
+        }
 
         if self.live_state.is_none() && self.provider_request_override_consumed {
             state.provider_request_override = None;

@@ -56,6 +56,11 @@ impl Drop for RunGuard {
 pub struct Agent {
     state: Arc<RwLock<AgentState>>,
     running: Arc<AtomicBool>,
+    /// Set by [`Agent::clear_queues`] while a turn is in flight so the next
+    /// state commit drops queued input that was already synced into the turn
+    /// context. This keeps `clear_queues` effective during a run instead of
+    /// having its effect rolled back by the turn's own queue merge.
+    queues_cleared: Arc<AtomicBool>,
 }
 
 impl Clone for Agent {
@@ -63,6 +68,7 @@ impl Clone for Agent {
         Self {
             state: Arc::clone(&self.state),
             running: Arc::clone(&self.running),
+            queues_cleared: Arc::clone(&self.queues_cleared),
         }
     }
 }
@@ -80,6 +86,7 @@ impl Agent {
                 provider_request_override: None,
             })),
             running: Arc::new(AtomicBool::new(false)),
+            queues_cleared: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -205,6 +212,9 @@ impl Agent {
         let mut state = self.state.write().unwrap();
         state.steering_queue.clear();
         state.follow_up_queue.clear();
+        // Signal an in-flight turn to drop the queued input it already synced
+        // into its context when it next commits back to the shared state.
+        self.queues_cleared.store(true, Ordering::SeqCst);
     }
 
     /// Drain and return all queued steering messages.
@@ -280,12 +290,13 @@ impl Agent {
 
     fn run_locked(&self) -> AgentStream {
         let state = self.state.clone();
+        let queues_cleared = self.queues_cleared.clone();
         let guard = RunGuard {
             flag: self.running.clone(),
         };
         Box::pin(async_stream::stream! {
             let _guard = guard;
-            let mut stream = AgentTurnRunner::run_state(state);
+            let mut stream = AgentTurnRunner::run_state(state, queues_cleared);
             use futures::StreamExt;
             while let Some(event) = stream.next().await {
                 yield event;
