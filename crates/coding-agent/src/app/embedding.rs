@@ -1117,7 +1117,6 @@ fn thinking_level_is_mapped(
 fn api_supports_explicit_thinking(model: &Model) -> bool {
     match model.api.as_str() {
         "anthropic-messages"
-        | "azure-openai-responses"
         | "google-generative-ai"
         | "mistral-conversations"
         | "openai-codex-responses"

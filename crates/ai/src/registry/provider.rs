@@ -82,7 +82,7 @@ impl ProviderRegistry {
             crate::providers::builtin_provider_apis().contains(&model.api.as_str());
         if builtin_transport
             && (bind_resolver_auth || options_contain_automatic_credentials(opts.as_ref()))
-            && let Err(message) = validate_automatic_credential_origin(model, opts.as_ref())
+            && let Err(message) = validate_automatic_credential_origin(model)
         {
             return credential_origin_error_stream(model, message);
         }

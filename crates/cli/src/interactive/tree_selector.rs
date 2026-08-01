@@ -1407,8 +1407,14 @@ mod tests {
     #[test]
     fn initial_selection_walks_to_nearest_visible_metadata_parent() {
         for (hidden_node, hidden_id) in [
-            (model_change_node as fn(&str, Option<&str>) -> CodingAgentSessionTreeNode, "model-1"),
-            (thinking_level_node as fn(&str, Option<&str>) -> CodingAgentSessionTreeNode, "thinking-1"),
+            (
+                model_change_node as fn(&str, Option<&str>) -> CodingAgentSessionTreeNode,
+                "model-1",
+            ),
+            (
+                thinking_level_node as fn(&str, Option<&str>) -> CodingAgentSessionTreeNode,
+                "thinking-1",
+            ),
         ] {
             let mut u2 = user_node("u2", Some("a1"), "active branch");
             u2.children.push(hidden_node(hidden_id, Some("u2")));

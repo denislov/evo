@@ -128,7 +128,7 @@ impl ApiProvider for FauxProvider {
             partial.provider = Some("faux".into());
             partial.timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs();
 
             yield AssistantMessageEvent::Start { content_index: None, partial: partial.clone() };
@@ -185,7 +185,7 @@ impl ApiProvider for FauxProvider {
                     for delta in &tc.deltas {
                         accumulated.push_str(delta);
                         if let Some(ContentBlock::ToolCall { arguments, .. }) = partial.content.last_mut() {
-                            *arguments = serde_json::json!(&accumulated);
+                            *arguments = crate::protocol::json::parse_streaming_json(&accumulated);
                         }
                         yield AssistantMessageEvent::ToolcallDelta {
                             content_index: 0,

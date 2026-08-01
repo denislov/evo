@@ -44,7 +44,7 @@ pub fn build_request(
     let temperature = opts.as_ref().and_then(|o| o.temperature);
 
     let thinking_config = opts.as_ref().and_then(|o| {
-        o.thinking.as_ref().map(|t| {
+        o.thinking.as_ref().filter(|t| t.enabled).map(|t| {
             serde_json::json!({
                 "thinkingBudget": t.budget_tokens.unwrap_or(2048),
             })
@@ -87,7 +87,10 @@ fn convert_message(msg: &Message) -> Option<wire::GeminiContent> {
             })
         }
         Message::ToolResult {
-            tool_name, content, ..
+            tool_call_id,
+            tool_name,
+            content,
+            ..
         } => {
             let text = content_to_text(content);
             Some(wire::GeminiContent {
@@ -97,7 +100,10 @@ fn convert_message(msg: &Message) -> Option<wire::GeminiContent> {
                     inline_data: None,
                     function_call: None,
                     function_response: Some(wire::FunctionResponse {
-                        name: tool_name.clone().unwrap_or_default(),
+                        name: tool_name
+                            .clone()
+                            .or_else(|| derive_tool_name_from_id(tool_call_id))
+                            .unwrap_or_default(),
                         response: serde_json::json!({ "text": text }),
                     }),
                 }],
@@ -153,4 +159,14 @@ fn content_to_text(content: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Recover the function name from a synthetic tool-call id of the shape
+/// `{name}-{serial}` when the explicit tool name is unavailable.
+fn derive_tool_name_from_id(tool_call_id: &str) -> Option<String> {
+    tool_call_id
+        .rsplit_once('-')
+        .filter(|(_, serial)| !serial.is_empty() && serial.bytes().all(|b| b.is_ascii_digit()))
+        .map(|(name, _)| name.to_string())
+        .filter(|name| !name.is_empty())
 }

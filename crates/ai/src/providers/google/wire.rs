@@ -128,4 +128,6 @@ pub struct UsageMetadata {
     pub candidates_token_count: u32,
     #[serde(rename = "totalTokenCount")]
     pub total_token_count: u32,
+    #[serde(rename = "cachedContentTokenCount", default)]
+    pub cached_content_token_count: u32,
 }

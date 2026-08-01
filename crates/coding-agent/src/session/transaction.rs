@@ -21,7 +21,7 @@ use crate::runtime::facade::CodingSessionError;
 use crate::session::event::{
     DiagnosticLevel, OperationKind, PersistedContentBlock, PersistedDelegationStatus,
     PersistedRole, PersistedRuntimeGenerationRef, PersistedSelfHealingEditCheckOutput,
-    PersistedSelfHealingEditReplacement, PersistedToolResult,     SessionEventData,
+    PersistedSelfHealingEditReplacement, PersistedToolResult, SessionEventData,
     SessionEventEnvelope,
 };
 

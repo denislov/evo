@@ -64,19 +64,24 @@ pub fn build_request(model: &Model, ctx: &Context, opts: &Option<StreamOptions>)
     };
 
     let thinking = opts.as_ref().and_then(|o| {
-        o.thinking
-            .as_ref()
-            .filter(|t| t.enabled)
-            .map(|t| wire::ThinkingConfig {
-                think_type: if compat.force_adaptive_thinking == Some(true) {
+        o.thinking.as_ref().filter(|t| t.enabled).map(|t| {
+            let adaptive = compat.force_adaptive_thinking == Some(true);
+            wire::ThinkingConfig {
+                think_type: if adaptive {
                     "adaptive".into()
                 } else if t.budget_tokens.is_some() {
                     "enabled".into()
                 } else {
                     "auto".into()
                 },
-                budget_tokens: t.budget_tokens,
-            })
+                // `adaptive` rejects an explicit budget on the wire.
+                budget_tokens: if adaptive {
+                    None
+                } else {
+                    t.budget_tokens
+                },
+            }
+        })
     });
 
     let tool_choice = opts.as_ref().and_then(|o| o.tool_choice.clone());

@@ -261,11 +261,11 @@ impl AuthStoreProviderAuthResolver {
 
 impl ai::api::auth::ProviderAuthResolver for AuthStoreProviderAuthResolver {
     fn resolve_model_auth(&self, model: &ai::api::model::Model) -> ai::api::auth::ProviderAuth {
-        // Preserve model-specific environment auth such as Azure deployment
-        // metadata, then replace only the provider credential with the
-        // product-resolved material. The current provider may carry an
-        // invocation-scoped key; every other provider is resolved separately
-        // from the global auth store and its supported environment variables.
+        // Preserve environment-resolved auth material, then replace only the
+        // provider credential with the product-resolved material. The current
+        // provider may carry an invocation-scoped key; every other provider is
+        // resolved separately from the global auth store and its supported
+        // environment variables.
         let mut auth = ai::api::auth::EnvProviderAuthResolver.resolve_model_auth(model);
         let resolved = if model.provider == self.current_provider {
             self.current_auth.clone()

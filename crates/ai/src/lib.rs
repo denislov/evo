@@ -7,6 +7,8 @@ mod model;
 // tree; it is not part of the public facade contract.
 mod protocol;
 mod providers;
+#[cfg(test)]
+mod regression_tests;
 mod registry;
 mod transport;
 

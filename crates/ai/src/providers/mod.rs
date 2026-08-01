@@ -1,5 +1,4 @@
 pub mod anthropic;
-pub mod azure_openai_responses;
 pub mod common;
 pub mod faux;
 pub mod google;
@@ -12,7 +11,6 @@ use std::sync::Arc;
 
 pub const BUILTIN_PROVIDER_APIS: &[&str] = &[
     "anthropic-messages",
-    "azure-openai-responses",
     "google-generative-ai",
     "mistral-conversations",
     "openai-codex-responses",
@@ -40,12 +38,6 @@ fn register_each_builtin(mut register: impl FnMut(&'static str, Arc<dyn ApiProvi
     register(
         "openai-codex-responses",
         Arc::new(openai_codex_responses::OpenAICodexResponsesProvider::new(
-            None,
-        )),
-    );
-    register(
-        "azure-openai-responses",
-        Arc::new(azure_openai_responses::AzureOpenAIResponsesProvider::new(
             None,
         )),
     );

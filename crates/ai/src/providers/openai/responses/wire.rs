@@ -151,7 +151,13 @@ impl ResponseStreamEvent {
             | "response.queued"
             | "response.content_part.done"
             | "response.output_text.done"
-            | "response.function_call_arguments.done" => Ok(Self::Bookkeeping),
+            | "response.function_call_arguments.done"
+            | "response.reasoning.delta"
+            | "response.reasoning.done"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_text.done"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done" => Ok(Self::Bookkeeping),
             _ => Ok(Self::Unknown {
                 event_type: event_type.to_string(),
                 raw,
@@ -212,6 +218,14 @@ pub struct ResponseUsage {
     pub output_tokens: u32,
     #[serde(default)]
     pub total_tokens: u32,
+    #[serde(default, rename = "input_tokens_details")]
+    pub input_tokens_details: Option<InputTokensDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InputTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]

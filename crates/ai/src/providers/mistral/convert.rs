@@ -180,16 +180,17 @@ fn convert_tool_calls(content: &[ContentBlock]) -> Vec<wire::ToolCall> {
 
 fn build_tool_result_text(content: &[ContentBlock], is_error: bool) -> String {
     let text = content_to_text(content);
-    let trimmed = text.trim();
     let prefix = if is_error { "[tool error] " } else { "" };
-    if trimmed.is_empty() {
+    // Only the emptiness probe trims; the payload is preserved verbatim so
+    // formatting-sensitive output (JSON, scripts) is not corrupted.
+    if text.trim().is_empty() {
         return if is_error {
             "[tool error] (no tool output)".into()
         } else {
             "(no tool output)".into()
         };
     }
-    format!("{}{}", prefix, trimmed)
+    format!("{}{}", prefix, text)
 }
 
 fn content_to_text(content: &[ContentBlock]) -> String {

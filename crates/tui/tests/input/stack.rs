@@ -76,8 +76,7 @@ fn parse_key_maps_sequences_to_expected_ids() {
         ("\x1b[2^", "ctrl+insert"),
     ];
     for (sequence, expected) in cases {
-        let event = parse_key(sequence)
-            .unwrap_or_else(|| panic!("parse {sequence:?} failed"));
+        let event = parse_key(sequence).unwrap_or_else(|| panic!("parse {sequence:?} failed"));
         assert!(
             matches_key(&InputEvent::Key(event), expected),
             "sequence {sequence:?} should match {expected}"

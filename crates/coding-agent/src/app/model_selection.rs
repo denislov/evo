@@ -40,9 +40,7 @@ pub fn parse_model_rotation(value: &str) -> Result<ModelRotation, ApplicationErr
                 ApplicationError::InvalidInput(format!("invalid model glob {pattern}: {error}"))
             })?
             .compile_matcher();
-        entries.push(ModelRotationEntry {
-            matcher,
-        });
+        entries.push(ModelRotationEntry { matcher });
         let _ = thinking;
     }
     if entries.is_empty() {

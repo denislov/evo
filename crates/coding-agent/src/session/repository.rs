@@ -231,7 +231,6 @@ impl SessionLogStore {
         .with_name(options.name)
         .with_default_agent_profile_id(options.default_agent_profile_id);
         let initialization = (|| -> Result<(), CodingSessionError> {
-
             fs::create_dir(session_dir.join("blobs")).map_err(|error| {
                 session_error(format!(
                     "failed to create blobs directory for {session_id}: {error}"
@@ -472,7 +471,6 @@ impl SessionLogStore {
         handle: &SessionHandle,
         events: &[SessionEventEnvelope],
     ) -> Result<(), CodingSessionError> {
-
         let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
         let records = events
             .iter()
@@ -747,7 +745,6 @@ impl SessionLogStore {
         handle: &SessionHandle,
         patch: ManifestPatch,
     ) -> Result<(), CodingSessionError> {
-
         let mut manifest = read_manifest(&handle.session_dir)?;
         patch.apply(&mut manifest);
         validate_manifest(&manifest)?;
@@ -781,7 +778,6 @@ impl SessionLogStore {
     }
 
     fn remove_created_session_dir(&self, session_dir: &Path) -> Result<(), CodingSessionError> {
-
         fs::remove_dir_all(session_dir).map_err(|error| {
             session_error(format!(
                 "failed to remove session directory {}: {error}",

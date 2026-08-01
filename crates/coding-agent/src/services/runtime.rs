@@ -120,7 +120,8 @@ impl RuntimeService {
         let provider_streamer = scoped_provider_streamer_for_runtime(runtime, model_capability)?;
 
         let mut diagnostics = runtime.profile_diagnostics().to_vec();
-        let resources = apply_skill_policy(runtime, &mut diagnostics);        let mut policy_tools = delegation_tools(
+        let resources = apply_skill_policy(runtime, &mut diagnostics);
+        let mut policy_tools = delegation_tools(
             runtime.profile_id(),
             runtime.profile_delegation_policy(),
             runtime.delegation_target_inventory(),

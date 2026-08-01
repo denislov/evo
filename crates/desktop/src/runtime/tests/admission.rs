@@ -1,7 +1,5 @@
 use super::*;
 
-
-
 #[tokio::test]
 async fn bootstrap_can_be_polled_without_waiting_on_runtime_initialization() {
     let temp = tempfile::tempdir().unwrap();

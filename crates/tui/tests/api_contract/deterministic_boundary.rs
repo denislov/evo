@@ -5,8 +5,18 @@ const TERMINAL_SOURCE: &str = include_str!("../../src/terminal/lifecycle.rs");
 #[test]
 fn tests_use_named_time_constants() {
     let cases: &[(&str, &str, &str, Option<&str>)] = &[
-        (TUI_RUNTIME_TEST_SOURCE, "const RENDER_SCHEDULER_", "render scheduler", None),
-        (STDIN_BUFFER_SOURCE, "const STDIN_BUFFER_", "stdin_buffer", Some("stdin_buffer")),
+        (
+            TUI_RUNTIME_TEST_SOURCE,
+            "const RENDER_SCHEDULER_",
+            "render scheduler",
+            None,
+        ),
+        (
+            STDIN_BUFFER_SOURCE,
+            "const STDIN_BUFFER_",
+            "stdin_buffer",
+            Some("stdin_buffer"),
+        ),
     ];
     for (source, named_prefix, label, tests_module) in cases {
         let mut violations = Vec::new();
@@ -55,8 +65,18 @@ fn tests_use_named_time_constants() {
 #[test]
 fn tests_use_named_clock_anchor() {
     for (source, anchor_fn, start_at, label) in [
-        (TUI_RUNTIME_TEST_SOURCE, "fn render_scheduler_clock_anchor", None, "render scheduler"),
-        (STDIN_BUFFER_SOURCE, "fn stdin_buffer_clock_anchor", Some("stdin_buffer"), "stdin_buffer"),
+        (
+            TUI_RUNTIME_TEST_SOURCE,
+            "fn render_scheduler_clock_anchor",
+            None,
+            "render scheduler",
+        ),
+        (
+            STDIN_BUFFER_SOURCE,
+            "fn stdin_buffer_clock_anchor",
+            Some("stdin_buffer"),
+            "stdin_buffer",
+        ),
     ] {
         let mut violations = Vec::new();
         let lines: Vec<_> = source.lines().collect();

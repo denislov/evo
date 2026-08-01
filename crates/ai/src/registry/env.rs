@@ -2,7 +2,6 @@ fn provider_env_vars(provider: &str) -> &'static [&'static str] {
     match provider {
         "anthropic" => &["ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "ANTHROPIC_KEY"],
         "openai" => &["OPENAI_API_KEY"],
-        "azure-openai-responses" => &["AZURE_OPENAI_API_KEY"],
         "deepseek" => &["DEEPSEEK_API_KEY", "DEEPSEEK_KEY"],
         "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "groq" => &["GROQ_API_KEY"],

@@ -62,17 +62,6 @@ pub struct StreamOptions {
     /// Request/session affinity identifier for APIs that explicitly support it.
     #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(rename = "azureApiVersion", skip_serializing_if = "Option::is_none")]
-    pub azure_api_version: Option<String>,
-    #[serde(rename = "azureResourceName", skip_serializing_if = "Option::is_none")]
-    pub azure_resource_name: Option<String>,
-    #[serde(rename = "azureBaseUrl", skip_serializing_if = "Option::is_none")]
-    pub azure_base_url: Option<String>,
-    #[serde(
-        rename = "azureDeploymentName",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub azure_deployment_name: Option<String>,
     #[serde(skip)]
     pub headers: Option<serde_json::Value>,
     /// Cooperative cancellation token checked at every async transport wait.
@@ -109,10 +98,6 @@ impl std::fmt::Debug for StreamOptions {
             .field("thinking", &self.thinking)
             .field("tool_choice", &self.tool_choice)
             .field("session_id", &self.session_id)
-            .field("azure_api_version", &self.azure_api_version)
-            .field("azure_resource_name", &self.azure_resource_name)
-            .field("azure_base_url", &self.azure_base_url)
-            .field("azure_deployment_name", &self.azure_deployment_name)
             .field("headers", &self.headers.as_ref().map(|_| "[REDACTED]"))
             .field("cancel", &self.cancel.is_some())
             .field("timeout_ms", &self.timeout_ms)

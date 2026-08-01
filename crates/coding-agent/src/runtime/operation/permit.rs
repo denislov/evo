@@ -1,7 +1,7 @@
 use tokio_util::sync::CancellationToken;
 
-use super::control::{ChildOperationGuard, OperationCancellationHandle, OperationGuard};
 use super::OperationExecution;
+use super::control::{ChildOperationGuard, OperationCancellationHandle, OperationGuard};
 use crate::runtime::capability::OperationCapabilitySnapshot;
 
 #[derive(Debug)]
@@ -15,10 +15,7 @@ pub(crate) struct OperationPermit {
 }
 
 impl OperationPermit {
-    pub(crate) fn guarded(
-        mut guard: OperationGuard,
-        execution: OperationExecution,
-    ) -> Self {
+    pub(crate) fn guarded(mut guard: OperationGuard, execution: OperationExecution) -> Self {
         guard.bind_capability_generation(execution.capability_generation);
         let cancellation = guard.cancellation_token();
         let cancellation_handle = Some(guard.cancellation_handle());
@@ -42,10 +39,7 @@ impl OperationPermit {
         }
     }
 
-    pub(crate) fn child(
-        execution: OperationExecution,
-        mut guard: ChildOperationGuard,
-    ) -> Self {
+    pub(crate) fn child(execution: OperationExecution, mut guard: ChildOperationGuard) -> Self {
         guard.bind_capability_generation(execution.capability_generation);
         let cancellation = Some(guard.cancellation_token());
         let cancellation_handle = Some(guard.cancellation_handle());

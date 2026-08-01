@@ -19,12 +19,12 @@ const MAX_TOOL_CALLS: usize = 256;
 const MAX_TOOL_ARGUMENT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
-struct ProviderEventLimits {
-    events: usize,
-    content_blocks: usize,
-    content_bytes: usize,
-    tool_calls: usize,
-    tool_argument_bytes: usize,
+pub(crate) struct ProviderEventLimits {
+    pub(crate) events: usize,
+    pub(crate) content_blocks: usize,
+    pub(crate) content_bytes: usize,
+    pub(crate) tool_calls: usize,
+    pub(crate) tool_argument_bytes: usize,
 }
 
 impl Default for ProviderEventLimits {
@@ -40,7 +40,7 @@ impl Default for ProviderEventLimits {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProviderLimit {
+pub(crate) enum ProviderLimit {
     Events,
     ContentBlocks,
     ContentBytes,
@@ -60,45 +60,159 @@ impl ProviderLimit {
     }
 }
 
-struct ProviderEventBudget {
+pub(crate) struct ProviderEventBudget {
     limits: ProviderEventLimits,
     events: usize,
+    content_blocks: usize,
+    content_bytes: usize,
+    tool_calls: usize,
+    tool_argument_bytes: usize,
 }
 
 impl ProviderEventBudget {
-    const fn new(limits: ProviderEventLimits) -> Self {
-        Self { limits, events: 0 }
+    pub(crate) const fn new(limits: ProviderEventLimits) -> Self {
+        Self {
+            limits,
+            events: 0,
+            content_blocks: 0,
+            content_bytes: 0,
+            tool_calls: 0,
+            tool_argument_bytes: 0,
+        }
     }
 
-    fn observe(&mut self, event: &AssistantMessageEvent) -> Result<(), ProviderLimit> {
+    /// Account for one streamed event by its *delta* instead of re-scanning
+    /// the accumulated message snapshot on every event, keeping long streams
+    /// O(n) rather than O(n²). Every built-in provider emits text and tool
+    /// arguments exclusively through delta events (start blocks are empty or
+    /// echoed back as deltas), so the running totals equal the contents of
+    /// the current message. Signatures ride the end events and are charged
+    /// once per block.
+    pub(crate) fn observe(&mut self, event: &AssistantMessageEvent) -> Result<(), ProviderLimit> {
         self.events = checked_total(self.events, 1, self.limits.events, ProviderLimit::Events)?;
-        let message = event_message(event);
-        if message.content.len() > self.limits.content_blocks {
-            return Err(ProviderLimit::ContentBlocks);
+        match event {
+            AssistantMessageEvent::Start { partial, .. } => {
+                // One-shot snapshot. Start payloads are empty for every
+                // built-in provider, so this stays O(1) while still covering
+                // image blocks, which have no dedicated stream events.
+                self.observe_snapshot(&partial.content)
+            }
+            AssistantMessageEvent::TextStart { .. } | AssistantMessageEvent::ThinkingStart { .. } => {
+                self.content_blocks = checked_total(
+                    self.content_blocks,
+                    1,
+                    self.limits.content_blocks,
+                    ProviderLimit::ContentBlocks,
+                )?;
+                // Initial block text is re-emitted as a TextDelta by every
+                // built-in provider; only the block boundary is charged here.
+                Ok(())
+            }
+            AssistantMessageEvent::ToolcallStart { content_index, partial } => {
+                self.content_blocks = checked_total(
+                    self.content_blocks,
+                    1,
+                    self.limits.content_blocks,
+                    ProviderLimit::ContentBlocks,
+                )?;
+                self.tool_calls = checked_total(
+                    self.tool_calls,
+                    1,
+                    self.limits.tool_calls,
+                    ProviderLimit::ToolCalls,
+                )?;
+                if let Some(ContentBlock::ToolCall {
+                    id,
+                    name,
+                    thought_signature,
+                    ..
+                }) = partial.content.get(*content_index as usize)
+                {
+                    self.charge_content(id.len())?;
+                    self.charge_content(name.len())?;
+                    if let Some(signature) = thought_signature {
+                        self.charge_content(signature.len())?;
+                    }
+                }
+                Ok(())
+            }
+            AssistantMessageEvent::TextDelta { delta, .. }
+            | AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+                self.charge_content(delta.len())
+            }
+            AssistantMessageEvent::ToolcallDelta { delta, .. } => {
+                // Google re-emits the full serialized arguments once per
+                // function call; every other provider streams true fragments.
+                // Either shape lands at the same accumulated total, with only
+                // pathological repeated snapshots over-accounting.
+                self.tool_argument_bytes = checked_total(
+                    self.tool_argument_bytes,
+                    delta.len(),
+                    self.limits.tool_argument_bytes,
+                    ProviderLimit::ToolArgumentBytes,
+                )?;
+                Ok(())
+            }
+            AssistantMessageEvent::TextEnd { content_index, partial } => {
+                if let Some(ContentBlock::Text { text_signature, .. }) =
+                    partial.content.get(*content_index as usize)
+                    && let Some(signature) = text_signature
+                {
+                    self.charge_content(signature.len())?;
+                }
+                Ok(())
+            }
+            AssistantMessageEvent::ThinkingEnd { content_index, partial } => {
+                if let Some(ContentBlock::Thinking {
+                    thinking_signature, ..
+                }) = partial.content.get(*content_index as usize)
+                    && let Some(signature) = thinking_signature
+                {
+                    self.charge_content(signature.len())?;
+                }
+                Ok(())
+            }
+            AssistantMessageEvent::ToolcallEnd { content_index, partial } => {
+                if let Some(ContentBlock::ToolCall {
+                    thought_signature, ..
+                }) = partial.content.get(*content_index as usize)
+                    && let Some(signature) = thought_signature
+                {
+                    self.charge_content(signature.len())?;
+                }
+                Ok(())
+            }
+            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => Ok(()),
         }
+    }
 
-        let mut content_bytes = 0_usize;
-        let mut tool_calls = 0_usize;
-        let mut tool_argument_bytes = 0_usize;
-        for block in &message.content {
+    fn charge_content(&mut self, added: usize) -> Result<(), ProviderLimit> {
+        self.content_bytes = checked_total(
+            self.content_bytes,
+            added,
+            self.limits.content_bytes,
+            ProviderLimit::ContentBytes,
+        )?;
+        Ok(())
+    }
+
+    /// Full-snapshot accounting, used only for `Start` events.
+    fn observe_snapshot(&mut self, content: &[ContentBlock]) -> Result<(), ProviderLimit> {
+        self.content_blocks = checked_total(
+            self.content_blocks,
+            content.len(),
+            self.limits.content_blocks,
+            ProviderLimit::ContentBlocks,
+        )?;
+        for block in content {
             match block {
                 ContentBlock::Text {
                     text,
                     text_signature,
                 } => {
-                    content_bytes = checked_total(
-                        content_bytes,
-                        text.len(),
-                        self.limits.content_bytes,
-                        ProviderLimit::ContentBytes,
-                    )?;
+                    self.charge_content(text.len())?;
                     if let Some(signature) = text_signature {
-                        content_bytes = checked_total(
-                            content_bytes,
-                            signature.len(),
-                            self.limits.content_bytes,
-                            ProviderLimit::ContentBytes,
-                        )?;
+                        self.charge_content(signature.len())?;
                     }
                 }
                 ContentBlock::Thinking {
@@ -106,34 +220,14 @@ impl ProviderEventBudget {
                     thinking_signature,
                     ..
                 } => {
-                    content_bytes = checked_total(
-                        content_bytes,
-                        thinking.len(),
-                        self.limits.content_bytes,
-                        ProviderLimit::ContentBytes,
-                    )?;
+                    self.charge_content(thinking.len())?;
                     if let Some(signature) = thinking_signature {
-                        content_bytes = checked_total(
-                            content_bytes,
-                            signature.len(),
-                            self.limits.content_bytes,
-                            ProviderLimit::ContentBytes,
-                        )?;
+                        self.charge_content(signature.len())?;
                     }
                 }
                 ContentBlock::Image { data, mime_type } => {
-                    content_bytes = checked_total(
-                        content_bytes,
-                        data.len(),
-                        self.limits.content_bytes,
-                        ProviderLimit::ContentBytes,
-                    )?;
-                    content_bytes = checked_total(
-                        content_bytes,
-                        mime_type.len(),
-                        self.limits.content_bytes,
-                        ProviderLimit::ContentBytes,
-                    )?;
+                    self.charge_content(data.len())?;
+                    self.charge_content(mime_type.len())?;
                 }
                 ContentBlock::ToolCall {
                     id,
@@ -141,32 +235,21 @@ impl ProviderEventBudget {
                     arguments,
                     thought_signature,
                 } => {
-                    tool_calls = checked_total(
-                        tool_calls,
+                    self.tool_calls = checked_total(
+                        self.tool_calls,
                         1,
                         self.limits.tool_calls,
                         ProviderLimit::ToolCalls,
                     )?;
-                    for value in [id.as_str(), name.as_str()] {
-                        content_bytes = checked_total(
-                            content_bytes,
-                            value.len(),
-                            self.limits.content_bytes,
-                            ProviderLimit::ContentBytes,
-                        )?;
-                    }
+                    self.charge_content(id.len())?;
+                    self.charge_content(name.len())?;
                     if let Some(signature) = thought_signature {
-                        content_bytes = checked_total(
-                            content_bytes,
-                            signature.len(),
-                            self.limits.content_bytes,
-                            ProviderLimit::ContentBytes,
-                        )?;
+                        self.charge_content(signature.len())?;
                     }
                     let argument_bytes = serialized_json_bytes(arguments)
                         .map_err(|_| ProviderLimit::ToolArgumentBytes)?;
-                    tool_argument_bytes = checked_total(
-                        tool_argument_bytes,
+                    self.tool_argument_bytes = checked_total(
+                        self.tool_argument_bytes,
                         argument_bytes,
                         self.limits.tool_argument_bytes,
                         ProviderLimit::ToolArgumentBytes,
@@ -211,23 +294,6 @@ fn serialized_json_bytes(value: &serde_json::Value) -> serde_json::Result<usize>
     let mut counter = ByteCounter::default();
     serde_json::to_writer(&mut counter, value)?;
     Ok(counter.0)
-}
-
-fn event_message(event: &AssistantMessageEvent) -> &AssistantMessage {
-    match event {
-        AssistantMessageEvent::Start { partial, .. }
-        | AssistantMessageEvent::TextStart { partial, .. }
-        | AssistantMessageEvent::TextDelta { partial, .. }
-        | AssistantMessageEvent::TextEnd { partial, .. }
-        | AssistantMessageEvent::ThinkingStart { partial, .. }
-        | AssistantMessageEvent::ThinkingDelta { partial, .. }
-        | AssistantMessageEvent::ThinkingEnd { partial, .. }
-        | AssistantMessageEvent::ToolcallStart { partial, .. }
-        | AssistantMessageEvent::ToolcallDelta { partial, .. }
-        | AssistantMessageEvent::ToolcallEnd { partial, .. } => partial,
-        AssistantMessageEvent::Done { message, .. }
-        | AssistantMessageEvent::Error { message, .. } => message,
-    }
 }
 
 pub enum SseEventResult {
@@ -281,13 +347,27 @@ impl ToolArgumentAssembler {
     }
 
     pub(super) fn finish(&self, provider_index: u32) -> Result<serde_json::Value, String> {
-        parse_terminal_json(
+        parse_terminal_tool_arguments(
             self.values
                 .get(&provider_index)
                 .map(String::as_str)
                 .unwrap_or(""),
         )
     }
+}
+
+/// Strictly parse accumulated terminal tool arguments.
+///
+/// Providers may legitimately omit argument deltas for parameter-less calls,
+/// leaving the accumulation empty; that is a valid `{}` argument set rather
+/// than malformed JSON.
+pub(crate) fn parse_terminal_tool_arguments(
+    accumulated: &str,
+) -> Result<serde_json::Value, String> {
+    if accumulated.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    parse_terminal_json(accumulated)
 }
 
 #[derive(Default)]
@@ -436,14 +516,13 @@ where
                 Ok(SseEventResult::ProviderError {
                     events,
                     reason,
-                    message: _message,
+                    message,
                 }) => {
                     for event in events {
                         yield event;
                     }
                     partial.stop_reason = reason.clone();
-                    partial.error_message =
-                        Some("Provider reported a terminal failure".to_string());
+                    partial.error_message = Some(message);
                     yield AssistantMessageEvent::Error {
                         reason,
                         message: partial.clone(),
@@ -535,10 +614,10 @@ fn terminal_error(
     partial: &mut AssistantMessage,
     _api_name: &str,
     _model: &Model,
-    _error: impl std::fmt::Display,
+    error: impl std::fmt::Display,
 ) -> AssistantMessageEvent {
     partial.stop_reason = StopReason::Error;
-    partial.error_message = Some("Provider protocol error".to_string());
+    partial.error_message = Some(format!("Provider protocol error: {error}"));
     AssistantMessageEvent::Error {
         reason: StopReason::Error,
         message: partial.clone(),
@@ -577,7 +656,8 @@ pub fn normalize_tool_call_id(id: &str, replacement: Option<char>) -> String {
     };
 
     if sanitized.len() > 64 {
-        sanitized[..64].to_string()
+        // Truncate on char boundaries; `replacement` may be multi-byte.
+        sanitized.chars().take(64).collect()
     } else if sanitized.is_empty() {
         "tool_0".to_string()
     } else {

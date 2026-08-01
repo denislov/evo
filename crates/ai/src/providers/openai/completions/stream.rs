@@ -247,10 +247,6 @@ impl SseEventHandler for CompletionsHandler {
 
         partial.stop_reason = map_finish_reason(self.finish_reason.as_deref());
 
-        if partial.usage.total_tokens == 0 {
-            partial.usage = Usage::default();
-        }
-
         Ok(events)
     }
 

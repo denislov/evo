@@ -299,14 +299,6 @@ fn desktop_depends_on_product_facade_without_bypassing_runtime_layers() {
     }
 }
 
-
-
-
-
-
-
-
-
 #[test]
 fn desktop_public_api_is_one_typed_application_surface() {
     let selected = PathBuf::from("/typed/project");
@@ -365,10 +357,6 @@ fn native_shell_root_and_refresh_authority_stay_bounded() {
         "refresh_views must have one authority"
     );
 }
-
-
-
-
 
 #[test]
 fn native_replay_authority_is_feature_gated_under_devtools() {
@@ -447,8 +435,6 @@ fn native_replay_authority_is_feature_gated_under_devtools() {
         }
     }
 }
-
-
 
 #[test]
 fn application_layer_has_no_ui_or_effect_executor_dependencies() {

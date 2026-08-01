@@ -2,12 +2,14 @@ use super::convert::map_stop_reason;
 use super::wire;
 use crate::model::Model;
 use crate::model::calculate_cost;
-use crate::protocol::json::{parse_streaming_json, parse_terminal_json};
+use crate::protocol::json::parse_streaming_json;
 use crate::protocol::stream::EventStream;
 use crate::protocol::{
     AssistantMessage, AssistantMessageEvent, ContentBlock, Cost, StopReason, Usage,
 };
-use crate::providers::common::{SseEventHandler, SseEventResult, process_sse};
+use crate::providers::common::{
+    SseEventHandler, SseEventResult, parse_terminal_tool_arguments, process_sse,
+};
 use bytes::Bytes;
 use futures::Stream;
 use tokio_util::sync::CancellationToken;
@@ -63,7 +65,7 @@ impl SseEventHandler for AnthropicHandler {
                 self.message_usage = message.usage;
                 partial.timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs();
                 if !self.first_event {
                     events.push(AssistantMessageEvent::Start {
@@ -244,8 +246,7 @@ impl SseEventHandler for AnthropicHandler {
                             ..
                         }) = partial.content.get_mut(self.block_index as usize)
                         {
-                            *arguments = parse_terminal_json(&self.accumulated_tool_args)
-                                .map_err(|_| "malformed final tool arguments".to_string())?;
+                            *arguments = parse_terminal_tool_arguments(&self.accumulated_tool_args)?;
                             *thought_signature = self.pending_thought_signature.take();
                         }
                         events.push(AssistantMessageEvent::ToolcallEnd {

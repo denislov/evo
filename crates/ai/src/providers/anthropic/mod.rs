@@ -59,23 +59,19 @@ impl ApiProvider for AnthropicProvider {
         let base_url = model.base_url.trim_end_matches('/');
         let url = format!("{}/v1/messages", base_url);
 
-        let mut request = self
-            .client
-            .post(&url)
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream");
+        let mut request = self.client.post(&url);
 
-        if let Some(opts) = &opts
-            && let Some(ref headers) = opts.headers
-            && let Some(obj) = headers.as_object()
-        {
-            for (k, v) in obj {
-                if let Some(val) = v.as_str() {
-                    request = request.header(k.as_str(), val);
-                }
-            }
+        for (key, value) in crate::transport::headers::merge_headers(
+            model.headers.as_ref(),
+            opts.as_ref().and_then(|o| o.headers.as_ref()),
+            [
+                ("x-api-key".into(), api_key.clone()),
+                ("anthropic-version".into(), "2023-06-01".into()),
+                ("content-type".into(), "application/json".into()),
+                ("accept".into(), "text/event-stream".into()),
+            ],
+        ) {
+            request = request.header(key, value);
         }
 
         send_json_stream(

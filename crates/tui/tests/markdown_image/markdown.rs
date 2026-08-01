@@ -718,7 +718,6 @@ fn adjacent_paragraphs_have_one_blank_line() {
     );
 }
 
-
 // ── List nesting (blockquote / code inside list items) ───────────────
 
 fn strip_ansi_line(s: &str) -> String {
@@ -839,7 +838,6 @@ fn render_cache_invalidates_on_text_change() {
     );
 }
 
-
 #[test]
 fn render_cache_invalidates_on_width_change() {
     let mut md = Markdown::new(
@@ -859,13 +857,15 @@ fn render_cache_invalidates_on_width_change() {
     );
 }
 
-
 // ── Inline style recovery (heading/quote with inline formatting) ─────
 
 #[test]
 fn heading_with_inline_code_restores_heading_style_after() {
     for (markdown, trailing) in [
-        ("### Why `sourceInfo` should not be optional", "should not be optional"),
+        (
+            "### Why `sourceInfo` should not be optional",
+            "should not be optional",
+        ),
         ("# Title with `code` inside", "inside"),
     ] {
         let mut md = Markdown::new(markdown);
@@ -873,7 +873,10 @@ fn heading_with_inline_code_restores_heading_style_after() {
         let joined = lines.join("\n");
         // The heading theme uses bold. Inline code uses theme.code styling.
         // After the code span's reset, bold must be re-applied.
-        assert!(joined.contains("sourceInfo") || joined.contains("Title with"), "{joined}");
+        assert!(
+            joined.contains("sourceInfo") || joined.contains("Title with"),
+            "{joined}"
+        );
         if color_enabled() {
             assert!(joined.contains("\x1b[1m"), "should have bold: {joined}");
             let after_code_idx = joined.find(trailing).unwrap();
@@ -914,4 +917,3 @@ fn blockquote_with_bold_restores_quote_style() {
         );
     }
 }
-

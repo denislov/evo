@@ -82,7 +82,7 @@ pub(crate) fn validate_models(models: &[Model]) -> Result<(), String> {
         if !supported_apis.contains(model.api.as_str()) {
             return Err(format!("{identity}: unsupported API `{}`", model.api));
         }
-        if model.base_url.trim().is_empty() && model.api != "azure-openai-responses" {
+        if model.base_url.trim().is_empty() {
             return Err(format!("{identity}: base URL must be non-empty"));
         }
         if model.input.is_empty() {
@@ -131,7 +131,7 @@ pub(crate) fn validate_models(models: &[Model]) -> Result<(), String> {
                 )
                 | (
                     Some(crate::compatibility::ModelCompat::OpenAIResponses(_)),
-                    "openai-responses" | "azure-openai-responses" | "openai-codex-responses",
+                    "openai-responses" | "openai-codex-responses",
                 )
         );
         if !compat_matches_api {

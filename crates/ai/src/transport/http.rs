@@ -341,7 +341,6 @@ pub(crate) fn validate_options(api: &str, opts: Option<&StreamOptions>) -> Resul
             "anthropic-messages"
                 | "openai-completions"
                 | "openai-responses"
-                | "azure-openai-responses"
                 | "google-generative-ai"
                 | "mistral-conversations"
                 | "openai-codex-responses"
@@ -353,21 +352,10 @@ pub(crate) fn validate_options(api: &str, opts: Option<&StreamOptions>) -> Resul
         }
     }
 
-    let azure_fields_present = opts.azure_api_version.is_some()
-        || opts.azure_resource_name.is_some()
-        || opts.azure_base_url.is_some()
-        || opts.azure_deployment_name.is_some();
-    if azure_fields_present && api != "azure-openai-responses" {
-        return Err(format!("Azure options are unsupported by API `{api}`"));
-    }
-
     if opts.session_id.is_some()
         && !matches!(
             api,
-            "openai-responses"
-                | "azure-openai-responses"
-                | "mistral-conversations"
-                | "openai-codex-responses"
+            "openai-responses" | "mistral-conversations" | "openai-codex-responses"
         )
     {
         return Err(format!("session_id is unsupported by API `{api}`"));

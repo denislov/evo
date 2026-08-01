@@ -3,12 +3,14 @@ use std::collections::HashMap;
 use super::wire;
 use crate::model::Model;
 use crate::model::calculate_cost;
-use crate::protocol::json::{parse_streaming_json, parse_terminal_json};
+use crate::protocol::json::parse_streaming_json;
 use crate::protocol::stream::EventStream;
 use crate::protocol::{
     AssistantMessage, AssistantMessageEvent, ContentBlock, Cost, StopReason, Usage,
 };
-use crate::providers::common::{SseEventHandler, SseEventResult, process_sse};
+use crate::providers::common::{
+    SseEventHandler, SseEventResult, parse_terminal_tool_arguments, process_sse,
+};
 use bytes::Bytes;
 use futures::Stream;
 use tokio_util::sync::CancellationToken;
@@ -155,8 +157,7 @@ impl ResponsesHandler {
                 partial: partial.clone(),
             },
             OutputKind::Tool { arguments } => {
-                let parsed = parse_terminal_json(arguments)
-                    .map_err(|error| format!("malformed final tool arguments: {error}"))?;
+                let parsed = parse_terminal_tool_arguments(arguments)?;
                 if let Some(ContentBlock::ToolCall {
                     arguments: value, ..
                 }) = partial.content.get_mut(output.content_index as usize)
@@ -207,7 +208,7 @@ impl SseEventHandler for ResponsesHandler {
                 partial.response_id = self.response_id.clone();
                 partial.timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs();
                 events.push(AssistantMessageEvent::Start {
                     content_index: None,
@@ -400,10 +401,20 @@ impl SseEventHandler for ResponsesHandler {
 }
 
 fn map_usage(usage: &wire::ResponseUsage, model: &Model) -> Usage {
+    let cache_tokens = usage
+        .input_tokens_details
+        .as_ref()
+        .map(|d| d.cached_tokens)
+        .unwrap_or(0);
+    // `input_tokens` is the total prompt size and includes the cached subset,
+    // mirroring the completions-path semantics where `input` excludes cache
+    // hits to avoid double-billing the cached portion.
+    let non_cached_input = usage.input_tokens.saturating_sub(cache_tokens);
+
     let mut result = Usage {
-        input: usage.input_tokens,
+        input: non_cached_input,
         output: usage.output_tokens,
-        cache_read: 0,
+        cache_read: cache_tokens,
         cache_write: 0,
         total_tokens: if usage.total_tokens == 0 {
             crate::protocol::usage::saturating_token_total(usage.input_tokens, usage.output_tokens)

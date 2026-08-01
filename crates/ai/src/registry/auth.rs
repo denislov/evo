@@ -5,10 +5,6 @@ use crate::protocol::{ProviderAuthDiagnostic, StreamOptions};
 pub struct ProviderAuth {
     pub api_key: Option<String>,
     pub headers: Option<serde_json::Value>,
-    pub azure_api_version: Option<String>,
-    pub azure_resource_name: Option<String>,
-    pub azure_base_url: Option<String>,
-    pub azure_deployment_name: Option<String>,
     pub diagnostics: Vec<ProviderAuthDiagnostic>,
 }
 
@@ -18,10 +14,6 @@ impl std::fmt::Debug for ProviderAuth {
             .debug_struct("ProviderAuth")
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("headers", &self.headers.as_ref().map(|_| "[REDACTED]"))
-            .field("azure_api_version", &self.azure_api_version)
-            .field("azure_resource_name", &self.azure_resource_name)
-            .field("azure_base_url", &self.azure_base_url)
-            .field("azure_deployment_name", &self.azure_deployment_name)
             .field("diagnostics", &self.diagnostics)
             .finish()
     }
@@ -70,35 +62,7 @@ impl ProviderAuthResolver for EnvProviderAuthResolver {
     }
 
     fn resolve_model_auth(&self, model: &Model) -> ProviderAuth {
-        let mut auth = self.resolve_auth(&model.provider);
-        if model.provider == "azure-openai-responses" {
-            set_auth_from_env(
-                &mut auth.azure_api_version,
-                &mut auth.diagnostics,
-                "azure_api_version",
-                "AZURE_OPENAI_API_VERSION",
-            );
-            set_auth_from_env(
-                &mut auth.azure_base_url,
-                &mut auth.diagnostics,
-                "azure_base_url",
-                "AZURE_OPENAI_BASE_URL",
-            );
-            set_auth_from_env(
-                &mut auth.azure_resource_name,
-                &mut auth.diagnostics,
-                "azure_resource_name",
-                "AZURE_OPENAI_RESOURCE_NAME",
-            );
-            if let Some(deployment_name) = resolve_azure_deployment_name(&model.id) {
-                auth.azure_deployment_name = Some(deployment_name);
-                auth.diagnostics.push(auth_diagnostic(
-                    "azure_deployment_name",
-                    "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
-                ));
-            }
-        }
-        auth
+        self.resolve_auth(&model.provider)
     }
 
     fn requires_approved_https_origin(&self) -> bool {
@@ -113,40 +77,6 @@ fn auth_diagnostic(field: impl Into<String>, source: impl Into<String>) -> Provi
     }
 }
 
-fn set_auth_from_env(
-    target: &mut Option<String>,
-    diagnostics: &mut Vec<ProviderAuthDiagnostic>,
-    field: &'static str,
-    env_name: &'static str,
-) {
-    if let Some(value) = non_empty_env(env_name) {
-        *target = Some(value);
-        diagnostics.push(auth_diagnostic(field, env_name));
-    }
-}
-
-fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn resolve_azure_deployment_name(model_id: &str) -> Option<String> {
-    let map = non_empty_env("AZURE_OPENAI_DEPLOYMENT_NAME_MAP")?;
-    for entry in map.split(',') {
-        let Some((entry_model_id, deployment)) = entry.trim().split_once('=') else {
-            continue;
-        };
-        if entry_model_id.trim() == model_id {
-            let deployment = deployment.trim();
-            if !deployment.is_empty() {
-                return Some(deployment.to_string());
-            }
-        }
-    }
-    None
-}
-
 pub(super) fn apply_auth_material(
     mut opts: Option<StreamOptions>,
     auth: ProviderAuth,
@@ -158,10 +88,6 @@ pub(super) fn apply_auth_material(
     let ProviderAuth {
         api_key,
         headers,
-        azure_api_version,
-        azure_resource_name,
-        azure_base_url,
-        azure_deployment_name,
         diagnostics,
     } = auth;
 
@@ -169,18 +95,6 @@ pub(super) fn apply_auth_material(
     let mut applied_fields = Vec::new();
     if fill_if_none(&mut options.api_key, api_key) {
         applied_fields.push("api_key");
-    }
-    if fill_if_none(&mut options.azure_api_version, azure_api_version) {
-        applied_fields.push("azure_api_version");
-    }
-    if fill_if_none(&mut options.azure_resource_name, azure_resource_name) {
-        applied_fields.push("azure_resource_name");
-    }
-    if fill_if_none(&mut options.azure_base_url, azure_base_url) {
-        applied_fields.push("azure_base_url");
-    }
-    if fill_if_none(&mut options.azure_deployment_name, azure_deployment_name) {
-        applied_fields.push("azure_deployment_name");
     }
     options.headers = merge_auth_headers(headers, options.headers.take());
     append_applied_auth_diagnostics(&mut options.auth_diagnostics, diagnostics, &applied_fields);
@@ -200,27 +114,10 @@ pub(super) fn options_contain_automatic_credentials(opts: Option<&StreamOptions>
     })
 }
 
-pub(super) fn validate_automatic_credential_origin(
-    model: &Model,
-    opts: Option<&StreamOptions>,
-) -> Result<(), String> {
+pub(super) fn validate_automatic_credential_origin(model: &Model) -> Result<(), String> {
     let trusted = crate::model::get_model(&model.provider, &model.id)
         .filter(|trusted| trusted.api == model.api)
         .ok_or_else(credential_origin_error)?;
-
-    if model.api == "azure-openai-responses" {
-        let target =
-            crate::providers::azure_openai_responses::resolve_target(model, &opts.cloned())
-                .map_err(|_| credential_origin_error())?;
-        let url = approved_https_url(&target.url)?;
-        let host = url.host_str().ok_or_else(credential_origin_error)?;
-        let azure_host =
-            host.ends_with(".openai.azure.com") || host.ends_with(".cognitiveservices.azure.com");
-        if !azure_host || url.port_or_known_default() != Some(443) {
-            return Err(credential_origin_error());
-        }
-        return Ok(());
-    }
 
     let requested = approved_https_url(&model.base_url)?;
     let approved = approved_https_url(&trusted.base_url)?;
