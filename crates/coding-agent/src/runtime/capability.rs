@@ -478,6 +478,71 @@ impl FilesystemCapability {
         .map_err(|_| FilesystemReviewTargetError::Inaccessible)?
     }
 
+    /// Reject any workspace-local target whose path resolves through a
+    /// symbolic link. Missing components are allowed (write tools create
+    /// leaves and parent directories on demand); anything that exists must
+    /// not be a symlink, mirroring [`Self::prepare_workspace_review_target_blocking`].
+    fn reject_workspace_symlink_components(
+        &self,
+        relative: &Path,
+    ) -> Result<(), CodingSessionError> {
+        let mut parent = self
+            .root
+            .try_clone()
+            .map_err(|error| CodingSessionError::Resource {
+                message: format!("cannot clone workspace root handle: {error}"),
+            })?;
+        let components = relative
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(PathBuf::from(name)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
+            let is_leaf = index + 1 == components.len();
+            let metadata = match parent.symlink_metadata(component) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(CodingSessionError::UnsupportedCapability {
+                        capability: format!(
+                            "cannot inspect filesystem target {}: {error}",
+                            component.display()
+                        ),
+                    });
+                }
+            };
+            if metadata.file_type().is_symlink() {
+                return Err(CodingSessionError::UnsupportedCapability {
+                    capability: format!(
+                        "filesystem target resolves through a symbolic link: {}",
+                        component.display()
+                    ),
+                });
+            }
+            if !is_leaf {
+                if !metadata.is_dir() {
+                    return Err(CodingSessionError::UnsupportedCapability {
+                        capability: format!(
+                            "filesystem target parent is not a directory: {}",
+                            component.display()
+                        ),
+                    });
+                }
+                parent = parent.open_dir(component).map_err(|error| {
+                    CodingSessionError::UnsupportedCapability {
+                        capability: format!(
+                            "cannot open filesystem target parent {}: {error}",
+                            component.display()
+                        ),
+                    }
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     fn prepare_workspace_review_target_blocking(
         &self,
         path: &str,
@@ -564,7 +629,15 @@ impl FilesystemCapability {
     ) -> Result<FilesystemTarget, CodingSessionError> {
         let preview = self.preview_path(path)?;
         let mut target = if preview.workspace_local {
-            self.target(path)?
+            let target = self.target(path)?;
+            // cap-std opens follow symbolic links by default, so a symlink
+            // inside the workspace (e.g. node_modules pointing at ~/.aws or a
+            // checked-in link to /etc) would let read/grep/write escape the
+            // granted root. The review path already rejects symlinks
+            // component-by-component; apply the same check before the main
+            // tool path opens anything.
+            self.reject_workspace_symlink_components(target.relative_path())?;
+            target
         } else {
             FilesystemTarget {
                 relative: preview
@@ -1285,5 +1358,72 @@ impl CapabilitySnapshotService {
 impl Default for CapabilitySnapshotService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod symlink_escape_tests {
+    use super::*;
+
+    fn capability(root: &std::path::Path) -> FilesystemCapability {
+        FilesystemCapability::new(root.to_path_buf()).expect("capability opens")
+    }
+
+    #[test]
+    fn read_through_a_workspace_symlink_is_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = temp.path().join("outside-secret");
+        std::fs::write(&outside, "secret").expect("write outside file");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::fs::create_dir(workspace.join("sub")).expect("create subdir");
+        // A symlink inside the workspace pointing at the outside directory.
+        std::os::unix::fs::symlink(&outside, workspace.join("sub").join("link")).expect("symlink");
+
+        let capability = capability(&workspace);
+        let error = capability
+            .prepare_target_blocking("read", "sub/link")
+            .expect_err("a workspace symlink must be rejected");
+        let CodingSessionError::UnsupportedCapability { capability: message } = &error else {
+            panic!("expected UnsupportedCapability, got {error:?}");
+        };
+        assert!(
+            message.contains("symbolic link"),
+            "rejection must mention the symlink, got: {message}"
+        );
+    }
+
+    #[test]
+    fn write_through_a_workspace_symlink_parent_is_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = temp.path().join("outside-dir");
+        std::fs::create_dir(&outside).expect("create outside dir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::os::unix::fs::symlink(&outside, workspace.join("linked")).expect("symlink");
+
+        let capability = capability(&workspace);
+        let error = capability
+            .prepare_target_blocking("write", "linked/new-file.txt")
+            .expect_err("writing through a workspace symlink parent must be rejected");
+        assert!(
+            error.to_string().contains("symbolic link"),
+            "rejection must mention the symlink, got: {error}"
+        );
+    }
+
+    #[test]
+    fn plain_workspace_paths_still_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::fs::create_dir(workspace.join("sub")).expect("create subdir");
+        std::fs::write(workspace.join("sub").join("file.txt"), "hello").expect("write file");
+
+        let capability = capability(&workspace);
+        let target = capability
+            .prepare_target_blocking("read", "sub/file.txt")
+            .expect("a plain workspace path opens");
+        assert!(target.object.is_some());
     }
 }
