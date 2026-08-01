@@ -3,7 +3,17 @@ enum DiffPart {
     Equal(Vec<String>),
     Removed(Vec<String>),
     Added(Vec<String>),
+    TooLarge {
+        old_lines: usize,
+        new_lines: usize,
+    },
 }
+
+/// Line-count ceiling for the O(n*m) LCS table. Above this the diff degrades
+/// to a summary instead of allocating `(n+1)*(m+1)*8` bytes (which exceeds
+/// ~33MB at 2048 lines and grows quadratically towards gigabytes on large
+/// files, taking the whole process down before any result is produced).
+const MAX_DIFF_LINES: usize = 2048;
 
 pub(crate) struct DiffString {
     pub diff: String,
@@ -23,6 +33,12 @@ fn diff_parts(old_content: &str, new_content: &str) -> Vec<DiffPart> {
     let new_lines = split_lines(new_content);
     let old_len = old_lines.len();
     let new_len = new_lines.len();
+    if old_len > MAX_DIFF_LINES || new_len > MAX_DIFF_LINES {
+        return vec![DiffPart::TooLarge {
+            old_lines: old_len,
+            new_lines: new_len,
+        }];
+    }
     let mut lcs = vec![vec![0usize; new_len + 1]; old_len + 1];
 
     for old_idx in (0..old_len).rev() {
@@ -96,6 +112,11 @@ pub(crate) fn generate_diff_string(
 
     for (index, part) in parts.iter().enumerate() {
         match part {
+            DiffPart::TooLarge { old_lines, new_lines } => {
+                output.push(format!(
+                    "[Diff omitted: {old_lines} -> {new_lines} lines exceed the {MAX_DIFF_LINES}-line diff limit]"
+                ));
+            }
             DiffPart::Added(lines) | DiffPart::Removed(lines) => {
                 if first_changed_line.is_none() {
                     first_changed_line = Some(new_line_num);
@@ -122,6 +143,9 @@ pub(crate) fn generate_diff_string(
                             old_line_num += 1;
                         }
                         DiffPart::Equal(_) => unreachable!(),
+                        DiffPart::TooLarge { .. } => unreachable!(
+                            "oversized diffs are handled before the line loop"
+                        ),
                     }
                 }
                 last_was_change = true;
@@ -241,6 +265,11 @@ pub(crate) fn generate_unified_patch(path: &str, old_content: &str, new_content:
 
     for part in diff_parts(old_content, new_content) {
         match part {
+            DiffPart::TooLarge { old_lines, new_lines } => {
+                output.push(format!(
+                    "[Diff omitted: {old_lines} -> {new_lines} lines exceed the {MAX_DIFF_LINES}-line diff limit]"
+                ));
+            }
             DiffPart::Equal(lines) => {
                 output.extend(lines.into_iter().map(|line| format!(" {line}")));
             }
@@ -424,4 +453,31 @@ pub(crate) fn apply_replacements_preserving_unchanged_lines(
         result.push_str(line);
     }
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_diffs_degrade_to_a_summary() {
+        let big_old = (0..10_000).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let big_new = format!("{big_old}\nextra");
+        let diff = generate_diff_string(&big_old, &big_new, 4);
+        assert!(diff.diff.contains("Diff omitted"), "{}", diff.diff);
+        assert_eq!(diff.first_changed_line, None);
+        let patch = generate_unified_patch("file.txt", &big_old, &big_new);
+        assert!(patch.contains("Diff omitted"), "{patch}");
+    }
+
+    #[test]
+    fn small_diffs_still_produce_full_details() {
+        let old = "one\ntwo\nthree";
+        let new = "one\nTWO\nthree";
+        let diff = generate_diff_string(old, new, 1);
+        assert!(!diff.diff.contains("Diff omitted"));
+        assert_eq!(diff.first_changed_line, Some(2));
+        assert!(diff.diff.contains("-2 two"), "{}", diff.diff);
+        assert!(diff.diff.contains("+2 TWO"), "{}", diff.diff);
+    }
 }
