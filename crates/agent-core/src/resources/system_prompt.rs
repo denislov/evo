@@ -105,11 +105,13 @@ pub fn substitute_args(content: &str, args: &[String]) -> String {
 
     SUBSTITUTE_RE
         .replace_all(content, |caps: &regex::Captures| {
-            // Group 1, 2: ${N:-default}
+            // Group 1, 2: ${N:-default}. Mirrors TS `substituteArgs`: an
+            // index of 0 (or an unparsable index) resolves past the start of
+            // the argument list, so it falls through to the default value.
             if let Some(default_num) = caps.get(1) {
-                let index: usize = default_num.as_str().parse().unwrap_or(1) - 1;
+                let index = positional_index(default_num.as_str());
                 let default_val = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-                match args.get(index) {
+                match index.and_then(|i| args.get(i)) {
                     Some(v) if !v.is_empty() => v.clone(),
                     _ => default_val.to_string(),
                 }
@@ -146,14 +148,24 @@ pub fn substitute_args(content: &str, args: &[String]) -> String {
                 if s == "ARGUMENTS" || s == "@" {
                     all_args.clone()
                 } else {
-                    let index: usize = s.parse().unwrap_or(1) - 1;
-                    args.get(index).cloned().unwrap_or_default()
+                    positional_index(s)
+                        .and_then(|i| args.get(i))
+                        .cloned()
+                        .unwrap_or_default()
                 }
             } else {
                 String::new()
             }
         })
         .to_string()
+}
+
+/// Resolve a `$N`-style placeholder to a zero-based index. `None` (instead of
+/// `0`) when the text is unparsable or zero, matching TS behavior where
+/// `args[Number(s) - 1]` is `undefined` for those inputs; this also avoids an
+/// `usize` underflow when the placeholder is `0`.
+fn positional_index(text: &str) -> Option<usize> {
+    text.parse::<usize>().ok()?.checked_sub(1)
 }
 
 /// Format a prompt template invocation, substituting arguments into the template content.
@@ -168,4 +180,72 @@ fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_command_args, substitute_args};
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn substitutes_positional_arguments() {
+        assert_eq!(
+            substitute_args("run $1 with $2", &args(&["tool", "a", "b"])),
+            "run tool with a"
+        );
+    }
+
+    #[test]
+    fn substitutes_all_arguments_forms() {
+        let values = args(&["a", "b", "c"]);
+        assert_eq!(substitute_args("$@", &values), "a b c");
+        assert_eq!(substitute_args("$ARGUMENTS", &values), "a b c");
+        assert_eq!(substitute_args("${@:2}", &values), "b c");
+        assert_eq!(substitute_args("${@:2:1}", &values), "b");
+    }
+
+    #[test]
+    fn substitutes_default_values() {
+        let values = args(&["a"]);
+        assert_eq!(substitute_args("${1:-none}", &values), "a");
+        assert_eq!(substitute_args("${2:-none}", &values), "none");
+        assert_eq!(substitute_args("${2:-}", &values), "");
+    }
+
+    #[test]
+    fn empty_arguments_use_the_default() {
+        assert_eq!(
+            substitute_args("${1:-fallback}", &args(&[""])),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn out_of_range_and_unparsable_indices_do_not_panic() {
+        assert_eq!(substitute_args("$9", &args(&["a"])), "");
+        assert_eq!(substitute_args("${9:-none}", &args(&["a"])), "none");
+        assert_eq!(
+            substitute_args("${xyz:-none}", &args(&["a"])),
+            "${xyz:-none}"
+        );
+    }
+
+    #[test]
+    fn zero_index_does_not_underflow() {
+        assert_eq!(substitute_args("$0", &args(&["a", "b"])), "");
+        assert_eq!(substitute_args("${0:-none}", &args(&["a", "b"])), "none");
+        assert_eq!(substitute_args("${00:-none}", &args(&["a", "b"])), "none");
+    }
+
+    #[test]
+    fn parses_quoted_command_arguments() {
+        assert_eq!(
+            parse_command_args("one \"two three\" four 'five six'"),
+            vec!["one", "two three", "four", "five six"]
+        );
+        assert_eq!(parse_command_args(""), Vec::<String>::new());
+    }
 }
