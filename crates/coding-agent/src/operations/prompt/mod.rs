@@ -230,6 +230,7 @@ impl PromptOperation<'_> {
                                 delegation_lineage_for_request(&[], request),
                                 parent_capability_snapshot.clone(),
                                 Some(self.authorization_service.clone()),
+                                None,
                             )
                             .await
                         }
@@ -244,6 +245,7 @@ impl PromptOperation<'_> {
                                 delegation_lineage_for_request(&[], request),
                                 parent_capability_snapshot.clone(),
                                 Some(self.authorization_service.clone()),
+                                None,
                             )
                             .await
                         }

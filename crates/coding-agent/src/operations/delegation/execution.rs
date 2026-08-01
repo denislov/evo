@@ -21,10 +21,16 @@ use crate::runtime::session_coordinator::{
 };
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use crate::services::runtime::RuntimeService;
 use crate::session::event::PersistedDelegationStatus;
 use agent_core::api::tool::ToolExecutionContext;
 use std::sync::{Arc, Mutex};
+
+/// How long a cancelled delegation child task gets to unwind through its
+/// RAII guards before the parent force-aborts it.
+const DELEGATION_CHILD_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ApprovedDelegationExecution {
@@ -173,6 +179,13 @@ pub(crate) async fn execute_tool_request_with_pending(
             let child_request = request.clone();
             let child_lineage =
                 super::delegation_lineage_for_request(&delegation_lineage, &child_request);
+            // The child task must unwind through its RAII guards (the
+            // admitted child operation's cleanup) on cancellation, so it gets
+            // its own cancellation token that the select below cancels
+            // instead of aborting the task outright (abort skips destructors
+            // and leaks the child operation state).
+            let external_cancellation = CancellationToken::new();
+            let child_cancel = external_cancellation.clone();
             let mut child_task = match request.target_kind {
                 ProfileKind::Agent => tokio::spawn(async move {
                     execute_agent(
@@ -185,6 +198,7 @@ pub(crate) async fn execute_tool_request_with_pending(
                         child_lineage,
                         Some(parent_capability_snapshot),
                         Some(authorization_service),
+                        Some(child_cancel),
                     )
                     .await
                 }),
@@ -199,6 +213,7 @@ pub(crate) async fn execute_tool_request_with_pending(
                         child_lineage,
                         Some(parent_capability_snapshot),
                         Some(authorization_service),
+                        Some(child_cancel),
                     )
                     .await
                 }),
@@ -211,12 +226,29 @@ pub(crate) async fn execute_tool_request_with_pending(
                     }),
                 },
                 _ = cancellation.cancelled() => {
-                    child_task.abort();
-                    let _ = child_task.await;
+                    // Request cancellation through the child token so the
+                    // task exits normally and its RAII guards (child
+                    // operation cleanup, descendant cancellation) run. Only
+                    // force-abort if it fails to unwind within the grace
+                    // period.
+                    external_cancellation.cancel();
+                    tokio::select! {
+                        joined = &mut child_task => match joined {
+                            Ok(_) => {}
+                            Err(error) => {
+                                let _ = failed_execution(CodingSessionError::Workflow {
+                                    message: format!("delegation child task failed: {error}"),
+                                });
+                            }
+                        },
+                        _ = tokio::time::sleep(DELEGATION_CHILD_CANCEL_GRACE) => {
+                            child_task.abort();
+                            let _ = child_task.await;
+                        }
+                    }
                     failed_execution(CodingSessionError::Cancelled)
                 }
-            };
-            match outcome.execution {
+            };            match outcome.execution {
                 Ok(execution) if !outcome.pending_confirmations.is_empty() => {
                     deferred_pending
                         .lock()
@@ -290,6 +322,7 @@ pub(crate) async fn execute_agent(
     delegation_lineage: Vec<DelegationLineageEntry>,
     parent_capability_snapshot: Option<OperationCapabilitySnapshot>,
     authorization_service: Option<AuthorizationService>,
+    external_cancellation: Option<CancellationToken>,
 ) -> ApprovedDelegationExecutionOutcome {
     let child_operation_id = OperationScheduler::allocate_child_operation_id();
     let mut context = AgentInvocationContext::new(
@@ -337,13 +370,20 @@ pub(crate) async fn execute_agent(
     context = context.with_parent_capability_snapshot(child_snapshot);
     event_service.emit_delegation_started(request, child_operation_id.clone());
     let result = match AgentInvocationRunner::new() {
-        Ok(runner) => match runner
-            .run_typed(&mut context, child_admission.cancellation_token())
-            .await
-        {
-            Ok(_) => context.finish_success(),
-            Err(error) => Err(error),
-        },
+        Ok(runner) => {
+            let runner_fut = runner.run_typed(&mut context, child_admission.cancellation_token());
+            let run_result = match external_cancellation {
+                Some(external) => tokio::select! {
+                    _ = external.cancelled() => Err(CodingSessionError::Cancelled),
+                    result = runner_fut => result,
+                },
+                None => runner_fut.await,
+            };
+            match run_result {
+                Ok(_) => context.finish_success(),
+                Err(error) => Err(error),
+            }
+        }
         Err(error) => Err(error),
     };
     let pending_confirmations = context.take_pending_delegation_confirmations();
@@ -390,6 +430,7 @@ pub(crate) async fn execute_team(
     delegation_lineage: Vec<DelegationLineageEntry>,
     parent_capability_snapshot: Option<OperationCapabilitySnapshot>,
     authorization_service: Option<AuthorizationService>,
+    external_cancellation: Option<CancellationToken>,
 ) -> ApprovedDelegationExecutionOutcome {
     let child_operation_id = OperationScheduler::allocate_child_operation_id();
     let mut context = AgentTeamContext::new(
@@ -436,13 +477,20 @@ pub(crate) async fn execute_team(
     context = context.with_parent_capability_snapshot(child_snapshot);
     event_service.emit_delegation_started(request, child_operation_id.clone());
     let result = match AgentTeamRunner::new() {
-        Ok(runner) => match runner
-            .run_typed(&mut context, child_admission.cancellation_token())
-            .await
-        {
-            Ok(_) => context.finish_success(),
-            Err(error) => Err(error),
-        },
+        Ok(runner) => {
+            let runner_fut = runner.run_typed(&mut context, child_admission.cancellation_token());
+            let run_result = match external_cancellation {
+                Some(external) => tokio::select! {
+                    _ = external.cancelled() => Err(CodingSessionError::Cancelled),
+                    result = runner_fut => result,
+                },
+                None => runner_fut.await,
+            };
+            match run_result {
+                Ok(_) => context.finish_success(),
+                Err(error) => Err(error),
+            }
+        }
         Err(error) => Err(error),
     };
     let pending_confirmations = context.take_pending_delegation_confirmations();
@@ -518,6 +566,7 @@ pub(crate) async fn approve(
                 pending.delegation_lineage,
                 Some(parent_capability_snapshot.clone()),
                 None,
+                None,
             )
             .await
         }
@@ -531,6 +580,7 @@ pub(crate) async fn approve(
                 pending.child_delegation_depth,
                 pending.delegation_lineage,
                 Some(parent_capability_snapshot),
+                None,
                 None,
             )
             .await

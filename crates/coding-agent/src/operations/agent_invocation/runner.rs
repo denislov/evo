@@ -528,6 +528,7 @@ impl AgentInvocationContext {
             delegation_lineage_for_request(self.options.delegation_lineage(), request),
             self.child_capability_snapshot.clone(),
             self.authorization_service.clone(),
+            None,
         ))
         .await;
         self.pending_delegation_confirmations
@@ -551,6 +552,7 @@ impl AgentInvocationContext {
             delegation_lineage_for_request(self.options.delegation_lineage(), request),
             self.child_capability_snapshot.clone(),
             self.authorization_service.clone(),
+            None,
         )
         .await;
         self.pending_delegation_confirmations
