@@ -8,6 +8,7 @@ async fn ten_mib_transcript_stays_single_hydration_across_metadata_commands() {
     initial.transcript.items = (0..MAX_TRANSCRIPT_BLOCKS)
         .map(|index| CodingAgentSessionTranscriptItem::User {
             text: format!("{index}:{payload}"),
+            started_at: None,
         })
         .collect();
     let fixture_bytes = initial
@@ -15,7 +16,7 @@ async fn ten_mib_transcript_stays_single_hydration_across_metadata_commands() {
         .items
         .iter()
         .map(|item| match item {
-            CodingAgentSessionTranscriptItem::User { text } => text.len(),
+            CodingAgentSessionTranscriptItem::User { text, .. } => text.len(),
             _ => 0,
         })
         .sum::<usize>();

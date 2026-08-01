@@ -475,14 +475,6 @@ impl RpcState {
                 self.handle_list_agent_profiles(id, writer).await
             }
             RpcCommand::ListTeamProfiles { id } => self.handle_list_team_profiles(id, writer).await,
-            RpcCommand::SetDefaultAgentProfile {
-                id,
-                profile_id,
-                idempotency_key,
-            } => {
-                self.handle_set_default_agent_profile(id, profile_id, idempotency_key, writer)
-                    .await
-            }
             RpcCommand::InvokeAgent {
                 id,
                 profile_id,
@@ -1147,158 +1139,6 @@ impl RpcState {
         .await
     }
 
-    async fn handle_set_default_agent_profile<W>(
-        &mut self,
-        id: Option<String>,
-        profile_id: String,
-        idempotency_key: Option<String>,
-        writer: &mut W,
-    ) -> Result<(), CliError>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        let idempotency_key = match self.parse_idempotency_key(idempotency_key) {
-            Ok(key) => key,
-            Err(error) => {
-                write_rpc_response(
-                    writer,
-                    rpc_cli_error(id, "set_default_agent_profile", &error),
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        match self.idempotent_retry_response(idempotency_key.as_ref(), "set_default_agent_profile")
-        {
-            Ok(Some(data)) => {
-                write_rpc_response(
-                    writer,
-                    RpcResponse::success(id, "set_default_agent_profile", Some(data)),
-                )
-                .await?;
-                return Ok(());
-            }
-            Ok(None) => {}
-            Err(error) => {
-                write_rpc_response(
-                    writer,
-                    rpc_cli_error(id, "set_default_agent_profile", &error),
-                )
-                .await?;
-                return Ok(());
-            }
-        }
-
-        if self.is_streaming() {
-            write_rpc_response(
-                writer,
-                RpcResponse::error(
-                    id,
-                    "set_default_agent_profile",
-                    "cannot set default agent profile while agent is streaming",
-                ),
-            )
-            .await?;
-            return Ok(());
-        }
-
-        let profile_id = match ProfileId::new(profile_id) {
-            Ok(profile_id) => profile_id,
-            Err(message) => {
-                write_rpc_response(
-                    writer,
-                    RpcResponse::error(id, "set_default_agent_profile", message),
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-
-        let mut session = match self.coding_session.take() {
-            Some(session) => session,
-            None => match self.open_runtime_session().await {
-                Ok(session) => session,
-                Err(error) => {
-                    write_rpc_response(
-                        writer,
-                        rpc_cli_error(id, "set_default_agent_profile", &error),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            },
-        };
-
-        if !session
-            .agent_profiles()
-            .iter()
-            .any(|profile| profile.id.as_str() == profile_id.as_str())
-        {
-            self.coding_session = Some(session);
-            write_rpc_response(
-                writer,
-                RpcResponse::error(
-                    id,
-                    "set_default_agent_profile",
-                    format!("Unknown agent profile: {profile_id}"),
-                ),
-            )
-            .await?;
-            return Ok(());
-        }
-
-        let complete_key = idempotency_key.clone();
-        self.remember_idempotency_key(
-            idempotency_key,
-            "set_default_agent_profile",
-            OperationKind::SetDefaultAgentProfile,
-        );
-
-        self.ensure_session_event_pump(&session);
-        let event_flush = self
-            .session_event_flush
-            .as_ref()
-            .expect("session event pump installed")
-            .clone();
-
-        let result = session
-            .run(CodingAgentOperation::SetDefaultAgentProfile {
-                profile_id: profile_id.clone(),
-            })
-            .await;
-        flush_session_product_events(event_flush).await;
-        match result {
-            Ok(operation_outcome) => {
-                operation_outcome
-                    .into_default_agent_profile_changed()
-                    .expect(
-                        "set default agent profile operation returned a different public outcome",
-                    );
-                let data = serde_json::json!({ "defaultAgentProfileId": profile_id.as_str() });
-                self.coding_session = Some(session);
-                write_rpc_response(
-                    writer,
-                    RpcResponse::success(id, "set_default_agent_profile", Some(data)),
-                )
-                .await?;
-                self.drain_session_product_events(writer).await?;
-                self.mark_idempotency_complete(complete_key.as_ref());
-                Ok(())
-            }
-            Err(error) => {
-                self.coding_session = Some(session);
-                write_rpc_response(
-                    writer,
-                    rpc_public_error(id, "set_default_agent_profile", error),
-                )
-                .await?;
-                self.drain_session_product_events(writer).await?;
-                self.mark_idempotency_complete(complete_key.as_ref());
-                Ok(())
-            }
-        }
-    }
-
     async fn handle_list_delegation_confirmations<W>(
         &mut self,
         id: Option<String>,
@@ -1851,9 +1691,11 @@ fn rpc_team_strategy(strategy: &TeamStrategy) -> &'static str {
 
 fn rpc_transcript_item(item: CodingAgentSessionTranscriptItem) -> serde_json::Value {
     match item {
-        CodingAgentSessionTranscriptItem::User { text } => {
-            serde_json::json!({"role": "user", "content": text})
-        }
+        CodingAgentSessionTranscriptItem::User { text, started_at } => serde_json::json!({
+            "role": "user",
+            "content": text,
+            "startedAt": started_at,
+        }),
         CodingAgentSessionTranscriptItem::Assistant {
             id,
             text,
@@ -1861,6 +1703,8 @@ fn rpc_transcript_item(item: CodingAgentSessionTranscriptItem) -> serde_json::Va
             images,
             done,
             reasoning_duration_millis,
+            model_id,
+            completed_at,
         } => serde_json::json!({
             "role": "assistant",
             "id": id,
@@ -1869,6 +1713,8 @@ fn rpc_transcript_item(item: CodingAgentSessionTranscriptItem) -> serde_json::Va
             "images": images,
             "done": done,
             "reasoningDurationMillis": reasoning_duration_millis,
+            "modelId": model_id,
+            "completedAt": completed_at,
         }),
         CodingAgentSessionTranscriptItem::Tool {
             call_id,

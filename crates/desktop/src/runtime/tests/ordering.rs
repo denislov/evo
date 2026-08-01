@@ -62,7 +62,8 @@ async fn prompt_submission_forwards_product_events_and_returns_the_session_owner
                     assert!(transcript.items.iter().any(|item| matches!(
                         item,
                         coding_agent::api::view::CodingAgentSessionTranscriptItem::User {
-                            text
+                            text,
+                            ..
                         } if text == "offline desktop prompt"
                     )));
                     break;
@@ -402,7 +403,7 @@ async fn project_workspace_owners_isolate_context_model_profile_and_events() {
         );
         assert!(snapshot.transcript.items.iter().any(|item| matches!(
             item,
-            CodingAgentSessionTranscriptItem::User { text } if text == prompt
+            CodingAgentSessionTranscriptItem::User { text, .. } if text == prompt
         )));
     }
     reopened.shutdown().await.unwrap();
@@ -466,12 +467,11 @@ async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() 
         .unwrap();
     assert!(matches!(
         bridge.next_update().await,
-        Some(DesktopRuntimeUpdate::SelectionChanged { metadata, .. })
-            if metadata
-                .session
-                .as_ref()
-                .is_some_and(|session| session.session.default_agent_profile_id.as_str()
-                    == "shared-project")
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 114,
+            command: DesktopRuntimeCommandKind::SelectSessionProfile,
+            ..
+        })
     ));
     runtime_commands(&bridge)
         .try_open_session(115, &second_id)
@@ -503,7 +503,7 @@ async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() 
         Some(DesktopRuntimeUpdate::SessionChanged { snapshot, .. })
             if snapshot.project.selected_model_id == "gpt-5"
                 && snapshot.session.session.default_agent_profile_id.as_str()
-                    == "shared-project"
+                    == "default"
     ));
     bridge.shutdown().await.unwrap();
 }

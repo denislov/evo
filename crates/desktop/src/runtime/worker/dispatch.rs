@@ -294,11 +294,13 @@ async fn dispatch_command_inner(
                     state.home.select_profile(profile_id)?;
                     state.metadata_snapshot(None)
                 }
-                DesktopRuntimeOwnerTarget::Session { session_id } => {
-                    let session_id = resolve_idle_target(state, active, Some(&session_id))?;
-                    state
-                        .select_session_profile(&session_id, profile_id)
-                        .await?
+                // A session's profile is locked to its creation choice; it
+                // cannot be switched mid-session.
+                DesktopRuntimeOwnerTarget::Session { .. } => {
+                    return Err(DesktopBridgeError::SessionTarget {
+                        message:
+                            "the session profile is locked to its creation choice".into(),
+                    });
                 }
             };
             Ok(DesktopRuntimeUpdate::SelectionChanged {

@@ -4,8 +4,7 @@ use crate::authorization::{ToolAuthorizationRequest, ToolAuthorizationScope};
 use crate::events::{
     CodingAgentCapabilityProductEvent, CodingAgentDiagnosticProductEvent,
     CodingAgentMessageProductEvent, CodingAgentProductEvent, CodingAgentProductEventKind,
-    CodingAgentProfileProductEvent, CodingAgentRuntimeProductEvent, CodingAgentToolProductEvent,
-    CodingAgentWorkflowProductEvent,
+    CodingAgentRuntimeProductEvent, CodingAgentToolProductEvent, CodingAgentWorkflowProductEvent,
 };
 use crate::profiles::ProfileId;
 use crate::runtime::client::connection::CodingAgentSnapshot;
@@ -512,15 +511,6 @@ impl CodingAgentClientProjection {
         event: &CodingAgentProductEvent,
         changes: &mut CodingAgentClientProjectionChanges,
     ) {
-        if let CodingAgentProductEventKind::Profile(
-            CodingAgentProfileProductEvent::DefaultChanged { profile_id },
-        ) = event.event()
-        {
-            self.snapshot.session.default_agent_profile_id =
-                ProfileId::from(bounded_text(profile_id, MAX_ID_BYTES));
-            changes.insert(CodingAgentClientProjectionArea::Profiles);
-            changes.insert(CodingAgentClientProjectionArea::Session);
-        }
         if matches!(
             event.event(),
             CodingAgentProductEventKind::Capability(
@@ -942,10 +932,10 @@ fn sanitize_transcript_item(
 ) -> (CodingAgentSessionTranscriptItem, usize, bool) {
     let mut truncated = false;
     let item = match item {
-        CodingAgentSessionTranscriptItem::User { text } => {
+        CodingAgentSessionTranscriptItem::User { text, started_at } => {
             let (text, was_truncated) = bounded_prefix(&text, MAX_MESSAGE_BYTES);
             truncated |= was_truncated;
-            CodingAgentSessionTranscriptItem::User { text }
+            CodingAgentSessionTranscriptItem::User { text, started_at }
         }
         CodingAgentSessionTranscriptItem::Assistant {
             id,
@@ -954,6 +944,8 @@ fn sanitize_transcript_item(
             images,
             done,
             reasoning_duration_millis,
+            model_id,
+            completed_at,
         } => {
             let (id, id_truncated) = bounded_prefix(&id, MAX_ID_BYTES);
             let (text, text_truncated) = bounded_prefix(&text, MAX_MESSAGE_BYTES);
@@ -976,6 +968,11 @@ fn sanitize_transcript_item(
                 })
                 .collect::<Vec<_>>();
             truncated |= original_image_count > images.len();
+            let model_id = model_id.map(|model| {
+                let (model, model_truncated) = bounded_prefix(&model, MAX_ID_BYTES);
+                truncated |= model_truncated;
+                model
+            });
             CodingAgentSessionTranscriptItem::Assistant {
                 id,
                 text,
@@ -983,6 +980,8 @@ fn sanitize_transcript_item(
                 images,
                 done,
                 reasoning_duration_millis,
+                model_id,
+                completed_at,
             }
         }
         CodingAgentSessionTranscriptItem::Tool {
@@ -1081,12 +1080,15 @@ fn sanitize_transcript_item(
 
 fn transcript_item_bytes(item: &CodingAgentSessionTranscriptItem) -> usize {
     match item {
-        CodingAgentSessionTranscriptItem::User { text } => text.len(),
+        CodingAgentSessionTranscriptItem::User {
+            text, started_at, ..
+        } => text.len() + started_at.as_ref().map_or(0, String::len),
         CodingAgentSessionTranscriptItem::Assistant {
             id,
             text,
             thinking,
             images,
+            model_id,
             ..
         } => {
             id.len()
@@ -1096,6 +1098,7 @@ fn transcript_item_bytes(item: &CodingAgentSessionTranscriptItem) -> usize {
                     .iter()
                     .map(|image| image.mime_type.len() + image.data.len())
                     .sum::<usize>()
+                + model_id.as_ref().map_or(0, String::len)
         }
         CodingAgentSessionTranscriptItem::Tool {
             call_id,

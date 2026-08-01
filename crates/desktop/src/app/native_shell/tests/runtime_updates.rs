@@ -103,6 +103,8 @@ fn secondary_message_details_are_collapsed_by_default_and_height_aware() {
             truncated: false,
             durable: true,
             delegation: None,
+            turn: None,
+            model: None,
         },
         900,
     );
@@ -334,6 +336,8 @@ fn streaming_deltas_do_not_collapse_a_measured_row_to_its_estimate() {
             images: Vec::new(),
             done: false,
             reasoning_duration_millis: None,
+            model_id: None,
+            completed_at: None,
         }];
         DesktopProjection::new(snapshot).expect("streaming fixture is a valid product projection")
     };
@@ -497,6 +501,7 @@ fn detail_toggle_holds_its_row_anchor_while_following_latest() {
     snapshot.transcript.items = vec![
         CodingAgentSessionTranscriptItem::User {
             text: "Earlier user context".repeat(8),
+            started_at: None,
         },
         CodingAgentSessionTranscriptItem::Assistant {
             id: "anchored-reasoning".into(),
@@ -505,9 +510,12 @@ fn detail_toggle_holds_its_row_anchor_while_following_latest() {
             images: Vec::new(),
             done: true,
             reasoning_duration_millis: Some(1_200),
+            model_id: None,
+            completed_at: None,
         },
         CodingAgentSessionTranscriptItem::User {
             text: "Later content keeps the toggled row above the viewport".repeat(16),
+            started_at: None,
         },
     ];
     let projection = DesktopProjection::new(snapshot)
@@ -657,6 +665,7 @@ fn conversation_selection_rail_preserves_card_geometry(cx: &mut TestAppContext) 
         DesktopRuntimeBridge::disconnected_for_test(),
         projection_with_last_item(CodingAgentSessionTranscriptItem::User {
             text: "Selection rail must preserve this row.".into(),
+            started_at: None,
         }),
     );
     cx.simulate_resize(size(px(1_300.), px(900.)));
@@ -693,6 +702,8 @@ fn conversation_track_centers_without_inspector_and_keeps_ai_copy_at_bottom_left
             images: Vec::new(),
             done: true,
             reasoning_duration_millis: None,
+            model_id: None,
+            completed_at: None,
         }),
         DesktopPreferences {
             sessions_panel_visible: false,
@@ -758,6 +769,7 @@ fn short_user_message_wraps_content_and_keeps_copy_outside_bottom_right(cx: &mut
         DesktopRuntimeBridge::disconnected_for_test(),
         projection_with_last_item(CodingAgentSessionTranscriptItem::User {
             text: "Short prompt".into(),
+            started_at: None,
         }),
         DesktopPreferences {
             sessions_panel_visible: false,
@@ -816,6 +828,7 @@ fn long_user_message_stops_at_max_width_and_grows_vertically(cx: &mut TestAppCon
         DesktopRuntimeBridge::disconnected_for_test(),
         projection_with_last_item(CodingAgentSessionTranscriptItem::User {
             text: "A long prompt with enough words to wrap naturally. ".repeat(120),
+            started_at: None,
         }),
         DesktopPreferences {
             sessions_panel_visible: false,

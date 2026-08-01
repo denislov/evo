@@ -102,6 +102,7 @@ pub(crate) struct ConversationHeaderViewModel {
     pub(crate) abort_pending: bool,
     pub(crate) reload_pending: bool,
     pub(crate) selector_disabled: bool,
+    pub(crate) profile_selector_disabled: bool,
     pub(crate) model: Arc<str>,
     pub(crate) profile: Arc<str>,
     pub(crate) thinking: Arc<str>,
@@ -166,6 +167,7 @@ pub(crate) fn view_model(
     let profile_options = project
         .profiles
         .iter()
+        .filter(|profile| !is_built_in_helper(profile.id.as_str()))
         .map(|profile| ConversationHeaderSelectorOption {
             id: Arc::from(profile.id.as_str()),
             label: Arc::from(format!(
@@ -199,6 +201,11 @@ pub(crate) fn view_model(
             }),
         reload_pending,
         selector_disabled: composer_running
+            || awaiting_prompt_start
+            || reload_pending
+            || selection_pending,
+        profile_selector_disabled: workspace.projection.is_some()
+            || composer_running
             || awaiting_prompt_start
             || reload_pending
             || selection_pending,
@@ -391,17 +398,15 @@ impl Render for ConversationHeader {
         let viewport_width = u32::from(viewport.width);
         let expanded_chrome =
             layout.center.width >= 900 || (view_model.idle && viewport_width >= 1_100);
-        let (model_label, profile_label, thinking_label) = if expanded_chrome {
+        let (model_label, profile_label) = if expanded_chrome {
             (
                 format!("Model · {}", view_model.model),
                 format!("Profile · {}", view_model.profile),
-                format!("Thinking · {}", view_model.thinking),
             )
         } else {
             (
                 format!("M · {}", view_model.model),
                 format!("P · {}", view_model.profile),
-                format!("T · {}", view_model.thinking),
             )
         };
         let show_session_title = expanded_chrome || (view_model.idle && viewport_width >= 900);
@@ -412,10 +417,6 @@ impl Render for ConversationHeader {
         let profile_accessible_label = format!(
             "Select session profile; current {}",
             view_model.current_profile_id
-        );
-        let thinking_accessible_label = format!(
-            "Select session thinking level; current {}",
-            view_model.thinking
         );
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let focus_accent = conversation_focus_accent(focused, theme);
@@ -431,10 +432,13 @@ impl Render for ConversationHeader {
             .map(|group| group.options.len())
             .sum::<usize>();
         let profile_options = Arc::clone(&view_model.profile_options);
+        let thinking_options = Arc::clone(&view_model.thinking_options);
+        let thinking_selection = view_model.thinking_selection;
         let thinking_hint = view_model.thinking_hint.clone();
         let current_model_id = Arc::clone(&view_model.current_model_id);
         let current_profile_id = Arc::clone(&view_model.current_profile_id);
         let selector_disabled = view_model.selector_disabled;
+        let profile_selector_disabled = view_model.profile_selector_disabled;
 
         div()
             .id("conversation-header")
@@ -651,6 +655,30 @@ impl Render for ConversationHeader {
                                     );
                                 }
                             }
+                            if !thinking_options.is_empty() {
+                                menu = menu
+                                    .separator()
+                                    .item(PopupMenuItem::label("Thinking"));
+                                for option in thinking_options.iter() {
+                                    let target = thinking_target.clone();
+                                    let level = option.selection;
+                                    menu = menu.item(
+                                        PopupMenuItem::new(option.label)
+                                            .checked(level == thinking_selection)
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(target) = target.upgrade() {
+                                                    target.update(cx, |_, cx| {
+                                                        cx.emit(
+                                                            ConversationHeaderEvent::SelectThinking(
+                                                                level,
+                                                            ),
+                                                        );
+                                                    });
+                                                }
+                                            }),
+                                    );
+                                }
+                            }
                             menu
                             }),
                     )
@@ -670,47 +698,13 @@ impl Render for ConversationHeader {
                                 .child("Thinking · Auto"),
                         )
                     })
-                    .when(!view_model.thinking_options.is_empty(), |actions| actions.child(
-                        DesktopSelector::new(
-                            "header-thinking-selector",
-                            thinking_label,
-                            thinking_accessible_label,
-                        )
-                        .disabled(selector_disabled)
-                        .build()
-                        .debug_selector(|| "desktop-header-thinking-selector".into())
-                        .dropdown_menu(move |menu, _, _| {
-                            view_model.thinking_options.iter().fold(
-                                menu.min_w(px(180.)).max_w(px(280.)),
-                                |menu, option| {
-                                    let target = thinking_target.clone();
-                                    let level = option.selection;
-                                    menu.item(
-                                        PopupMenuItem::new(option.label)
-                                        .checked(level == view_model.thinking_selection)
-                                        .on_click(move |_, _, cx| {
-                                            if let Some(target) = target.upgrade() {
-                                                target.update(cx, |_, cx| {
-                                                    cx.emit(
-                                                        ConversationHeaderEvent::SelectThinking(
-                                                            level,
-                                                        ),
-                                                    );
-                                                });
-                                            }
-                                        }),
-                                    )
-                                },
-                            )
-                        }),
-                    ))
                     .child(
                         DesktopSelector::new(
                             "header-profile-selector",
                             profile_label,
                             profile_accessible_label,
                         )
-                        .disabled(selector_disabled)
+                        .disabled(profile_selector_disabled)
                         .build()
                         .debug_selector(|| "desktop-header-profile-selector".into())
                         .dropdown_menu(move |menu, _, _| {
@@ -814,6 +808,12 @@ impl Render for ConversationHeader {
             )
             .into_any_element()
     }
+}
+
+/// The three built-in helper agents exist only as delegation targets; they
+/// cannot be chosen as a session's profile.
+fn is_built_in_helper(profile_id: &str) -> bool {
+    matches!(profile_id, "explore" | "review" | "check")
 }
 
 #[cfg(test)]

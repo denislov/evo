@@ -16,7 +16,6 @@ use crate::operations::self_healing_edit::runner::{
     SelfHealingEditOutcome, SelfHealingEditRequest,
 };
 use crate::operations::team_invocation::runner::{AgentTeamOptions, AgentTeamOutcome};
-use crate::profiles::ProfileId;
 use crate::runtime::capability::SessionCapabilityAccess;
 use crate::runtime::operation::control::OperationKind;
 use crate::runtime::operation::{OperationClass, OperationDispatchMode, OperationOutcome};
@@ -49,9 +48,6 @@ pub enum CodingAgentOperation {
     SelfHealingEdit(SelfHealingEditRequest),
     InvokeAgent(AgentInvocationOptions),
     InvokeTeam(AgentTeamOptions),
-    SetDefaultAgentProfile {
-        profile_id: ProfileId,
-    },
     ApproveDelegation {
         operation_id: String,
         tool_call_id: String,
@@ -90,7 +86,6 @@ pub enum CodingAgentOperationOutcome {
     SelfHealingEdit(SelfHealingEditOutcome),
     AgentInvocation(AgentInvocationOutcome),
     AgentTeam(AgentTeamOutcome),
-    DefaultAgentProfileChanged,
     DelegationApproved,
     DelegationRejected,
     /// The session owner was replaced with a newly forked session.
@@ -205,7 +200,6 @@ pub(crate) enum OperationOutcomeFamily {
     SelfHealingEdit,
     AgentInvocation,
     AgentTeam,
-    DefaultAgentProfileChanged,
     DelegationApproved,
     DelegationRejected,
     SessionForked,
@@ -497,7 +491,6 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::SetDefaultAgentProfile
         | OperationKind::Export => return None,
     };
     if !permitted.contains(&evidence) {
@@ -519,7 +512,6 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::SetDefaultAgentProfile
         | OperationKind::Export => unreachable!("non-terminal operation kind filtered above"),
     };
     Some(CodingAgentProductEventTerminalOperation { kind, status })
@@ -544,7 +536,6 @@ pub(crate) fn terminal_operation_kind(
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::SetDefaultAgentProfile
         | OperationKind::Export => None,
     }
 }
@@ -593,8 +584,7 @@ fn recovery_terminal_operation_kind(
         | OperationKind::ForkSession
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
-        | OperationKind::SetSessionName
-        | OperationKind::SetDefaultAgentProfile => return None,
+        | OperationKind::SetSessionName => return None,
     })
 }
 
@@ -625,7 +615,6 @@ pub(crate) fn descriptor_for_child_kind(kind: OperationKind) -> Option<Operation
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::SetDefaultAgentProfile
         | OperationKind::Export => return None,
     };
     contract.descriptor().for_child()
@@ -697,14 +686,6 @@ impl OperationContract {
         OperationOutcomeFamily::AgentTeam,
         OperationTerminalPolicy::ProductEvent,
         AGENT_TEAM_ROOT_EVIDENCE,
-    );
-    const SET_DEFAULT_AGENT_PROFILE: Self = Self::new(
-        OperationKind::SetDefaultAgentProfile,
-        OperationClass::RuntimeWrite,
-        OperationDispatchMode::SyncMutable,
-        OperationOutcomeFamily::DefaultAgentProfileChanged,
-        OperationTerminalPolicy::OutcomeAcknowledgement,
-        &[],
     );
     const APPROVE_DELEGATION: Self = Self::new(
         OperationKind::DelegationConfirmation,
@@ -855,7 +836,6 @@ impl CodingAgentOperation {
             Self::SelfHealingEdit(_) => OperationContract::SELF_HEALING_EDIT,
             Self::InvokeAgent(_) => OperationContract::INVOKE_AGENT,
             Self::InvokeTeam(_) => OperationContract::INVOKE_TEAM,
-            Self::SetDefaultAgentProfile { .. } => OperationContract::SET_DEFAULT_AGENT_PROFILE,
             Self::ApproveDelegation { .. } => OperationContract::APPROVE_DELEGATION,
             Self::RejectDelegation { .. } => OperationContract::REJECT_DELEGATION,
             Self::ForkSession { .. } => OperationContract::FORK_SESSION,
@@ -908,7 +888,6 @@ impl CodingAgentOperation {
             | Self::SwitchActiveLeaf { .. }
             | Self::SetSessionTreeLabel { .. }
             | Self::SetSessionName { .. }
-            | Self::SetDefaultAgentProfile { .. }
             | Self::ExportCurrent
             | Self::ExportCurrentHtml(_) => None,
         }
@@ -937,7 +916,6 @@ impl CodingAgentOperation {
             | Self::SwitchActiveLeaf { .. }
             | Self::SetSessionTreeLabel { .. }
             | Self::SetSessionName { .. }
-            | Self::SetDefaultAgentProfile { .. }
             | Self::ExportCurrent
             | Self::ExportCurrentHtml(_) => None,
         }
@@ -991,7 +969,6 @@ impl CodingAgentOperationOutcome {
             OperationOutcome::SelfHealingEdit(outcome) => Self::SelfHealingEdit(outcome),
             OperationOutcome::AgentInvocation(outcome) => Self::AgentInvocation(outcome),
             OperationOutcome::AgentTeam(outcome) => Self::AgentTeam(outcome),
-            OperationOutcome::SetDefaultAgentProfile => Self::DefaultAgentProfileChanged,
             OperationOutcome::ForkSession => Self::SessionForked,
             OperationOutcome::SwitchActiveLeaf => Self::ActiveLeafSwitched,
             OperationOutcome::SessionTreeLabelChanged {
@@ -1065,13 +1042,6 @@ impl CodingAgentOperationOutcome {
     pub fn into_delegation_rejected(self) -> Result<(), Self> {
         match self {
             Self::DelegationRejected => Ok(()),
-            other => Err(other),
-        }
-    }
-
-    pub fn into_default_agent_profile_changed(self) -> Result<(), Self> {
-        match self {
-            Self::DefaultAgentProfileChanged => Ok(()),
             other => Err(other),
         }
     }

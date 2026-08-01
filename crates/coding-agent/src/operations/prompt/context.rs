@@ -933,6 +933,7 @@ impl PromptTurnContext {
                 transcript.push(TranscriptItem::UserInput {
                     turn_id: self.turn_id().to_owned(),
                     text,
+                    started_at: None,
                 });
             }
         }
@@ -948,6 +949,17 @@ impl PromptTurnContext {
                     content,
                     status: MessageStatus::Completed,
                     reasoning_duration_millis: None,
+                    model_id: self
+                        .final_message
+                        .as_ref()
+                        .and_then(|message| {
+                            message
+                                .response_model
+                                .as_deref()
+                                .or(Some(message.model.as_str()))
+                        })
+                        .map(str::to_owned),
+                    completed_at: None,
                 });
             }
         }
@@ -1285,12 +1297,18 @@ impl PromptTurnContext {
     ) -> Result<(), CodingSessionError> {
         let message_id = self.ensure_assistant_session_message_started()?;
         let content = persisted_assistant_content_blocks(&message.content);
+        let model_id = message
+            .response_model
+            .as_deref()
+            .unwrap_or(&message.model)
+            .to_owned();
         self.transaction_mut_required()?
             .complete_assistant_message(
                 message_id.clone(),
                 content,
                 stop_reason_string(message),
                 message.usage.clone(),
+                Some(model_id),
             )?;
         self.assistant_session_message_id = None;
         self.completed_assistant_session_message_id = Some(message_id);

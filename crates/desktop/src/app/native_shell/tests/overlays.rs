@@ -12,6 +12,8 @@ fn native_shell_markdown_code_action_copies_exact_block(cx: &mut TestAppContext)
             images: Vec::new(),
             done: true,
             reasoning_duration_millis: None,
+            model_id: None,
+            completed_at: None,
         },
     );
     let projection = DesktopProjection::new(snapshot)

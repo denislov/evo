@@ -28,7 +28,7 @@ use coding_agent::api::runtime::{
     CodingAgentSessionNameUpdateReceiver,
 };
 use coding_agent::api::view::{
-    CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot, ProfileId,
+    CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot,
 };
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{mpsc, watch};
@@ -343,47 +343,6 @@ impl RuntimeState {
         })?;
         let recovery_id = result.recovery_id;
         Ok((recovery_id, self.recovery_snapshot(session_id)?))
-    }
-
-    pub(super) async fn select_session_profile(
-        &mut self,
-        session_id: &str,
-        profile_id: String,
-    ) -> Result<DesktopRuntimeMetadataSnapshot, DesktopBridgeError> {
-        let workspace =
-            self.workspaces
-                .get_mut(session_id)
-                .ok_or_else(|| DesktopBridgeError::Busy {
-                    operation: "desktop_profile_selection".into(),
-                })?;
-        if !workspace
-            .context
-            .snapshot()
-            .profiles
-            .iter()
-            .any(|profile| profile.id.as_str() == profile_id)
-        {
-            return Err(DesktopBridgeError::Input {
-                message: format!("unknown desktop session profile {profile_id}"),
-            });
-        }
-        let profile_id =
-            ProfileId::new(profile_id).map_err(|message| DesktopBridgeError::Input {
-                message: format!("invalid desktop session profile: {message}"),
-            })?;
-        let outcome = workspace
-            .session
-            .run(CodingAgentOperation::SetDefaultAgentProfile { profile_id })
-            .await?;
-        if !matches!(
-            outcome,
-            CodingAgentOperationOutcome::DefaultAgentProfileChanged
-        ) {
-            return Err(DesktopBridgeError::Session {
-                message: "desktop profile selection returned an unexpected outcome".into(),
-            });
-        }
-        Ok(self.metadata_snapshot(Some(session_id)))
     }
 
     pub(super) async fn rename_session(

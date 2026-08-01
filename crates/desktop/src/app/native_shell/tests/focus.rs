@@ -137,9 +137,8 @@ fn shell_header_and_toast_host_stay_bounded_at_all_viewports(cx: &mut TestAppCon
         assert!(toast_host.right() <= px(width));
         assert!(toast_host.bottom() <= px(900.));
         assert!(
-            cx.debug_bounds("desktop-header-thinking-selector")
-                .is_some(),
-            "the session thinking selector remains available in the Header"
+            cx.debug_bounds("desktop-header-model-selector").is_some(),
+            "the model selector (with session thinking folded in) remains available in the Header"
         );
         assert!(cx.debug_bounds("desktop-composer-thinking").is_none());
     }
@@ -157,7 +156,6 @@ fn idle_and_running_header_status_keep_every_other_control_stationary(cx: &mut T
         "desktop-header-identity",
         "desktop-header-actions",
         "desktop-header-model-selector",
-        "desktop-header-thinking-selector",
         "desktop-header-profile-selector",
         "desktop-hit-toggle-inspector",
         "desktop-header-overflow",
@@ -330,6 +328,7 @@ fn responsive_drawers_preserve_conversation_geometry_scroll_and_owner_focus(
         DesktopRuntimeBridge::disconnected_for_test(),
         projection_with_last_item(CodingAgentSessionTranscriptItem::User {
             text: "Drawer geometry must remain stable.".into(),
+            started_at: None,
         }),
     );
 
@@ -503,7 +502,7 @@ fn responsive_drawers_preserve_conversation_geometry_scroll_and_owner_focus(
     );
 }
 
-fn assert_profile_dropdown_usable_with_inspector_drawer(
+fn assert_profile_selector_locked_with_inspector_drawer(
     cx: &mut TestAppContext,
     viewport_width: f32,
 ) {
@@ -542,21 +541,14 @@ fn assert_profile_dropdown_usable_with_inspector_drawer(
     assert!(profile_selector.bottom() <= inspector_drawer.top());
     cx.simulate_click(profile_selector.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    choose_popup_item(cx, 1);
-
-    assert_eq!(
-        runtime_harness.drain_selections(),
-        [(
-            desktop::runtime::DesktopRuntimeCommandKind::SelectSessionProfile,
-            DesktopRuntimeOwnerTarget::session("desktop-visual-test"),
-            "exact-reviewer".into(),
-            None,
-        )]
+    assert!(
+        runtime_harness.drain_selections().is_empty(),
+        "a session's profile selector is locked and must not submit selections"
     );
     assert_eq!(
         shell.read_with(cx, |shell, _| shell.ui.active_drawer),
         Some(CenterDrawerKind::Inspector),
-        "Profile selection must not implicitly close the non-modal drawer"
+        "the locked Profile selector must not implicitly close the non-modal drawer"
     );
 
     let close = cx
@@ -573,11 +565,11 @@ fn assert_profile_dropdown_usable_with_inspector_drawer(
 }
 
 #[gpui::test]
-fn medium_profile_dropdown_remains_usable_with_inspector_drawer(cx: &mut TestAppContext) {
-    assert_profile_dropdown_usable_with_inspector_drawer(cx, 1_000.);
+fn medium_profile_selector_locked_with_inspector_drawer(cx: &mut TestAppContext) {
+    assert_profile_selector_locked_with_inspector_drawer(cx, 1_000.);
 }
 
 #[gpui::test]
-fn narrow_profile_dropdown_remains_usable_with_inspector_drawer(cx: &mut TestAppContext) {
-    assert_profile_dropdown_usable_with_inspector_drawer(cx, 700.);
+fn narrow_profile_selector_locked_with_inspector_drawer(cx: &mut TestAppContext) {
+    assert_profile_selector_locked_with_inspector_drawer(cx, 700.);
 }

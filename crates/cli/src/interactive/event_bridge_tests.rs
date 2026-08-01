@@ -695,7 +695,7 @@ fn coding_event_bridge_ignores_session_write_and_capability_events() {
         }),
         CodingAgentProductEventKind::Capability(CodingAgentCapabilityProductEvent::Changed {
             generation: 1,
-            revocation: CodingAgentProductEventCapabilityRevocation::FutureOnly,
+            revocation: CodingAgentProductEventCapabilityRevocation::RequestCancelOlderOperations,
             cancellation_requested_operation_ids: Vec::new(),
         }),
     ];

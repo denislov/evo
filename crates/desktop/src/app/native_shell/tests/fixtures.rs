@@ -249,6 +249,7 @@ fn visual_performance_projection(block_count: usize) -> DesktopProjection {
     snapshot.transcript.items = (0..block_count)
         .map(|index| CodingAgentSessionTranscriptItem::User {
             text: format!("message {index}: {payload}"),
+            started_at: None,
         })
         .collect();
     DesktopProjection::new(snapshot)
@@ -278,6 +279,8 @@ fn clipping_regression_projection() -> DesktopProjection {
             images: Vec::new(),
             done: true,
             reasoning_duration_millis: None,
+            model_id: None,
+            completed_at: None,
         });
     DesktopProjection::new(snapshot)
         .expect("clipping regression fixture is a valid product projection")

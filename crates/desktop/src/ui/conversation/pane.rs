@@ -424,6 +424,14 @@ impl Render for ConversationPane {
                             .map(compact_duration);
                         let is_tool = block.kind == ConversationBlockKind::Tool;
                         let is_delegation = block.kind == ConversationBlockKind::Delegation;
+                        let turn_label = block.turn.as_ref().map(|turn| {
+                            let mut label = format!("Model · {}", turn.model);
+                            if let Some(duration_millis) = turn.duration_millis {
+                                label.push_str(" · ");
+                                label.push_str(&compact_duration(duration_millis));
+                            }
+                            SharedString::from(label)
+                        });
                         let delegation = block.delegation.as_ref();
                         let delegation_expandable = is_delegation;
                         let delegation_summary_text = if is_delegation {
@@ -465,9 +473,10 @@ impl Render for ConversationPane {
                             )
                         };
                         // Selection paints a full-height leading rail; hover no
-                        // longer paints a stub. The rail is absolutely
-                        // positioned and never affects row height.
-                        let selection_rail = (selected && !is_tool).then(|| {
+                        // longer paints a stub. Tool-group rows (tool calls and
+                        // delegations) stay rail-free like before. The rail is
+                        // absolutely positioned and never affects row height.
+                        let selection_rail = (selected && !is_tool_group(block.kind)).then(|| {
                             div()
                                 .debug_selector(|| "conversation-selected-rail".to_owned())
                                 .absolute()
@@ -1068,6 +1077,9 @@ impl Render for ConversationPane {
                                             let is_shell = matches!(tool_name_str, "bash" | "shell");
                                             let is_edit = tool_name_str == "edit";
                                             let is_write = tool_name_str == "write";
+                                            let is_ls = tool_name_str == "ls";
+                                            let is_find = tool_name_str == "find";
+                                            let is_grep = tool_name_str == "grep";
                                             card.child(
                                                 div()
                                                     .id(("tool-output-region", index))
@@ -1168,8 +1180,25 @@ impl Render for ConversationPane {
                                                                     ))
                                                                 }
                                                             })
+                                                            .when(is_ls || is_find, |region| {
+                                                                region.child(ls_find_view(
+                                                                    &text,
+                                                                    &theme,
+                                                                ))
+                                                            })
+                                                            .when(is_grep, |region| {
+                                                                region.child(grep_view(
+                                                                    &text,
+                                                                    &theme,
+                                                                ))
+                                                            })
                                                             .when(
-                                                                !is_shell && !is_edit && !is_write,
+                                                                !is_shell
+                                                                    && !is_edit
+                                                                    && !is_write
+                                                                    && !is_ls
+                                                                    && !is_find
+                                                                    && !is_grep,
                                                                 |region| {
                                                                     region.child(
                                                                         div()
@@ -1540,6 +1569,8 @@ impl Render for ConversationPane {
                                                 div()
                                                     .w_full()
                                                     .flex()
+                                                    .items_center()
+                                                    .gap_token(DesignSpace::Sm)
                                                     .when(visual.align_right, |actions| {
                                                         actions.justify_end()
                                                     })
@@ -1549,7 +1580,22 @@ impl Render for ConversationPane {
                                                         hover_group.clone(),
                                                         selected,
                                                         cx,
-                                                    )),
+                                                    ))
+                                                    .when_some(turn_label, |actions, label| {
+                                                        actions.child(
+                                                            div()
+                                                                .id(("turn-metadata", index))
+                                                                .debug_selector(|| {
+                                                                    "desktop-turn-metadata".into()
+                                                                })
+                                                                .flex_shrink_0()
+                                                                .text_token(DesignText::Metadata)
+                                                                .text_color(rgb(
+                                                                    theme.muted_text.value(),
+                                                                ))
+                                                                .child(label),
+                                                        )
+                                                    }),
                                             )
                                         }),
                                         ),
@@ -1740,24 +1786,31 @@ fn user_message_width(text: &str) -> f32 {
         .clamp(USER_MESSAGE_MIN_WIDTH, maximum)
 }
 
+/// Whether the row is an interior part of an assistant turn: tool calls and
+/// delegations neither start a new identity segment nor carry the turn's
+/// trailing copy affordance, so adjacent assistant rows must merge across
+/// them exactly like they merge across plain tool calls.
+fn is_tool_group(kind: ConversationBlockKind) -> bool {
+    matches!(
+        kind,
+        ConversationBlockKind::Tool | ConversationBlockKind::Delegation
+    )
+}
+
 fn conversation_identity_header_visible(
     kind: ConversationBlockKind,
     previous_kind: Option<ConversationBlockKind>,
 ) -> bool {
     kind != ConversationBlockKind::User
-        && (kind != ConversationBlockKind::Assistant
-            || previous_kind != Some(ConversationBlockKind::Tool))
+        && !(kind == ConversationBlockKind::Assistant && previous_kind.is_some_and(is_tool_group))
 }
 
 fn conversation_copy_footer_visible(
     kind: ConversationBlockKind,
     next_kind: Option<ConversationBlockKind>,
 ) -> bool {
-    !(matches!(
-        kind,
-        ConversationBlockKind::Tool | ConversationBlockKind::Delegation
-    ) || kind == ConversationBlockKind::Assistant
-        && next_kind == Some(ConversationBlockKind::Tool))
+    !(is_tool_group(kind)
+        || kind == ConversationBlockKind::Assistant && next_kind.is_some_and(is_tool_group))
 }
 
 /// Collapsed-header summary for a delegation: the first line of the task.
@@ -1778,6 +1831,9 @@ fn tool_display_label(name: &str) -> &'static str {
         "edit" => "Edit",
         "write" => "Write",
         "read" => "Read",
+        "ls" => "Files",
+        "find" => "Find",
+        "grep" => "Search",
         _ => "Tool",
     }
 }
@@ -1861,8 +1917,212 @@ fn tool_summary(name: &str, detail: &str, text: &str) -> String {
                 .map_or(0, |content| content.lines().count());
             format!("{path} +{added}")
         }
+        "ls" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let entries = count_entries(text);
+            if entries == 0 {
+                format!("{path} · empty")
+            } else {
+                format!("{path} · {}", pluralized(entries, "entry", "entries"))
+            }
+        }
+        "find" => {
+            let pattern = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let matches = count_entries(text);
+            if matches == 0 {
+                format!("{pattern} · no matches")
+            } else {
+                format!("{pattern} · {}", pluralized(matches, "match", "matches"))
+            }
+        }
+        "grep" => {
+            let pattern = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let matches = count_grep_matches(text);
+            if matches == 0 {
+                format!("{pattern} · no matches")
+            } else {
+                format!("{pattern} · {}", pluralized(matches, "match", "matches"))
+            }
+        }
         _ => String::new(),
     }
+}
+
+/// Non-empty content lines of an ls/find/grep result, excluding the trailing
+/// `[notice]` block those tools append after a blank line. Content lines that
+/// merely start with '[' (e.g. a grep match of `[foo]`) are kept.
+fn tool_result_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut in_notice = false;
+    for line in text.lines().map(str::trim_end) {
+        if line.is_empty() {
+            in_notice = true;
+        } else if !in_notice {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// The empty-state messages ls/find/grep emit when nothing matched.
+fn is_empty_state_line(line: &str) -> bool {
+    matches!(
+        line,
+        "(empty directory)" | "No files found matching pattern" | "No matches found"
+    )
+}
+
+/// Entry count of an ls/find result, treating empty-state messages as zero
+/// entries.
+fn count_entries(text: &str) -> usize {
+    let lines = tool_result_lines(text);
+    if lines.first().is_some_and(|first| is_empty_state_line(first)) {
+        0
+    } else {
+        lines.len()
+    }
+}
+
+/// Number of `path:line: content` match lines in a grep result, so context
+/// lines around a match do not inflate the count.
+fn count_grep_matches(text: &str) -> usize {
+    tool_result_lines(text)
+        .iter()
+        .filter(|line| parse_grep_match(line).is_some())
+        .count()
+}
+
+fn pluralized(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
+/// Split a grep match line `path:line: content`. The path and content may
+/// themselves contain `: `, `:` or digits, so the split anchors on the *last*
+/// `: <digits>: ` segment — the emitters format every match that way.
+fn parse_grep_match(line: &str) -> Option<(&str, &str, &str)> {
+    let mut anchor: Option<(usize, usize)> = None; // (colon index, digit count)
+    for (index, _) in line.match_indices(':') {
+        let after = &line[index + 1..];
+        let digits = after
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            continue;
+        }
+        if after.as_bytes().get(digits) == Some(&b':')
+            && after.as_bytes().get(digits + 1) == Some(&b' ')
+        {
+            anchor = Some((index, digits));
+        }
+    }
+    let (colon, digits) = anchor?;
+    let after = &line[colon + 1..];
+    let (line_no, content) = after.split_at(digits);
+    Some((&line[..colon], line_no, &content[2..]))
+}
+
+/// Split a grep context line `path-line- content` shown around a match.
+fn parse_grep_context(line: &str) -> Option<(&str, &str, &str)> {
+    let mut anchor: Option<(usize, usize)> = None; // (dash index, digit count)
+    for (index, _) in line.match_indices('-') {
+        let after = &line[index + 1..];
+        let digits = after
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            continue;
+        }
+        if after.as_bytes().get(digits) == Some(&b'-')
+            && after.as_bytes().get(digits + 1) == Some(&b' ')
+        {
+            anchor = Some((index, digits));
+        }
+    }
+    let (dash, digits) = anchor?;
+    let after = &line[dash + 1..];
+    let (line_no, content) = after.split_at(digits);
+    Some((&line[..dash], line_no, &content[2..]))
+}
+
+/// Directory listings (`ls`, `find`) paint directory entries with the accent
+/// color, keep files neutral and dim the notice and empty-state lines.
+fn ls_find_view(text: &str, theme: &SemanticTheme) -> gpui::AnyElement {
+    let mut container = div().flex().flex_col();
+    for line in tool_result_lines(text) {
+        let directory = line.ends_with('/');
+        let muted = is_empty_state_line(line);
+        container = container.child(
+            div()
+                .text_color(rgb(if directory {
+                    theme.accent.value()
+                } else if muted {
+                    theme.subtle_text.value()
+                } else {
+                    theme.text.value()
+                }))
+                .child(SharedString::new(line)),
+        );
+    }
+    container.into_any_element()
+}
+
+/// Grep results keep the path neutral, highlight the line number on match
+/// lines and dim context, notice and empty-state lines.
+fn grep_view(text: &str, theme: &SemanticTheme) -> gpui::AnyElement {
+    let mut container = div().flex().flex_col();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((path, line_no, content)) = parse_grep_match(line) {
+            container = container.child(
+                div()
+                    .flex()
+                    .child(
+                        div()
+                            .text_color(rgb(theme.subtle_text.value()))
+                            .child(SharedString::new(format!("{path}:"))),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme.accent.value()))
+                            .child(SharedString::new(format!("{line_no}: "))),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text.value()))
+                            .child(SharedString::new(content)),
+                    ),
+            );
+        } else {
+            let muted = line.starts_with('[')
+                || is_empty_state_line(line)
+                || parse_grep_context(line).is_some();
+            container = container.child(
+                div()
+                    .text_color(rgb(if muted {
+                        theme.subtle_text.value()
+                    } else {
+                        theme.text.value()
+                    }))
+                    .child(SharedString::new(line)),
+            );
+        }
+    }
+    container.into_any_element()
 }
 
 fn edit_diff_view(detail: &str, text: &str, theme: &SemanticTheme) -> gpui::AnyElement {
@@ -1973,8 +2233,9 @@ mod tests {
     use super::{
         ConversationBlockKind, ConversationPane, MAX_MARKDOWN_PARSE_STATES,
         conversation_copy_footer_visible, conversation_identity_header_visible,
-        delegation_task_summary, edit_diff_text, tool_detail_copy_text, tool_disclosure_icon,
-        tool_name_from_title, tool_summary, user_message_width, write_diff_text,
+        delegation_task_summary, edit_diff_text, parse_grep_context, parse_grep_match,
+        tool_detail_copy_text, tool_disclosure_icon, tool_name_from_title, tool_summary,
+        user_message_width, write_diff_text,
     };
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::{Theme, ThemeMode, text::TextViewState};
@@ -2021,6 +2282,92 @@ mod tests {
             ),
             "src/lib.rs +2"
         );
+        assert_eq!(
+            tool_summary("ls", r#"{"path":"src"}"#, "a.rs\nb.rs\nlib/\n"),
+            "src · 3 entries"
+        );
+        assert_eq!(
+            tool_summary("ls", r#"{"path":"."}"#, "(empty directory)"),
+            ". · empty"
+        );
+        assert_eq!(
+            tool_summary("find", r#"{"pattern":"*.rs"}"#, "a.rs\nb.rs"),
+            "*.rs · 2 matches"
+        );
+        assert_eq!(
+            tool_summary(
+                "find",
+                r#"{"pattern":"*.rs"}"#,
+                "No files found matching pattern"
+            ),
+            "*.rs · no matches"
+        );
+        assert_eq!(
+            tool_summary(
+                "grep",
+                r#"{"pattern":"foo"}"#,
+                "src/a.rs:3: foo\nsrc/b.rs:1: foo\n\n[2 matches limit reached]"
+            ),
+            "foo · 2 matches"
+        );
+        // grep context lines around a match do not inflate the count.
+        assert_eq!(
+            tool_summary(
+                "grep",
+                r#"{"pattern":"fn","context":1}"#,
+                "src/lib.rs-3- use std::io;\nsrc/lib.rs:4: fn main() {}"
+            ),
+            "fn · 1 match"
+        );
+        // A match whose content starts with '[' or contains ': ' still counts
+        // and is not mistaken for the trailing notice block.
+        assert_eq!(
+            tool_summary(
+                "grep",
+                r#"{"pattern":"a"}"#,
+                "src/a.rs:2: [foo]\nsrc/b.rs:5: let m = {a: 1}\n\n[3 matches limit reached]"
+            ),
+            "a · 2 matches"
+        );
+        assert_eq!(
+            tool_summary("grep", r#"{"pattern":"nope"}"#, "No matches found"),
+            "nope · no matches"
+        );
+    }
+
+    #[test]
+    fn grep_lines_parse_paths_line_numbers_and_context() {
+        assert_eq!(
+            parse_grep_match("src/a.rs:12: let x = 1"),
+            Some(("src/a.rs", "12", "let x = 1"))
+        );
+        // A path containing ':' or content containing ': ' must not confuse
+        // the final `: <digits>: ` anchor.
+        assert_eq!(
+            parse_grep_match("src/a.rs:3: url = \"http://x:8080\""),
+            Some(("src/a.rs", "3", "url = \"http://x:8080\""))
+        );
+        assert_eq!(
+            parse_grep_match("src/a.rs:3: let m = {a: 1, b: 2}"),
+            Some(("src/a.rs", "3", "let m = {a: 1, b: 2}"))
+        );
+        assert_eq!(
+            parse_grep_context("src/lib.rs-3- use std::io;"),
+            Some(("src/lib.rs", "3", "use std::io;"))
+        );
+        // A hyphenated basename still splits at the final `- <digits>- `.
+        assert_eq!(
+            parse_grep_context("my-file.rs-5- let y = 2"),
+            Some(("my-file.rs", "5", "let y = 2"))
+        );
+        // Content containing '- ' must not confuse the context anchor.
+        assert_eq!(
+            parse_grep_context("src/lib.rs-2- let y = a - b"),
+            Some(("src/lib.rs", "2", "let y = a - b"))
+        );
+        assert_eq!(parse_grep_match("not a match line"), None);
+        assert_eq!(parse_grep_match("src/a.rs:12"), None);
+        assert_eq!(parse_grep_context("src/a.rs:12: content"), None);
     }
 
     #[test]
@@ -2061,7 +2408,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_headers_hide_for_user_and_continue_across_a_tool_row() {
+    fn identity_headers_hide_for_user_and_continue_across_tool_group_rows() {
         assert!(!conversation_identity_header_visible(
             ConversationBlockKind::User,
             Some(ConversationBlockKind::Assistant)
@@ -2069,6 +2416,10 @@ mod tests {
         assert!(!conversation_identity_header_visible(
             ConversationBlockKind::Assistant,
             Some(ConversationBlockKind::Tool)
+        ));
+        assert!(!conversation_identity_header_visible(
+            ConversationBlockKind::Assistant,
+            Some(ConversationBlockKind::Delegation)
         ));
         assert!(conversation_identity_header_visible(
             ConversationBlockKind::Assistant,
@@ -2085,6 +2436,10 @@ mod tests {
         assert!(!conversation_copy_footer_visible(
             ConversationBlockKind::Assistant,
             Some(ConversationBlockKind::Tool)
+        ));
+        assert!(!conversation_copy_footer_visible(
+            ConversationBlockKind::Assistant,
+            Some(ConversationBlockKind::Delegation)
         ));
         assert!(conversation_copy_footer_visible(
             ConversationBlockKind::Assistant,
@@ -2115,6 +2470,12 @@ mod tests {
         assert!(!conversation_copy_footer_visible(
             ConversationBlockKind::Delegation,
             Some(ConversationBlockKind::Assistant)
+        ));
+        // An assistant row followed by a delegation is still mid-turn: the
+        // copy affordance waits for the delegation like it does for a tool.
+        assert!(!conversation_copy_footer_visible(
+            ConversationBlockKind::Assistant,
+            Some(ConversationBlockKind::Delegation)
         ));
         assert!(conversation_copy_footer_visible(
             ConversationBlockKind::Assistant,

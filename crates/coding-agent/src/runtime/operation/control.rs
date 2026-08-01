@@ -23,7 +23,6 @@ pub(crate) enum OperationKind {
     SwitchActiveLeaf,
     SetSessionTreeLabel,
     SetSessionName,
-    SetDefaultAgentProfile,
     SelfHealingEdit,
 }
 
@@ -41,7 +40,6 @@ impl OperationKind {
             Self::SwitchActiveLeaf => "switch_active_leaf",
             Self::SetSessionTreeLabel => "set_session_tree_label",
             Self::SetSessionName => "set_session_name",
-            Self::SetDefaultAgentProfile => "set_default_agent_profile",
             Self::SelfHealingEdit => "self_healing_edit",
         }
     }
@@ -59,7 +57,6 @@ impl OperationKind {
             "switch_active_leaf" => Self::SwitchActiveLeaf,
             "set_session_tree_label" => Self::SetSessionTreeLabel,
             "set_session_name" => Self::SetSessionName,
-            "set_default_agent_profile" => Self::SetDefaultAgentProfile,
             "self_healing_edit" => Self::SelfHealingEdit,
             _ => return None,
         })

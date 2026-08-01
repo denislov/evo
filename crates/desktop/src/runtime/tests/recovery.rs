@@ -227,6 +227,7 @@ async fn shared_cross_adapter_fixture_matches_desktop_product_state_exactly() {
         pending_recoveries: initial.pending_recoveries.clone(),
     })
     .unwrap();
+    let initial_profile_id = initial.session.session.default_agent_profile_id.clone();
     let mut desktop = DesktopProjection::new(initial).unwrap();
     let base_sequence = desktop.cursor().last_event_sequence;
     let stream_id = desktop.cursor().stream_id.clone();
@@ -268,7 +269,8 @@ async fn shared_cross_adapter_fixture_matches_desktop_product_state_exactly() {
     );
     assert_eq!(
         desktop.snapshot().session.default_agent_profile_id.as_str(),
-        "reviewer"
+        initial_profile_id.as_str(),
+        "the session profile is locked to its creation choice"
     );
     bridge.shutdown().await.unwrap();
 }

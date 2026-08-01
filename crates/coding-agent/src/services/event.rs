@@ -15,7 +15,6 @@ use crate::events::diagnostic::DiagnosticEvent;
 use crate::events::emission::ProductEventDraft;
 use crate::events::message::MessageEvent;
 use crate::events::outbox::DurableOutboxRecord;
-use crate::events::profile::ProfileEvent;
 use crate::events::prompt::PromptEvent;
 use crate::events::prompt_stream::PromptStreamEvent;
 #[cfg(test)]
@@ -803,18 +802,6 @@ impl EventService {
             DiagnosticEvent::Diagnostic {
                 operation_id: operation_id.map(Into::into),
                 message: message.into(),
-            }
-            .into_product_draft(),
-        )
-    }
-
-    pub(crate) fn emit_default_agent_profile_changed(
-        &self,
-        profile_id: impl Into<ProfileId>,
-    ) -> ProductEvent {
-        self.publish_without_root_terminal(
-            ProfileEvent::DefaultChanged {
-                profile_id: profile_id.into(),
             }
             .into_product_draft(),
         )

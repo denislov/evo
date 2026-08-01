@@ -183,7 +183,6 @@ pub(crate) enum OperationOutcome {
     SelfHealingEdit(SelfHealingEditOutcome),
     AgentInvocation(AgentInvocationOutcome),
     AgentTeam(AgentTeamOutcome),
-    SetDefaultAgentProfile,
     ForkSession,
     SwitchActiveLeaf,
     SessionTreeLabelChanged {

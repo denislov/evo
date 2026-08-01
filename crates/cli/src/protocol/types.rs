@@ -147,11 +147,6 @@ pub(crate) enum ProtocolEventPayload {
     },
     #[serde(rename = "agent_end")]
     AgentEnd { messages: Vec<serde_json::Value> },
-    #[serde(rename = "default_agent_profile_changed")]
-    DefaultAgentProfileChanged {
-        #[serde(rename = "profileId")]
-        profile_id: String,
-    },
     #[serde(rename = "self_healing_edit_start")]
     SelfHealingEditStart {
         #[serde(rename = "operationId")]
@@ -740,14 +735,6 @@ pub enum RpcCommand {
     ListAgentProfiles { id: Option<String> },
     #[serde(rename = "list_team_profiles")]
     ListTeamProfiles { id: Option<String> },
-    #[serde(rename = "set_default_agent_profile")]
-    SetDefaultAgentProfile {
-        id: Option<String>,
-        #[serde(rename = "profileId")]
-        profile_id: String,
-        #[serde(rename = "idempotencyKey", skip_serializing_if = "Option::is_none")]
-        idempotency_key: Option<String>,
-    },
     #[serde(rename = "invoke_agent")]
     InvokeAgent {
         id: Option<String>,

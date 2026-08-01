@@ -122,14 +122,16 @@ fn model_switch_fallback_commits_auto_and_uses_a_header_local_hint(cx: &mut Test
     });
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("desktop-header-thinking-selector")
-            .is_none()
+        cx.debug_bounds("desktop-header-model-selector").is_some(),
+        "the model selector remains available once thinking is folded into it"
     );
     assert!(cx.debug_bounds("desktop-header-thinking-hint").is_some());
 }
 
 #[gpui::test]
-fn header_thinking_selector_submits_the_session_level_with_the_prompt(cx: &mut TestAppContext) {
+fn header_model_selector_submits_the_session_thinking_level_with_the_prompt(
+    cx: &mut TestAppContext,
+) {
     initialize_visual_test(cx);
     let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
     let (shell, cx) = add_visual_shell(cx, runtime, visual_test_projection());
@@ -145,13 +147,15 @@ fn header_thinking_selector_submits_the_session_level_with_the_prompt(cx: &mut T
         DesktopThinkingLevel::Default
     );
     let selector = cx
-        .debug_bounds("desktop-header-thinking-selector")
-        .expect("the Header owns the session thinking selector");
+        .debug_bounds("desktop-header-model-selector")
+        .expect("the Header owns the model selector with session thinking folded in");
     assert!(cx.debug_bounds("desktop-composer-thinking").is_none());
 
     cx.simulate_click(selector.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    choose_popup_item(cx, 5);
+    // Clickable items in the merged dropdown: 4 models, then the folded-in
+    // thinking group Auto/Off/Minimal/Low/Medium/High/XHigh.
+    choose_popup_item(cx, 9);
 
     assert_eq!(
         shell.read_with(cx, |shell, _| shell

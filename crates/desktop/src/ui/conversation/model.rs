@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use coding_agent::api::view::{CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::copy::{conversation_copy_text, truncate_bytes};
 
@@ -170,6 +171,15 @@ impl ConversationItemKey {
     }
 }
 
+/// Turn-level display metadata attached to the turn's final assistant row:
+/// which model answered and how long the whole turn (submit to completion,
+/// tool calls included) took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnMeta {
+    pub model: String,
+    pub duration_millis: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationBlock {
     pub id: String,
@@ -184,6 +194,16 @@ pub struct ConversationBlock {
     pub image_count: usize,
     pub reasoning_duration_millis: Option<u64>,
     pub truncated: bool,
+    /// Model that actually produced this assistant message (`response_model`
+    /// when the provider reported one, otherwise the requested model).
+    pub model: Option<String>,
+    /// Wall-clock submit time (RFC 3339) of the turn this user row opened.
+    pub started_at: Option<String>,
+    /// Wall-clock completion time (RFC 3339) of this assistant message.
+    pub completed_at: Option<String>,
+    /// Turn summary attached to the turn's final assistant row; `None` for
+    /// interior rows and rows outside a completed turn.
+    pub turn: Option<TurnMeta>,
     /// Delegation target and lifecycle state; `None` for every other kind.
     pub delegation: Option<DelegationMeta>,
 }
@@ -198,6 +218,10 @@ impl ConversationBlock {
             + self.title.len()
             + self.text.len()
             + self.detail.len()
+            + self.model.as_ref().map_or(0, String::len)
+            + self.started_at.as_ref().map_or(0, String::len)
+            + self.completed_at.as_ref().map_or(0, String::len)
+            + self.turn.as_ref().map_or(0, |turn| turn.model.len())
             + self
                 .delegation
                 .as_ref()
@@ -230,6 +254,7 @@ impl ConversationProjection {
         for (index, item) in snapshot.items.into_iter().enumerate() {
             projection.push_bounded(block_from_product(index, item));
         }
+        projection.refresh_turn_metadata();
         projection
     }
 
@@ -287,6 +312,102 @@ impl ConversationProjection {
             self.omitted_blocks = self.omitted_blocks.saturating_add(1);
         }
     }
+
+    /// Attach the turn summary (model + whole-turn duration) to the final
+    /// assistant row of every completed turn: from the user's submit time to
+    /// the last assistant message's completion, tool calls included.
+    fn refresh_turn_metadata(&mut self) {
+        let mut turn_started_at: Option<String> = None;
+        // Index of the last assistant row in the open turn; its `turn` field
+        // receives the summary once the turn closes or the transcript ends.
+        let mut last_assistant_index: Option<usize> = None;
+        let mut last_model: Option<String> = None;
+        let mut last_completed_at: Option<String> = None;
+        let mut finalized = Vec::<PendingTurnFinalize>::new();
+        for index in 0..self.blocks.len() {
+            match self.blocks[index].kind {
+                ConversationBlockKind::User => {
+                    if let Some(assistant_index) = last_assistant_index.take() {
+                        finalized.push(PendingTurnFinalize {
+                            assistant_index,
+                            started_at: turn_started_at.clone(),
+                            completed_at: last_completed_at.take(),
+                            model: last_model.take(),
+                        });
+                    }
+                    turn_started_at = self.blocks[index].started_at.clone();
+                }
+                ConversationBlockKind::Assistant => {
+                    last_assistant_index = Some(index);
+                    if let Some(model) = &self.blocks[index].model {
+                        last_model = Some(model.clone());
+                    }
+                    if let Some(completed_at) = &self.blocks[index].completed_at {
+                        last_completed_at = Some(completed_at.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(assistant_index) = last_assistant_index {
+            finalized.push(PendingTurnFinalize {
+                assistant_index,
+                started_at: turn_started_at,
+                completed_at: last_completed_at,
+                model: last_model,
+            });
+        }
+        for pending in finalized {
+            self.finalize_turn(
+                pending.assistant_index,
+                &pending.started_at,
+                pending.completed_at,
+                pending.model,
+            );
+        }
+    }
+
+    fn finalize_turn(
+        &mut self,
+        assistant_index: usize,
+        turn_started_at: &Option<String>,
+        completed_at: Option<String>,
+        model: Option<String>,
+    ) {
+        let Some(model) = model else {
+            return;
+        };
+        let duration_millis = match (&turn_started_at, &completed_at) {
+            (Some(started_at), Some(completed_at)) => {
+                rfc3339_elapsed_millis(started_at, completed_at)
+            }
+            _ => None,
+        };
+        let Some(block) = self.blocks.get_mut(assistant_index) else {
+            return;
+        };
+        block.turn = Some(TurnMeta {
+            model,
+            duration_millis,
+        });
+        block.refresh_source_revision();
+    }
+}
+
+/// Finalize work for one closed turn, collected while scanning the transcript.
+struct PendingTurnFinalize {
+    assistant_index: usize,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    model: Option<String>,
+}
+
+/// Whole-turn wall-clock duration in milliseconds between two RFC 3339
+/// timestamps; `None` when either side fails to parse.
+fn rfc3339_elapsed_millis(started_at: &str, completed_at: &str) -> Option<u64> {
+    let started_at = OffsetDateTime::parse(started_at, &Rfc3339).ok()?;
+    let completed_at = OffsetDateTime::parse(completed_at, &Rfc3339).ok()?;
+    u64::try_from((completed_at - started_at).whole_milliseconds()).ok()
 }
 
 fn diagnostic_equivalence_key(message: &str) -> &str {
@@ -314,9 +435,21 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
         } => *reasoning_duration_millis,
         _ => None,
     };
+    let model = match &item {
+        CodingAgentSessionTranscriptItem::Assistant { model_id, .. } => model_id.clone(),
+        _ => None,
+    };
+    let started_at = match &item {
+        CodingAgentSessionTranscriptItem::User { started_at, .. } => started_at.clone(),
+        _ => None,
+    };
+    let completed_at = match &item {
+        CodingAgentSessionTranscriptItem::Assistant { completed_at, .. } => completed_at.clone(),
+        _ => None,
+    };
     let (kind, source_id, title, text, detail, done, is_error, image_count, truncated, delegation) =
         match item {
-            CodingAgentSessionTranscriptItem::User { text } => {
+            CodingAgentSessionTranscriptItem::User { text, .. } => {
                 let (text, truncated) = truncate_bytes(text, MAX_BLOCK_TEXT_BYTES);
                 (
                     ConversationBlockKind::User,
@@ -453,6 +586,10 @@ fn block_from_product(index: usize, item: CodingAgentSessionTranscriptItem) -> C
         image_count,
         reasoning_duration_millis,
         truncated,
+        model,
+        started_at,
+        completed_at,
+        turn: None,
         delegation,
     };
     block.refresh_source_revision();
@@ -516,6 +653,26 @@ fn conversation_block_revision(block: &ConversationBlock) -> u64 {
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
+    if let Some(model) = &block.model {
+        hash = update(hash, &(model.len() as u64).to_le_bytes());
+        hash = update(hash, model.as_bytes());
+    }
+    if let Some(started_at) = &block.started_at {
+        hash = update(hash, &(started_at.len() as u64).to_le_bytes());
+        hash = update(hash, started_at.as_bytes());
+    }
+    if let Some(completed_at) = &block.completed_at {
+        hash = update(hash, &(completed_at.len() as u64).to_le_bytes());
+        hash = update(hash, completed_at.as_bytes());
+    }
+    if let Some(turn) = &block.turn {
+        hash = update(hash, &(turn.model.len() as u64).to_le_bytes());
+        hash = update(hash, turn.model.as_bytes());
+        hash = update(
+            hash,
+            &turn.duration_millis.unwrap_or(u64::MAX).to_le_bytes(),
+        );
+    }
     // A status-only transition (running -> cancelled, unchanged task and
     // summary) must still invalidate the render cache, or the header would
     // keep showing the stale status.
@@ -584,6 +741,7 @@ mod tests {
     fn user(index: usize) -> CodingAgentSessionTranscriptItem {
         CodingAgentSessionTranscriptItem::User {
             text: format!("message {index}"),
+            started_at: None,
         }
     }
 
@@ -709,12 +867,13 @@ mod tests {
         let items = (0..MAX_TRANSCRIPT_BLOCKS)
             .map(|index| CodingAgentSessionTranscriptItem::User {
                 text: format!("{index}:{payload}"),
+                started_at: None,
             })
             .collect::<Vec<_>>();
         let fixture_bytes = items
             .iter()
             .map(|item| match item {
-                CodingAgentSessionTranscriptItem::User { text } => text.len(),
+                CodingAgentSessionTranscriptItem::User { text, .. } => text.len(),
                 _ => 0,
             })
             .sum::<usize>();
@@ -765,12 +924,13 @@ mod tests {
         let items = (0..MAX_TRANSCRIPT_BLOCKS)
             .map(|index| CodingAgentSessionTranscriptItem::User {
                 text: format!("{index}:{payload}"),
+                started_at: None,
             })
             .collect::<Vec<_>>();
         let fixture_bytes = items
             .iter()
             .map(|item| match item {
-                CodingAgentSessionTranscriptItem::User { text } => text.len(),
+                CodingAgentSessionTranscriptItem::User { text, .. } => text.len(),
                 _ => 0,
             })
             .sum::<usize>();
@@ -982,6 +1142,8 @@ mod tests {
                         truncated: false,
                         durable: false,
                         delegation: None,
+                        turn: None,
+                        model: None,
                     },
                     900,
                 );
@@ -1018,6 +1180,7 @@ mod tests {
         let projection = ConversationProjection::hydrate(transcript(vec![
             CodingAgentSessionTranscriptItem::User {
                 text: "界".repeat(MAX_BLOCK_TEXT_BYTES),
+                started_at: None,
             },
         ]));
         let block = projection.blocks().front().unwrap();
@@ -1048,6 +1211,8 @@ mod tests {
                 images: Vec::new(),
                 done: true,
                 reasoning_duration_millis: Some(2_430),
+                model_id: None,
+                completed_at: None,
             },
         ]));
         let block = projection.blocks().front().unwrap();
@@ -1056,5 +1221,120 @@ mod tests {
             compact_duration(block.reasoning_duration_millis.unwrap()),
             "2.4 s"
         );
+    }
+
+    #[test]
+    fn assistant_hydration_carries_the_message_level_model() {
+        let projection = ConversationProjection::hydrate(transcript(vec![
+            CodingAgentSessionTranscriptItem::Assistant {
+                id: "message-model".into(),
+                text: "answer".into(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: None,
+                model_id: Some("deepseek-v4-flash".into()),
+                completed_at: None,
+            },
+        ]));
+        let block = projection.blocks().front().unwrap();
+        assert_eq!(block.model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn turn_metadata_lands_on_the_final_assistant_row_of_a_completed_turn() {
+        let items = vec![
+            CodingAgentSessionTranscriptItem::User {
+                text: "do it".into(),
+                started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+            CodingAgentSessionTranscriptItem::Assistant {
+                id: "message-1".into(),
+                text: "step one".into(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: None,
+                model_id: Some("deepseek-v4-flash".into()),
+                completed_at: Some("2026-01-01T00:00:10Z".into()),
+            },
+            CodingAgentSessionTranscriptItem::Tool {
+                call_id: "call-1".into(),
+                name: "shell".into(),
+                args: serde_json::json!({}),
+                result: Some("done".into()),
+                is_error: false,
+                duration_millis: None,
+            },
+            CodingAgentSessionTranscriptItem::Assistant {
+                id: "message-2".into(),
+                text: "step two".into(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: None,
+                model_id: Some("deepseek-v4-flash".into()),
+                completed_at: Some("2026-01-01T00:00:30Z".into()),
+            },
+        ];
+        let projection = ConversationProjection::hydrate(transcript(items));
+        let blocks = projection.blocks();
+        // Interior assistant rows of the turn carry no turn metadata.
+        assert!(blocks[1].turn.is_none(), "interior row must stay bare");
+        let turn = blocks[3]
+            .turn
+            .as_ref()
+            .expect("the turn's final assistant row carries the summary");
+        assert_eq!(turn.model, "deepseek-v4-flash");
+        // Submit at 00:00:00 to completion at 00:00:30, tool call included.
+        assert_eq!(turn.duration_millis, Some(30_000));
+    }
+
+    #[test]
+    fn turn_metadata_omits_duration_for_unfinished_or_legacy_turns() {
+        // The last assistant row never completed: the model is known but the
+        // whole-turn duration is not.
+        let items = vec![
+            CodingAgentSessionTranscriptItem::User {
+                text: "do it".into(),
+                started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+            CodingAgentSessionTranscriptItem::Assistant {
+                id: "message-3".into(),
+                text: "streaming…".into(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: false,
+                reasoning_duration_millis: None,
+                model_id: Some("deepseek-v4-flash".into()),
+                completed_at: None,
+            },
+        ];
+        let projection = ConversationProjection::hydrate(transcript(items));
+        let turn = projection.blocks().back().unwrap().turn.as_ref().unwrap();
+        assert_eq!(turn.model, "deepseek-v4-flash");
+        assert_eq!(turn.duration_millis, None);
+
+        // Legacy session without submit timestamps: no duration either.
+        let items = vec![
+            CodingAgentSessionTranscriptItem::User {
+                text: "legacy".into(),
+                started_at: None,
+            },
+            CodingAgentSessionTranscriptItem::Assistant {
+                id: "message-4".into(),
+                text: "old answer".into(),
+                thinking: String::new(),
+                images: Vec::new(),
+                done: true,
+                reasoning_duration_millis: None,
+                model_id: Some("claude-sonnet-4-5".into()),
+                completed_at: None,
+            },
+        ];
+        let projection = ConversationProjection::hydrate(transcript(items));
+        let turn = projection.blocks().back().unwrap().turn.as_ref().unwrap();
+        assert_eq!(turn.model, "claude-sonnet-4-5");
+        assert_eq!(turn.duration_millis, None);
     }
 }

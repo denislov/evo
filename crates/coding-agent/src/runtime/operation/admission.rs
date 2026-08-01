@@ -48,7 +48,6 @@ impl CodingAgentSession {
             | CodingAgentOperation::SwitchActiveLeaf { .. }
             | CodingAgentOperation::SetSessionTreeLabel { .. }
             | CodingAgentOperation::SetSessionName { .. }
-            | CodingAgentOperation::SetDefaultAgentProfile { .. }
             | CodingAgentOperation::ExportCurrent
             | CodingAgentOperation::ExportCurrentHtml(_) => {}
         }

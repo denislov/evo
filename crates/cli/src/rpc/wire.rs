@@ -62,7 +62,6 @@ pub(super) fn is_supported_m5_command(command: &str) -> bool {
             | "approve_tool_authorization"
             | "deny_tool_authorization"
             | "list_team_profiles"
-            | "set_default_agent_profile"
             | "invoke_agent"
             | "invoke_team"
             | "list_delegation_confirmations"

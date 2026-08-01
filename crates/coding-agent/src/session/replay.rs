@@ -106,12 +106,21 @@ pub(crate) enum TranscriptItem {
     UserInput {
         turn_id: String,
         text: String,
+        /// Wall-clock time the turn was submitted (RFC 3339). `None` for
+        /// in-memory transcripts that never persisted the event envelope.
+        started_at: Option<String>,
     },
     AssistantMessage {
         message_id: String,
         content: Vec<PersistedContentBlock>,
         status: MessageStatus,
         reasoning_duration_millis: Option<u64>,
+        /// Model that actually produced this message; `None` while the
+        /// message is still streaming or for legacy session files.
+        model_id: Option<String>,
+        /// Wall-clock completion time (RFC 3339) when the message finished
+        /// streaming; `None` while running or for legacy session files.
+        completed_at: Option<String>,
     },
     ToolCall {
         tool_call_id: String,
@@ -543,6 +552,7 @@ impl ReplayBuilder {
                 self.transcript.push(TranscriptItem::UserInput {
                     turn_id: event.turn_id.clone().unwrap_or_default(),
                     text: content_blocks_text(content),
+                    started_at: Some(event.created_at.clone()),
                 });
             }
             SessionEventData::MessageStarted { message_id, .. } => {
@@ -553,6 +563,8 @@ impl ReplayBuilder {
                     content: Vec::new(),
                     status: MessageStatus::Started,
                     reasoning_duration_millis: None,
+                    model_id: None,
+                    completed_at: None,
                 });
             }
             SessionEventData::MessageReasoningStarted {
@@ -612,12 +624,32 @@ impl ReplayBuilder {
                 content,
                 finish_reason: _,
                 usage,
+                model_id,
             } => {
                 self.record_assistant_usage(message_id, usage);
+                let completed_at = event.created_at.clone();
                 if self.complete_message(message_id, content.clone()).is_err() {
                     self.warn(format!(
                         "message completion references unknown message: {message_id}"
                     ));
+                } else {
+                    if let Some(model_id) = model_id
+                        && self
+                            .set_message_model(message_id, model_id.to_owned())
+                            .is_err()
+                    {
+                        self.warn(format!(
+                            "message model attribution references unknown message: {message_id}"
+                        ));
+                    }
+                    if self
+                        .set_message_completed_at(message_id, completed_at)
+                        .is_err()
+                    {
+                        self.warn(format!(
+                            "message completion time references unknown message: {message_id}"
+                        ));
+                    }
                 }
             }
             SessionEventData::ModelUsageRecorded {
@@ -905,6 +937,37 @@ impl ReplayBuilder {
         }
     }
 
+    fn set_message_model(&mut self, message_id: &str, model_id: String) -> Result<(), ()> {
+        let index = *self.message_indices.get(message_id).ok_or(())?;
+        match self.transcript.get_mut(index).ok_or(())? {
+            TranscriptItem::AssistantMessage {
+                model_id: current, ..
+            } => {
+                *current = Some(model_id);
+                Ok(())
+            }
+            _ => Err(()),
+        }
+    }
+
+    fn set_message_completed_at(
+        &mut self,
+        message_id: &str,
+        completed_at: String,
+    ) -> Result<(), ()> {
+        let index = *self.message_indices.get(message_id).ok_or(())?;
+        match self.transcript.get_mut(index).ok_or(())? {
+            TranscriptItem::AssistantMessage {
+                completed_at: current,
+                ..
+            } => {
+                *current = Some(completed_at);
+                Ok(())
+            }
+            _ => Err(()),
+        }
+    }
+
     fn set_tool_status(
         &mut self,
         tool_call_id: &str,
@@ -1034,5 +1097,106 @@ fn tool_result_summary(result: &PersistedToolResult) -> String {
         PersistedToolResult::Text { text } => text.clone(),
         PersistedToolResult::Json { value } => value.to_string(),
         PersistedToolResult::Error { message } => message.clone(),
+    }
+}
+
+#[cfg(test)]
+mod message_model_attribution_tests {
+    use super::*;
+    use crate::session::event::{PersistedContentBlock, SessionEventData, SessionEventEnvelope};
+
+    fn message_started(message_id: &str, event_id: &str) -> SessionEventEnvelope {
+        SessionEventEnvelope::new(
+            "session-model",
+            event_id,
+            "2026-01-01T00:00:00Z",
+            SessionEventData::MessageStarted {
+                message_id: message_id.into(),
+                role: crate::session::event::PersistedRole::Assistant,
+            },
+        )
+    }
+
+    fn message_completed(
+        message_id: &str,
+        event_id: &str,
+        model_id: Option<&str>,
+    ) -> SessionEventEnvelope {
+        SessionEventEnvelope::new(
+            "session-model",
+            event_id,
+            "2026-01-01T00:00:01Z",
+            SessionEventData::MessageCompleted {
+                message_id: message_id.into(),
+                content: vec![PersistedContentBlock::Text {
+                    text: "answer".into(),
+                }],
+                finish_reason: None,
+                usage: Default::default(),
+                model_id: model_id.map(str::to_owned),
+            },
+        )
+    }
+
+    #[test]
+    fn message_completed_attributes_the_model_to_the_transcript_item() {
+        let replay = fold_events(&[
+            message_started("message-1", "event-1"),
+            message_completed("message-1", "event-2", Some("deepseek-v4-pro")),
+        ]);
+        let [
+            TranscriptItem::AssistantMessage {
+                model_id,
+                completed_at,
+                ..
+            },
+        ] = replay.transcript.as_slice()
+        else {
+            panic!(
+                "expected one assistant message, got {:?}",
+                replay.transcript
+            );
+        };
+        assert_eq!(model_id.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(
+            completed_at.as_deref(),
+            Some("2026-01-01T00:00:01Z"),
+            "the completion event's created_at lands on the transcript item"
+        );
+    }
+
+    #[test]
+    fn turn_input_recorded_carries_the_submit_time_into_the_transcript() {
+        let started = SessionEventEnvelope::new(
+            "session-model",
+            "event-turn",
+            "2026-01-01T00:00:00Z",
+            SessionEventData::TurnInputRecorded {
+                content: vec![PersistedContentBlock::Text {
+                    text: "do it".into(),
+                }],
+            },
+        );
+        let replay = fold_events(&[started]);
+        let [TranscriptItem::UserInput { started_at, .. }] = replay.transcript.as_slice() else {
+            panic!("expected one user input, got {:?}", replay.transcript);
+        };
+        assert_eq!(started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn legacy_message_completed_without_model_id_stays_unattributed() {
+        let replay = fold_events(&[
+            message_started("message-2", "event-3"),
+            message_completed("message-2", "event-4", None),
+        ]);
+        let [TranscriptItem::AssistantMessage { model_id, .. }] = replay.transcript.as_slice()
+        else {
+            panic!(
+                "expected one assistant message, got {:?}",
+                replay.transcript
+            );
+        };
+        assert!(model_id.is_none(), "legacy events must stay unattributed");
     }
 }

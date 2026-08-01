@@ -689,6 +689,8 @@ impl ConversationController {
                 truncated: false,
                 durable: false,
                 delegation: None,
+                turn: None,
+                model: None,
             },
             panel_width,
         ))
@@ -720,6 +722,8 @@ impl ConversationController {
                 truncated: message.truncated,
                 durable: false,
                 delegation: None,
+                turn: None,
+                model: None,
             },
             panel_width,
         )
@@ -751,6 +755,8 @@ impl ConversationController {
                 truncated: tool.truncated,
                 durable: false,
                 delegation: None,
+                turn: None,
+                model: None,
             },
             panel_width,
         )
@@ -804,6 +810,8 @@ impl ConversationController {
                     truncated: block.truncated,
                     durable: true,
                     delegation: block.delegation.clone(),
+                    model: block.model.as_deref(),
+                    turn: block.turn.as_ref(),
                 },
                 panel_width,
             ));

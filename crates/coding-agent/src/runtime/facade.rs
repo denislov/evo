@@ -16,7 +16,7 @@ pub use crate::events::{
     CodingAgentProductEventProfileKind, CodingAgentProductEventReplacement,
     CodingAgentProductEventTerminalOperation, CodingAgentProductEventTerminalOperationKind,
     CodingAgentProductEventTerminalStatus, CodingAgentProductEventUsage,
-    CodingAgentProfileProductEvent, CodingAgentRecoveryResolution, CodingAgentRuntimeProductEvent,
+    CodingAgentRecoveryResolution, CodingAgentRuntimeProductEvent,
     CodingAgentSessionProductEvent, CodingAgentSessionWriteFailureStatus,
     CodingAgentTeamProductEvent, CodingAgentToolProductEvent, CodingAgentWorkflowProductEvent,
 };

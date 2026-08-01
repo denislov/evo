@@ -253,6 +253,7 @@ mod tests {
         let projection = ConversationProjection::hydrate(transcript(vec![
             CodingAgentSessionTranscriptItem::User {
                 text: "exact payload".into(),
+                started_at: None,
             },
         ]));
         let mut composer = ComposerState::default();

@@ -13,7 +13,7 @@ use coding_agent::api::event::{
     CodingAgentProductEventCheckOutput, CodingAgentProductEventDiagnostic,
     CodingAgentProductEventKind, CodingAgentProductEventProfileKind,
     CodingAgentProductEventReplacement, CodingAgentProductEventUsage,
-    CodingAgentProfileProductEvent, CodingAgentRuntimeProductEvent, CodingAgentSessionProductEvent,
+    CodingAgentRuntimeProductEvent, CodingAgentSessionProductEvent,
     CodingAgentSessionWriteFailureStatus, CodingAgentTeamProductEvent, CodingAgentToolProductEvent,
     CodingAgentWorkflowProductEvent,
 };
@@ -368,9 +368,6 @@ fn product_event_protocol_adapter_does_not_emit_flow_node_fields() {
             first_kept_message_id: "msg_prompt".into(),
             tokens_before: 100,
         }),
-        CodingAgentProductEventKind::Profile(CodingAgentProfileProductEvent::DefaultChanged {
-            profile_id: "coder".into(),
-        }),
         CodingAgentProductEventKind::Workflow(
             CodingAgentWorkflowProductEvent::SelfHealingEditStarted {
                 operation_id: "op_edit".into(),
@@ -618,7 +615,7 @@ fn delegation_protocol_events_include_folded_block_payload() {
 }
 
 #[test]
-fn coding_event_adapter_maps_profile_and_delegation_lifecycle_to_protocol_events() {
+fn coding_event_adapter_maps_delegation_lifecycle_to_protocol_events() {
     let mut adapter = CodingProtocolEventAdapter::new_with_provider(
         "faux".into(),
         "faux-provider".into(),
@@ -626,9 +623,6 @@ fn coding_event_adapter_maps_profile_and_delegation_lifecycle_to_protocol_events
     );
 
     let events = [
-        CodingAgentProductEventKind::Profile(CodingAgentProfileProductEvent::DefaultChanged {
-            profile_id: "coder".into(),
-        }),
         CodingAgentProductEventKind::Delegation(CodingAgentDelegationProductEvent::Requested {
             context: CodingAgentDelegationEventContext {
                 operation_id: "op_parent".into(),
@@ -729,10 +723,6 @@ fn coding_event_adapter_maps_profile_and_delegation_lifecycle_to_protocol_events
     assert_eq!(
         events,
         vec![
-            json!({
-                "type": "default_agent_profile_changed",
-                "profileId": "coder"
-            }),
             json!({
                 "type": "delegation_requested",
                 "operationId": "op_parent",
@@ -1137,7 +1127,7 @@ fn coding_event_adapter_maps_capability_changed_to_payloaded_protocol_event() {
     let events = adapter.push_product_event(&product_event(
         CodingAgentProductEventKind::Capability(CodingAgentCapabilityProductEvent::Changed {
             generation: 7,
-            revocation: CodingAgentProductEventCapabilityRevocation::FutureOnly,
+            revocation: CodingAgentProductEventCapabilityRevocation::RequestCancelOlderOperations,
             cancellation_requested_operation_ids: Vec::new(),
         }),
     ));
@@ -1147,7 +1137,7 @@ fn coding_event_adapter_maps_capability_changed_to_payloaded_protocol_event() {
         json!([{
             "type": "capability_changed",
             "generation": 7,
-            "revocation": "future_only"
+            "revocation": "request_cancel_older_operations"
         }])
     );
 }

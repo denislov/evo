@@ -708,6 +708,7 @@ where
         content: Vec<PersistedContentBlock>,
         finish_reason: Option<String>,
         usage: Usage,
+        model_id: Option<String>,
     ) -> Result<(), CodingSessionError> {
         self.ensure_open()?;
         let message_id = message_id.into();
@@ -719,6 +720,7 @@ where
             content,
             finish_reason,
             usage,
+            model_id,
         });
         Ok(())
     }

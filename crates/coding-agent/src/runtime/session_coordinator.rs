@@ -136,18 +136,6 @@ pub(crate) struct SessionWriterCommand {
 }
 
 impl SessionWriterCommand {
-    pub(super) fn set_default_agent_profile(
-        operation_id: impl Into<String>,
-        capability_generation: CapabilityGeneration,
-        profile_id: ProfileId,
-    ) -> Self {
-        Self {
-            operation_id: operation_id.into(),
-            capability_generation,
-            mutation: SessionMutation::SetDefaultAgentProfile { profile_id },
-        }
-    }
-
     pub(super) fn switch_active_leaf(
         operation_id: impl Into<String>,
         capability_generation: CapabilityGeneration,
@@ -287,9 +275,6 @@ impl SessionWriterCommand {
 
 #[derive(Debug)]
 pub(crate) enum SessionMutation {
-    SetDefaultAgentProfile {
-        profile_id: ProfileId,
-    },
     SwitchActiveLeaf {
         target_leaf_id: String,
     },
@@ -331,9 +316,6 @@ pub(crate) enum SessionMutation {
 
 #[derive(Debug)]
 pub(crate) enum SessionWriterReply {
-    DefaultAgentProfile {
-        profile_id: ProfileId,
-    },
     ActiveLeaf,
     SessionTreeLabel {
         entry_id: String,
@@ -383,17 +365,6 @@ impl SessionCoordinator {
         }
         let _capability_generation = command.capability_generation;
         match command.mutation {
-            SessionMutation::SetDefaultAgentProfile { profile_id } => {
-                match &mut self.persistence {
-                    SessionPersistence::Persistent(session_service) => {
-                        session_service.set_default_agent_profile_id(profile_id.clone())?;
-                    }
-                    SessionPersistence::NonPersistent(state) => {
-                        state.default_agent_profile_id = profile_id.clone();
-                    }
-                }
-                Ok(SessionWriterReply::DefaultAgentProfile { profile_id })
-            }
             SessionMutation::SwitchActiveLeaf { target_leaf_id } => {
                 let SessionPersistence::Persistent(session_service) = &mut self.persistence else {
                     return Err(CodingSessionError::UnsupportedCapability {

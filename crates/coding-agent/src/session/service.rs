@@ -760,20 +760,6 @@ impl SessionService {
             .default_agent_profile_id
     }
 
-    pub(crate) fn set_default_agent_profile_id(
-        &mut self,
-        profile_id: ProfileId,
-    ) -> Result<(), CodingSessionError> {
-        self.commit_writer_mutation(
-            Vec::new(),
-            ManifestPatch::new()
-                .updated_at(SystemClock.now_rfc3339())
-                .default_agent_profile_id(profile_id),
-            None,
-        )?;
-        Ok(())
-    }
-
     pub(crate) fn branch_summary_for(
         &self,
         source_leaf_id: &str,
@@ -2890,12 +2876,16 @@ pub(crate) fn coding_transcript_item_from_replay(
     item: TranscriptItem,
 ) -> CodingAgentSessionTranscriptItem {
     match item {
-        TranscriptItem::UserInput { text, .. } => CodingAgentSessionTranscriptItem::User { text },
+        TranscriptItem::UserInput {
+            text, started_at, ..
+        } => CodingAgentSessionTranscriptItem::User { text, started_at },
         TranscriptItem::AssistantMessage {
             message_id,
             content,
             status,
             reasoning_duration_millis,
+            model_id,
+            completed_at,
         } => CodingAgentSessionTranscriptItem::Assistant {
             id: message_id,
             text: persisted_content_blocks_text(&content),
@@ -2903,6 +2893,8 @@ pub(crate) fn coding_transcript_item_from_replay(
             images: persisted_content_blocks_images(&content),
             done: !matches!(status, MessageStatus::Started),
             reasoning_duration_millis,
+            model_id,
+            completed_at,
         },
         TranscriptItem::ToolCall {
             tool_call_id,
@@ -3233,4 +3225,49 @@ fn normalized_path_string(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod coding_transcript_item_from_replay_tests {
+    use super::*;
+    use crate::session::event::PersistedContentBlock;
+    use crate::session::replay::{MessageStatus, TranscriptItem};
+
+    #[test]
+    fn assistant_message_model_id_flows_through_the_transcript_conversion() {
+        let item = TranscriptItem::AssistantMessage {
+            message_id: "message-1".into(),
+            content: vec![PersistedContentBlock::Text {
+                text: "answer".into(),
+            }],
+            status: MessageStatus::Completed,
+            reasoning_duration_millis: None,
+            model_id: Some("deepseek-v4-pro".into()),
+            completed_at: Some("2026-01-01T00:00:01Z".into()),
+        };
+        let CodingAgentSessionTranscriptItem::Assistant { model_id, .. } =
+            coding_transcript_item_from_replay(item)
+        else {
+            panic!("assistant message must convert to an assistant transcript item");
+        };
+        assert_eq!(model_id.as_deref(), Some("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn assistant_message_without_model_id_stays_unattributed() {
+        let item = TranscriptItem::AssistantMessage {
+            message_id: "message-2".into(),
+            content: Vec::new(),
+            status: MessageStatus::Started,
+            reasoning_duration_millis: None,
+            model_id: None,
+            completed_at: None,
+        };
+        let CodingAgentSessionTranscriptItem::Assistant { model_id, .. } =
+            coding_transcript_item_from_replay(item)
+        else {
+            panic!("assistant message must convert to an assistant transcript item");
+        };
+        assert!(model_id.is_none());
+    }
 }

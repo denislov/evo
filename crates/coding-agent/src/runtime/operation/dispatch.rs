@@ -5,7 +5,6 @@ use super::permit::OperationPermit;
 use super::submission::SubmissionCommitGuard;
 use super::{OperationDispatchMode, OperationExecution, OperationOutcome};
 use crate::operations::compaction::runner::ManualCompactionOptions;
-use crate::runtime::capability::CapabilityRevocationPolicy;
 use crate::runtime::capability::SessionWriteCapability;
 use crate::runtime::facade::{CodingAgentSession, CodingSessionError, PromptControlCleanupGuard};
 use crate::session::id::{Clock, SystemClock};
@@ -276,50 +275,6 @@ impl CodingAgentSession {
                     unreachable!("session-name writer command returns its typed reply")
                 };
                 Ok(OperationOutcome::SessionNameChanged { name, updated_at })
-            }
-            CodingAgentOperation::SetDefaultAgentProfile { profile_id } => {
-                SessionWriteCapability::require(
-                    operation_permit
-                        .capability_snapshot()
-                        .session_write
-                        .as_ref(),
-                )?;
-                let reply = self
-                    .runtime_host
-                    .session_coordinator
-                    .execute_writer_command(
-                        crate::runtime::session_coordinator::SessionWriterCommand::
-                            set_default_agent_profile(
-                                operation_permit.execution().operation_id.clone(),
-                                operation_permit
-                                .execution()
-                                .capability_generation,
-                                profile_id.clone(),
-                            ),
-                    )?;
-                match reply {
-                    crate::runtime::session_coordinator::SessionWriterReply::DefaultAgentProfile {
-                        profile_id: changed_profile_id,
-                    } if changed_profile_id == profile_id => {}
-                    _ => {
-                        return Err(CodingSessionError::Session {
-                            message:
-                                "session writer returned an unexpected default-profile reply"
-                                    .into(),
-                        });
-                    }
-                }
-                self.runtime_host
-                    .events
-                    .emit_default_agent_profile_changed(profile_id);
-                let installed = self
-                    .runtime_host
-                    .operation_supervisor
-                    .capabilities
-                    .install_next_generation(CapabilityRevocationPolicy::FutureOnly)?;
-                self.refresh_snapshot_projection();
-                self.runtime_host.events.emit_capability_changed(installed);
-                Ok(OperationOutcome::SetDefaultAgentProfile)
             }
             _ => unreachable!("descriptor routed a non-mutable operation to the mutable handler"),
         })()

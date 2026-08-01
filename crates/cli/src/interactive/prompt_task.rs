@@ -12,7 +12,6 @@ use coding_agent::api::operation::{
     SelfHealingEditOutcome,
 };
 use coding_agent::api::runtime::{CodingAgentSession, CodingAgentSessionBootstrap};
-use coding_agent::api::view::ProfileId;
 use tokio::sync::{mpsc, oneshot};
 
 const PROMPT_TASK_CONTROL_CAPACITY: usize = 32;
@@ -27,7 +26,6 @@ pub(super) enum PromptTaskResult {
     AgentTeam(AgentTeamTaskResult),
     DelegationApproval(DelegationApprovalTaskResult),
     SelfHealingEdit(SelfHealingEditTaskResult),
-    SetDefaultAgentProfile(SetDefaultAgentProfileTaskResult),
     SessionTreeLabel(SessionTreeLabelTaskResult),
     DelegationRejection(DelegationRejectionTaskResult),
     ForkSession(ForkSessionTaskResult),
@@ -73,10 +71,6 @@ pub(super) struct AgentTeamTaskResult {
 }
 
 pub(super) struct DelegationApprovalTaskResult {
-    pub(super) session: CodingAgentSession,
-}
-
-pub(super) struct SetDefaultAgentProfileTaskResult {
     pub(super) session: CodingAgentSession,
 }
 
@@ -181,16 +175,6 @@ impl PromptTask {
             existing_session,
             operation_id,
             tool_call_id,
-        ))
-    }
-
-    pub(super) fn spawn_set_default_agent_profile(
-        existing_session: CodingAgentSession,
-        profile_id: ProfileId,
-    ) -> Result<Self, CliError> {
-        Ok(Self::spawn_coding_set_default_agent_profile(
-            existing_session,
-            profile_id,
         ))
     }
 
@@ -467,33 +451,6 @@ impl PromptTask {
 
         Self {
             control: PromptTaskControlHandle::Operation(control_tx),
-            connection_handoff: Some(connection_rx),
-            done: done_rx,
-            abort_requested: false,
-        }
-    }
-
-    fn spawn_coding_set_default_agent_profile(
-        existing_session: CodingAgentSession,
-        profile_id: ProfileId,
-    ) -> Self {
-        let (connection_tx, connection_rx) = oneshot::channel();
-        let (done_tx, done_rx) = oneshot::channel();
-        let (abort_tx, abort_rx) = oneshot::channel();
-
-        tokio::spawn(async move {
-            let result = run_coding_set_default_agent_profile_task(
-                existing_session,
-                profile_id,
-                connection_tx,
-                abort_rx,
-            )
-            .await;
-            let _ = done_tx.send(result);
-        });
-
-        Self {
-            control: PromptTaskControlHandle::AbortOnly(Some(abort_tx)),
             connection_handoff: Some(connection_rx),
             done: done_rx,
             abort_requested: false,
@@ -1157,30 +1114,6 @@ async fn run_coding_delegation_approval_task(
 
     complete_owned_task(session, result, |session, ()| {
         PromptTaskResult::DelegationApproval(DelegationApprovalTaskResult { session })
-    })
-}
-
-async fn run_coding_set_default_agent_profile_task(
-    mut session: CodingAgentSession,
-    profile_id: ProfileId,
-    connection_tx: oneshot::Sender<Result<Option<CodingAgentClientConnection>, CliError>>,
-    mut abort_rx: oneshot::Receiver<()>,
-) -> PromptTaskCompletion {
-    let result = async {
-        let operation = CodingAgentOperation::SetDefaultAgentProfile { profile_id };
-        let (submission, connection) =
-            prepare_interactive_submission(connection_tx, &mut session, None, operation)?;
-        run_abortable_submission(&mut session, submission, &connection, &mut abort_rx)
-            .await?
-            .into_default_agent_profile_changed()
-            .expect("set default agent profile operation returned a different public outcome");
-
-        Ok(())
-    }
-    .await;
-
-    complete_owned_task(session, result, |session, ()| {
-        PromptTaskResult::SetDefaultAgentProfile(SetDefaultAgentProfileTaskResult { session })
     })
 }
 

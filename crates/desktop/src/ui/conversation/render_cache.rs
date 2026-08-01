@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::markdown::bounded_markdown_preview;
 use super::model::{
-    ConversationBlockKind, ConversationItemKey, DelegationMeta, MAX_TRANSCRIPT_BLOCKS,
+    ConversationBlockKind, ConversationItemKey, DelegationMeta, MAX_TRANSCRIPT_BLOCKS, TurnMeta,
 };
 use crate::ui::shell::{ASSISTANT_MESSAGE_MAX_WIDTH, USER_MESSAGE_MAX_WIDTH};
 
@@ -118,6 +118,10 @@ pub struct ConversationRowRenderSource<'a> {
     pub truncated: bool,
     pub durable: bool,
     pub delegation: Option<DelegationMeta>,
+    /// Turn summary attached to this turn's final assistant row.
+    pub turn: Option<&'a TurnMeta>,
+    /// Model that actually produced this assistant message.
+    pub model: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +177,10 @@ pub struct ConversationRowRenderData {
     pub width_bucket: u32,
     pub estimated_height: f32,
     pub delegation: Option<DelegationMeta>,
+    /// Model that actually produced this assistant message.
+    pub model: Option<Arc<str>>,
+    /// Turn summary attached to this turn's final assistant row.
+    pub turn: Option<TurnMeta>,
 }
 
 impl ConversationRowRenderData {
@@ -188,6 +196,8 @@ impl ConversationRowRenderData {
                 .delegation
                 .as_ref()
                 .map_or(0, |meta| meta.target_id.len())
+            + self.model.as_ref().map_or(0, |model| model.len())
+            + self.turn.as_ref().map_or(0, |turn| turn.model.len())
     }
 }
 
@@ -356,6 +366,8 @@ impl ConversationRowRenderCache {
             durable: source.durable,
             width_bucket: effective_width,
             delegation: source.delegation,
+            model: source.model.map(Arc::from),
+            turn: source.turn.cloned(),
         };
         let retained_bytes = data.retained_bytes();
         let entry = ConversationRowRenderCacheEntry {
@@ -462,6 +474,8 @@ mod tests {
             truncated: false,
             durable: true,
             delegation: None,
+            turn: None,
+            model: None,
         }
     }
 
@@ -602,6 +616,8 @@ mod tests {
                 truncated: false,
                 durable: true,
                 delegation: None,
+                turn: None,
+                model: None,
             },
             900,
         );
@@ -627,6 +643,8 @@ mod tests {
                 truncated: false,
                 durable: true,
                 delegation: None,
+                turn: None,
+                model: None,
             },
             900,
         );
@@ -724,6 +742,8 @@ mod tests {
                 truncated: false,
                 durable: false,
                 delegation: None,
+                turn: None,
+                model: None,
             },
             900,
         );
@@ -750,6 +770,8 @@ mod tests {
                 truncated: false,
                 durable: true,
                 delegation: None,
+                turn: None,
+                model: None,
             },
             900,
         );
@@ -776,6 +798,8 @@ mod tests {
                 truncated: false,
                 durable: true,
                 delegation: None,
+                turn: None,
+                model: None,
             },
             900,
         );

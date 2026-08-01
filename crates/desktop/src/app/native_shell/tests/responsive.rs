@@ -92,6 +92,7 @@ fn final_long_user_tail_is_inside_its_measured_row(cx: &mut TestAppContext) {
         DesktopRuntimeBridge::disconnected_for_test(),
         projection_with_last_item(CodingAgentSessionTranscriptItem::User {
             text: long_integrity_text("User"),
+            started_at: None,
         }),
     );
     cx.simulate_resize(size(px(700.), px(800.)));
@@ -338,6 +339,8 @@ fn assistant_after_tool_continues_without_repeating_the_identity_header(cx: &mut
                 images: Vec::new(),
                 done: true,
                 reasoning_duration_millis: None,
+                model_id: None,
+                completed_at: None,
             },
         ]),
     );
@@ -372,6 +375,8 @@ fn assistant_segment_before_tool_does_not_insert_a_middle_copy_button(cx: &mut T
                 images: Vec::new(),
                 done: true,
                 reasoning_duration_millis: None,
+                model_id: None,
+                completed_at: None,
             },
             CodingAgentSessionTranscriptItem::Tool {
                 call_id: "copy-group-tool".into(),
@@ -405,6 +410,8 @@ fn tool_content_aligns_with_assistant_and_selection_has_no_focus_rail(cx: &mut T
                 images: Vec::new(),
                 done: true,
                 reasoning_duration_millis: None,
+                model_id: None,
+                completed_at: None,
             },
             CodingAgentSessionTranscriptItem::Tool {
                 call_id: "alignment-tool".into(),
@@ -535,6 +542,8 @@ fn assistant_reasoning_expands_downward_without_moving_its_top(cx: &mut TestAppC
             images: Vec::new(),
             done: true,
             reasoning_duration_millis: Some(2_430),
+            model_id: None,
+            completed_at: None,
         }),
     );
     cx.simulate_resize(size(px(700.), px(800.)));
@@ -612,6 +621,8 @@ fn assistant_reasoning_chevron_toggles_once_without_reflow(cx: &mut TestAppConte
             images: Vec::new(),
             done: true,
             reasoning_duration_millis: Some(640),
+            model_id: None,
+            completed_at: None,
         }),
     );
     cx.simulate_resize(size(px(700.), px(800.)));
@@ -702,6 +713,8 @@ fn conversation_row_copy_selection_is_typed_and_geometry_stable(cx: &mut TestApp
             images: Vec::new(),
             done: true,
             reasoning_duration_millis: None,
+            model_id: None,
+            completed_at: None,
         }),
     );
     cx.simulate_resize(size(px(700.), px(800.)));
@@ -770,6 +783,8 @@ fn truncated_preview_opens_and_copies_the_complete_bounded_message(cx: &mut Test
             images: Vec::new(),
             done: true,
             reasoning_duration_millis: None,
+            model_id: None,
+            completed_at: None,
         });
     let projection = DesktopProjection::new(snapshot)
         .expect("full-message fixture is a valid product projection");
@@ -899,7 +914,6 @@ fn native_shell_primary_controls_keep_minimum_hit_targets(cx: &mut TestAppContex
             "desktop-hit-submit-composer",
             "desktop-header-model-selector",
             "desktop-header-profile-selector",
-            "desktop-header-thinking-selector",
         ] {
             assert_minimum_hit_target(cx, selector);
         }

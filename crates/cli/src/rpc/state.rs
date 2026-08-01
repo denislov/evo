@@ -30,7 +30,6 @@ pub(super) enum OperationKind {
     AgentInvocation,
     AgentTeam,
     SelfHealingEdit,
-    SetDefaultAgentProfile,
     DelegationConfirmation,
 }
 
@@ -42,7 +41,6 @@ impl OperationKind {
             Self::AgentInvocation => "agent_invocation",
             Self::AgentTeam => "agent_team",
             Self::SelfHealingEdit => "self_healing_edit",
-            Self::SetDefaultAgentProfile => "set_default_agent_profile",
             Self::DelegationConfirmation => "delegation_confirmation",
         }
     }

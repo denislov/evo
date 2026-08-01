@@ -274,25 +274,6 @@
     "stream_id": "test-stream",
     "sequence": 12,
     "event": {
-      "family": "profile",
-      "payload": {
-        "kind": "default_changed",
-        "profile_id": "reviewer"
-      }
-    },
-    "operation_id": null,
-    "session_id": "session-1",
-    "terminal_status": null,
-    "terminal_operation": null,
-    "durability": {
-      "state": "live_only"
-    },
-    "delivery_class": "data"
-  },
-  {
-    "stream_id": "test-stream",
-    "sequence": 13,
-    "event": {
       "family": "workflow",
       "payload": {
         "kind": "prompt_completed",

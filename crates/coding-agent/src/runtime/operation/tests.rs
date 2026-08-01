@@ -20,7 +20,6 @@ use crate::operations::agent_invocation::runner::AgentInvocationOptions;
 use crate::operations::prompt::context::PromptTurnOptions;
 use crate::operations::self_healing_edit::runner::SelfHealingEditRequest;
 use crate::operations::team_invocation::runner::AgentTeamOptions;
-use crate::profiles::ProfileId;
 use crate::runtime::operation::control::OperationKind;
 
 fn prompt_options() -> PromptTurnOptions {
@@ -120,20 +119,6 @@ fn contract_table() -> Vec<(&'static str, CodingAgentOperation, ExpectedContract
                 outcome_family: OperationOutcomeFamily::AgentTeam,
                 terminal_policy: OperationTerminalPolicy::ProductEvent,
                 has_root_evidence: true,
-            },
-        ),
-        (
-            "SetDefaultAgentProfile",
-            CodingAgentOperation::SetDefaultAgentProfile {
-                profile_id: ProfileId::from("reviewer"),
-            },
-            ExpectedContract {
-                kind: OperationKind::SetDefaultAgentProfile,
-                class: OperationClass::RuntimeWrite,
-                dispatch: OperationDispatchMode::SyncMutable,
-                outcome_family: OperationOutcomeFamily::DefaultAgentProfileChanged,
-                terminal_policy: OperationTerminalPolicy::OutcomeAcknowledgement,
-                has_root_evidence: false,
             },
         ),
         // Approve is async because it resumes a real agent turn; reject is a
@@ -408,7 +393,7 @@ fn priority_cancellation_and_child_policy_follow_kind_and_dispatch() {
 /// contract review.
 #[test]
 fn every_operation_variant_is_covered() {
-    const PUBLIC_VARIANT_COUNT: usize = 15;
+    const PUBLIC_VARIANT_COUNT: usize = 14;
 
     let table = contract_table();
     assert_eq!(

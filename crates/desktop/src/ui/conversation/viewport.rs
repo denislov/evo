@@ -202,6 +202,7 @@ mod tests {
     fn user(index: usize) -> CodingAgentSessionTranscriptItem {
         CodingAgentSessionTranscriptItem::User {
             text: format!("message {index}"),
+            started_at: None,
         }
     }
 
@@ -229,6 +230,8 @@ mod tests {
                 images: Vec::new(),
                 done: true,
                 reasoning_duration_millis: None,
+                model_id: None,
+                completed_at: None,
             },
         ]));
         let mut viewport = ConversationViewport::new(1);

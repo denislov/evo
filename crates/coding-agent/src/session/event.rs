@@ -256,6 +256,11 @@ pub(crate) enum SessionEventData {
         finish_reason: Option<String>,
         #[serde(default)]
         usage: Usage,
+        /// Model that actually produced this message (`response_model`
+        /// when the provider reports one, otherwise the requested model).
+        /// Absent for sessions persisted before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_id: Option<String>,
     },
     #[serde(rename = "message.cancelled")]
     MessageCancelled { message_id: String, reason: String },

@@ -1218,7 +1218,6 @@ impl OperationCapabilitySnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityRevocationPolicy {
-    FutureOnly,
     RequestCancelOlderOperations,
 }
 
@@ -1272,19 +1271,6 @@ impl CapabilitySnapshotService {
 
     pub(crate) fn current_generation(&self) -> CapabilityGeneration {
         self.snapshot_coordinator.current_capability_generation()
-    }
-
-    pub(crate) fn install_next_generation(
-        &mut self,
-        revocation: CapabilityRevocationPolicy,
-    ) -> Result<InstalledCapabilityGeneration, CodingSessionError> {
-        Ok(InstalledCapabilityGeneration {
-            generation: self
-                .snapshot_coordinator
-                .install_next_capability_generation()?,
-            revocation,
-            cancellation_requested_operation_ids: Vec::new(),
-        })
     }
 
     pub(crate) fn snapshot(

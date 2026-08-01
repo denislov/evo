@@ -351,6 +351,9 @@ impl Default for CodingAgentSessionUsageSummary {
 pub enum CodingAgentSessionTranscriptItem {
     User {
         text: String,
+        /// Wall-clock time the turn was submitted (RFC 3339); `None` for
+        /// in-memory transcripts.
+        started_at: Option<String>,
     },
     Assistant {
         id: String,
@@ -361,6 +364,12 @@ pub enum CodingAgentSessionTranscriptItem {
         /// Sum of completed reasoning-segment lifetimes. `None` means the
         /// lifecycle was not observed or the message is still streaming.
         reasoning_duration_millis: Option<u64>,
+        /// Model that actually produced this message (`response_model` when
+        /// the provider reported one, otherwise the requested model).
+        model_id: Option<String>,
+        /// Wall-clock completion time (RFC 3339) when the message finished
+        /// streaming; `None` while running or for legacy session files.
+        completed_at: Option<String>,
     },
     Tool {
         call_id: String,

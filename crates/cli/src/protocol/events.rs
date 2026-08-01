@@ -9,8 +9,7 @@ use coding_agent::api::event::{
     CodingAgentDiagnosticProductEvent, CodingAgentMessageProductEvent, CodingAgentProductEvent,
     CodingAgentProductEventCapabilityRevocation, CodingAgentProductEventCheckOutput,
     CodingAgentProductEventKind, CodingAgentProductEventProfileKind,
-    CodingAgentProductEventReplacement, CodingAgentProfileProductEvent,
-    CodingAgentRecoveryResolution, CodingAgentRuntimeProductEvent, CodingAgentSessionProductEvent,
+    CodingAgentProductEventReplacement, CodingAgentRecoveryResolution, CodingAgentRuntimeProductEvent, CodingAgentSessionProductEvent,
     CodingAgentSessionWriteFailureStatus, CodingAgentTeamProductEvent, CodingAgentToolProductEvent,
     CodingAgentWorkflowProductEvent,
 };
@@ -417,13 +416,6 @@ impl CodingProtocolEventAdapter {
             CodingAgentProductEventKind::Workflow(
                 CodingAgentWorkflowProductEvent::PromptAborted { reason, .. },
             ) => self.push_prompt_failed_message(reason),
-            CodingAgentProductEventKind::Profile(
-                CodingAgentProfileProductEvent::DefaultChanged { profile_id },
-            ) => {
-                vec![ProtocolEventPayload::DefaultAgentProfileChanged {
-                    profile_id: profile_id.as_str().to_string(),
-                }]
-            }
             CodingAgentProductEventKind::Capability(
                 CodingAgentCapabilityProductEvent::Changed {
                     generation,
@@ -1161,7 +1153,6 @@ fn capability_revocation_to_protocol(
     revocation: CodingAgentProductEventCapabilityRevocation,
 ) -> &'static str {
     match revocation {
-        CodingAgentProductEventCapabilityRevocation::FutureOnly => "future_only",
         CodingAgentProductEventCapabilityRevocation::RequestCancelOlderOperations => {
             "request_cancel_older_operations"
         }

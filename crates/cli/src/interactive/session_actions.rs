@@ -92,7 +92,7 @@ fn transcript_items_from_rust_native(
     item: CodingAgentSessionTranscriptItem,
 ) -> Vec<TranscriptItem> {
     let item = match item {
-        CodingAgentSessionTranscriptItem::User { text } => TranscriptItem::user(text),
+        CodingAgentSessionTranscriptItem::User { text, .. } => TranscriptItem::user(text),
         CodingAgentSessionTranscriptItem::Assistant {
             id,
             text,

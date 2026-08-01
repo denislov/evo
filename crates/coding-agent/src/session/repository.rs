@@ -1088,11 +1088,6 @@ impl ManifestPatch {
         self
     }
 
-    pub(crate) fn default_agent_profile_id(mut self, profile_id: ProfileId) -> Self {
-        self.default_agent_profile_id = Some(profile_id);
-        self
-    }
-
     fn workspace_migration(mut self, scope: PersistedWorkspaceScope) -> Self {
         self.workspace_migration = Some(scope);
         self

@@ -389,7 +389,7 @@ async fn failed_reload_retains_the_previous_runtime_context() {
 }
 
 #[tokio::test]
-async fn idle_model_and_session_profile_selection_are_typed_and_transactional() {
+async fn idle_model_selection_is_typed_and_session_profile_selection_is_locked() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, mut bridge, initial) = start_isolated_runtime(&temp).await;
     let session_id = initial.session.session.session_id.clone();
@@ -450,38 +450,14 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
         .try_select_session_profile(9, session_owner_target(&session_id), "review")
         .unwrap();
     let update = bridge.next_update().await.unwrap();
-    let DesktopRuntimeUpdate::SelectionChanged {
+    let DesktopRuntimeUpdate::CommandRejected {
         command_id: 9,
-        selection: DesktopRuntimeSelectionKind::SessionProfile,
-        metadata,
+        command: DesktopRuntimeCommandKind::SelectSessionProfile,
         ..
-    } = &update
+    } = update
     else {
-        panic!("idle profile selection must return a typed replacement snapshot");
+        panic!("session profile selection must be rejected once a session exists");
     };
-    assert_eq!(
-        metadata
-            .session
-            .as_ref()
-            .unwrap()
-            .session
-            .default_agent_profile_id
-            .as_str(),
-        "review"
-    );
-    assert_eq!(
-        metadata.project.selected_model_id,
-        "claude-3-5-haiku-latest"
-    );
-    assert!(
-        projection
-            .apply(
-                crate::application::reducer::projection_event(update)
-                    .expect("profile update must map to projection metadata"),
-            )
-            .is_replaced()
-    );
-    assert_eq!(projection.conversation(), &conversation);
 
     runtime_commands(&bridge)
         .try_select_model(
@@ -522,10 +498,6 @@ async fn idle_model_and_session_profile_selection_are_typed_and_transactional() 
     assert_eq!(
         snapshot.project.selected_model_id,
         "claude-3-5-haiku-latest"
-    );
-    assert_eq!(
-        snapshot.session.session.default_agent_profile_id.as_str(),
-        "review"
     );
     bridge.shutdown().await.unwrap();
 }
@@ -819,7 +791,7 @@ async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
                 assert_eq!(snapshot.session.session.session_id, session_id);
                 assert!(snapshot.transcript.items.iter().any(|item| matches!(
                     item,
-                    CodingAgentSessionTranscriptItem::User { text }
+                    CodingAgentSessionTranscriptItem::User { text, .. }
                         if text == "first desktop prompt"
                 )));
                 break;

@@ -26,9 +26,6 @@ impl CapabilityEvent {
                     CodingAgentCapabilityProductEvent::Changed {
                         generation,
                         revocation: match revocation {
-                            CapabilityRevocationPolicy::FutureOnly => {
-                                CodingAgentProductEventCapabilityRevocation::FutureOnly
-                            }
                             CapabilityRevocationPolicy::RequestCancelOlderOperations => {
                                 CodingAgentProductEventCapabilityRevocation::RequestCancelOlderOperations
                             }

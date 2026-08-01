@@ -7,7 +7,6 @@ pub(crate) mod diagnostic;
 pub(crate) mod emission;
 pub(crate) mod message;
 pub(crate) mod outbox;
-pub(crate) mod profile;
 pub(crate) mod prompt;
 pub(crate) mod prompt_stream;
 pub(crate) mod recovery;
@@ -46,7 +45,6 @@ impl ProductEventSequence {
 #[serde(rename_all = "snake_case")]
 pub enum CodingAgentProductEventFamily {
     Session,
-    Profile,
     Agent,
     Team,
     Message,
@@ -71,7 +69,6 @@ impl CodingAgentProductEventFamily {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Session => "session",
-            Self::Profile => "profile",
             Self::Agent => "agent",
             Self::Team => "team",
             Self::Message => "message",
@@ -279,7 +276,6 @@ pub enum CodingAgentProductEventProfileKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodingAgentProductEventCapabilityRevocation {
-    FutureOnly,
     RequestCancelOlderOperations,
 }
 
@@ -319,12 +315,6 @@ pub enum CodingAgentSessionProductEvent {
 pub enum CodingAgentSessionWriteFailureStatus {
     Definite,
     Uncertain,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum CodingAgentProfileProductEvent {
-    DefaultChanged { profile_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -674,7 +664,6 @@ pub enum CodingAgentCapabilityProductEvent {
 #[serde(rename_all = "snake_case", tag = "family", content = "payload")]
 pub enum CodingAgentProductEventKind {
     Session(CodingAgentSessionProductEvent),
-    Profile(CodingAgentProfileProductEvent),
     Agent(CodingAgentAgentProductEvent),
     Team(CodingAgentTeamProductEvent),
     Message(CodingAgentMessageProductEvent),
@@ -690,7 +679,6 @@ impl CodingAgentProductEventKind {
     pub const fn family(&self) -> CodingAgentProductEventFamily {
         match self {
             Self::Session(_) => CodingAgentProductEventFamily::Session,
-            Self::Profile(_) => CodingAgentProductEventFamily::Profile,
             Self::Agent(_) => CodingAgentProductEventFamily::Agent,
             Self::Team(_) => CodingAgentProductEventFamily::Team,
             Self::Message(_) => CodingAgentProductEventFamily::Message,
@@ -714,9 +702,6 @@ impl CodingAgentProductEventKind {
             Self::Session(CodingAgentSessionProductEvent::WriteFailed { .. }) => "write_failed",
             Self::Session(CodingAgentSessionProductEvent::CompactionCompleted { .. }) => {
                 "compaction_completed"
-            }
-            Self::Profile(CodingAgentProfileProductEvent::DefaultChanged { .. }) => {
-                "default_changed"
             }
             Self::Agent(CodingAgentAgentProductEvent::InvocationStarted { .. }) => {
                 "invocation_started"
