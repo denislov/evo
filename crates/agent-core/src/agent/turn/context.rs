@@ -49,9 +49,6 @@ pub struct AgentTurnContext {
     pub tool_results: Vec<AgentToolResult>,
     pub tool_results_all_terminate: bool,
     pub runtime_compaction: RuntimeCompactionState,
-    pub max_turns_exceeded: Option<u32>,
-    pub should_finish: bool,
-    pub has_more_queued_input: bool,
     pub(crate) live_state: Option<Arc<RwLock<AgentState>>>,
     event_sender: Option<mpsc::UnboundedSender<AgentEvent>>,
 }
@@ -79,9 +76,6 @@ impl AgentTurnContext {
             tool_results: Vec::new(),
             tool_results_all_terminate: false,
             runtime_compaction: RuntimeCompactionState::default(),
-            max_turns_exceeded: None,
-            should_finish: false,
-            has_more_queued_input: false,
             live_state: None,
             event_sender: None,
         }

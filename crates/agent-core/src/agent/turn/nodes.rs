@@ -86,7 +86,6 @@ pub(crate) enum AgentTurnDecision {
 
 pub(crate) fn start_turn(ctx: &mut AgentTurnContext) -> Result<AgentTurnDecision, AgentTurnError> {
     if ctx.cancel_token.is_cancelled() {
-        ctx.should_finish = true;
         ctx.emit(AgentEvent::AgentError {
             error: "aborted".into(),
         });
@@ -100,8 +99,6 @@ pub(crate) fn start_turn(ctx: &mut AgentTurnContext) -> Result<AgentTurnDecision
     if let Some(max_turns) = ctx.config.max_turns
         && ctx.turn > max_turns
     {
-        ctx.max_turns_exceeded = Some(max_turns);
-        ctx.should_finish = true;
         ctx.emit(AgentEvent::AgentError {
             error: format!("max turns ({}) exceeded", max_turns),
         });
@@ -116,7 +113,6 @@ pub(crate) fn drain_queued_input(ctx: &mut AgentTurnContext) {
     ctx.sync_live_queues();
     let steered = drain_queue(&mut ctx.steering_queue, ctx.config.steering_mode);
     ctx.messages.extend(steered);
-    ctx.has_more_queued_input = !ctx.steering_queue.is_empty() || !ctx.follow_up_queue.is_empty();
 }
 
 pub(crate) async fn prepare_provider_request(
@@ -387,7 +383,6 @@ pub(crate) fn decide_after_assistant(
     if assistant.stop_reason == StopReason::ToolUse
         && normalize_terminal_tool_arguments(&mut assistant).is_err()
     {
-        ctx.should_finish = true;
         ctx.emit(AgentEvent::AgentError {
             error: "invalid terminal tool arguments".into(),
         });
@@ -396,7 +391,6 @@ pub(crate) fn decide_after_assistant(
     if assistant.stop_reason == StopReason::ToolUse
         && let Err(error) = validate_terminal_tool_call_identity(&assistant, &ctx.messages)
     {
-        ctx.should_finish = true;
         ctx.emit(AgentEvent::AgentError {
             error: error.into(),
         });
@@ -423,12 +417,10 @@ pub(crate) fn decide_after_assistant(
                 .error_message
                 .clone()
                 .unwrap_or_else(|| "LLM error".into());
-            ctx.should_finish = true;
             ctx.emit(AgentEvent::AgentError { error });
             Ok(AgentTurnDecision::Error)
         }
         StopReason::Aborted => {
-            ctx.should_finish = true;
             ctx.emit(AgentEvent::AgentError {
                 error: "aborted".into(),
             });
@@ -437,7 +429,6 @@ pub(crate) fn decide_after_assistant(
         StopReason::ToolUse => {
             let tool_calls = extract_tool_calls(&assistant);
             if tool_calls.is_empty() {
-                ctx.should_finish = true;
                 ctx.emit(AgentEvent::AgentError {
                     error: "tool-use response contained no tool calls".into(),
                 });
@@ -529,8 +520,6 @@ pub(crate) async fn maybe_prepare_next_turn(
                 return Ok(AgentTurnDecision::Error);
             };
             if should_stop {
-                ctx.should_finish = true;
-                ctx.has_more_queued_input = false;
                 ctx.emit(AgentEvent::AgentDone { message: assistant });
                 return Ok(AgentTurnDecision::Done);
             }
@@ -540,14 +529,11 @@ pub(crate) async fn maybe_prepare_next_turn(
             }
 
             let has_more = !ctx.follow_up_queue.is_empty() || !ctx.steering_queue.is_empty();
-            ctx.has_more_queued_input = has_more;
             if has_more {
                 let follow_ups = drain_queue(&mut ctx.follow_up_queue, ctx.config.follow_up_mode);
                 ctx.messages.extend(follow_ups);
-                ctx.should_finish = false;
                 Ok(AgentTurnDecision::Continue)
             } else {
-                ctx.should_finish = true;
                 ctx.emit(AgentEvent::AgentDone { message: assistant });
                 Ok(AgentTurnDecision::Done)
             }
@@ -557,15 +543,11 @@ pub(crate) async fn maybe_prepare_next_turn(
                 return Ok(AgentTurnDecision::Error);
             };
             if should_stop {
-                ctx.should_finish = true;
-                ctx.has_more_queued_input = false;
                 ctx.emit(AgentEvent::AgentDone { message: assistant });
                 return Ok(AgentTurnDecision::Done);
             }
 
             if ctx.tool_results_all_terminate {
-                ctx.should_finish = true;
-                ctx.has_more_queued_input = false;
                 ctx.emit(AgentEvent::AgentDone { message: assistant });
                 return Ok(AgentTurnDecision::Done);
             }
@@ -574,17 +556,12 @@ pub(crate) async fn maybe_prepare_next_turn(
                 return Ok(action);
             }
 
-            ctx.should_finish = false;
-            ctx.has_more_queued_input =
-                !ctx.follow_up_queue.is_empty() || !ctx.steering_queue.is_empty();
             Ok(AgentTurnDecision::Continue)
         }
         StopReason::Error => {
-            ctx.should_finish = true;
             Ok(AgentTurnDecision::Error)
         }
         StopReason::Aborted => {
-            ctx.should_finish = true;
             Ok(AgentTurnDecision::Aborted)
         }
     }
@@ -599,7 +576,6 @@ pub(crate) async fn execute_tools(
         return Ok(AgentTurnDecision::ContinueProvider);
     }
     if pending.len() > MAX_TOOL_CALLS_PER_TURN {
-        ctx.should_finish = true;
         return Err(AgentTurnError::ToolLimit(ToolExecutionLimit::CallsPerTurn));
     }
 
@@ -1079,7 +1055,6 @@ impl Write for ByteCounter {
 }
 
 fn aborted(ctx: &mut AgentTurnContext) -> Result<AgentTurnDecision, AgentTurnError> {
-    ctx.should_finish = true;
     ctx.emit(AgentEvent::AgentError {
         error: "aborted".into(),
     });
@@ -1125,7 +1100,6 @@ async fn should_stop_after_turn(
     {
         Ok(should_stop) => Ok(Some(should_stop)),
         Err(error) => {
-            ctx.should_finish = true;
             ctx.emit(AgentEvent::AgentError {
                 error: error.clone(),
             });
@@ -1149,7 +1123,6 @@ async fn prepare_next_turn_or_error(
     {
         Ok(update) => update,
         Err(error) => {
-            ctx.should_finish = true;
             ctx.emit(AgentEvent::AgentError {
                 error: error.clone(),
             });
