@@ -1093,7 +1093,13 @@ impl SnapshotCoordinator {
     ) -> Result<(), ClientRegistryError> {
         let mut state = self.state.lock().unwrap();
         let record = Self::record(&mut state, handle)?;
-        if record.prepared_operation.is_some() || record.submitted_operation.is_some() {
+        if record.prepared_operation.is_some()
+            || matches!(
+                record.submitted_operation,
+                Some(SubmittedOperationStatus::Running { .. })
+                    | Some(SubmittedOperationStatus::RecoveryPending { .. })
+            )
+        {
             Err(ClientRegistryError::SubmittedOperationPending)
         } else {
             Ok(())
@@ -1108,8 +1114,22 @@ impl SnapshotCoordinator {
     ) -> Result<(), ClientRegistryError> {
         let mut state = self.state.lock().unwrap();
         let record = Self::record(&mut state, handle)?;
-        if record.prepared_operation.is_some() || record.submitted_operation.is_some() {
+        if record.prepared_operation.is_some()
+            || matches!(
+                record.submitted_operation,
+                Some(SubmittedOperationStatus::Running { .. })
+                    | Some(SubmittedOperationStatus::RecoveryPending { .. })
+            )
+        {
             return Err(ClientRegistryError::SubmittedOperationPending);
+        }
+        // A terminal submission (acknowledged or not) no longer blocks a
+        // fresh prepare: this is the escape hatch for clients whose previous
+        // operation ended in `TerminalUncertain` (e.g. a failed prompt that
+        // never produced a terminal product event), which previously locked
+        // them out of submitting anything until the runtime restarted.
+        if record.submitted_operation.is_some() {
+            record.submitted_operation = None;
         }
         record.prepared_operation = Some(PreparedOperation {
             operation_id,
@@ -1483,9 +1503,17 @@ impl SnapshotCoordinator {
             probe.release.recv().unwrap();
         }
         let record = Self::record(&mut state, handle)?;
-        if record.submitted_operation.is_some() {
+        if matches!(
+            record.submitted_operation,
+            Some(SubmittedOperationStatus::Running { .. })
+                | Some(SubmittedOperationStatus::RecoveryPending { .. })
+        ) {
             return Err(ClientRegistryError::SubmittedRegression);
         }
+        // Same escape hatch as `register_prepared_submission`: a stale
+        // terminal submission (in particular `TerminalUncertain`) is
+        // replaced by the new running operation instead of blocking it.
+        record.submitted_operation = None;
         match record.prepared_operation.as_ref() {
             Some(prepared)
                 if prepared.operation_id == operation_id && prepared.descriptor == descriptor => {}
@@ -1779,4 +1807,118 @@ pub(crate) enum ClientRegistryError {
     SubmissionDraftMismatch,
     #[error("submitted terminal root cardinality was {count}, expected exactly one")]
     TerminalCardinality { count: u8 },
+}
+
+#[cfg(test)]
+mod submission_escape_hatch_tests {
+    use super::*;
+    use crate::events::CodingAgentProductEventTerminalStatus;
+    use crate::runtime::client::state::ClientConnectionId;
+    use crate::runtime::operation::contract::CodingAgentOperation;
+
+    fn coordinator() -> SnapshotCoordinator {
+        SnapshotCoordinator::default()
+    }
+
+    fn descriptor() -> OperationDescriptor {
+        CodingAgentOperation::SetSessionName { name: None }.descriptor()
+    }
+
+    fn submitted_operation(
+        coordinator: &SnapshotCoordinator,
+        handle: &ClientHandle,
+    ) -> Option<SubmittedOperationStatus> {
+        coordinator
+            .state
+            .lock()
+            .unwrap()
+            .clients
+            .get(&handle.id)
+            .and_then(|record| record.submitted_operation.clone())
+    }
+
+    #[test]
+    fn terminal_uncertain_submission_can_be_replaced_by_a_fresh_submission() {
+        let coordinator = coordinator();
+        let handle = coordinator
+            .connect_or_takeover(ClientConnectionId::new("client-1"))
+            .unwrap();
+
+        // Simulate a failed prompt: the operation ran, never produced a
+        // terminal product event, and finalization degraded the Running
+        // submission into TerminalUncertain.
+        let first = "op-1".to_owned();
+        coordinator
+            .register_prepared_submission(&handle, first.clone(), descriptor())
+            .unwrap();
+        coordinator
+            .commit_submission_running(&handle, first.clone(), descriptor(), None)
+            .unwrap();
+        coordinator
+            .finalize_terminal_association(
+                &handle,
+                &first,
+                descriptor(),
+                CodingAgentProductEventTerminalStatus::Failed,
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                submitted_operation(&coordinator, &handle),
+                Some(SubmittedOperationStatus::Terminal {
+                    anchor: SubmittedTerminalAnchor::TerminalUncertain { .. },
+                    ..
+                })
+            ),
+            "failed finalization must degrade the submission to TerminalUncertain"
+        );
+
+        // The escape hatch: the stale terminal submission must not block a
+        // fresh prepare/commit, and the new submission must replace it.
+        assert!(coordinator.validate_submission_slot(&handle).is_ok());
+        let second = "op-2".to_owned();
+        coordinator
+            .register_prepared_submission(&handle, second.clone(), descriptor())
+            .unwrap();
+        coordinator
+            .commit_submission_running(&handle, second.clone(), descriptor(), None)
+            .unwrap();
+        assert!(
+            matches!(
+                submitted_operation(&coordinator, &handle),
+                Some(SubmittedOperationStatus::Running { .. })
+            ),
+            "the fresh submission must replace the stale terminal one"
+        );
+    }
+
+    #[test]
+    fn running_or_recovery_pending_submissions_still_block_prepare() {
+        let coordinator = coordinator();
+        let handle = coordinator
+            .connect_or_takeover(ClientConnectionId::new("client-2"))
+            .unwrap();
+
+        let operation_id = "op-1".to_owned();
+        coordinator
+            .register_prepared_submission(&handle, operation_id.clone(), descriptor())
+            .unwrap();
+        coordinator
+            .commit_submission_running(&handle, operation_id.clone(), descriptor(), None)
+            .unwrap();
+
+        assert!(
+            matches!(
+                coordinator.validate_submission_slot(&handle),
+                Err(ClientRegistryError::SubmittedOperationPending)
+            ),
+            "a running submission must still block the slot"
+        );
+        assert!(
+            coordinator
+                .register_prepared_submission(&handle, "op-2".to_owned(), descriptor())
+                .is_err(),
+            "a running submission must still block prepare"
+        );
+    }
 }
