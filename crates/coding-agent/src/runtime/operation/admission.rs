@@ -233,11 +233,7 @@ impl OperationScheduler {
                 });
             }
             OperationClass::ReadOnly => {
-                return Ok(OperationPermit::unguarded(
-                    admission.kind,
-                    class,
-                    admission.clone(),
-                ));
+                return Ok(OperationPermit::unguarded(admission.clone()));
             }
             OperationClass::SessionWriteRoot
             | OperationClass::NonSessionRoot
@@ -252,7 +248,7 @@ impl OperationScheduler {
                 admission.capability_snapshot.operation_id.clone(),
                 admission.capability_snapshot.generation,
             )
-            .map(|guard| OperationPermit::guarded(admission.kind, class, guard, admission.clone()))
+            .map(|guard| OperationPermit::guarded(guard, admission.clone()))
             .map_err(AdmissionRejection::Control)
     }
 
@@ -291,7 +287,7 @@ impl OperationScheduler {
                 execution
                     .validate()
                     .map_err(AdmissionRejection::InvalidExecution)?;
-                Ok(OperationPermit::child(kind, execution, guard))
+                Ok(OperationPermit::child(execution, guard))
             }
             _ => Err(AdmissionRejection::ChildLineageMissing { kind }),
         }

@@ -38,21 +38,6 @@ use crate::session::replay::{MessageStatus, SessionReplay, ToolCallStatus, Trans
 pub(crate) struct AgentRuntimeBuild {
     pub(crate) agent: Agent,
     pub(crate) diagnostics: Vec<CodingDiagnostic>,
-    #[cfg(test)]
-    tool_names: Vec<String>,
-    #[cfg(test)]
-    compaction_enabled: bool,
-}
-
-#[cfg(test)]
-impl AgentRuntimeBuild {
-    pub(crate) fn tool_names_for_tests(&self) -> Vec<String> {
-        self.tool_names.clone()
-    }
-
-    pub(crate) fn compaction_enabled_for_tests(&self) -> bool {
-        self.compaction_enabled
-    }
 }
 
 pub(crate) fn stream_model_for_scoped_runtime(
@@ -115,23 +100,6 @@ impl RuntimeService {
         }));
     }
 
-    #[cfg(test)]
-    pub(crate) fn build_agent_runtime(
-        &self,
-        runtime: &RuntimeSnapshot,
-    ) -> Result<Agent, CodingSessionError> {
-        Ok(self.build_agent_runtime_with_diagnostics(runtime)?.agent)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn build_agent_runtime_with_diagnostics(
-        &self,
-        runtime: &RuntimeSnapshot,
-    ) -> Result<AgentRuntimeBuild, CodingSessionError> {
-        let snapshot = OperationCapabilitySnapshot::permissive("op_test_runtime");
-        self.build_agent_runtime_with_capabilities(runtime, &snapshot)
-    }
-
     pub(crate) fn build_agent_runtime_with_capabilities(
         &self,
         runtime: &RuntimeSnapshot,
@@ -152,8 +120,7 @@ impl RuntimeService {
         let provider_streamer = scoped_provider_streamer_for_runtime(runtime, model_capability)?;
 
         let mut diagnostics = runtime.profile_diagnostics().to_vec();
-        let resources = apply_skill_policy(runtime, &mut diagnostics);
-        let mut policy_tools = delegation_tools(
+        let resources = apply_skill_policy(runtime, &mut diagnostics);        let mut policy_tools = delegation_tools(
             runtime.profile_id(),
             runtime.profile_delegation_policy(),
             runtime.delegation_target_inventory(),
@@ -186,11 +153,6 @@ impl RuntimeService {
                     snapshot.shell.as_ref(),
                 )
             })
-            .collect::<Vec<_>>();
-        #[cfg(test)]
-        let tool_names = tools
-            .iter()
-            .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
 
         let mut config = build_agent_config_with_auth_diagnostics(
@@ -242,8 +204,6 @@ impl RuntimeService {
             }));
         }
 
-        #[cfg(test)]
-        let compaction_enabled = config.compaction.is_some();
         let agent = Agent::new(config);
         for tool in tools {
             agent
@@ -252,14 +212,7 @@ impl RuntimeService {
                     message: error.to_string(),
                 })?;
         }
-        Ok(AgentRuntimeBuild {
-            agent,
-            diagnostics,
-            #[cfg(test)]
-            tool_names,
-            #[cfg(test)]
-            compaction_enabled,
-        })
+        Ok(AgentRuntimeBuild { agent, diagnostics })
     }
 
     pub(crate) fn hydrate_agent_runtime(

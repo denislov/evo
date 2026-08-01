@@ -21,12 +21,9 @@ use crate::runtime::facade::CodingSessionError;
 use crate::session::event::{
     DiagnosticLevel, OperationKind, PersistedContentBlock, PersistedDelegationStatus,
     PersistedRole, PersistedRuntimeGenerationRef, PersistedSelfHealingEditCheckOutput,
-    PersistedSelfHealingEditReplacement, PersistedToolResult, SessionEventData,
+    PersistedSelfHealingEditReplacement, PersistedToolResult,     SessionEventData,
     SessionEventEnvelope,
 };
-
-#[cfg(test)]
-const BASELINE_CAPABILITY_GENERATION: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionState {
@@ -105,11 +102,6 @@ enum SessionTransactionWriterCommand {
         events: Vec<SessionEventEnvelope>,
         manifest_patch: ManifestPatch,
         operation_id: String,
-    },
-    #[cfg(test)]
-    Block {
-        entered: SyncSender<()>,
-        release: std::sync::mpsc::Receiver<()>,
     },
 }
 
@@ -528,12 +520,6 @@ fn execute_writer_command(
                 committed_session_sequence,
             })
         }
-        #[cfg(test)]
-        SessionTransactionWriterCommand::Block { entered, release } => {
-            let _ = entered.send(());
-            let _ = release.recv();
-            Ok(SessionCommitReceipt::default())
-        }
     }
 }
 
@@ -596,48 +582,6 @@ where
     G: IdGenerator,
     C: Clock,
 {
-    #[cfg(test)]
-    pub(crate) fn begin(
-        store: &SessionLogStore,
-        handle: SessionHandle,
-        ids: G,
-        clock: C,
-        operation: OperationKind,
-    ) -> Self {
-        let runtime_generation = runtime_generation_for_operation(handle.manifest(), &operation);
-        Self::begin_with_runtime_generation(
-            store,
-            handle,
-            ids,
-            clock,
-            operation,
-            runtime_generation,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_with_runtime_generation(
-        store: &SessionLogStore,
-        handle: SessionHandle,
-        mut ids: G,
-        clock: C,
-        operation: OperationKind,
-        runtime_generation: PersistedRuntimeGenerationRef,
-    ) -> Self {
-        let operation_id = ids.next_root_operation_id();
-        let session_id = handle.manifest().session_id.clone();
-        Self::begin_admitted_with_runtime_generation(
-            SessionTransactionWriter::new(store.clone(), handle)
-                .expect("test session writer should acquire its lease"),
-            session_id,
-            ids,
-            clock,
-            operation,
-            runtime_generation,
-            operation_id,
-        )
-    }
-
     pub(crate) fn begin_admitted_with_runtime_generation(
         writer: SessionTransactionWriter,
         session_id: String,
@@ -1019,11 +963,6 @@ where
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_in_doubt(&self) -> bool {
-        self.state == TransactionState::InDoubt
-    }
-
     pub(crate) fn abort_with_outbox(
         &mut self,
         reason: impl Into<String>,
@@ -1232,24 +1171,5 @@ where
                 message: format!("tool call is not open: {tool_call_id}"),
             })
         }
-    }
-}
-
-#[cfg(test)]
-fn runtime_generation_for_operation(
-    manifest: &SessionManifest,
-    operation: &OperationKind,
-) -> PersistedRuntimeGenerationRef {
-    match operation {
-        OperationKind::Prompt => PersistedRuntimeGenerationRef {
-            profile_id: Some(manifest.default_agent_profile_id.clone()),
-            capability_generation: Some(BASELINE_CAPABILITY_GENERATION),
-        },
-        OperationKind::ManualCompaction
-        | OperationKind::SessionTreeLabel
-        | OperationKind::BranchSummary
-        | OperationKind::Export
-        | OperationKind::SelfHealingEdit
-        | OperationKind::Other { .. } => PersistedRuntimeGenerationRef::default(),
     }
 }

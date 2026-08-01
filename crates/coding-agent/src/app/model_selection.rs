@@ -9,10 +9,6 @@ pub struct ModelRotation {
 
 #[derive(Debug)]
 pub struct ModelRotationEntry {
-    #[cfg(test)]
-    pub pattern: String,
-    #[cfg(test)]
-    pub thinking: Option<ThinkingLevel>,
     matcher: GlobMatcher,
 }
 
@@ -45,13 +41,8 @@ pub fn parse_model_rotation(value: &str) -> Result<ModelRotation, ApplicationErr
             })?
             .compile_matcher();
         entries.push(ModelRotationEntry {
-            #[cfg(test)]
-            pattern: pattern.clone(),
-            #[cfg(test)]
-            thinking,
             matcher,
         });
-        #[cfg(not(test))]
         let _ = thinking;
     }
     if entries.is_empty() {

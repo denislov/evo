@@ -1,20 +1,9 @@
-#[cfg(test)]
-use super::CodingAgentProductEventTerminalStatus;
 use super::emission::ProductEventDraft;
 use super::{
     CodingAgentProductEventDurability, CodingAgentProductEventKind, CodingAgentWorkflowProductEvent,
 };
 
 pub(crate) const RECOVERY_RECORD_VERSION: u64 = 1;
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecoveryEvent {
-    pub(crate) operation_id: String,
-    pub(crate) recovery_id: String,
-    pub(crate) reason: String,
-    pub(crate) session_id: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecoveryPendingEvent {
@@ -97,29 +86,6 @@ impl RecoveryResolvedEvent {
             terminal_status: Some(terminal_status),
             durability: CodingAgentProductEventDurability::Durable {
                 session_id: self.session_id,
-            },
-        }
-    }
-}
-
-#[cfg(test)]
-impl RecoveryEvent {
-    pub(crate) fn into_product_draft(self) -> ProductEventDraft {
-        ProductEventDraft {
-            event: CodingAgentProductEventKind::Workflow(
-                CodingAgentWorkflowProductEvent::OperationRecovered {
-                    operation_id: self.operation_id.clone(),
-                    recovery_id: self.recovery_id.clone(),
-                    reason: self.reason,
-                },
-            ),
-            operation_id: Some(self.operation_id.clone()),
-            session_id: Some(self.session_id.clone()),
-            terminal_status: Some(CodingAgentProductEventTerminalStatus::Recovered),
-            durability: CodingAgentProductEventDurability::DerivedFromSession {
-                session_id: self.session_id,
-                source_operation_id: self.operation_id,
-                recovery_id: self.recovery_id,
             },
         }
     }

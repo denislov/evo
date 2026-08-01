@@ -23,15 +23,6 @@ pub(crate) struct ManualCompactionOptions {
 }
 
 impl ManualCompactionOptions {
-    #[cfg(test)]
-    pub(crate) fn new(runtime: RuntimeSnapshot) -> Self {
-        Self {
-            runtime,
-            custom_instructions: None,
-            cancellation: None,
-        }
-    }
-
     pub(crate) fn from_prompt_turn_options(
         options: &PromptTurnOptions,
     ) -> Result<Self, CodingSessionError> {

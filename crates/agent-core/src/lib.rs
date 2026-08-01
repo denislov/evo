@@ -4,8 +4,6 @@ mod context;
 mod execution;
 mod hooks;
 mod resources;
-#[cfg(any(test, feature = "test-support"))]
-mod testing;
 mod transcript;
 
 /// Stable low-level runtime facade for `agent-core`.

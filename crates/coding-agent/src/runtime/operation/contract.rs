@@ -540,16 +540,6 @@ pub(crate) fn terminal_operation_kind(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn recovered_product_terminal_operation(
-    kind: OperationKind,
-) -> Option<CodingAgentProductEventTerminalOperation> {
-    Some(CodingAgentProductEventTerminalOperation {
-        kind: recovery_terminal_operation_kind(kind)?,
-        status: CodingAgentProductEventTerminalStatus::Recovered,
-    })
-}
-
 pub(crate) fn recovery_resolution_terminal_operation(
     kind: OperationKind,
     status: CodingAgentProductEventTerminalStatus,

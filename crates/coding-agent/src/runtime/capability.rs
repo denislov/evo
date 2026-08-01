@@ -1169,51 +1169,6 @@ impl OperationCapabilitySnapshot {
             capability_generation: Some(self.generation.get()),
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn permissive(operation_id: impl Into<String>) -> Self {
-        Self {
-            generation: CapabilityGeneration::new(1),
-            operation_id: operation_id.into(),
-            actor: ActorId::Client,
-            model: Some(ModelCapability { profile_id: None }),
-            tools: ToolCapabilitySet {
-                allow_all: true,
-                allowed: BTreeSet::new(),
-            },
-            commands: Default::default(),
-            filesystem: Some(
-                FilesystemCapability::new(std::path::PathBuf::from("."))
-                    .expect("test/permissive filesystem root must open"),
-            ),
-            shell: Some(ShellCapability {
-                cwd: std::path::PathBuf::from("."),
-                shell_path: None,
-                command_prefix: None,
-            }),
-            session_read: Some(SessionReadCapability { persistent: true }),
-            session_write: Some(SessionWriteCapability { persistent: true }),
-            ui: Some(UiCapability),
-        }
-    }
-}
-
-#[cfg(test)]
-impl OperationCapabilitySnapshot {
-    pub(crate) fn test_without_session_write(operation_id: impl Into<String>) -> Self {
-        let mut snapshot = Self::permissive(operation_id);
-        snapshot.session_write = None;
-        snapshot
-    }
-
-    pub(crate) fn test_with_tools(
-        operation_id: impl Into<String>,
-        names: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        let mut snapshot = Self::permissive(operation_id);
-        snapshot.tools = ToolCapabilitySet::from_names(names.into_iter().map(Into::into));
-        snapshot
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

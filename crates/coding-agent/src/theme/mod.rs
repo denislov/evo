@@ -8,10 +8,6 @@
 
 mod builtin;
 mod color_value;
-#[cfg(test)]
-mod detection;
-#[cfg(test)]
-mod export;
 mod json;
 mod reload;
 mod resolve;

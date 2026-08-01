@@ -1087,23 +1087,6 @@ impl SnapshotCoordinator {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn validate_prompt_draft(
-        &self,
-        handle: &ClientHandle,
-        draft_id: &str,
-        fingerprint: &str,
-    ) -> Result<DraftRecord, ClientRegistryError> {
-        let mut state = self.state.lock().unwrap();
-        let record = Self::record(&mut state, handle)?;
-        match &record.prompt_draft {
-            Some(draft) if draft.id == draft_id && draft.fingerprint == fingerprint => {
-                Ok(draft.clone())
-            }
-            _ => Err(ClientRegistryError::InvalidInput),
-        }
-    }
-
     pub(crate) fn validate_submission_slot(
         &self,
         handle: &ClientHandle,

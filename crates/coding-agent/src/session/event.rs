@@ -69,24 +69,6 @@ impl SessionEventEnvelope {
         self.turn_id = Some(turn_id.into());
         self
     }
-
-    #[cfg(test)]
-    pub(crate) fn with_branch_id(mut self, branch_id: impl Into<String>) -> Self {
-        self.branch_id = Some(branch_id.into());
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_leaf_id(mut self, leaf_id: impl Into<String>) -> Self {
-        self.leaf_id = Some(leaf_id.into());
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_parent_event_id(mut self, parent_event_id: impl Into<String>) -> Self {
-        self.parent_event_id = Some(parent_event_id.into());
-        self
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

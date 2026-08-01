@@ -1,9 +1,7 @@
 use tokio_util::sync::CancellationToken;
 
-use super::control::{
-    ChildOperationGuard, OperationCancellationHandle, OperationGuard, OperationKind,
-};
-use super::{OperationClass, OperationExecution};
+use super::control::{ChildOperationGuard, OperationCancellationHandle, OperationGuard};
+use super::OperationExecution;
 use crate::runtime::capability::OperationCapabilitySnapshot;
 
 #[derive(Debug)]
@@ -14,24 +12,16 @@ pub(crate) struct OperationPermit {
     execution: OperationExecution,
     cancellation: Option<CancellationToken>,
     cancellation_handle: Option<OperationCancellationHandle>,
-    #[cfg(test)]
-    kind: OperationKind,
-    #[cfg(test)]
-    class: OperationClass,
 }
 
 impl OperationPermit {
     pub(crate) fn guarded(
-        kind: OperationKind,
-        class: OperationClass,
         mut guard: OperationGuard,
         execution: OperationExecution,
     ) -> Self {
         guard.bind_capability_generation(execution.capability_generation);
         let cancellation = guard.cancellation_token();
         let cancellation_handle = Some(guard.cancellation_handle());
-        #[cfg(not(test))]
-        let _ = (kind, class);
 
         Self {
             guard: Some(guard),
@@ -39,44 +29,26 @@ impl OperationPermit {
             execution,
             cancellation,
             cancellation_handle,
-            #[cfg(test)]
-            kind,
-            #[cfg(test)]
-            class,
         }
     }
 
-    pub(crate) fn unguarded(
-        kind: OperationKind,
-        class: OperationClass,
-        execution: OperationExecution,
-    ) -> Self {
-        #[cfg(not(test))]
-        let _ = (kind, class);
-
+    pub(crate) fn unguarded(execution: OperationExecution) -> Self {
         Self {
             guard: None,
             child_guard: None,
             execution,
             cancellation: None,
             cancellation_handle: None,
-            #[cfg(test)]
-            kind,
-            #[cfg(test)]
-            class,
         }
     }
 
     pub(crate) fn child(
-        kind: OperationKind,
         execution: OperationExecution,
         mut guard: ChildOperationGuard,
     ) -> Self {
         guard.bind_capability_generation(execution.capability_generation);
         let cancellation = Some(guard.cancellation_token());
         let cancellation_handle = Some(guard.cancellation_handle());
-        #[cfg(not(test))]
-        let _ = kind;
 
         Self {
             guard: None,
@@ -84,10 +56,6 @@ impl OperationPermit {
             execution,
             cancellation,
             cancellation_handle,
-            #[cfg(test)]
-            kind,
-            #[cfg(test)]
-            class: OperationClass::Child,
         }
     }
 

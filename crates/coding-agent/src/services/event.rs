@@ -17,19 +17,13 @@ use crate::events::message::MessageEvent;
 use crate::events::outbox::DurableOutboxRecord;
 use crate::events::prompt::PromptEvent;
 use crate::events::prompt_stream::PromptStreamEvent;
-#[cfg(test)]
-use crate::events::recovery::RecoveryEvent;
 use crate::events::recovery::RecoveryPendingEvent;
 use crate::events::runtime::RuntimeEvent;
-#[cfg(test)]
-use crate::events::session::SessionCompactionEvent;
 use crate::events::session::{SessionLifecycleEvent, SessionWriteEvent};
 use crate::events::team::TeamEvent;
 use crate::events::tool::ToolEvent;
 use crate::events::workflow::SelfHealingEditEvent;
 use crate::events::{CodingAgentProductEventKind, ProductEvent, ProductEventSequence};
-#[cfg(test)]
-use crate::operations::compaction::runner::ManualCompactionOutcome;
 use crate::operations::prompt::context::{DelegationRequest, InternalPromptTurnOutcome};
 use crate::operations::self_healing_edit::runner::{
     SelfHealingEditObserver, SelfHealingEditOutcome, SelfHealingEditRepairAttempt,
@@ -48,8 +42,6 @@ pub(crate) struct EventService {
     product_sender: broadcast::Sender<ProductEvent>,
     snapshot_coordinator: Arc<SnapshotCoordinator>,
     deferred_terminal_drafts: Arc<Mutex<HashMap<String, ProductEventDraft>>>,
-    #[cfg(test)]
-    channel_capacity: usize,
     retained_capacity: usize,
 }
 
@@ -60,16 +52,6 @@ struct ProductEventEmissionContext {
     root_operation_id: Option<String>,
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EventBackpressureStatus {
-    pub(crate) channel_capacity: usize,
-    pub(crate) retained_capacity: usize,
-    pub(crate) oldest_retained_sequence: Option<ProductEventSequence>,
-    pub(crate) current_sequence: ProductEventSequence,
-    pub(crate) dropped_before: Option<ProductEventSequence>,
-}
-
 /// The replay/live cut captured while holding the publication lock.
 ///
 /// The receiver is established before the sequence and retained partition are
@@ -77,11 +59,7 @@ pub(crate) struct EventBackpressureStatus {
 /// through `receiver`, never accidentally omitted between two calls.
 #[derive(Debug)]
 pub(crate) struct ProductEventRecoveryBoundary {
-    #[cfg(test)]
-    pub(crate) requested_after: ProductEventSequence,
     pub(crate) replayed_through: ProductEventSequence,
-    #[cfg(test)]
-    pub(crate) oldest_available: Option<ProductEventSequence>,
     pub(crate) replay: Vec<ProductEvent>,
     pub(crate) receiver: ProductEventReceiver,
     pub(crate) lifecycle_receiver: tokio::sync::watch::Receiver<u64>,
@@ -178,11 +156,6 @@ impl EventService {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn new() -> Self {
-        Self::with_snapshot_coordinator(SnapshotCoordinator::new())
-    }
-
     pub(crate) fn with_snapshot_coordinator(
         snapshot_coordinator: Arc<SnapshotCoordinator>,
     ) -> Self {
@@ -190,15 +163,6 @@ impl EventService {
             EVENT_CHANNEL_CAPACITY,
             EVENT_RETAINED_CAPACITY,
             snapshot_coordinator,
-        )
-    }
-
-    #[cfg(test)]
-    fn with_event_capacities(channel_capacity: usize, retained_capacity: usize) -> Self {
-        Self::with_event_capacities_and_coordinator(
-            channel_capacity,
-            retained_capacity,
-            SnapshotCoordinator::new(),
         )
     }
 
@@ -213,97 +177,8 @@ impl EventService {
             product_sender,
             snapshot_coordinator,
             deferred_terminal_drafts: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(test)]
-            channel_capacity,
             retained_capacity,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_event_capacity_for_tests(capacity: usize) -> Self {
-        Self::with_event_capacities(capacity, capacity)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_event_capacity_and_coordinator_for_tests(
-        capacity: usize,
-        snapshot_coordinator: Arc<SnapshotCoordinator>,
-    ) -> Self {
-        Self::with_event_capacities_and_coordinator(capacity, capacity, snapshot_coordinator)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_event_capacities_and_coordinator_for_tests(
-        channel_capacity: usize,
-        retained_capacity: usize,
-        snapshot_coordinator: Arc<SnapshotCoordinator>,
-    ) -> Self {
-        Self::with_event_capacities_and_coordinator(
-            channel_capacity,
-            retained_capacity,
-            snapshot_coordinator,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn current_product_sequence(&self) -> ProductEventSequence {
-        let state = self.snapshot_coordinator.state.lock().unwrap();
-        ProductEventSequence::new(state.next_event_sequence.saturating_sub(1))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn backpressure_status(&self) -> EventBackpressureStatus {
-        let state = self.snapshot_coordinator.state.lock().unwrap();
-        EventBackpressureStatus {
-            channel_capacity: self.channel_capacity,
-            retained_capacity: self.retained_capacity,
-            oldest_retained_sequence: state
-                .retained_product_events
-                .front()
-                .map(ProductEvent::sequence_internal),
-            current_sequence: ProductEventSequence::new(
-                state.next_event_sequence.saturating_sub(1),
-            ),
-            dropped_before: state.dropped_before,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn product_events_after(
-        &self,
-        cursor: ProductEventSequence,
-    ) -> Result<Vec<ProductEvent>, CodingSessionError> {
-        let state = self.snapshot_coordinator.state.lock().unwrap();
-        let Some(oldest) = state
-            .retained_product_events
-            .front()
-            .map(ProductEvent::sequence_internal)
-        else {
-            return Ok(Vec::new());
-        };
-        if cursor < oldest && cursor != ProductEventSequence::default() {
-            return Err(CodingSessionError::EventStreamGap {
-                requested_after: cursor.get(),
-                oldest_available: oldest.get(),
-            });
-        }
-        Ok(state
-            .retained_product_events
-            .iter()
-            .filter(|event| event.sequence_internal() > cursor)
-            .cloned()
-            .collect())
-    }
-
-    /// Atomically establish a live receiver and copy the retained partition
-    /// after `cursor`. No acknowledgement cursor is read or mutated here.
-    #[cfg(test)]
-    pub(crate) fn recovery_boundary_after(
-        &self,
-        cursor: ProductEventSequence,
-    ) -> ProductEventRecovery {
-        let state = self.snapshot_coordinator.state.lock().unwrap();
-        self.recovery_boundary_from_state(&state, cursor)
     }
 
     pub(crate) fn recovery_boundary_after_for_client(
@@ -348,11 +223,7 @@ impl EventService {
             .cloned()
             .collect();
         ProductEventRecovery::Ready(ProductEventRecoveryBoundary {
-            #[cfg(test)]
-            requested_after: cursor,
             replayed_through,
-            #[cfg(test)]
-            oldest_available,
             replay,
             receiver,
             lifecycle_receiver: self.snapshot_coordinator.subscribe_lifecycle(),
@@ -387,24 +258,6 @@ impl EventService {
         self.publish(draft, ProductEventEmissionContext::default(), |_, _| None)
     }
 
-    #[cfg(test)]
-    fn publish_session_compaction_event(&self, event: SessionCompactionEvent) -> ProductEvent {
-        let evidence = event.root_terminal_evidence();
-        self.publish(
-            event.into_product_draft(),
-            ProductEventEmissionContext::default(),
-            move |operation_kind, terminal_status| {
-                terminal_status.and_then(|status| {
-                    operation_kind.and_then(|kind| {
-                        crate::runtime::operation::contract::product_terminal_operation(
-                            kind, evidence, status,
-                        )
-                    })
-                })
-            },
-        )
-    }
-
     fn publish_self_healing_edit_event(&self, event: SelfHealingEditEvent) -> ProductEvent {
         let evidence = event.root_terminal_evidence();
         self.publish(
@@ -422,18 +275,6 @@ impl EventService {
                 })
             },
         )
-    }
-
-    #[cfg(test)]
-    fn publish_recovery_event(
-        &self,
-        event: RecoveryEvent,
-        explicit: ProductEventEmissionContext,
-    ) -> ProductEvent {
-        self.publish(event.into_product_draft(), explicit, |operation_kind, _| {
-            operation_kind
-                .and_then(crate::runtime::operation::contract::recovered_product_terminal_operation)
-        })
     }
 
     fn publish_prompt_event(&self, event: PromptEvent) -> ProductEvent {
@@ -565,19 +406,6 @@ impl EventService {
         drop(state);
         let _ = self.product_sender.send(product_event.clone());
         product_event
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_agent_event(
-        &self,
-        context: &AgentEventMappingContext,
-        event: &AgentEvent,
-    ) -> Vec<PromptStreamEvent> {
-        let events = map_agent_event(context, event);
-        for event in &events {
-            self.publish_prompt_stream_event(event.clone());
-        }
-        events
     }
 
     pub(crate) fn emit_session_opened(&self, session_id: impl Into<String>) -> ProductEvent {
@@ -807,22 +635,6 @@ impl EventService {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn emit_session_compaction_completed(
-        &self,
-        operation_id: impl Into<String>,
-        turn_id: impl Into<String>,
-        outcome: &ManualCompactionOutcome,
-    ) {
-        self.publish_session_compaction_event(SessionCompactionEvent {
-            operation_id: operation_id.into(),
-            turn_id: turn_id.into(),
-            summary: outcome.summary.clone(),
-            first_kept_message_id: outcome.first_kept_message_id.clone(),
-            tokens_before: outcome.tokens_before,
-        });
-    }
-
     pub(crate) fn emit_capability_changed(
         &self,
         installed: InstalledCapabilityGeneration,
@@ -954,12 +766,6 @@ impl EventService {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn emit_prompt_outcome(&self, outcome: &InternalPromptTurnOutcome) {
-        self.emit_prompt_diagnostics(outcome);
-        self.emit_prompt_terminal(outcome);
-    }
-
     pub(crate) fn emit_prompt_terminal(&self, outcome: &InternalPromptTurnOutcome) {
         match outcome {
             InternalPromptTurnOutcome::Success {
@@ -1086,54 +892,6 @@ impl EventService {
         .into_product_draft()
     }
 
-    #[cfg(test)]
-    pub(crate) fn emit_agent_invocation_completed(
-        &self,
-        operation_id: impl Into<String>,
-        child_operation_id: impl Into<String>,
-        profile_id: impl Into<ProfileId>,
-        final_text: impl Into<String>,
-    ) -> ProductEvent {
-        self.publish_agent_invocation_event(AgentInvocationEvent::Completed {
-            operation_id: operation_id.into(),
-            child_operation_id: child_operation_id.into(),
-            profile_id: profile_id.into(),
-            final_text: final_text.into(),
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_agent_invocation_failed(
-        &self,
-        operation_id: impl Into<String>,
-        child_operation_id: impl Into<String>,
-        profile_id: impl Into<ProfileId>,
-        error: CodingSessionError,
-    ) -> ProductEvent {
-        self.publish_agent_invocation_event(AgentInvocationEvent::Failed {
-            operation_id: operation_id.into(),
-            child_operation_id: child_operation_id.into(),
-            profile_id: profile_id.into(),
-            error,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_agent_invocation_aborted(
-        &self,
-        operation_id: impl Into<String>,
-        child_operation_id: impl Into<String>,
-        profile_id: impl Into<ProfileId>,
-        reason: impl Into<String>,
-    ) -> ProductEvent {
-        self.publish_agent_invocation_event(AgentInvocationEvent::Aborted {
-            operation_id: operation_id.into(),
-            child_operation_id: child_operation_id.into(),
-            profile_id: profile_id.into(),
-            reason: reason.into(),
-        })
-    }
-
     pub(crate) fn emit_agent_team_started(
         &self,
         operation_id: impl Into<String>,
@@ -1217,48 +975,6 @@ impl EventService {
             team_id: team_id.into(),
             profile_id: profile_id.into(),
             final_text: final_text.into(),
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_agent_team_completed(
-        &self,
-        operation_id: impl Into<String>,
-        team_id: impl Into<ProfileId>,
-        final_text: impl Into<String>,
-    ) -> ProductEvent {
-        self.publish_team_event(TeamEvent::Completed {
-            operation_id: operation_id.into(),
-            team_id: team_id.into(),
-            final_text: final_text.into(),
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_agent_team_failed(
-        &self,
-        operation_id: impl Into<String>,
-        team_id: impl Into<ProfileId>,
-        error: CodingSessionError,
-    ) -> ProductEvent {
-        self.publish_team_event(TeamEvent::Failed {
-            operation_id: operation_id.into(),
-            team_id: team_id.into(),
-            error,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_agent_team_aborted(
-        &self,
-        operation_id: impl Into<String>,
-        team_id: impl Into<ProfileId>,
-        reason: impl Into<String>,
-    ) -> ProductEvent {
-        self.publish_team_event(TeamEvent::Aborted {
-            operation_id: operation_id.into(),
-            team_id: team_id.into(),
-            reason: reason.into(),
         })
     }
 
@@ -1412,76 +1128,6 @@ impl EventService {
             }
         }
         .into_product_draft()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_self_healing_edit_completed(
-        &self,
-        operation_id: impl Into<String>,
-        outcome: &SelfHealingEditOutcome,
-    ) {
-        self.publish_self_healing_edit_event(SelfHealingEditEvent::Completed {
-            operation_id: operation_id.into(),
-            path: outcome.path.clone(),
-            attempts: outcome.attempts,
-            first_changed_line: outcome.first_changed_line,
-            check_output: outcome.check_output.clone(),
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_self_healing_edit_failed(
-        &self,
-        operation_id: impl Into<String>,
-        path: impl Into<String>,
-        error: &CodingSessionError,
-    ) {
-        self.publish_self_healing_edit_event(SelfHealingEditEvent::Failed {
-            operation_id: operation_id.into(),
-            path: path.into(),
-            error: error.clone(),
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_self_healing_edit_aborted(
-        &self,
-        operation_id: impl Into<String>,
-        path: impl Into<String>,
-        reason: impl Into<String>,
-    ) {
-        self.publish_self_healing_edit_event(SelfHealingEditEvent::Aborted {
-            operation_id: operation_id.into(),
-            path: path.into(),
-            reason: reason.into(),
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_operation_recovered(
-        &self,
-        operation_id: impl Into<String>,
-        recovery_id: impl Into<String>,
-        reason: impl Into<String>,
-        session_id: impl Into<String>,
-        operation_kind: Option<crate::runtime::operation::control::OperationKind>,
-        capability_generation: Option<u64>,
-    ) -> ProductEvent {
-        let operation_id = operation_id.into();
-        self.publish_recovery_event(
-            RecoveryEvent {
-                operation_id: operation_id.clone(),
-                recovery_id: recovery_id.into(),
-                reason: reason.into(),
-                session_id: session_id.into(),
-            },
-            ProductEventEmissionContext {
-                capability_generation: capability_generation
-                    .map(crate::runtime::capability::CapabilityGeneration::new),
-                operation_kind,
-                root_operation_id: Some(operation_id),
-            },
-        )
     }
 
     #[allow(

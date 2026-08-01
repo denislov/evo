@@ -10,9 +10,6 @@ mod providers;
 mod registry;
 mod transport;
 
-#[cfg(test)]
-extern crate self as ai;
-
 /// Stable facade for embedding `ai`.
 ///
 /// Implementation owners are private. Provider registration and streaming are

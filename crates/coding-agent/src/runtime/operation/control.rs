@@ -795,17 +795,6 @@ impl OperationState {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn ensure_session_write_idle(&self) -> Result<(), CodingSessionError> {
-        if let Some(active) = self.activity().session_write_blocker() {
-            return Err(CodingSessionError::Busy {
-                operation: active.as_str().into(),
-            });
-        }
-
-        Ok(())
-    }
-
     pub(crate) fn begin_root_with_capability_generation(
         &self,
         class: OperationClass,
@@ -899,16 +888,6 @@ impl OperationState {
             generation,
             cancellation: Some(cancellation),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_child(
-        &self,
-        kind: OperationKind,
-        operation_id: String,
-        parent_operation_id: String,
-    ) -> Result<ChildOperationGuard, CodingSessionError> {
-        self.begin_child_inner(kind, operation_id, parent_operation_id, None)
     }
 
     pub(crate) fn begin_child_with_capability_generation(

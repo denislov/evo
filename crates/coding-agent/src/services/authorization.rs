@@ -173,16 +173,6 @@ impl AuthorizationService {
         pending_requests(&self.state.lock().unwrap())
     }
 
-    #[cfg(test)]
-    pub(crate) fn resource_snapshot(&self) -> AuthorizationResourceSnapshot {
-        let state = self.state.lock().unwrap();
-        AuthorizationResourceSnapshot {
-            pending_authorization_ids: state.pending.keys().cloned().collect(),
-            operation_grant_count: state.grants.len(),
-            revision: state.revision,
-        }
-    }
-
     pub(crate) fn uses_interactive_waiters(&self) -> bool {
         self.mode == ToolAuthorizationMode::Interactive
     }
@@ -595,14 +585,6 @@ impl AuthorizationService {
             pending = pending_requests(&state);
         }
     }
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AuthorizationResourceSnapshot {
-    pub(crate) pending_authorization_ids: Vec<String>,
-    pub(crate) operation_grant_count: usize,
-    pub(crate) revision: u64,
 }
 
 fn persist_authorization_events(

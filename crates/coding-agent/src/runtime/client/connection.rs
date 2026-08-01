@@ -1129,48 +1129,6 @@ impl CodingAgentClientConnection {
             owner_handle: handle,
         })
     }
-
-    #[cfg(test)]
-    pub(crate) fn prepare_submission(
-        &self,
-        session: &mut crate::runtime::facade::CodingAgentSession,
-        draft_id: CodingAgentDraftId,
-        operation: &crate::runtime::facade::CodingAgentOperation,
-    ) -> Result<CodingAgentSubmissionLease, CodingSessionError> {
-        let handle = self.handle();
-        let descriptor = operation.descriptor();
-        let prompt_fingerprint = operation.submission_fingerprint();
-        let expected_prompt_draft = if descriptor.submitted_kind
-            == crate::runtime::operation::control::OperationKind::Prompt
-        {
-            let Some((_, fingerprint)) = prompt_fingerprint.as_ref() else {
-                return Err(CodingSessionError::Input {
-                    message: "prompt submission preparation requires a fingerprintable invocation"
-                        .into(),
-                });
-            };
-            Some(
-                self.coordinator
-                    .validate_prompt_draft(&handle, &draft_id.0, fingerprint)
-                    .map_err(|error| registry_error(&self.client_id, error))?,
-            )
-        } else {
-            None
-        };
-        self.coordinator
-            .validate_submission_slot(&handle)
-            .map_err(|error| submission_preparation_error(&self.client_id, error))?;
-        let (shared, operation_id) = session.install_submission_lease(
-            handle,
-            descriptor,
-            prompt_fingerprint,
-            expected_prompt_draft,
-        )?;
-        self.coordinator
-            .register_prepared_submission(&self.handle(), operation_id, descriptor)
-            .map_err(|error| registry_error(&self.client_id, error))?;
-        Ok(CodingAgentSubmissionLease { shared })
-    }
 }
 
 #[derive(Debug)]

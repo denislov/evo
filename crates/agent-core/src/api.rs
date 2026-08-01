@@ -87,14 +87,3 @@ pub mod transcript {
         agent_message_to_stored, create_session_id, create_timestamp, generate_entry_id,
     };
 }
-
-/// Deterministic helpers for owner and downstream tests. Production code
-/// must not import this category.
-#[cfg(any(test, feature = "test-support"))]
-pub mod testing {
-    pub use crate::context::conversion::{
-        assemble_context, convert_to_context, default_convert_to_llm,
-    };
-    pub use crate::execution::capture::bash_execution_to_text;
-    pub use crate::testing::environment::InMemoryExecutionEnv;
-}

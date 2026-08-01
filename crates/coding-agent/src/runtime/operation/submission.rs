@@ -82,29 +82,6 @@ impl SubmissionCommitGuard {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(super) fn commit(&mut self, operation_id: String) -> Result<(), CodingSessionError> {
-        self.coordinator
-            .register_prepared_submission(&self.handle, operation_id.clone(), self.descriptor)
-            .map_err(|error| match error {
-                snapshot_coordinator::ClientRegistryError::Lifecycle(reason) => {
-                    CodingSessionError::Lifecycle { reason }
-                }
-                other => CodingSessionError::Input {
-                    message: other.to_string(),
-                },
-            })?;
-        let execution = OperationExecution::root(
-            self.descriptor.submitted_kind,
-            self.descriptor,
-            super::OperationOrigin::ClientRoot,
-            None,
-            None,
-            crate::runtime::capability::OperationCapabilitySnapshot::permissive(operation_id),
-        );
-        self.commit_execution(&execution)
-    }
-
     pub(super) fn finish(
         &mut self,
         decision: &FinalizationDecision,

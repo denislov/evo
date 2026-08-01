@@ -9,11 +9,6 @@ pub const DARK_JSON: &str = include_str!("dark.json");
 /// The embedded `light` theme JSON.
 pub const LIGHT_JSON: &str = include_str!("light.json");
 
-/// The embedded `theme-schema.json`, used for `$schema` references and
-/// editor validation (mirrors the TS schema URL payload).
-#[cfg(test)]
-pub const SCHEMA_JSON: &str = include_str!("theme-schema.json");
-
 /// Parse the built-in `dark` theme. Panics if the embedded JSON is invalid
 /// (a programming error, not a user input).
 pub fn builtin_dark() -> ThemeJson {

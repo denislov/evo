@@ -19,8 +19,6 @@ use crate::operations::prompt::context::{
     InternalPromptTurnOutcome, PromptTurnContext, PromptTurnTransaction,
 };
 use crate::runtime::capability::OperationCapabilitySnapshot;
-#[cfg(test)]
-use crate::runtime::capability::SessionWriteCapability;
 use crate::runtime::facade::CodingAgentSessionOpenTarget;
 use crate::runtime::facade::{
     CodingAgentSessionDiagnostic, CodingAgentSessionHydration, CodingAgentSessionOptions,
@@ -38,13 +36,9 @@ use crate::session::event::{
 };
 use crate::session::id::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
 use crate::session::manifest::PersistedWorkspaceScope;
-#[cfg(test)]
-use crate::session::replay::SessionRecoverySummary;
 use crate::session::replay::{
     MessageStatus, ReplayTreeLabel, SessionReplay, ToolCallStatus, TranscriptItem, fold_events,
 };
-#[cfg(test)]
-use crate::session::repository::StoreFailurePoint;
 use crate::session::repository::{
     CreateSessionOptions, ManifestPatch, SessionCreateError, SessionHandle, SessionLogStore,
     SessionSummary,
@@ -916,17 +910,6 @@ impl SessionService {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn begin_prompt_transaction(&self) -> PromptTurnTransaction {
-        TurnTransaction::begin(
-            &self.store,
-            self.handle.clone(),
-            SystemIdGenerator,
-            SystemClock,
-            OperationKind::Prompt,
-        )
-    }
-
     pub(crate) fn begin_prompt_transaction_with_snapshot(
         &self,
         snapshot: &OperationCapabilitySnapshot,
@@ -1039,17 +1022,6 @@ impl SessionService {
             leaf_id: new_leaf_id,
             committed_session_sequence: transaction.committed_session_sequence(),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn commit_prompt_transaction_with_snapshot(
-        &mut self,
-        transaction: Option<PromptTurnTransaction>,
-        operation_id: impl Into<String>,
-        snapshot: &OperationCapabilitySnapshot,
-    ) -> Result<FinalizedSessionWrite, CodingSessionError> {
-        SessionWriteCapability::require(snapshot.session_write.as_ref())?;
-        self.commit_prompt_transaction(transaction, operation_id)
     }
 
     pub(crate) fn fail_prompt_transaction(
@@ -1276,20 +1248,6 @@ impl SessionService {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn session_dir(&self) -> &Path {
-        self.handle.session_dir()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_store_after_for_tests(
-        &self,
-        point: StoreFailurePoint,
-        successful_calls: usize,
-    ) {
-        self.store.fail_after(point, successful_calls);
-    }
-
     pub(crate) fn replay(&self) -> Result<SessionReplay, CodingSessionError> {
         self.store.replay_session(&self.handle)
     }
@@ -1477,11 +1435,6 @@ impl SessionService {
 
     pub(crate) fn shutdown_transaction_writer(&self) -> Result<(), CodingSessionError> {
         self.transaction_writer.shutdown()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn recovery_summary(&self) -> Result<SessionRecoverySummary, CodingSessionError> {
-        Ok(self.replay()?.recovery_summary())
     }
 
     pub(crate) fn inspect_recovery_pending(

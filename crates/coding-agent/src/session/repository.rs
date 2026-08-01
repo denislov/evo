@@ -2,8 +2,6 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -30,8 +28,6 @@ const MAX_SESSION_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_SESSION_PAYLOAD_BYTES: usize = MAX_SESSION_RECORD_BYTES - 4096;
 const DURABLE_FRAME_SCHEMA: &str = "evo.session.frame";
 const DURABLE_FRAME_VERSION: u32 = 2;
-#[cfg(test)]
-const DURABLE_FRAME_FIELD: &str = "_evo_frame";
 static MANIFEST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, serde::Deserialize, Serialize)]
@@ -55,10 +51,6 @@ struct DurableFrame {
 pub(crate) struct SessionLogStore {
     root: PathBuf,
     append_lock: Arc<Mutex<()>>,
-    #[cfg(test)]
-    sequence_scans: Arc<AtomicUsize>,
-    #[cfg(test)]
-    failures: Arc<Mutex<StoreFailureState>>,
 }
 
 #[derive(Debug)]
@@ -78,32 +70,6 @@ impl SessionWriteLease {
     }
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StoreFailurePoint {
-    CreateBlobs,
-    CreateIndex,
-    WriteManifest,
-    CreateEventLog,
-    AppendEvents,
-    AppendOutbox,
-    UpdateManifest,
-    RemoveSession,
-}
-
-#[cfg(test)]
-#[derive(Debug, Default)]
-struct StoreFailureState {
-    create_blobs: Option<usize>,
-    create_index: Option<usize>,
-    write_manifest: Option<usize>,
-    create_event_log: Option<usize>,
-    append_events: Option<usize>,
-    append_outbox: Option<usize>,
-    update_manifest: Option<usize>,
-    remove_session: Option<usize>,
-}
-
 #[derive(Debug)]
 pub(crate) enum SessionCreateError {
     Create(CodingSessionError),
@@ -113,13 +79,6 @@ pub(crate) enum SessionCreateError {
         create_error: CodingSessionError,
         cleanup_error: CodingSessionError,
     },
-}
-
-impl SessionCreateError {
-    #[cfg(test)]
-    pub(crate) fn code(&self) -> &'static str {
-        "session"
-    }
 }
 
 impl fmt::Display for SessionCreateError {
@@ -166,10 +125,6 @@ impl SessionLogStore {
         Self {
             root: root.into(),
             append_lock: Arc::new(Mutex::new(())),
-            #[cfg(test)]
-            sequence_scans: Arc::new(AtomicUsize::new(0)),
-            #[cfg(test)]
-            failures: Arc::new(Mutex::new(StoreFailureState::default())),
         }
     }
 
@@ -234,59 +189,6 @@ impl SessionLogStore {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn sequence_scan_count(&self) -> usize {
-        self.sequence_scans.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_after(&self, point: StoreFailurePoint, successful_calls: usize) {
-        let mut failures = self.failures.lock().unwrap();
-        let target = match point {
-            StoreFailurePoint::CreateBlobs => &mut failures.create_blobs,
-            StoreFailurePoint::CreateIndex => &mut failures.create_index,
-            StoreFailurePoint::WriteManifest => &mut failures.write_manifest,
-            StoreFailurePoint::CreateEventLog => &mut failures.create_event_log,
-            StoreFailurePoint::AppendEvents => &mut failures.append_events,
-            StoreFailurePoint::AppendOutbox => &mut failures.append_outbox,
-            StoreFailurePoint::UpdateManifest => &mut failures.update_manifest,
-            StoreFailurePoint::RemoveSession => &mut failures.remove_session,
-        };
-        *target = Some(successful_calls);
-    }
-
-    #[cfg(test)]
-    fn fail_if_injected(&self, point: StoreFailurePoint) -> Result<(), CodingSessionError> {
-        let mut failures = self.failures.lock().unwrap();
-        let target = match point {
-            StoreFailurePoint::CreateBlobs => &mut failures.create_blobs,
-            StoreFailurePoint::CreateIndex => &mut failures.create_index,
-            StoreFailurePoint::WriteManifest => &mut failures.write_manifest,
-            StoreFailurePoint::CreateEventLog => &mut failures.create_event_log,
-            StoreFailurePoint::AppendEvents => &mut failures.append_events,
-            StoreFailurePoint::AppendOutbox => &mut failures.append_outbox,
-            StoreFailurePoint::UpdateManifest => &mut failures.update_manifest,
-            StoreFailurePoint::RemoveSession => &mut failures.remove_session,
-        };
-        let Some(remaining) = target.as_mut() else {
-            return Ok(());
-        };
-        if *remaining > 0 {
-            *remaining -= 1;
-            return Ok(());
-        }
-        *target = None;
-        if point == StoreFailurePoint::AppendEvents {
-            Err(CodingSessionError::SessionWriteRejected {
-                message: format!("injected session store failure at {point:?}"),
-            })
-        } else {
-            Err(session_error(format!(
-                "injected session store failure at {point:?}"
-            )))
-        }
-    }
-
     #[allow(
         clippy::result_large_err,
         reason = "session creation errors retain typed cleanup and partial-initialization evidence"
@@ -329,25 +231,21 @@ impl SessionLogStore {
         .with_name(options.name)
         .with_default_agent_profile_id(options.default_agent_profile_id);
         let initialization = (|| -> Result<(), CodingSessionError> {
-            #[cfg(test)]
-            self.fail_if_injected(StoreFailurePoint::CreateBlobs)?;
+
             fs::create_dir(session_dir.join("blobs")).map_err(|error| {
                 session_error(format!(
                     "failed to create blobs directory for {session_id}: {error}"
                 ))
             })?;
-            #[cfg(test)]
-            self.fail_if_injected(StoreFailurePoint::CreateIndex)?;
+
             fs::create_dir(session_dir.join("index")).map_err(|error| {
                 session_error(format!(
                     "failed to create index directory for {session_id}: {error}"
                 ))
             })?;
-            #[cfg(test)]
-            self.fail_if_injected(StoreFailurePoint::WriteManifest)?;
+
             write_manifest(&session_dir, &manifest)?;
-            #[cfg(test)]
-            self.fail_if_injected(StoreFailurePoint::CreateEventLog)?;
+
             create_empty_event_log(&session_dir)?;
             create_empty_outbox_log(&session_dir)?;
             sync_directory(&session_dir)
@@ -462,33 +360,6 @@ impl SessionLogStore {
         Ok(sessions)
     }
 
-    #[cfg(test)]
-    pub(crate) fn append_events(
-        &self,
-        handle: &SessionHandle,
-        events: &[SessionEventEnvelope],
-    ) -> Result<(), CodingSessionError> {
-        let _append_guard = self.append_lock.lock().unwrap();
-        let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
-        let mut lease = SessionWriteLease {
-            _lock_file: OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&event_log_path)
-                .map_err(|error| {
-                    session_error(format!(
-                        "failed to open test session event log {}: {error}",
-                        event_log_path.display()
-                    ))
-                })?,
-            next_sequence: self
-                .next_session_sequence(&event_log_path, &handle.manifest.session_id)?,
-            tail_recoveries: Vec::new(),
-        };
-        self.append_events_locked(handle, events, &mut lease)
-            .map(|_| ())
-    }
-
     pub(crate) fn append_events_with_cursor(
         &self,
         handle: &SessionHandle,
@@ -593,8 +464,6 @@ impl SessionLogStore {
         event_log_path: &Path,
         session_id: &str,
     ) -> Result<u64, CodingSessionError> {
-        #[cfg(test)]
-        self.sequence_scans.fetch_add(1, Ordering::AcqRel);
         next_session_sequence(event_log_path, session_id)
     }
 
@@ -603,8 +472,7 @@ impl SessionLogStore {
         handle: &SessionHandle,
         events: &[SessionEventEnvelope],
     ) -> Result<(), CodingSessionError> {
-        #[cfg(test)]
-        self.fail_if_injected(StoreFailurePoint::AppendEvents)?;
+
         let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
         let records = events
             .iter()
@@ -652,8 +520,7 @@ impl SessionLogStore {
         if records.is_empty() {
             return Ok(());
         }
-        #[cfg(test)]
-        self.fail_if_injected(StoreFailurePoint::AppendOutbox)?;
+
         let outbox_path = outbox_log_path(&handle.session_dir, &handle.manifest)?;
         let records = records
             .iter()
@@ -880,8 +747,7 @@ impl SessionLogStore {
         handle: &SessionHandle,
         patch: ManifestPatch,
     ) -> Result<(), CodingSessionError> {
-        #[cfg(test)]
-        self.fail_if_injected(StoreFailurePoint::UpdateManifest)?;
+
         let mut manifest = read_manifest(&handle.session_dir)?;
         patch.apply(&mut manifest);
         validate_manifest(&manifest)?;
@@ -915,8 +781,7 @@ impl SessionLogStore {
     }
 
     fn remove_created_session_dir(&self, session_dir: &Path) -> Result<(), CodingSessionError> {
-        #[cfg(test)]
-        self.fail_if_injected(StoreFailurePoint::RemoveSession)?;
+
         fs::remove_dir_all(session_dir).map_err(|error| {
             session_error(format!(
                 "failed to remove session directory {}: {error}",
@@ -1012,11 +877,6 @@ impl SessionHandle {
     pub(crate) fn manifest(&self) -> &SessionManifest {
         &self.manifest
     }
-
-    #[cfg(test)]
-    pub(crate) fn event_log_path(&self) -> Result<PathBuf, CodingSessionError> {
-        event_log_path(&self.session_dir, &self.manifest)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1074,12 +934,6 @@ impl ManifestPatch {
 
     pub(crate) fn name(mut self, name: Option<String>) -> Self {
         self.name = Some(name);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active_branch_id(mut self, active_branch_id: Option<String>) -> Self {
-        self.active_branch_id = Some(active_branch_id);
         self
     }
 
@@ -1301,18 +1155,6 @@ fn decode_durable_record<T: DeserializeOwned>(
             path.display()
         ))
     })
-}
-
-#[cfg(test)]
-pub(crate) fn decode_durable_record_for_tests<T: DeserializeOwned>(
-    line: &str,
-) -> Result<T, CodingSessionError> {
-    decode_durable_record(
-        line,
-        1,
-        Path::new("<test durable record>"),
-        "test durable record",
-    )
 }
 
 fn decode_durable_value(

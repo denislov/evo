@@ -215,80 +215,10 @@ pub mod api {
 #[cfg(any(test, feature = "test-support"))]
 #[allow(deprecated)]
 pub(crate) mod test_support {
-    use std::ffi::{OsStr, OsString};
-    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::sync::Arc;
 
     use ai::api::client::AiClient;
     use ai::api::provider::ApiProvider;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    pub(crate) fn env_lock() -> MutexGuard<'static, ()> {
-        ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    pub(crate) struct EnvGuard<'a> {
-        _lock: MutexGuard<'a, ()>,
-        saved: Vec<(&'static str, Option<OsString>)>,
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the optional test-support feature compiles environment helpers outside the unit-test targets that consume every method"
-    )]
-    impl EnvGuard<'static> {
-        pub(crate) fn new(names: &[&'static str]) -> Self {
-            let lock = env_lock();
-            let saved = names
-                .iter()
-                .map(|name| (*name, std::env::var_os(name)))
-                .collect();
-            Self { _lock: lock, saved }
-        }
-
-        pub(crate) fn with_evo_dir<V: AsRef<OsStr>>(value: V) -> Self {
-            let guard = Self::new(&["EVO_DIR"]);
-            guard.set_evo_dir(value);
-            guard
-        }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the optional test-support feature compiles environment mutations outside the unit-test targets that consume every method"
-    )]
-    impl EnvGuard<'_> {
-        pub(crate) fn set<V: AsRef<OsStr>>(&self, name: &str, value: V) {
-            unsafe {
-                std::env::set_var(name, value);
-            }
-        }
-
-        pub(crate) fn remove(&self, name: &str) {
-            unsafe {
-                std::env::remove_var(name);
-            }
-        }
-
-        pub(crate) fn set_evo_dir<V: AsRef<OsStr>>(&self, value: V) {
-            self.set("EVO_DIR", value);
-        }
-    }
-
-    impl Drop for EnvGuard<'_> {
-        fn drop(&mut self) {
-            for (name, value) in self.saved.iter().rev() {
-                unsafe {
-                    match value {
-                        Some(value) => std::env::set_var(name, value),
-                        None => std::env::remove_var(name),
-                    }
-                }
-            }
-        }
-    }
 
     pub(crate) struct ProviderGuard {
         ai_client: AiClient,
