@@ -745,3 +745,159 @@ fn schema_require(condition: bool, message: &'static str) -> Result<(), AgentToo
 fn schema_error(message: impl Into<String>) -> AgentToolDefinitionError {
     AgentToolDefinitionError::new("parameters", message)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tool(parameters: serde_json::Value) -> AgentTool {
+        AgentTool {
+            name: "test_tool".into(),
+            description: "A test tool".into(),
+            parameters,
+            execution_mode: None,
+            execute: Arc::new(|_context, _args, _on_update| {
+                Box::pin(async { Ok(AgentToolOutput::new(Vec::new())) })
+            }),
+        }
+    }
+
+    #[test]
+    fn valid_object_schema_is_accepted() {
+        let tool = make_tool(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "count": {"type": "integer", "minimum": 0}
+            },
+            "required": ["query"]
+        }));
+        assert!(tool.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_names_and_descriptions_are_rejected() {
+        let bad_name = AgentTool {
+            name: "has space".into(),
+            ..make_tool(serde_json::json!({"type": "object"}))
+        };
+        assert!(bad_name.validate().is_err());
+
+        let empty_description = AgentTool {
+            description: "  ".into(),
+            ..make_tool(serde_json::json!({"type": "object"}))
+        };
+        assert!(empty_description.validate().is_err());
+    }
+
+    #[test]
+    fn root_must_be_an_object() {
+        let tool = make_tool(serde_json::json!({"type": "string"}));
+        assert!(tool.validate().is_err());
+    }
+
+    #[test]
+    fn unsupported_keywords_are_rejected() {
+        let tool = make_tool(serde_json::json!({
+            "type": "object",
+            "patternProperties": {}
+        }));
+        assert!(tool.validate().is_err());
+    }
+
+    #[test]
+    fn depth_and_node_budgets_are_enforced() {
+        let deep = make_tool(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "nested2": {
+                            "type": "object",
+                            "properties": {
+                                "nested3": {
+                                    "type": "object",
+                                    "properties": {
+                                        "x": {"type": "string"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        assert!(deep.validate().is_ok());
+
+        let mut too_deep = serde_json::json!({"type": "string"});
+        for _ in 0..MAX_TOOL_SCHEMA_DEPTH + 1 {
+            too_deep = serde_json::json!({
+                "type": "object",
+                "properties": {"next": too_deep}
+            });
+        }
+        assert!(make_tool(too_deep).validate().is_err());
+    }
+
+    #[test]
+    fn arguments_match_required_properties() {
+        let tool = make_tool(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"}
+            },
+            "required": ["query"]
+        }));
+        assert!(tool.validate_arguments(&serde_json::json!({"query": "x"})).is_ok());
+        assert!(tool.validate_arguments(&serde_json::json!({"query": "x", "limit": 3})).is_ok());
+        assert!(tool.validate_arguments(&serde_json::json!({})).is_err());
+        assert!(tool.validate_arguments(&serde_json::json!({"query": 3})).is_err());
+    }
+
+    #[test]
+    fn additional_properties_can_be_forbidden() {
+        let tool = make_tool(serde_json::json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "additionalProperties": false
+        }));
+        assert!(tool.validate_arguments(&serde_json::json!({"a": "x"})).is_ok());
+        assert!(tool.validate_arguments(&serde_json::json!({"b": "x"})).is_err());
+    }
+
+    #[test]
+    fn enum_values_must_match_the_declared_type() {
+        let tool = make_tool(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["fast", "slow"]}
+            }
+        }));
+        assert!(tool.validate().is_ok());
+        assert!(tool.validate_arguments(&serde_json::json!({"mode": "fast"})).is_ok());
+        assert!(tool.validate_arguments(&serde_json::json!({"mode": "warp"})).is_err());
+
+        let bad_enum = make_tool(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": [1, 2]}
+            }
+        }));
+        assert!(bad_enum.validate().is_err());
+    }
+
+    #[test]
+    fn array_bounds_are_checked() {
+        let tool = make_tool(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 3}
+            }
+        }));
+        assert!(tool.validate_arguments(&serde_json::json!({"tags": ["a"]})).is_ok());
+        assert!(tool.validate_arguments(&serde_json::json!({"tags": []})).is_err());
+        assert!(tool.validate_arguments(&serde_json::json!({"tags": ["a", "b", "c", "d"]})).is_err());
+    }
+}

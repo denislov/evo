@@ -144,3 +144,105 @@ pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimat
         last_usage_index: Some(index),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ai::api::conversation::AssistantMessage;
+
+    fn user(text: &str) -> AgentMessage {
+        AgentMessage::UserText {
+            message_id: "u".into(),
+            text: text.into(),
+        }
+    }
+
+    fn assistant_with_usage(usage: Usage, stop_reason: StopReason) -> AgentMessage {
+        let mut message = AssistantMessage::empty("api", "model");
+        message.usage = usage;
+        message.stop_reason = stop_reason;
+        AgentMessage::Assistant {
+            message_id: "a".into(),
+            message,
+        }
+    }
+
+    fn usage(input: u32, output: u32, total: u32) -> Usage {
+        Usage {
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: total,
+            cost: Default::default(),
+        }
+    }
+
+    #[test]
+    fn token_estimate_is_roughly_bytes_over_four() {
+        assert_eq!(estimate_text_tokens("abcdefgh"), 2);
+        assert_eq!(estimate_text_tokens("abcde"), 2);
+    }
+
+    #[test]
+    fn usage_anchor_dominates_the_estimate() {
+        let messages = vec![
+            assistant_with_usage(usage(100, 50, 150), StopReason::Stop),
+            user("trailing text"),
+        ];
+        let estimate = estimate_context_tokens(&messages);
+        assert_eq!(estimate.usage_tokens, 150);
+        assert!(estimate.trailing_tokens > 0);
+        assert_eq!(estimate.tokens, estimate.usage_tokens + estimate.trailing_tokens);
+        assert_eq!(estimate.last_usage_index, Some(0));
+    }
+
+    #[test]
+    fn aborted_and_zero_usages_are_not_anchors() {
+        let messages = vec![
+            assistant_with_usage(usage(0, 0, 0), StopReason::Stop),
+            assistant_with_usage(usage(10, 20, 30), StopReason::Aborted),
+            user("text"),
+        ];
+        let estimate = estimate_context_tokens(&messages);
+        assert_eq!(estimate.usage_tokens, 0);
+        assert_eq!(estimate.last_usage_index, None);
+        assert_eq!(estimate.tokens, estimate.trailing_tokens);
+    }
+
+    #[test]
+    fn newest_valid_usage_wins() {
+        let messages = vec![
+            assistant_with_usage(usage(100, 100, 200), StopReason::Stop),
+            user("x"),
+            assistant_with_usage(usage(200, 100, 300), StopReason::Stop),
+        ];
+        let estimate = estimate_context_tokens(&messages);
+        assert_eq!(estimate.usage_tokens, 300);
+        assert_eq!(estimate.last_usage_index, Some(2));
+        assert_eq!(estimate.trailing_tokens, 0);
+    }
+
+    #[test]
+    fn calculate_context_tokens_falls_back_to_component_sum() {
+        let with_total = Usage {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            total_tokens: 100,
+            cost: Default::default(),
+        };
+        assert_eq!(calculate_context_tokens(&with_total), 100);
+
+        let without_total = Usage {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            total_tokens: 0,
+            cost: Default::default(),
+        };
+        assert_eq!(calculate_context_tokens(&without_total), 10);
+    }
+}

@@ -200,3 +200,83 @@ fn truncate_str_from_end(text: &str, max_bytes: usize) -> String {
     }
     chars.into_iter().rev().collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_content_is_not_truncated() {
+        let result = truncate_tail("one\ntwo\n", TruncationLimit::default());
+        assert!(!result.truncated);
+        assert_eq!(result.content, "one\ntwo\n");
+        assert_eq!(result.total_lines, 2);
+    }
+
+    #[test]
+    fn tail_truncates_by_lines_keeping_the_end() {
+        let content = (1..=10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let result = truncate_tail(&content, TruncationLimit { max_lines: 3, max_bytes: 1024 });
+        assert!(result.truncated);
+        assert_eq!(result.truncated_by.as_deref(), Some("lines"));
+        assert_eq!(result.content, "line8\nline9\nline10");
+        assert_eq!(result.output_lines, 3);
+    }
+
+    #[test]
+    fn tail_truncates_by_bytes_and_partially_keeps_a_long_last_line() {
+        let content = "a\nb\ncdefghijkl";
+        let result = truncate_tail(&content, TruncationLimit { max_lines: 2, max_bytes: 6 });
+        assert!(result.truncated);
+        assert_eq!(result.truncated_by.as_deref(), Some("bytes"));
+        assert!(result.last_line_partial);
+        assert_eq!(result.content, "ghijkl");
+    }
+
+    #[test]
+    fn head_truncates_by_lines_keeping_the_start() {
+        let content = (1..=10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let result = truncate_head(&content, TruncationLimit { max_lines: 3, max_bytes: 1024 });
+        assert!(result.truncated);
+        assert_eq!(result.content, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn head_drops_everything_when_the_first_line_exceeds_the_byte_limit() {
+        let content = "a_very_long_line_exceeding_the_budget\nshort";
+        let result = truncate_head(
+            &content,
+            TruncationLimit { max_lines: 10, max_bytes: 16 },
+        );
+        assert!(result.truncated);
+        assert!(result.first_line_exceeds_limit);
+        assert_eq!(result.content, "");
+        assert_eq!(result.output_bytes, 0);
+    }
+
+    #[test]
+    fn truncate_line_marks_overflow() {
+        let (kept, truncated) = truncate_line("hello world", 5);
+        assert!(truncated);
+        assert!(kept.starts_with("hello"));
+        assert!(kept.contains("truncated"));
+
+        let (kept, truncated) = truncate_line("short", 100);
+        assert!(!truncated);
+        assert_eq!(kept, "short");
+    }
+
+    #[test]
+    fn zero_byte_limit_keeps_only_empty_output() {
+        let result = truncate_tail("line", TruncationLimit { max_lines: 10, max_bytes: 0 });
+        assert!(result.truncated);
+        assert_eq!(result.content, "");
+    }
+
+    #[test]
+    fn multi_byte_characters_are_kept_whole() {
+        let content = "中文输出测试";
+        let result = truncate_tail(&content, TruncationLimit { max_lines: 10, max_bytes: 7 });
+        assert_eq!(result.content, "测试");
+    }
+}
