@@ -805,7 +805,7 @@ async fn sessionless_prompt_atomically_creates_and_accepts_one_session() {
 }
 
 #[tokio::test]
-async fn new_prompt_context_load_failure_creates_no_session_owner_or_manifest() {
+async fn admission_failure_creates_no_session_owner_or_manifest() {
     let temp = tempfile::tempdir().unwrap();
     let global = temp.path().join("global");
     let home = temp.path().join("home");
@@ -826,93 +826,54 @@ async fn new_prompt_context_load_failure_creates_no_session_owner_or_manifest() 
         focused_session_id: None,
         fail_next_prompt_start: false,
     };
-    let mut active = std::collections::HashMap::new();
 
-    let update = dispatch_command(
-        &mut state,
-        &mut active,
-        DesktopRuntimeCommand::SubmitPrompt {
-            command_id: 131,
-            target: DesktopPromptTarget::new(
-                CodingAgentWorkspaceSelection::project(&target),
-                "missing-desktop-context-model",
-                "default",
+    for (command_id, (model_id, pre_fail)) in [
+        (131, ("missing-desktop-context-model", None)),
+        (
+            132,
+            (
+                "claude-sonnet-4-5",
+                Some(|| std::fs::remove_dir(&target).unwrap()),
             ),
-            prompt: "context must load before persistence".into(),
-            attachments: Vec::new(),
-            thinking_level: None,
-        },
-    )
-    .await;
-
-    assert!(matches!(
-        update,
-        DesktopRuntimeUpdate::CommandRejected {
-            command_id: 131,
-            command: DesktopRuntimeCommandKind::SubmitPrompt,
-            ..
+        ),
+    ] {
+        let mut prompt_target = DesktopPromptTarget::new(
+            CodingAgentWorkspaceSelection::project(&target),
+            model_id,
+            "default",
+        );
+        validate_prompt_target(&prompt_target).expect("the target is valid at admission time");
+        if let Some(pre_fail) = pre_fail {
+            pre_fail();
         }
-    ));
-    assert!(state.workspaces.is_empty());
-    assert!(active.is_empty());
-    assert!(!sessions.exists());
-}
+        let mut active = std::collections::HashMap::new();
+        let update = dispatch_command(
+            &mut state,
+            &mut active,
+            DesktopRuntimeCommand::SubmitPrompt {
+                command_id,
+                target: prompt_target,
+                prompt: "the runtime must resolve the target again".into(),
+                attachments: Vec::new(),
+                thinking_level: None,
+            },
+        )
+        .await;
 
-#[tokio::test]
-async fn workspace_deleted_after_admission_creates_no_session_owner_or_manifest() {
-    let temp = tempfile::tempdir().unwrap();
-    let global = temp.path().join("global");
-    let home = temp.path().join("home");
-    let target = temp.path().join("target");
-    let sessions = temp.path().join("sessions");
-    std::fs::create_dir_all(&global).unwrap();
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&target).unwrap();
-    let _env = ProcessEnvGuard::isolated(&global);
-    let home_options =
-        CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(&home))
-            .unwrap()
-            .with_session_dir(&sessions)
-            .with_model_id("claude-sonnet-4-5");
-    let mut state = RuntimeState {
-        home: HomeRuntimeContext::load(home_options).unwrap(),
-        workspaces: std::collections::HashMap::new(),
-        focused_session_id: None,
-        fail_next_prompt_start: false,
-    };
-    let prompt_target = DesktopPromptTarget::new(
-        CodingAgentWorkspaceSelection::project(&target),
-        "claude-sonnet-4-5",
-        "default",
-    );
-    validate_prompt_target(&prompt_target).expect("the target is valid at admission time");
-    std::fs::remove_dir(&target).unwrap();
-    let mut active = std::collections::HashMap::new();
-
-    let update = dispatch_command(
-        &mut state,
-        &mut active,
-        DesktopRuntimeCommand::SubmitPrompt {
-            command_id: 132,
-            target: prompt_target,
-            prompt: "the runtime must resolve the target again".into(),
-            attachments: Vec::new(),
-            thinking_level: None,
-        },
-    )
-    .await;
-
-    assert!(matches!(
-        update,
-        DesktopRuntimeUpdate::CommandRejected {
-            command_id: 132,
-            command: DesktopRuntimeCommandKind::SubmitPrompt,
-            ..
-        }
-    ));
-    assert!(state.workspaces.is_empty());
-    assert!(active.is_empty());
-    assert!(!sessions.exists());
+        assert!(
+            matches!(
+                update,
+                DesktopRuntimeUpdate::CommandRejected {
+                    command: DesktopRuntimeCommandKind::SubmitPrompt,
+                    ..
+                }
+            ),
+            "command {command_id} should be rejected"
+        );
+        assert!(state.workspaces.is_empty());
+        assert!(active.is_empty());
+        assert!(!sessions.exists());
+    }
 }
 
 #[tokio::test]

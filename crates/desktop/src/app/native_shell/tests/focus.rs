@@ -565,11 +565,8 @@ fn assert_profile_selector_locked_with_inspector_drawer(
 }
 
 #[gpui::test]
-fn medium_profile_selector_locked_with_inspector_drawer(cx: &mut TestAppContext) {
-    assert_profile_selector_locked_with_inspector_drawer(cx, 1_000.);
-}
-
-#[gpui::test]
-fn narrow_profile_selector_locked_with_inspector_drawer(cx: &mut TestAppContext) {
-    assert_profile_selector_locked_with_inspector_drawer(cx, 700.);
+fn profile_selector_locked_with_inspector_drawer_across_widths(cx: &mut TestAppContext) {
+    for width in [1_000., 700.] {
+        assert_profile_selector_locked_with_inspector_drawer(cx, width);
+    }
 }

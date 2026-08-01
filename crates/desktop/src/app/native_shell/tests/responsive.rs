@@ -171,54 +171,41 @@ fn final_long_markdown_tail_is_inside_measured_row_at_all_viewports(cx: &mut Tes
 }
 
 #[gpui::test]
-fn final_long_user_tail_is_inside_its_measured_row(cx: &mut TestAppContext) {
-    initialize_visual_test(cx);
-    let (_, cx) = add_visual_shell(
-        cx,
-        DesktopRuntimeBridge::disconnected_for_test(),
-        projection_with_last_item(CodingAgentSessionTranscriptItem::User {
+fn final_long_transcript_tail_is_inside_its_measured_row(cx: &mut TestAppContext) {
+    for item in [
+        CodingAgentSessionTranscriptItem::User {
             text: long_integrity_text("User"),
             started_at: None,
-        }),
-    );
-    cx.simulate_resize(size(px(700.), px(800.)));
-    settle_visual_measurements(cx);
-
-    assert_last_row_matches_card_and_tail(cx, "User");
-    assert!(
-        f32::from(
-            cx.debug_bounds("conversation-last-card")
-                .expect("User card remains mounted")
-                .size
-                .height
-        ) > TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT,
-        "long User content must not inherit the former silent height cap"
-    );
-}
-
-#[gpui::test]
-fn final_long_diagnostic_tail_is_inside_its_measured_row(cx: &mut TestAppContext) {
-    initialize_visual_test(cx);
-    let (_, cx) = add_visual_shell(
-        cx,
-        DesktopRuntimeBridge::disconnected_for_test(),
-        projection_with_last_item(CodingAgentSessionTranscriptItem::Diagnostic {
+        },
+        CodingAgentSessionTranscriptItem::Diagnostic {
             message: long_integrity_text("Diagnostic"),
-        }),
-    );
-    cx.simulate_resize(size(px(700.), px(800.)));
-    settle_visual_measurements(cx);
+        },
+    ] {
+        initialize_visual_test(cx);
+        let (_, cx) = add_visual_shell(
+            cx,
+            DesktopRuntimeBridge::disconnected_for_test(),
+            projection_with_last_item(item.clone()),
+        );
+        cx.simulate_resize(size(px(700.), px(800.)));
+        settle_visual_measurements(cx);
 
-    assert_last_row_matches_card_and_tail(cx, "Diagnostic");
-    assert!(
-        f32::from(
-            cx.debug_bounds("conversation-last-card")
-                .expect("Diagnostic card remains mounted")
-                .size
-                .height
-        ) > TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT,
-        "long Diagnostic content must not inherit the former silent height cap"
-    );
+        let label = match &item {
+            CodingAgentSessionTranscriptItem::User { .. } => "User",
+            CodingAgentSessionTranscriptItem::Diagnostic { .. } => "Diagnostic",
+            _ => unreachable!(),
+        };
+        assert_last_row_matches_card_and_tail(cx, label);
+        assert!(
+            f32::from(
+                cx.debug_bounds("conversation-last-card")
+                    .expect("transcript card remains mounted")
+                    .size
+                    .height
+            ) > TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT,
+            "long {label} content must not inherit the former silent height cap"
+        );
+    }
 }
 
 #[gpui::test]
@@ -404,34 +391,38 @@ fn read_tool_remains_a_single_collapsed_summary(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn assistant_after_tool_continues_without_repeating_the_identity_header(cx: &mut TestAppContext) {
+fn assistant_segments_and_tool_rows_share_one_copy_action(cx: &mut TestAppContext) {
+    let assistant_after_tool = CodingAgentSessionTranscriptItem::Assistant {
+        id: "identity-answer".into(),
+        text: "This answer is part of the same assistant output.".into(),
+        thinking: String::new(),
+        images: Vec::new(),
+        done: true,
+        reasoning_duration_millis: None,
+        model_id: None,
+        completed_at: None,
+    };
+    let tool_row = |call_id: &str| CodingAgentSessionTranscriptItem::Tool {
+        call_id: call_id.into(),
+        name: "shell".into(),
+        args: serde_json::json!({ "command": "git status" }),
+        result: Some("working tree clean".into()),
+        is_error: false,
+        duration_millis: Some(20),
+    };
+
+    // An Assistant answer after a Tool row continues the identity group:
+    // no repeated header, and the group keeps its copy action.
     initialize_visual_test(cx);
     let (_, cx) = add_visual_shell(
         cx,
         DesktopRuntimeBridge::disconnected_for_test(),
         projection_with_items(vec![
-            CodingAgentSessionTranscriptItem::Tool {
-                call_id: "identity-tool".into(),
-                name: "shell".into(),
-                args: serde_json::json!({ "command": "git status" }),
-                result: Some("working tree clean".into()),
-                is_error: false,
-                duration_millis: Some(20),
-            },
-            CodingAgentSessionTranscriptItem::Assistant {
-                id: "identity-answer".into(),
-                text: "This answer is part of the same assistant output.".into(),
-                thinking: String::new(),
-                images: Vec::new(),
-                done: true,
-                reasoning_duration_millis: None,
-                model_id: None,
-                completed_at: None,
-            },
+            tool_row("identity-tool"),
+            assistant_after_tool.clone(),
         ]),
     );
     settle_visual_measurements(cx);
-
     assert!(
         cx.debug_bounds("conversation-last-card").is_some(),
         "the final Assistant answer remains rendered"
@@ -445,37 +436,16 @@ fn assistant_after_tool_continues_without_repeating_the_identity_header(cx: &mut
         cx.debug_bounds("desktop-copy-conversation-row").is_some(),
         "the final Assistant segment keeps the group's copy action"
     );
-}
 
-#[gpui::test]
-fn assistant_segment_before_tool_does_not_insert_a_middle_copy_button(cx: &mut TestAppContext) {
+    // An Assistant segment immediately before a Tool row must not paint an
+    // in-between copy action.
     initialize_visual_test(cx);
     let (_, cx) = add_visual_shell(
         cx,
         DesktopRuntimeBridge::disconnected_for_test(),
-        projection_with_items(vec![
-            CodingAgentSessionTranscriptItem::Assistant {
-                id: "pre-tool-answer".into(),
-                text: "I will inspect the workspace.".into(),
-                thinking: String::new(),
-                images: Vec::new(),
-                done: true,
-                reasoning_duration_millis: None,
-                model_id: None,
-                completed_at: None,
-            },
-            CodingAgentSessionTranscriptItem::Tool {
-                call_id: "copy-group-tool".into(),
-                name: "shell".into(),
-                args: serde_json::json!({ "command": "git status" }),
-                result: Some("working tree clean".into()),
-                is_error: false,
-                duration_millis: Some(20),
-            },
-        ]),
+        projection_with_items(vec![assistant_after_tool, tool_row("copy-group-tool")]),
     );
     settle_visual_measurements(cx);
-
     assert!(
         cx.debug_bounds("desktop-copy-conversation-row").is_none(),
         "an Assistant segment immediately before Tool must not paint an in-between copy action"
