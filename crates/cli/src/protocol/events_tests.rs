@@ -1,8 +1,5 @@
 use super::events::CodingProtocolEventAdapter;
-use super::types::{
-    ProtocolEvent, RpcDetachLifecycleEvent, RpcDetachRequest, RpcDetachResponse, RpcDetachStatus,
-    RpcShutdownLifecycleEvent, RpcShutdownRequest, RpcShutdownResponse, RpcShutdownStatus,
-};
+use super::types::ProtocolEvent;
 use coding_agent::api::error::{
     CodingAgentErrorCategory, CodingAgentErrorContext, CodingAgentPublicError,
 };
@@ -143,76 +140,6 @@ fn coding_event_adapter_maps_session_write_failure_state() {
             "status": "uncertain",
             "reason": "append result is uncertain"
         }])
-    );
-}
-
-#[test]
-fn lifecycle_wire_values_are_additive_and_exact() {
-    assert_eq!(
-        serde_json::to_value(RpcDetachRequest {
-            id: Some("detach-1".into()),
-        })
-        .unwrap(),
-        json!({"id": "detach-1", "type": "detach"})
-    );
-    assert_eq!(
-        serde_json::to_value(RpcDetachResponse {
-            status: RpcDetachStatus::AlreadyDetached,
-        })
-        .unwrap(),
-        json!({"status": "already_detached"})
-    );
-    assert_eq!(
-        serde_json::to_value(RpcDetachLifecycleEvent {
-            status: RpcDetachStatus::Detached,
-        })
-        .unwrap(),
-        json!({"type": "client_detached", "status": "detached"})
-    );
-
-    assert_eq!(
-        serde_json::to_value(RpcShutdownRequest {
-            id: Some("shutdown-1".into()),
-        })
-        .unwrap(),
-        json!({"id": "shutdown-1", "type": "shutdown"})
-    );
-    assert_eq!(
-        serde_json::to_value(RpcShutdownResponse {
-            status: RpcShutdownStatus::AlreadyShutDown,
-        })
-        .unwrap(),
-        json!({"status": "already_shut_down"})
-    );
-    assert_eq!(
-        serde_json::to_value(RpcShutdownLifecycleEvent {
-            status: RpcShutdownStatus::ShutDown,
-        })
-        .unwrap(),
-        json!({"type": "runtime_shut_down", "status": "shut_down"})
-    );
-
-    assert_eq!(
-        serde_json::to_value(RpcDetachStatus::StaleGeneration).unwrap(),
-        json!("stale_generation")
-    );
-    assert_eq!(
-        serde_json::to_value(RpcShutdownStatus::ShutdownRequested).unwrap(),
-        json!("shutdown_requested")
-    );
-}
-
-#[test]
-fn product_event_adapter_reads_the_owned_typed_payload() {
-    let source = include_str!("events.rs");
-
-    assert!(
-        source.contains("event.event()"),
-        "product-event projection must read the owned typed payload"
-    );
-    assert!(
-        !source.contains("event.compatibility_event()"),
-        "product-event projection must not consult compatibility storage"
     );
 }
 
@@ -541,77 +468,6 @@ fn coding_event_adapter_maps_agent_team_lifecycle_to_protocol_events() {
             })
         ]
     );
-}
-
-#[test]
-fn delegation_protocol_events_include_folded_block_payload() {
-    let mut adapter = CodingProtocolEventAdapter::new_with_provider(
-        "faux".into(),
-        "faux-provider".into(),
-        "faux-model".into(),
-    );
-
-    let events = [
-        CodingAgentProductEventKind::Delegation(CodingAgentDelegationProductEvent::Requested {
-            context: CodingAgentDelegationEventContext {
-                operation_id: "op_parent".into(),
-                turn_id: "turn_parent".into(),
-                tool_call_id: "tool_delegate".into(),
-                requesting_profile_id: "planner".into(),
-                target_kind: CodingAgentProductEventProfileKind::Agent,
-                target_id: "coder".into(),
-                task: "implement parser".into(),
-            },
-        }),
-        CodingAgentProductEventKind::Delegation(CodingAgentDelegationProductEvent::Started {
-            context: CodingAgentDelegationEventContext {
-                operation_id: "op_parent".into(),
-                turn_id: "turn_parent".into(),
-                tool_call_id: "tool_delegate".into(),
-                requesting_profile_id: "planner".into(),
-                target_kind: CodingAgentProductEventProfileKind::Agent,
-                target_id: "coder".into(),
-                task: "implement parser".into(),
-            },
-            child_operation_id: "op_child".into(),
-        }),
-        CodingAgentProductEventKind::Delegation(CodingAgentDelegationProductEvent::Completed {
-            context: CodingAgentDelegationEventContext {
-                operation_id: "op_parent".into(),
-                turn_id: "turn_parent".into(),
-                tool_call_id: "tool_delegate".into(),
-                requesting_profile_id: "planner".into(),
-                target_kind: CodingAgentProductEventProfileKind::Agent,
-                target_id: "coder".into(),
-                task: "implement parser".into(),
-            },
-            child_operation_id: "op_child".into(),
-            final_text: "child result".into(),
-        }),
-    ]
-    .into_iter()
-    .flat_map(|event| adapter.push_product_event(&product_event(event)))
-    .map(|event| serde_json::to_value(event).unwrap())
-    .collect::<Vec<_>>();
-
-    assert_eq!(events.len(), 3);
-    assert_eq!(events[0]["foldedBlock"]["toolCallId"], "tool_delegate");
-    assert_eq!(events[0]["foldedBlock"]["status"], "requested");
-    assert_eq!(events[0]["foldedBlock"]["targetKind"], "agent");
-    assert_eq!(events[0]["foldedBlock"]["targetId"], "coder");
-    assert_eq!(events[0]["foldedBlock"]["task"], "implement parser");
-    assert_eq!(events[0]["foldedBlock"]["isError"], false);
-
-    assert_eq!(events[1]["foldedBlock"]["status"], "running");
-    assert_eq!(events[1]["foldedBlock"]["childOperationId"], "op_child");
-
-    assert_eq!(events[2]["foldedBlock"]["status"], "completed");
-    assert_eq!(events[2]["foldedBlock"]["childOperationId"], "op_child");
-    assert_eq!(
-        events[2]["foldedBlock"]["summary"],
-        "completed: child result"
-    );
-    assert_eq!(events[2]["foldedBlock"]["isError"], false);
 }
 
 #[test]

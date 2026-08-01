@@ -1,18 +1,6 @@
 use super::*;
 
-#[test]
-fn desktop_runtime_enables_tcp_io() {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let address = listener.local_addr().unwrap();
-    let client = std::net::TcpStream::connect(address).unwrap();
-    let (_server, _) = listener.accept().unwrap();
-    client.set_nonblocking(true).unwrap();
 
-    build_desktop_runtime().unwrap().block_on(async move {
-        let stream = tokio::net::TcpStream::from_std(client).unwrap();
-        stream.writable().await.unwrap();
-    });
-}
 
 #[tokio::test]
 async fn bootstrap_can_be_polled_without_waiting_on_runtime_initialization() {

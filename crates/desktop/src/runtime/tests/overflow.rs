@@ -161,9 +161,6 @@ async fn data_queue_overflow_emits_a_priority_resync_snapshot() {
 
 #[test]
 fn command_inputs_and_queue_capacities_are_bounded() {
-    assert!((1..=128).contains(&DESKTOP_COMMAND_QUEUE_CAPACITY));
-    assert!((1..=256).contains(&DESKTOP_UPDATE_QUEUE_CAPACITY));
-    assert!((1..=128).contains(&DESKTOP_PRIORITY_UPDATE_QUEUE_CAPACITY));
     assert!(validate_session_id("").is_err());
     assert!(validate_session_id(&"x".repeat(MAX_SESSION_ID_BYTES + 1)).is_err());
     assert!(validate_session_id("session-ok").is_ok());

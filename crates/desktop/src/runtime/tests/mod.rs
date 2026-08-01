@@ -35,7 +35,6 @@ use crate::projection::{
 };
 use crate::ui::conversation::model::{MAX_TRANSCRIPT_BLOCKS, MAX_TRANSCRIPT_BYTES};
 
-use super::client::build_desktop_runtime;
 use super::protocol::*;
 use super::worker::dispatch::{dispatch_active_command, dispatch_command};
 use super::worker::*;

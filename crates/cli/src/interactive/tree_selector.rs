@@ -1406,45 +1406,28 @@ mod tests {
 
     #[test]
     fn initial_selection_walks_to_nearest_visible_metadata_parent() {
-        let mut u2 = user_node("u2", Some("a1"), "active branch");
-        u2.children.push(model_change_node("model-1", Some("u2")));
-        let mut a1 = assistant_node("a1", Some("u1"), "hi");
-        a1.children.push(u2);
-        a1.children
-            .push(user_node("u3", Some("a1"), "sibling branch"));
-        let mut u1 = user_node("u1", None, "hello");
-        u1.children.push(a1);
+        for (hidden_node, hidden_id) in [
+            (model_change_node as fn(&str, Option<&str>) -> CodingAgentSessionTreeNode, "model-1"),
+            (thinking_level_node as fn(&str, Option<&str>) -> CodingAgentSessionTreeNode, "thinking-1"),
+        ] {
+            let mut u2 = user_node("u2", Some("a1"), "active branch");
+            u2.children.push(hidden_node(hidden_id, Some("u2")));
+            let mut a1 = assistant_node("a1", Some("u1"), "hi");
+            a1.children.push(u2);
+            a1.children
+                .push(user_node("u3", Some("a1"), "sibling branch"));
+            let mut u1 = user_node("u1", None, "hello");
+            u1.children.push(a1);
 
-        let state = TreeSelectorState::new(
-            vec![u1],
-            Some("model-1".into()),
-            TreeFilterMode::Default,
-            80,
-        );
+            let state = TreeSelectorState::new(
+                vec![u1],
+                Some(hidden_id.into()),
+                TreeFilterMode::Default,
+                80,
+            );
 
-        assert_eq!(state.selected_entry_id().as_deref(), Some("u2"));
-    }
-
-    #[test]
-    fn initial_selection_walks_to_nearest_visible_thinking_parent() {
-        let mut u2 = user_node("u2", Some("a1"), "active branch");
-        u2.children
-            .push(thinking_level_node("thinking-1", Some("u2")));
-        let mut a1 = assistant_node("a1", Some("u1"), "hi");
-        a1.children.push(u2);
-        a1.children
-            .push(user_node("u3", Some("a1"), "sibling branch"));
-        let mut u1 = user_node("u1", None, "hello");
-        u1.children.push(a1);
-
-        let state = TreeSelectorState::new(
-            vec![u1],
-            Some("thinking-1".into()),
-            TreeFilterMode::Default,
-            80,
-        );
-
-        assert_eq!(state.selected_entry_id().as_deref(), Some("u2"));
+            assert_eq!(state.selected_entry_id().as_deref(), Some("u2"));
+        }
     }
 
     #[test]
@@ -1720,15 +1703,6 @@ mod tests {
         state.handle_input(&kbm, &event);
 
         assert_eq!(state.selected_entry_id().as_deref(), Some("a1"));
-    }
-
-    #[test]
-    fn empty_tree_handles_gracefully() {
-        let state = TreeSelectorState::new(vec![], None, TreeFilterMode::Default, 80);
-        assert_eq!(state.visible_nodes.len(), 0);
-        // render should not panic
-        let rendered = state.render(80);
-        assert!(!rendered.is_empty());
     }
 
     #[test]

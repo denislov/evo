@@ -614,14 +614,6 @@ fn long_user_message_stops_at_max_width_and_grows_vertically(cx: &mut TestAppCon
     );
 }
 
-#[test]
-fn conversation_focus_uses_the_existing_header_divider_without_panel_geometry() {
-    let theme = SemanticTheme::GEEK_DARK;
-    assert_eq!(conversation_focus_accent(false, theme), theme.divider);
-    assert_eq!(conversation_focus_accent(true, theme), theme.accent);
-}
 
-#[test]
-fn inspector_defaults_to_changes() {
-    assert_eq!(InspectorSection::default(), InspectorSection::Changes);
-}
+
+

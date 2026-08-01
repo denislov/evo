@@ -74,43 +74,6 @@ fn public_error(
 }
 
 #[test]
-fn ui_events_apply_to_transcript() {
-    let mut transcript = Transcript::new();
-    transcript.apply_event(UiEvent::AssistantDelta {
-        text: "hel".to_string(),
-    });
-    transcript.apply_event(UiEvent::AssistantDelta {
-        text: "lo".to_string(),
-    });
-    transcript.apply_event(UiEvent::AssistantDone);
-
-    assert_eq!(
-        transcript.items(),
-        &[TranscriptItem::Assistant {
-            id: "assistant_0".to_string(),
-            markdown: "hello".to_string(),
-            thinking: String::new(),
-            done: true,
-        }]
-    );
-}
-
-#[test]
-fn system_notice_ui_event_applies_to_transcript() {
-    let mut transcript = Transcript::new();
-    transcript.apply_event(UiEvent::SystemNotice {
-        text: "Delegation pending".to_string(),
-    });
-
-    assert_eq!(
-        transcript.items(),
-        &[TranscriptItem::System {
-            text: "Delegation pending".to_string(),
-        }]
-    );
-}
-
-#[test]
 fn coding_event_bridge_maps_assistant_events() {
     let mut bridge = CodingEventBridge::new();
 

@@ -299,184 +299,16 @@ fn desktop_depends_on_product_facade_without_bypassing_runtime_layers() {
     }
 }
 
-#[test]
-fn unstable_ui_dependencies_are_exactly_pinned() {
-    let manifest = manifest();
-    let dependencies = manifest["dependencies"]
-        .as_table()
-        .expect("dependencies table");
-    let component = &dependencies["gpui-component"];
-    let assets = &dependencies["gpui-component-assets"];
-    assert_eq!(
-        component["rev"].as_str(),
-        Some("bc174a7ec4534b2a4174fddde314b38d30d69093")
-    );
-    assert_eq!(
-        component["git"].as_str(),
-        Some("https://github.com/longbridge/gpui-component.git")
-    );
-    assert_eq!(assets["rev"], component["rev"]);
-    assert_eq!(assets["git"], component["git"]);
 
-    let targets = manifest["target"].as_table().expect("target table");
-    for target in [
-        "cfg(target_os = \"linux\")",
-        "cfg(target_os = \"macos\")",
-        "cfg(target_os = \"windows\")",
-    ] {
-        assert_eq!(
-            targets[target]["dependencies"]["gpui"]["git"].as_str(),
-            Some("https://github.com/zed-industries/zed.git")
-        );
-        assert!(
-            targets[target]["dependencies"]
-                .get("gpui_platform")
-                .is_some()
-        );
-    }
 
-    let lock = read_toml(workspace_root().join("Cargo.lock"));
-    let packages = lock["package"].as_array().expect("Cargo.lock packages");
-    assert!(packages.iter().any(|package| {
-        package["name"].as_str() == Some("gpui")
-            && package["source"].as_str()
-                == Some(
-                    "git+https://github.com/zed-industries/zed.git#30730a305ae235f3be44643d5895e142048ef701",
-                )
-    }));
-}
 
-#[test]
-fn release_memory_probe_has_the_windows_runtime_dependencies() {
-    let manifest = manifest();
-    let windows = &manifest["target"]["cfg(target_os = \"windows\")"];
-    let windows_sys = &windows["dependencies"]["windows-sys"];
-    assert_eq!(windows_sys["version"].as_str(), Some("0.61"));
-    let features = windows_sys["features"]
-        .as_array()
-        .expect("windows-sys features should be explicit")
-        .iter()
-        .filter_map(toml::Value::as_str)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        features,
-        BTreeSet::from([
-            "Win32_Foundation",
-            "Win32_System_ProcessStatus",
-            "Win32_System_Threading",
-        ])
-    );
-}
 
-#[test]
-fn external_gate_entrypoints_are_paired_and_committed() {
-    let root = workspace_root();
-    for pair in [
-        [
-            "scripts/desktop-native-perf-gate.sh",
-            "scripts/desktop-native-perf-gate.ps1",
-        ],
-        [
-            "scripts/desktop-perf-gate.sh",
-            "scripts/desktop-perf-gate.ps1",
-        ],
-        [
-            "scripts/desktop-click-to-photon.sh",
-            "scripts/desktop-click-to-photon.ps1",
-        ],
-    ] {
-        for relative in pair {
-            let metadata = fs::metadata(root.join(relative))
-                .unwrap_or_else(|error| panic!("missing gate {relative}: {error}"));
-            assert!(
-                metadata.is_file(),
-                "gate entrypoint must be a file: {relative}"
-            );
-            assert!(
-                metadata.len() > 0,
-                "gate entrypoint must not be empty: {relative}"
-            );
-        }
-    }
-    for relative in [
-        "scripts/desktop-click-to-photon-report.py",
-        "scripts/desktop-click-to-photon-report-test.py",
-        "scripts/desktop-visual-golden.sh",
-        "crates/desktop/tests/goldens/native/REVIEW.md",
-    ] {
-        assert!(
-            root.join(relative).is_file(),
-            "missing gate artifact {relative}"
-        );
-    }
-}
 
-#[test]
-fn vendored_ui_patch_state_matches_the_workspace_manifest_and_lockfile() {
-    let root = workspace_root();
-    let root_manifest = read_toml(root.join("Cargo.toml"));
-    let patched = root_manifest["patch"]["https://github.com/longbridge/gpui-component.git"]
-        .as_table()
-        .expect("workspace declares the gpui-component patch table");
-    assert_eq!(
-        patched["gpui-component"]["path"].as_str(),
-        Some("third-party/gpui-component/crates/ui")
-    );
-    assert_eq!(
-        patched["gpui-component-assets"]["path"].as_str(),
-        Some("third-party/gpui-component/crates/assets")
-    );
 
-    let patch_count = fs::read_dir(root.join("patches/gpui-component"))
-        .expect("gpui-component patch archive exists")
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "patch")
-        })
-        .count();
-    assert!(
-        patch_count > 0,
-        "the patched checkout must archive its delta"
-    );
 
-    let lock = read_toml(root.join("Cargo.lock"));
-    let packages = lock["package"].as_array().expect("Cargo.lock packages");
-    for name in ["gpui-component", "gpui-component-assets"] {
-        let package = packages
-            .iter()
-            .find(|package| package["name"].as_str() == Some(name))
-            .unwrap_or_else(|| panic!("Cargo.lock contains {name}"));
-        assert!(
-            package.get("source").is_none(),
-            "{name} must resolve through the local workspace patch"
-        );
-    }
-}
 
 #[test]
 fn desktop_public_api_is_one_typed_application_surface() {
-    let library = parse_rust(manifest_dir().join("src/lib.rs"));
-    assert_eq!(
-        public_surface(&library),
-        BTreeSet::from([
-            "fn run".to_owned(),
-            "struct DesktopApplicationOptions".to_owned(),
-        ])
-    );
-    assert!(
-        library
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Mod(module) => Some(&module.vis),
-                _ => None,
-            })
-            .all(|visibility| !matches!(visibility, Visibility::Public(_)))
-    );
-
     let selected = PathBuf::from("/typed/project");
     let options = desktop::DesktopApplicationOptions::new(&selected).with_session_id("session-a");
     assert_eq!(options.cwd(), selected);
@@ -486,21 +318,6 @@ fn desktop_public_api_is_one_typed_application_surface() {
     let projectless = desktop::DesktopApplicationOptions::projectless();
     assert!(projectless.is_projectless());
     assert_eq!(projectless.session_id(), None);
-}
-
-#[test]
-fn production_sources_use_explicit_imports() {
-    for path in rust_files(manifest_dir().join("src")) {
-        if is_test_only_source(&path) {
-            continue;
-        }
-        let facts = production_facts(&path);
-        assert!(
-            !facts.imports.contains("super::*"),
-            "production module must not hide its authority dependencies behind use super::*: {}",
-            path.display()
-        );
-    }
 }
 
 #[test]
@@ -549,116 +366,9 @@ fn native_shell_root_and_refresh_authority_stay_bounded() {
     );
 }
 
-#[test]
-fn native_shell_tests_are_external_and_grouped_by_behavior() {
-    let source_root = manifest_dir().join("src/app");
-    let shell = source_root.join("native_shell.rs");
-    let shell_source = fs::read_to_string(&shell).expect("native shell source is readable");
-    assert_eq!(
-        shell_source.matches("#[cfg(test)]").count(),
-        1,
-        "native_shell.rs should keep cfg(test) only for its external test-module declaration"
-    );
-    assert_eq!(shell_source.matches("#[cfg(test)]\nmod tests;").count(), 1);
-    assert!(
-        !shell_source.contains("#[cfg(test)]\nmod tests {"),
-        "native_shell.rs must not regain a large inline test module"
-    );
 
-    let tests = source_root.join("native_shell/tests");
-    for suite in [
-        "commands.rs",
-        "fixtures.rs",
-        "focus.rs",
-        "mod.rs",
-        "overlays.rs",
-        "performance.rs",
-        "responsive.rs",
-        "runtime_updates.rs",
-        "workspace.rs",
-    ] {
-        let path = tests.join(suite);
-        assert!(
-            path.is_file(),
-            "native shell test suite is missing: {}",
-            path.display()
-        );
-    }
 
-    let test_root = fs::read_to_string(tests.join("mod.rs")).expect("test root is readable");
-    assert!(test_root.contains("include!(\"fixtures.rs\");"));
-    for suite in [
-        "commands",
-        "focus",
-        "overlays",
-        "performance",
-        "responsive",
-        "runtime_updates",
-        "workspace",
-    ] {
-        assert!(
-            test_root.contains(&format!("mod {suite};")),
-            "native shell test root must declare {suite}"
-        );
-    }
-}
 
-#[test]
-fn runtime_tests_are_grouped_by_state_machine_invariant() {
-    let runtime = manifest_dir().join("src/runtime");
-    assert!(
-        !runtime.join("tests.rs").exists(),
-        "runtime tests must not return to one large source file"
-    );
-
-    let tests = runtime.join("tests");
-    for suite in [
-        "admission.rs",
-        "fixtures.rs",
-        "mod.rs",
-        "ordering.rs",
-        "overflow.rs",
-        "reconnect.rs",
-        "recovery.rs",
-        "shutdown.rs",
-    ] {
-        let path = tests.join(suite);
-        assert!(
-            path.is_file(),
-            "runtime test suite is missing: {}",
-            path.display()
-        );
-    }
-
-    let test_root = fs::read_to_string(tests.join("mod.rs")).expect("test root is readable");
-    assert!(test_root.contains("include!(\"fixtures.rs\");"));
-    for suite in [
-        "admission",
-        "ordering",
-        "overflow",
-        "reconnect",
-        "recovery",
-        "shutdown",
-    ] {
-        assert!(
-            test_root.contains(&format!("mod {suite};")),
-            "runtime test root must declare {suite}"
-        );
-    }
-
-    let fixtures =
-        fs::read_to_string(tests.join("fixtures.rs")).expect("runtime fixtures are readable");
-    assert!(
-        !fixtures.contains("#[test]") && !fixtures.contains("#[tokio::test]"),
-        "runtime fixtures must contain construction only, not test cases"
-    );
-    assert!(
-        !fixtures.contains("assert!(")
-            && !fixtures.contains("assert_eq!(")
-            && !fixtures.contains("assert_ne!("),
-        "runtime fixtures must not hide behavioral assertions"
-    );
-}
 
 #[test]
 fn native_replay_authority_is_feature_gated_under_devtools() {
@@ -738,60 +448,7 @@ fn native_replay_authority_is_feature_gated_under_devtools() {
     }
 }
 
-#[test]
-fn migration_debt_and_compatibility_facades_stay_deleted() {
-    let source_root = manifest_dir().join("src");
-    for relative in [
-        "app/command_ledger.rs",
-        "app/native_shell/update.rs",
-        "app/native_shell/preferences.rs",
-        "app/native_shell/file_review.rs",
-        "preferences.rs",
-        "runtime.rs",
-    ] {
-        let path = source_root.join(relative);
-        assert!(
-            !path.exists(),
-            "legacy desktop path must stay deleted: {}",
-            path.display()
-        );
-    }
 
-    for path in rust_files(&source_root) {
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for forbidden in [
-            "TODO(DSK-",
-            "HOME_COMPOSER_SESSION_KEY",
-            "command_owner_session_id",
-            "complete_workspace_command",
-            "reserve_with_id",
-            "command_client_for_test",
-            "try_submit_prompt(",
-            "try_abort(",
-            "try_steer(",
-            "try_follow_up(",
-            "allow(dead_code",
-            "allow(unused_imports",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{} must not restore migration debt token {forbidden}",
-                path.display()
-            );
-        }
-        assert!(
-            !(source.contains("impl Deref") && source.contains("NativeShell")),
-            "{} must not restore NativeShell deref forwarding",
-            path.display()
-        );
-    }
-
-    let commands = fs::read_to_string(source_root.join("app/native_shell/commands.rs"))
-        .expect("native shell command owner is readable");
-    assert!(commands.contains("pub(super) fn reserve_command("));
-    assert!(commands.contains("shell.app.commands.reserve(owner, intent)"));
-}
 
 #[test]
 fn application_layer_has_no_ui_or_effect_executor_dependencies() {

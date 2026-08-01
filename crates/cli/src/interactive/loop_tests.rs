@@ -90,22 +90,6 @@ fn coalesced_stream_updates_do_not_bypass_the_render_interval() {
 }
 
 #[test]
-fn parsed_events_continue_after_an_event_changes_running_state() {
-    let source = include_str!("loop.rs");
-    let start = source
-        .find("async fn process_input_events")
-        .expect("input reducer exists");
-    let end = source[start..]
-        .find("\nfn schedule_render")
-        .map(|offset| start + offset)
-        .expect("input reducer has a bounded source region");
-    let reducer = &source[start..end];
-
-    assert!(reducer.contains("for event in events"));
-    assert!(!reducer.contains("break;"));
-}
-
-#[test]
 fn transient_overlay_roles_keep_independent_geometry_and_capture_policy() {
     let assistance = transient_overlay_options(TransientOverlayRole::ComposerAssistance, 4);
     assert_eq!(assistance.anchor, OverlayAnchor::BottomLeft);

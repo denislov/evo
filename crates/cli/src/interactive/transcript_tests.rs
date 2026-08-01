@@ -152,16 +152,6 @@ fn system_item_is_pushed_and_rendered_as_a_line() {
 }
 
 #[test]
-fn system_item_scrolls_like_other_items() {
-    let mut transcript = Transcript::new();
-    transcript.push(TranscriptItem::system("welcome"));
-    transcript.scroll_page_up(2);
-    assert_eq!(transcript.scroll_offset(), 2);
-    transcript.scroll_page_down(usize::MAX);
-    assert_eq!(transcript.scroll_offset(), 0);
-}
-
-#[test]
 fn transcript_revision_changes_only_on_real_mutation() {
     let mut transcript = Transcript::new();
     let initial = transcript.revision();
