@@ -230,7 +230,6 @@ impl Render for NativeShell {
             .on_action(cx.listener(Self::on_open_file_surface))
             .on_action(cx.listener(Self::on_new_session))
             .on_action(cx.listener(Self::on_focus_composer))
-            .on_action(cx.listener(Self::on_submit_composer))
             .on_action(cx.listener(Self::on_abort_active_operation))
             .on_action(cx.listener(Self::on_escape_hierarchy))
             .on_action(cx.listener(Self::on_follow_latest_output))

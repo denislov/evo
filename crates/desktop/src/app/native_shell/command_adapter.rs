@@ -168,7 +168,9 @@ impl NativeShell {
         cx.notify();
     }
 
-    pub(super) fn submit_primary_composer(&mut self, cx: &mut Context<Self>) {
+    /// Send the draft using the normal conversation flow. While an operation is
+    /// active this queues the message after it; otherwise it starts a prompt.
+    pub(super) fn send_composer(&mut self, cx: &mut Context<Self>) {
         if self
             .app
             .workspaces
@@ -177,7 +179,24 @@ impl NativeShell {
             .as_ref()
             .is_some_and(|projection| projection.snapshot().active_operation.is_some())
         {
-            self.submit_active_control(self.active_composer_running_mode().submission_kind(), cx);
+            self.submit_active_control(ComposerSubmissionKind::FollowUp, cx);
+        } else {
+            self.submit_composer(cx);
+        }
+    }
+
+    /// Insert the draft into the active operation. With no operation to steer,
+    /// the same shortcut behaves like a normal send instead of dropping input.
+    pub(super) fn insert_composer(&mut self, cx: &mut Context<Self>) {
+        if self
+            .app
+            .workspaces
+            .active_mut()
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.snapshot().active_operation.is_some())
+        {
+            self.submit_active_control(ComposerSubmissionKind::Steer, cx);
         } else {
             self.submit_composer(cx);
         }

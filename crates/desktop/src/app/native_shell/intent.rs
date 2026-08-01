@@ -5,11 +5,10 @@ use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
 use std::{path::PathBuf, sync::Arc};
 
 use super::{
-    ComposerRunningMode, DesktopPaletteCommand, InspectorSection,
-    center_drawer_host::CenterDrawerHostEvent, composer_pane::ComposerPaneEvent,
-    conversation_header::ConversationHeaderEvent, conversation_pane::ConversationPaneEvent,
-    inspector_pane::InspectorPaneEvent, root_modal_host::RootModalHostEvent,
-    sessions_pane::SessionsPaneEvent,
+    DesktopPaletteCommand, InspectorSection, center_drawer_host::CenterDrawerHostEvent,
+    composer_pane::ComposerPaneEvent, conversation_header::ConversationHeaderEvent,
+    conversation_pane::ConversationPaneEvent, inspector_pane::InspectorPaneEvent,
+    root_modal_host::RootModalHostEvent, sessions_pane::SessionsPaneEvent,
 };
 use crate::ui::shell::CenterNavigationTarget;
 
@@ -47,10 +46,8 @@ pub(super) enum UiIntent {
     RemoveAttachment(usize),
     ChooseProjectDirectory,
     ClearProjectDirectory,
-    SubmitPrimary,
-    Submit,
-    SubmitRunning,
-    SetRunningMode(ComposerRunningMode),
+    SendComposer,
+    InsertComposer,
     SelectConversation {
         block_id: String,
         durable: bool,
@@ -163,10 +160,8 @@ impl From<&ComposerPaneEvent> for UiIntent {
             ComposerPaneEvent::RemoveAttachment(index) => Self::RemoveAttachment(*index),
             ComposerPaneEvent::ChooseProjectDirectory => Self::ChooseProjectDirectory,
             ComposerPaneEvent::ClearProjectDirectory => Self::ClearProjectDirectory,
-            ComposerPaneEvent::SubmitPrimary => Self::SubmitPrimary,
-            ComposerPaneEvent::Submit => Self::Submit,
-            ComposerPaneEvent::SubmitRunning => Self::SubmitRunning,
-            ComposerPaneEvent::SetRunningMode(mode) => Self::SetRunningMode(*mode),
+            ComposerPaneEvent::Send => Self::SendComposer,
+            ComposerPaneEvent::Insert => Self::InsertComposer,
         }
     }
 }
@@ -243,10 +238,12 @@ mod tests {
             UiIntent::SelectModel(Arc::from("model-a"))
         );
         assert_eq!(
-            UiIntent::from(&ComposerPaneEvent::SetRunningMode(
-                ComposerRunningMode::QueueNext,
-            )),
-            UiIntent::SetRunningMode(ComposerRunningMode::QueueNext)
+            UiIntent::from(&ComposerPaneEvent::Send),
+            UiIntent::SendComposer
+        );
+        assert_eq!(
+            UiIntent::from(&ComposerPaneEvent::Insert),
+            UiIntent::InsertComposer
         );
         assert_eq!(
             UiIntent::from(&ConversationPaneEvent::Select {

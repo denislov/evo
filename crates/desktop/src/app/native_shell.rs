@@ -34,7 +34,7 @@ use crate::actions::{
     AuthorizationDeny, CopySelectedConversation, DesktopPaletteCommand, EscapeHierarchy,
     FocusComposer, FocusNextRegion, FocusPreviousRegion, FollowLatestOutput, NewSession,
     OpenCommandPalette, OpenFileSurface, PaletteConfirm, PaletteNext, PalettePrevious,
-    SelectNextConversation, SelectPreviousConversation, SubmitComposer, ToggleInspectorPanel,
+    SelectNextConversation, SelectPreviousConversation, ToggleInspectorPanel,
     ToggleSelectedConversationDetails, TrapOverlayFocus,
 };
 use crate::application::{
@@ -150,13 +150,6 @@ pub(crate) fn conversation_block_visual(
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ComposerRunningMode {
-    #[default]
-    SteerNow,
-    QueueNext,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum InspectorSection {
     #[default]
     Changes,
@@ -208,15 +201,6 @@ pub(crate) enum FocusInputModality {
     Pointer,
 }
 
-impl ComposerRunningMode {
-    const fn submission_kind(self) -> ComposerSubmissionKind {
-        match self {
-            Self::SteerNow => ComposerSubmissionKind::Steer,
-            Self::QueueNext => ComposerSubmissionKind::FollowUp,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DesktopModalKind {
     Authorization,
@@ -237,7 +221,6 @@ pub(crate) struct ConversationFullMessageView {
 pub(crate) struct SessionWorkspacePresentation {
     pub(crate) conversation_controller: ConversationController,
     pub(crate) inspector_section: InspectorSection,
-    pub(crate) composer_running_mode: ComposerRunningMode,
 }
 
 impl RuntimeWorkspacePresentation for SessionWorkspacePresentation {
@@ -671,15 +654,12 @@ impl NativeShell {
             UiIntent::ClearProjectDirectory => {
                 self.clear_project_directory(cx);
             }
-            UiIntent::SubmitPrimary => {
+            UiIntent::InsertComposer => {
                 if !self.root_action_blocked_by_modal(window, cx) {
-                    self.submit_primary_composer(cx);
+                    self.insert_composer(cx);
                 }
             }
-            UiIntent::Submit => self.submit_composer(cx),
-            UiIntent::SubmitRunning => self
-                .submit_active_control(self.active_composer_running_mode().submission_kind(), cx),
-            UiIntent::SetRunningMode(mode) => self.set_active_composer_running_mode(mode, cx),
+            UiIntent::SendComposer => self.send_composer(cx),
             UiIntent::SelectConversation { block_id, durable } => {
                 self.record_focus(FocusTarget::CenterBody, window, cx);
                 let workspace = self.app.workspaces.active_mut();

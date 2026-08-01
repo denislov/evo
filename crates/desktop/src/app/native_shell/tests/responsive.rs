@@ -1370,18 +1370,15 @@ fn composer_running_authorization_and_rejection_fit_at_narrow_width(cx: &mut Tes
         .debug_bounds("desktop-hit-abort-operation")
         .expect("running operation exposes the critical Abort action");
     assert_eq!(f32::from(abort.size.height), 40.);
-    let selector = cx
-        .debug_bounds("desktop-composer-running-mode-selector")
-        .expect("running Composer exposes one mode selector");
     let submit = cx
-        .debug_bounds("desktop-hit-submit-running-composer")
-        .expect("running Composer exposes one primary submit action");
-    assert!(selector.right() <= submit.left());
+        .debug_bounds("desktop-hit-submit-composer")
+        .expect("running Composer keeps one primary send action");
+    assert_eq!(f32::from(submit.size.height), 36.);
     assert!(
-        (f32::from(selector.bottom() - submit.bottom())).abs() <= 2.1,
-        "32 px selector and 36 px submit remain center-aligned: selector={selector:?}, submit={submit:?}"
+        cx.debug_bounds("desktop-composer-running-mode-selector")
+            .is_none(),
+        "running Composer must not expose Steer/Follow mode state"
     );
-    assert!(cx.debug_bounds("desktop-hit-submit-composer").is_none());
 
     let mut authorization_snapshot = visual_test_snapshot();
     authorization_snapshot

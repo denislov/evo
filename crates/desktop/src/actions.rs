@@ -20,7 +20,6 @@ actions!(
         OpenFileSurface,
         NewSession,
         FocusComposer,
-        SubmitComposer,
         AbortActiveOperation,
         EscapeHierarchy,
         FollowLatestOutput,
@@ -52,8 +51,7 @@ pub(crate) enum DesktopPaletteCommand {
     FocusComposer,
     FocusInspector,
     SubmitPrompt,
-    SteerOperation,
-    FollowUpOperation,
+    InsertMessage,
     AbortOperation,
     FollowLatest,
     ReloadResources,
@@ -128,21 +126,15 @@ pub(crate) const PALETTE_ENTRIES: &[DesktopPaletteEntry] = &[
     ),
     entry(
         DesktopPaletteCommand::SubmitPrompt,
-        "Send prompt",
+        "Send message",
+        Some("Enter"),
+        "Send the current composer draft, after the active operation when needed",
+    ),
+    entry(
+        DesktopPaletteCommand::InsertMessage,
+        "Insert message",
         Some("Ctrl/Cmd+Enter"),
-        "Submit the current composer draft as a new prompt",
-    ),
-    entry(
-        DesktopPaletteCommand::SteerOperation,
-        "Steer active operation",
-        None,
-        "Submit the composer draft as steering input",
-    ),
-    entry(
-        DesktopPaletteCommand::FollowUpOperation,
-        "Queue follow-up",
-        None,
-        "Submit the composer draft as a follow-up",
+        "Insert the composer draft into the active operation",
     ),
     entry(
         DesktopPaletteCommand::AbortOperation,
@@ -303,8 +295,6 @@ const ROOT_BINDINGS: &[BindingSpec] = &[
     binding("cmd-n", ROOT_KEY_CONTEXT),
     binding("ctrl-l", ROOT_KEY_CONTEXT),
     binding("cmd-l", ROOT_KEY_CONTEXT),
-    binding("ctrl-enter", ROOT_KEY_CONTEXT),
-    binding("cmd-enter", ROOT_KEY_CONTEXT),
     binding("ctrl-escape", ROOT_KEY_CONTEXT),
     binding("cmd-escape", ROOT_KEY_CONTEXT),
     binding("escape", ROOT_KEY_CONTEXT),
@@ -332,8 +322,6 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-n", NewSession, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("ctrl-l", FocusComposer, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("cmd-l", FocusComposer, Some(ROOT_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-enter", SubmitComposer, Some(ROOT_KEY_CONTEXT)),
-        KeyBinding::new("cmd-enter", SubmitComposer, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("ctrl-escape", AbortActiveOperation, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("cmd-escape", AbortActiveOperation, Some(ROOT_KEY_CONTEXT)),
         KeyBinding::new("escape", EscapeHierarchy, Some(ROOT_KEY_CONTEXT)),
@@ -462,7 +450,7 @@ mod tests {
             .iter()
             .map(|binding| binding.keystroke)
             .collect::<HashSet<_>>();
-        for key in ["k", "p", "n", "l", "enter", "escape", "\\"] {
+        for key in ["k", "p", "n", "l", "escape", "\\"] {
             assert!(bindings.contains(format!("ctrl-{key}").as_str()));
             assert!(bindings.contains(format!("cmd-{key}").as_str()));
         }

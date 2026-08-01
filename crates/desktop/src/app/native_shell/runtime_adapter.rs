@@ -1,10 +1,10 @@
 use super::{
-    Arc, ClipboardItem, ComposerRunningMode, Context, DesktopController, DesktopEffect,
-    DesktopEvent, DesktopPickerKind, DesktopThinkingLevel, DesktopTimer, DesktopTimerKind, Instant,
-    MAX_RUNTIME_UPDATES_PER_FRAME, NativeShell, PathPromptOptions, PlatformOutcome, PlatformResult,
-    PreferenceWriteResult, RuntimePoll, ToastNotice, Transition, UiChangeSet, UiRegion,
-    WorkspaceKey, center_drawer_host, composer_pane, conversation_header, conversation_pane,
-    inspector_pane, root_modal_host, sessions_pane, skills_pane,
+    Arc, ClipboardItem, Context, DesktopController, DesktopEffect, DesktopEvent, DesktopPickerKind,
+    DesktopThinkingLevel, DesktopTimer, DesktopTimerKind, Instant, MAX_RUNTIME_UPDATES_PER_FRAME,
+    NativeShell, PathPromptOptions, PlatformOutcome, PlatformResult, PreferenceWriteResult,
+    RuntimePoll, ToastNotice, Transition, UiChangeSet, UiRegion, WorkspaceKey, center_drawer_host,
+    composer_pane, conversation_header, conversation_pane, inspector_pane, root_modal_host,
+    sessions_pane, skills_pane,
 };
 use crate::platform::external_editor::launch_external_editor;
 
@@ -363,27 +363,6 @@ impl NativeShell {
                 cx.notify();
             });
         }
-    }
-
-    pub(super) fn active_composer_running_mode(&self) -> ComposerRunningMode {
-        self.app
-            .workspaces
-            .active()
-            .presentation
-            .composer_running_mode
-    }
-
-    pub(super) fn set_active_composer_running_mode(
-        &mut self,
-        mode: ComposerRunningMode,
-        cx: &mut Context<Self>,
-    ) {
-        self.app
-            .workspaces
-            .active_mut()
-            .presentation
-            .composer_running_mode = mode;
-        self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
     }
 
     pub(super) fn schedule_inspector_telemetry_refresh(&mut self, cx: &mut Context<Self>) {

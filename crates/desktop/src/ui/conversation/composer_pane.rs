@@ -9,7 +9,7 @@ use gpui::{
 };
 use gpui_component::{
     input::{Input, InputEvent, InputState},
-    menu::{DropdownMenu as _, PopupMenuItem},
+    menu::PopupMenuItem,
 };
 use std::{
     cell::Cell,
@@ -17,11 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::app::native_shell::{ComposerRunningMode, SessionWorkspace};
+use crate::app::native_shell::SessionWorkspace;
 use crate::ui::components::{
     controls::{
         DesktopControlSize, DesktopControlWeight, DesktopIcon, DesktopIconButton,
-        DesktopProjectDirectoryControl, DesktopProjectDirectoryState, DesktopSelector,
+        DesktopProjectDirectoryControl, DesktopProjectDirectoryState,
     },
     style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
@@ -36,10 +36,18 @@ pub(crate) enum ComposerPaneEvent {
     RemoveAttachment(usize),
     ChooseProjectDirectory,
     ClearProjectDirectory,
-    SubmitPrimary,
-    Submit,
-    SubmitRunning,
-    SetRunningMode(ComposerRunningMode),
+    Send,
+    Insert,
+}
+
+fn enter_event(secondary: bool, shift: bool) -> Option<ComposerPaneEvent> {
+    if shift {
+        None
+    } else if secondary {
+        Some(ComposerPaneEvent::Insert)
+    } else {
+        Some(ComposerPaneEvent::Send)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +56,6 @@ pub(crate) struct ComposerPaneViewModel {
     pub(crate) composer_running: bool,
     pub(crate) awaiting_prompt_start: bool,
     pub(crate) authorization_pending: bool,
-    pub(crate) running_mode: ComposerRunningMode,
     pub(crate) project_directory: ComposerProjectDirectoryViewModel,
     pub(crate) attachments: Arc<[ComposerAttachmentViewModel]>,
     pub(crate) attachments_enabled: bool,
@@ -82,7 +89,6 @@ pub(crate) fn view_model(workspace: &SessionWorkspace) -> ComposerPaneViewModel 
         awaiting_prompt_start,
         authorization_pending: snapshot
             .is_some_and(|snapshot| !snapshot.pending_authorizations.is_empty()),
-        running_mode: workspace.presentation.composer_running_mode,
         project_directory: ComposerProjectDirectoryViewModel {
             value: Arc::from(
                 project_directory_path
@@ -233,6 +239,7 @@ impl ComposerPane {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 8)
+                .submit_on_enter(true)
                 .placeholder(COMPOSER_PLACEHOLDER)
         });
         let focus = input.focus_handle(cx).clone();
@@ -249,13 +256,12 @@ impl ComposerPane {
                     cx.notify();
                 }
                 InputEvent::Focus => cx.emit(ComposerPaneEvent::Focused),
-                InputEvent::PressEnter {
-                    secondary: true, ..
-                } => cx.emit(ComposerPaneEvent::SubmitPrimary),
+                InputEvent::PressEnter { secondary, shift } => {
+                    if let Some(event) = enter_event(*secondary, *shift) {
+                        cx.emit(event);
+                    }
+                }
                 InputEvent::Blur => cx.notify(),
-                InputEvent::PressEnter {
-                    secondary: false, ..
-                } => {}
             },
         );
         Self {
@@ -306,7 +312,6 @@ impl Render for ComposerPane {
         let composer_running = view_model.composer_running;
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
         let authorization_pending = view_model.authorization_pending;
-        let running_mode = view_model.running_mode;
         let project_directory = view_model.project_directory;
         let attachments = view_model.attachments;
         let attachments_enabled = view_model.attachments_enabled;
@@ -314,9 +319,10 @@ impl Render for ComposerPane {
         let rejection = view_model.rejection;
         let composer_disabled = composer_pending || awaiting_prompt_start;
         let theme = SemanticTheme::current(cx);
-        let running_action_label = match running_mode {
-            ComposerRunningMode::SteerNow => "Steer now",
-            ComposerRunningMode::QueueNext => "Queue next",
+        let submit_accessible_label = if composer_running {
+            "Send after the active operation · Enter; insert into it now · Ctrl/Cmd+Enter"
+        } else {
+            "Send the composer draft · Enter; newline · Shift+Enter"
         };
         let state_notice = if awaiting_prompt_start {
             Some("Waiting for the operation to start…")
@@ -327,8 +333,6 @@ impl Render for ComposerPane {
         } else {
             None
         };
-        let event_target_for_steer = cx.entity().downgrade();
-        let event_target_for_queue = cx.entity().downgrade();
         let event_target_for_project_choose = cx.entity().downgrade();
         let event_target_for_project_clear = cx.entity().downgrade();
         let attachment_button_label = attachment_disabled_reason.as_deref().map_or_else(
@@ -548,104 +552,21 @@ impl Render for ComposerPane {
                                     .flex()
                                     .items_center()
                                     .gap_token(DesignSpace::Xs)
-                                    .when(composer_running, |actions| {
-                                        actions.child(
-                                            DesktopSelector::new(
-                                                "composer-running-mode-selector",
-                                                running_action_label,
-                                                "Choose how this draft enters the active operation",
-                                            )
-                                            .disabled(composer_pending)
-                                            .build()
-                                            .debug_selector(|| {
-                                                "desktop-composer-running-mode-selector".into()
-                                            })
-                                            .dropdown_menu(move |menu, _, _| {
-                                                let steer_target =
-                                                    event_target_for_steer.clone();
-                                                let queue_target =
-                                                    event_target_for_queue.clone();
-                                                menu.item(
-                                                    PopupMenuItem::new("Steer now")
-                                                        .checked(
-                                                            running_mode
-                                                                == ComposerRunningMode::SteerNow,
-                                                        )
-                                                        .on_click(move |_, _, cx| {
-                                                            if let Some(target) =
-                                                                steer_target.upgrade()
-                                                            {
-                                                                target.update(cx, |_, cx| {
-                                                                    cx.emit(
-                                                                        ComposerPaneEvent::SetRunningMode(
-                                                                            ComposerRunningMode::SteerNow,
-                                                                        ),
-                                                                    );
-                                                                });
-                                                            }
-                                                        }),
-                                                )
-                                                .item(
-                                                    PopupMenuItem::new("Queue next")
-                                                        .checked(
-                                                            running_mode
-                                                                == ComposerRunningMode::QueueNext,
-                                                        )
-                                                        .on_click(move |_, _, cx| {
-                                                            if let Some(target) =
-                                                                queue_target.upgrade()
-                                                            {
-                                                                target.update(cx, |_, cx| {
-                                                                    cx.emit(
-                                                                        ComposerPaneEvent::SetRunningMode(
-                                                                            ComposerRunningMode::QueueNext,
-                                                                        ),
-                                                                    );
-                                                                });
-                                                            }
-                                                        }),
-                                                )
-                                            }),
+                                    .child(
+                                        DesktopIconButton::new(
+                                            "submit-composer",
+                                            DesktopIcon::Submit,
+                                            submit_accessible_label,
                                         )
-                                    })
-                                    .when(!composer_running, |actions| {
-                                        actions.child(
-                                            DesktopIconButton::new(
-                                                "submit-composer",
-                                                DesktopIcon::Submit,
-                                                "Send the composer draft · Ctrl/Cmd+Enter",
-                                            )
-                                            .size(DesktopControlSize::Standard)
-                                            .weight(DesktopControlWeight::Primary)
-                                            .busy(composer_disabled)
-                                            .build()
-                                            .debug_selector(|| {
-                                                "desktop-hit-submit-composer".into()
-                                            })
-                                            .on_click(cx.listener(|_, _, _, cx| {
-                                                cx.emit(ComposerPaneEvent::Submit);
-                                            })),
-                                        )
-                                    })
-                                    .when(composer_running, |actions| {
-                                        actions.child(
-                                            DesktopIconButton::new(
-                                                "submit-running-composer",
-                                                DesktopIcon::Submit,
-                                                format!("Submit using {running_action_label}"),
-                                            )
-                                            .size(DesktopControlSize::Standard)
-                                            .weight(DesktopControlWeight::Primary)
-                                            .busy(composer_disabled)
-                                            .build()
-                                            .debug_selector(|| {
-                                                "desktop-hit-submit-running-composer".into()
-                                            })
-                                            .on_click(cx.listener(|_, _, _, cx| {
-                                                cx.emit(ComposerPaneEvent::SubmitRunning);
-                                            })),
-                                        )
-                                    }),
+                                        .size(DesktopControlSize::Standard)
+                                        .weight(DesktopControlWeight::Primary)
+                                        .busy(composer_disabled)
+                                        .build()
+                                        .debug_selector(|| "desktop-hit-submit-composer".into())
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(ComposerPaneEvent::Send);
+                                        })),
+                                    ),
                             ),
                     ),
             )
@@ -663,6 +584,14 @@ mod tests {
             COMPOSER_PLACEHOLDER,
             "What do you want to build or improve?"
         );
+    }
+
+    #[test]
+    fn enter_shortcuts_have_fixed_send_insert_and_newline_semantics() {
+        assert_eq!(enter_event(false, false), Some(ComposerPaneEvent::Send));
+        assert_eq!(enter_event(true, false), Some(ComposerPaneEvent::Insert));
+        assert_eq!(enter_event(false, true), None);
+        assert_eq!(enter_event(true, true), None);
     }
 
     #[test]

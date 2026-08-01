@@ -1,31 +1,16 @@
 use super::*;
 
 #[test]
-fn composer_mode_and_draft_are_scoped_to_the_active_session() {
+fn composer_draft_is_scoped_to_the_active_session() {
     let projection = visual_test_projection();
     let project = projection.project().clone();
     let mut session_a = make_session_workspace(project.clone(), Some(projection), None);
     let mut session_b = make_session_workspace(project, None, None);
     session_a.composer.edit("draft a");
-    session_a.presentation.composer_running_mode = ComposerRunningMode::QueueNext;
     session_b.composer.edit("draft b");
 
     assert_eq!(session_a.composer.draft(), "draft a");
-    assert_eq!(
-        session_a
-            .presentation
-            .composer_running_mode
-            .submission_kind(),
-        ComposerSubmissionKind::FollowUp
-    );
     assert_eq!(session_b.composer.draft(), "draft b");
-    assert_eq!(
-        session_b
-            .presentation
-            .composer_running_mode
-            .submission_kind(),
-        ComposerSubmissionKind::Steer
-    );
 }
 
 #[test]
@@ -613,7 +598,3 @@ fn long_user_message_stops_at_max_width_and_grows_vertically(cx: &mut TestAppCon
         "content beyond the maximum width must wrap and grow vertically: card={card:?}"
     );
 }
-
-
-
-

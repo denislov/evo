@@ -1,13 +1,12 @@
 use super::{
     AbortActiveOperation, Arc, AuthorizationAllowForOperation, AuthorizationAllowOnce,
-    AuthorizationDeny, CodingAgentFileReviewRequest, ComposerSubmissionKind, Context,
-    CopySelectedConversation, DesktopFileReviewState, DesktopModalKind, DesktopPaletteCommand,
-    DesktopRecoveryAction, DesktopRecoveryStatus, EscapeHierarchy, FocusComposer, FocusNextRegion,
-    FocusPreviousRegion, FocusTarget, FollowLatestOutput, NativeShell, NewSession,
-    OpenCommandPalette, OpenFileSurface, PaletteConfirm, PaletteNext, PalettePrevious,
-    SelectNextConversation, SelectPreviousConversation, SubmitComposer, ToggleInspectorPanel,
-    ToggleSelectedConversationDetails, ToolAuthorizationDecision, TrapOverlayFocus, UiChangeSet,
-    UiRegion, Window, conversation_pane,
+    AuthorizationDeny, CodingAgentFileReviewRequest, Context, CopySelectedConversation,
+    DesktopFileReviewState, DesktopModalKind, DesktopPaletteCommand, DesktopRecoveryAction,
+    DesktopRecoveryStatus, EscapeHierarchy, FocusComposer, FocusNextRegion, FocusPreviousRegion,
+    FocusTarget, FollowLatestOutput, NativeShell, NewSession, OpenCommandPalette, OpenFileSurface,
+    PaletteConfirm, PaletteNext, PalettePrevious, SelectNextConversation,
+    SelectPreviousConversation, ToggleInspectorPanel, ToggleSelectedConversationDetails,
+    ToolAuthorizationDecision, TrapOverlayFocus, UiChangeSet, UiRegion, Window, conversation_pane,
 };
 
 impl NativeShell {
@@ -127,24 +126,10 @@ impl NativeShell {
                 self.focus_target(FocusTarget::Inspector, window, cx);
             }
             DesktopPaletteCommand::SubmitPrompt => {
-                if self
-                    .app
-                    .workspaces
-                    .active_mut()
-                    .projection
-                    .as_ref()
-                    .is_some_and(|projection| projection.snapshot().active_operation.is_some())
-                {
-                    self.submit_active_control(ComposerSubmissionKind::Steer, cx);
-                } else {
-                    self.submit_composer(cx);
-                }
+                self.send_composer(cx);
             }
-            DesktopPaletteCommand::SteerOperation => {
-                self.submit_active_control(ComposerSubmissionKind::Steer, cx);
-            }
-            DesktopPaletteCommand::FollowUpOperation => {
-                self.submit_active_control(ComposerSubmissionKind::FollowUp, cx);
+            DesktopPaletteCommand::InsertMessage => {
+                self.insert_composer(cx);
             }
             DesktopPaletteCommand::AbortOperation => self.abort_active_operation(cx),
             DesktopPaletteCommand::FollowLatest => self.follow_latest(cx),
@@ -244,18 +229,6 @@ impl NativeShell {
             return;
         }
         self.focus_target(FocusTarget::Composer, window, cx);
-    }
-
-    pub(super) fn on_submit_composer(
-        &mut self,
-        _: &SubmitComposer,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.root_action_blocked_by_modal(window, cx) {
-            return;
-        }
-        self.submit_primary_composer(cx);
     }
 
     pub(super) fn on_abort_active_operation(
