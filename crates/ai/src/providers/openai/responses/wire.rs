@@ -72,6 +72,14 @@ pub enum ResponseStreamEvent {
         item_id: Option<String>,
         delta: String,
     },
+    ReasoningTextDelta {
+        item_id: Option<String>,
+        delta: String,
+    },
+    ReasoningTextDone {
+        item_id: Option<String>,
+        text: Option<String>,
+    },
     FunctionCallArgumentsDelta {
         item_id: Option<String>,
         delta: String,
@@ -125,6 +133,14 @@ impl ResponseStreamEvent {
                 item_id: optional_string(&raw, "item_id"),
                 delta: field(&raw, "delta")?,
             }),
+            "response.reasoning_text.delta" => Ok(Self::ReasoningTextDelta {
+                item_id: optional_string(&raw, "item_id"),
+                delta: field(&raw, "delta")?,
+            }),
+            "response.reasoning_text.done" => Ok(Self::ReasoningTextDone {
+                item_id: optional_string(&raw, "item_id"),
+                text: optional_string(&raw, "text"),
+            }),
             "response.function_call_arguments.delta" => Ok(Self::FunctionCallArgumentsDelta {
                 item_id: optional_string(&raw, "item_id"),
                 delta: field(&raw, "delta")?,
@@ -154,8 +170,6 @@ impl ResponseStreamEvent {
             | "response.function_call_arguments.done"
             | "response.reasoning.delta"
             | "response.reasoning.done"
-            | "response.reasoning_text.delta"
-            | "response.reasoning_text.done"
             | "response.reasoning_summary_text.delta"
             | "response.reasoning_summary_text.done" => Ok(Self::Bookkeeping),
             _ => Ok(Self::Unknown {

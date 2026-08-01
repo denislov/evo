@@ -41,6 +41,7 @@ where
 #[derive(Debug)]
 enum OutputKind {
     Text,
+    Thinking,
     Tool { arguments: String },
 }
 
@@ -59,8 +60,10 @@ struct ResponsesHandler {
     outputs: HashMap<String, OutputState>,
     output_order: Vec<String>,
     last_text_output: Option<String>,
+    last_thinking_output: Option<String>,
     last_tool_output: Option<String>,
     synthetic_output_id: u64,
+    terminal_stop_reason: Option<StopReason>,
 }
 
 impl ResponsesHandler {
@@ -138,6 +141,40 @@ impl ResponsesHandler {
         });
     }
 
+    fn start_thinking(
+        &mut self,
+        item_id: Option<String>,
+        partial: &mut AssistantMessage,
+        events: &mut Vec<AssistantMessageEvent>,
+    ) -> String {
+        let key = item_id.unwrap_or_else(|| self.next_synthetic_id("reasoning"));
+        if self.outputs.contains_key(&key) {
+            self.last_thinking_output = Some(key.clone());
+            return key;
+        }
+        let content_index = partial.content.len() as u32;
+        partial.content.push(ContentBlock::Thinking {
+            thinking: String::new(),
+            thinking_signature: Some(key.clone()),
+            redacted: None,
+        });
+        self.outputs.insert(
+            key.clone(),
+            OutputState {
+                content_index,
+                kind: OutputKind::Thinking,
+                ended: false,
+            },
+        );
+        self.output_order.push(key.clone());
+        self.last_thinking_output = Some(key.clone());
+        events.push(AssistantMessageEvent::ThinkingStart {
+            content_index,
+            partial: partial.clone(),
+        });
+        key
+    }
+
     fn finish_output(
         &mut self,
         key: &str,
@@ -153,6 +190,10 @@ impl ResponsesHandler {
 
         let event = match &output.kind {
             OutputKind::Text => AssistantMessageEvent::TextEnd {
+                content_index: output.content_index,
+                partial: partial.clone(),
+            },
+            OutputKind::Thinking => AssistantMessageEvent::ThinkingEnd {
                 content_index: output.content_index,
                 partial: partial.clone(),
             },
@@ -216,11 +257,13 @@ impl SseEventHandler for ResponsesHandler {
                 });
                 self.started = true;
             }
-            wire::ResponseStreamEvent::OutputItemAdded { item } => {
-                if item.item_type == "function_call" {
-                    self.start_tool(item, partial, &mut events);
+            wire::ResponseStreamEvent::OutputItemAdded { item } => match item.item_type.as_str() {
+                "reasoning" => {
+                    self.start_thinking(Some(item.id), partial, &mut events);
                 }
-            }
+                "function_call" => self.start_tool(item, partial, &mut events),
+                _ => {}
+            },
             wire::ResponseStreamEvent::ContentPartAdded { item_id, part } => {
                 if part.part_type == "output_text" || part.part_type == "text" {
                     let key = self.start_text(item_id, partial, &mut events);
@@ -234,6 +277,26 @@ impl SseEventHandler for ResponsesHandler {
                             value.push_str(&text);
                         }
                         events.push(AssistantMessageEvent::TextDelta {
+                            content_index: output.content_index,
+                            delta: text,
+                            partial: partial.clone(),
+                        });
+                    }
+                } else if part.part_type == "reasoning_text" {
+                    let key = self.start_thinking(item_id, partial, &mut events);
+                    if let Some(text) = part.text
+                        && !text.is_empty()
+                    {
+                        let output = self
+                            .outputs
+                            .get(&key)
+                            .expect("thinking output was inserted");
+                        if let Some(ContentBlock::Thinking { thinking, .. }) =
+                            partial.content.get_mut(output.content_index as usize)
+                        {
+                            thinking.push_str(&text);
+                        }
+                        events.push(AssistantMessageEvent::ThinkingDelta {
                             content_index: output.content_index,
                             delta: text,
                             partial: partial.clone(),
@@ -266,6 +329,72 @@ impl SseEventHandler for ResponsesHandler {
                     delta,
                     partial: partial.clone(),
                 });
+            }
+            wire::ResponseStreamEvent::ReasoningTextDelta { item_id, delta } => {
+                let key = item_id
+                    .or_else(|| self.last_thinking_output.clone())
+                    .ok_or_else(|| {
+                        "reasoning_text.delta arrived before a reasoning output item".to_string()
+                    })?;
+                let output = self
+                    .outputs
+                    .get(&key)
+                    .ok_or_else(|| format!("reasoning_text.delta references unknown item {key}"))?;
+                if output.ended || !matches!(output.kind, OutputKind::Thinking) {
+                    return Err(format!(
+                        "reasoning_text.delta references closed/non-reasoning item {key}"
+                    ));
+                }
+                if let Some(ContentBlock::Thinking { thinking, .. }) =
+                    partial.content.get_mut(output.content_index as usize)
+                {
+                    thinking.push_str(&delta);
+                }
+                events.push(AssistantMessageEvent::ThinkingDelta {
+                    content_index: output.content_index,
+                    delta,
+                    partial: partial.clone(),
+                });
+            }
+            wire::ResponseStreamEvent::ReasoningTextDone { item_id, text } => {
+                let Some(full_text) = text.filter(|text| !text.is_empty()) else {
+                    return Ok(SseEventResult::Continue(events));
+                };
+                let key = item_id
+                    .or_else(|| self.last_thinking_output.clone())
+                    .ok_or_else(|| {
+                        "reasoning_text.done arrived before a reasoning output item".to_string()
+                    })?;
+                let output = self
+                    .outputs
+                    .get(&key)
+                    .ok_or_else(|| format!("reasoning_text.done references unknown item {key}"))?;
+                if output.ended || !matches!(output.kind, OutputKind::Thinking) {
+                    return Err(format!(
+                        "reasoning_text.done references closed/non-reasoning item {key}"
+                    ));
+                }
+                let Some(ContentBlock::Thinking { thinking, .. }) =
+                    partial.content.get_mut(output.content_index as usize)
+                else {
+                    return Err(format!("reasoning output {key} has no thinking block"));
+                };
+                if full_text != *thinking {
+                    let Some(suffix) = full_text.strip_prefix(thinking.as_str()) else {
+                        return Err(format!(
+                            "reasoning_text.done contradicts accumulated reasoning for item {key}"
+                        ));
+                    };
+                    if !suffix.is_empty() {
+                        let delta = suffix.to_owned();
+                        thinking.push_str(&delta);
+                        events.push(AssistantMessageEvent::ThinkingDelta {
+                            content_index: output.content_index,
+                            delta,
+                            partial: partial.clone(),
+                        });
+                    }
+                }
             }
             wire::ResponseStreamEvent::FunctionCallArgumentsDelta { item_id, delta } => {
                 let key = item_id
@@ -306,6 +435,8 @@ impl SseEventHandler for ResponsesHandler {
                     item.id
                 } else if item.item_type == "message" {
                     self.last_text_output.clone().unwrap_or(item.id)
+                } else if item.item_type == "reasoning" {
+                    self.last_thinking_output.clone().unwrap_or(item.id)
                 } else {
                     self.last_tool_output.clone().unwrap_or(item.id)
                 };
@@ -329,6 +460,17 @@ impl SseEventHandler for ResponsesHandler {
                 });
             }
             wire::ResponseStreamEvent::ResponseIncomplete { response } => {
+                if response
+                    .incomplete_details
+                    .as_ref()
+                    .and_then(|details| details.reason.as_deref())
+                    .is_some_and(|reason| matches!(reason, "max_output_tokens" | "max_tokens"))
+                {
+                    partial.response_id = Some(response.id);
+                    self.usage = response.usage;
+                    self.terminal_stop_reason = Some(StopReason::Length);
+                    return Ok(SseEventResult::ProviderDone(events));
+                }
                 return Ok(SseEventResult::ProviderError {
                     events,
                     reason: StopReason::Error,
@@ -387,15 +529,17 @@ impl SseEventHandler for ResponsesHandler {
         if let Some(usage) = &self.usage {
             partial.usage = map_usage(usage, model);
         }
-        partial.stop_reason = if partial
-            .content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolCall { .. }))
-        {
-            StopReason::ToolUse
-        } else {
-            StopReason::Stop
-        };
+        partial.stop_reason = self.terminal_stop_reason.clone().unwrap_or_else(|| {
+            if partial
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolCall { .. }))
+            {
+                StopReason::ToolUse
+            } else {
+                StopReason::Stop
+            }
+        });
         Ok(events)
     }
 }

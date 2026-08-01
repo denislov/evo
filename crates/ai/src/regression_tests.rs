@@ -1,19 +1,16 @@
 #![cfg(test)]
 
-use crate::protocol::{
-    AssistantMessageEvent, ContentBlock, Context, StopReason,
-};
+use crate::protocol::{AssistantMessageEvent, ContentBlock, Context, StopReason};
 use futures::StreamExt;
 
 #[test]
 fn empty_tool_arguments_parse_as_empty_object() {
     let parsed = crate::protocol::json::parse_terminal_json("");
     assert!(parsed.is_err());
-    let parsed =
-        crate::providers::common::parse_terminal_tool_arguments("").expect("empty -> {}");
+    let parsed = crate::providers::common::parse_terminal_tool_arguments("").expect("empty -> {}");
     assert_eq!(parsed, serde_json::json!({}));
-    let parsed = crate::providers::common::parse_terminal_tool_arguments("{\"a\":1}")
-        .expect("valid args");
+    let parsed =
+        crate::providers::common::parse_terminal_tool_arguments("{\"a\":1}").expect("valid args");
     assert_eq!(parsed, serde_json::json!({"a": 1}));
 }
 
@@ -57,7 +54,11 @@ data: {"type":"response.completed","response":{"id":"r_1","status":"completed","
         .iter()
         .filter(|e| matches!(e, AssistantMessageEvent::Done { .. }))
         .count();
-    assert_eq!(errors, Vec::<String>::new(), "reasoning events must not error the stream: {errors:?}");
+    assert_eq!(
+        errors,
+        Vec::<String>::new(),
+        "reasoning events must not error the stream: {errors:?}"
+    );
     assert_eq!(terminals, 1, "exactly one Done terminal");
     let text: String = collected
         .iter()
@@ -67,6 +68,144 @@ data: {"type":"response.completed","response":{"id":"r_1","status":"completed","
         })
         .collect();
     assert_eq!(text, "hello");
+}
+
+#[tokio::test]
+async fn deepseek_reasoning_and_tool_call_are_preserved() {
+    let sse_body = r#"data: {"type":"response.created","response":{"id":"r_1","status":"in_progress"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress","summary":[],"content":[]}}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"need "}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"weather"}
+
+data: {"type":"response.reasoning_text.done","item_id":"rs_1","output_index":0,"content_index":0,"text":"need weather"}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"need weather"}]}}
+
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"weather","arguments":""}}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{\"city\":\"杭州\"}"}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"weather","arguments":"{\"city\":\"杭州\"}"}}
+
+data: {"type":"response.completed","response":{"id":"r_1","status":"completed","usage":{"input_tokens":20,"output_tokens":8,"total_tokens":28,"input_tokens_details":{"cached_tokens":5}}}}
+
+"#;
+    let model = crate::model::get_model("deepseek", "deepseek-v4-flash")
+        .expect("DeepSeek V4 Flash is in the catalog");
+    let body = futures::stream::iter(vec![Ok::<_, String>(bytes::Bytes::from(sse_body))]);
+    let mut stream = crate::providers::openai::responses::stream::process_with_api_name(
+        body,
+        model,
+        None,
+        "deepseek-responses",
+    );
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+
+    let thinking: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AssistantMessageEvent::ThinkingDelta { delta, .. } => Some(delta.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking, "need weather");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AssistantMessageEvent::ThinkingStart { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AssistantMessageEvent::ThinkingEnd { .. }))
+            .count(),
+        1
+    );
+
+    let done = events
+        .iter()
+        .find_map(|event| match event {
+            AssistantMessageEvent::Done { message, .. } => Some(message),
+            _ => None,
+        })
+        .expect("stream completes successfully");
+    assert_eq!(done.api, "deepseek-responses");
+    assert_eq!(done.stop_reason, StopReason::ToolUse);
+    assert_eq!(done.usage.input, 15);
+    assert_eq!(done.usage.cache_read, 5);
+    assert!(matches!(
+        &done.content[0],
+        ContentBlock::Thinking {
+            thinking,
+            thinking_signature: Some(signature),
+            ..
+        } if thinking == "need weather" && signature == "rs_1"
+    ));
+    assert!(matches!(
+        &done.content[1],
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            ..
+        } if id == "call_1" && name == "weather" && arguments == &serde_json::json!({"city": "杭州"})
+    ));
+}
+
+#[tokio::test]
+async fn responses_max_output_tokens_incomplete_is_length() {
+    let sse_body = r#"data: {"type":"response.created","response":{"id":"r_2","status":"in_progress"}}
+
+data: {"type":"response.incomplete","response":{"id":"r_2","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}
+
+"#;
+    let model = crate::model::get_model("deepseek", "deepseek-v4-flash")
+        .expect("DeepSeek V4 Flash is in the catalog");
+    let body = futures::stream::iter(vec![Ok::<_, String>(bytes::Bytes::from(sse_body))]);
+    let mut stream = crate::providers::openai::responses::stream::process_with_api_name(
+        body,
+        model,
+        None,
+        "deepseek-responses",
+    );
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AssistantMessageEvent::Error { .. }))
+    );
+    let done = events
+        .iter()
+        .find_map(|event| match event {
+            AssistantMessageEvent::Done { reason, message } => Some((reason, message)),
+            _ => None,
+        })
+        .expect("incomplete max tokens is a successful length terminal");
+    assert_eq!(done.0, &StopReason::Length);
+    assert_eq!(done.1.stop_reason, StopReason::Length);
+    assert_eq!(done.1.usage.total_tokens, 5);
+}
+
+#[test]
+fn deepseek_catalog_routes_only_flash_to_responses() {
+    let flash = crate::model::get_model("deepseek", "deepseek-v4-flash")
+        .expect("DeepSeek V4 Flash is in the catalog");
+    let pro = crate::model::get_model("deepseek", "deepseek-v4-pro")
+        .expect("DeepSeek V4 Pro is in the catalog");
+    assert_eq!(flash.api, "deepseek-responses");
+    assert_eq!(pro.api, "openai-completions");
 }
 
 #[tokio::test]
@@ -159,13 +298,12 @@ async fn faux_tool_deltas_parse_streaming_json() {
         collected.push(event);
     }
     let delta_args = collected.iter().rev().find_map(|e| match e {
-        AssistantMessageEvent::ToolcallDelta { partial, .. } => partial
-            .content
-            .iter()
-            .find_map(|b| match b {
+        AssistantMessageEvent::ToolcallDelta { partial, .. } => {
+            partial.content.iter().find_map(|b| match b {
                 ContentBlock::ToolCall { arguments, .. } => Some(arguments.clone()),
                 _ => None,
-            }),
+            })
+        }
         _ => None,
     });
     assert_eq!(delta_args, Some(serde_json::json!({"a": 1})));
@@ -298,4 +436,3 @@ fn provider_event_budget_charges_deltas_and_still_limits() {
         })
         .expect("Done never trips the budget");
 }
-

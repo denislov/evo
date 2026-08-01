@@ -1117,6 +1117,7 @@ fn thinking_level_is_mapped(
 fn api_supports_explicit_thinking(model: &Model) -> bool {
     match model.api.as_str() {
         "anthropic-messages"
+        | "deepseek-responses"
         | "google-generative-ai"
         | "mistral-conversations"
         | "openai-codex-responses"
@@ -1131,7 +1132,7 @@ fn api_supports_explicit_thinking(model: &Model) -> bool {
 
 fn api_can_disable_thinking(model: &Model) -> bool {
     match model.api.as_str() {
-        "anthropic-messages" | "mistral-conversations" => true,
+        "anthropic-messages" | "deepseek-responses" | "mistral-conversations" => true,
         "openai-completions" => openai_completions_compat(model)
             .is_some_and(|compat| compat.thinking_format == Some(ThinkingFormat::DeepSeek)),
         _ => false,
@@ -1212,4 +1213,22 @@ fn default_thinking_level(resolved: &ResolvedApplicationContext) -> Option<Think
         .default_thinking_level
         .as_deref()
         .and_then(|level| level.parse().ok())
+}
+
+#[cfg(test)]
+mod deepseek_provider_tests {
+    use super::*;
+
+    #[test]
+    fn deepseek_responses_exposes_effort_levels_and_off() {
+        let model = ai::api::model::get_model("deepseek", "deepseek-v4-flash")
+            .expect("DeepSeek V4 Flash is in the catalog");
+        let capability = thinking_capability(&model);
+
+        assert!(capability.supported);
+        assert!(capability.can_disable);
+        assert!(capability.supports(CodingAgentThinkingLevel::Off));
+        assert!(capability.supports(CodingAgentThinkingLevel::Low));
+        assert!(capability.supports(CodingAgentThinkingLevel::XHigh));
+    }
 }

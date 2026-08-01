@@ -339,6 +339,7 @@ pub(crate) fn validate_options(api: &str, opts: Option<&StreamOptions>) -> Resul
         let supports_sse = matches!(
             api,
             "anthropic-messages"
+                | "deepseek-responses"
                 | "openai-completions"
                 | "openai-responses"
                 | "google-generative-ai"
@@ -355,7 +356,10 @@ pub(crate) fn validate_options(api: &str, opts: Option<&StreamOptions>) -> Resul
     if opts.session_id.is_some()
         && !matches!(
             api,
-            "openai-responses" | "mistral-conversations" | "openai-codex-responses"
+            "deepseek-responses"
+                | "openai-responses"
+                | "mistral-conversations"
+                | "openai-codex-responses"
         )
     {
         return Err(format!("session_id is unsupported by API `{api}`"));

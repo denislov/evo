@@ -1859,13 +1859,13 @@
   {
     "id": "deepseek-v4-flash",
     "name": "DeepSeek V4 Flash",
-    "api": "openai-completions",
+    "api": "deepseek-responses",
     "provider": "deepseek",
     "baseUrl": "https://api.deepseek.com",
     "reasoning": true,
     "thinkingLevelMap": {
-      "minimal": "high",
-      "low": "high",
+      "minimal": "low",
+      "low": "low",
       "medium": "high",
       "high": "high",
       "xhigh": "max"
@@ -1880,26 +1880,7 @@
       "cacheWrite": 0.0
     },
     "contextWindow": 1000000,
-    "maxTokens": 384000,
-    "compat": {
-      "supportsStore": null,
-      "supportsUsageInStreaming": null,
-      "supportsDeveloperRole": null,
-      "supportsReasoningEffort": null,
-      "maxTokensField": null,
-      "requiresToolResultName": null,
-      "requiresAssistantAfterToolResult": null,
-      "requiresThinkingAsText": null,
-      "requiresReasoningContentOnAssistantMessages": true,
-      "thinkingFormat": "deepseek",
-      "openRouterRouting": null,
-      "vercelGatewayRouting": null,
-      "zaiToolStream": null,
-      "supportsStrictMode": null,
-      "cacheControlFormat": null,
-      "sendSessionAffinityHeaders": null,
-      "supportsLongCacheRetention": null
-    }
+    "maxTokens": 384000
   },
   {
     "id": "deepseek-v4-pro",
