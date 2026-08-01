@@ -967,7 +967,7 @@ impl ManifestPatch {
     }
 }
 
-fn normalize_session_id(value: &str) -> Result<String, CodingSessionError> {
+pub(crate) fn normalize_session_id(value: &str) -> Result<String, CodingSessionError> {
     let session_id = value.trim();
     if session_id.is_empty() {
         return Err(session_error("session id must not be empty"));

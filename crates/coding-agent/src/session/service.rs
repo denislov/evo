@@ -2999,13 +2999,13 @@ fn open_target(options: &CodingAgentSessionOptions) -> Result<PathBuf, CodingSes
 }
 
 fn normalize_session_id(value: &str, label: &str) -> Result<String, CodingSessionError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(CodingSessionError::Input {
-            message: format!("{label} must not be empty"),
-        });
-    }
-    Ok(trimmed.to_owned())
+    // Reuse the repository's strict charset check: session ids are joined
+    // onto the log root as path components, so anything but
+    // `[a-zA-Z0-9_-]` (e.g. `../x` or an absolute path) must be rejected
+    // before any directory is created or opened.
+    super::repository::normalize_session_id(value).map_err(|_| CodingSessionError::Input {
+        message: format!("{label} contains unsupported characters"),
+    })
 }
 
 fn option_cwd_string(options: &CodingAgentSessionOptions) -> Option<String> {

@@ -148,23 +148,10 @@ async fn read_target_with_operations(
     let all: Vec<&str> = content.split('\n').collect();
     let total = all.len();
 
+    let (selected_lines, user_limited) = select_lines(&all, offset, limit)?;
+    let selected = selected_lines.join("\n");
     let start = offset.unwrap_or(1).saturating_sub(1);
     let start_display = start + 1;
-    if start >= all.len() {
-        return Err(format!(
-            "Offset {} is beyond end of file ({} lines total)",
-            offset.unwrap_or(1),
-            total
-        ));
-    }
-
-    let (selected, user_limited): (String, Option<usize>) = match limit {
-        Some(l) => {
-            let end = (start + l).min(all.len());
-            (all[start..end].join("\n"), Some(end - start))
-        }
-        None => (all[start..].join("\n"), None),
-    };
 
     let tr = truncate_head(&selected, default_truncation_limit());
     let out = if tr.first_line_exceeds_limit {
@@ -207,6 +194,32 @@ async fn read_target_with_operations(
     Ok(text_block(out))
 }
 
+/// Select the requested line window without arithmetic overflow. A huge
+/// user-supplied `limit` (e.g. `u64::MAX` from JSON) previously overflowed
+/// `start + l`, wrapping below `start` and panicking on the slice.
+fn select_lines<'a>(
+    all: &[&'a str],
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<(Vec<&'a str>, Option<usize>), String> {
+    let start = offset.unwrap_or(1).saturating_sub(1);
+    if start >= all.len() {
+        return Err(format!(
+            "Offset {} is beyond end of file ({} lines total)",
+            offset.unwrap_or(1),
+            all.len()
+        ));
+    }
+    let (selected, user_limited) = match limit {
+        Some(l) => {
+            let end = l.saturating_add(start).min(all.len());
+            (&all[start..end], Some(end - start))
+        }
+        None => (&all[start..], None),
+    };
+    Ok((selected.to_vec(), user_limited))
+}
+
 pub fn read_tool(filesystem: FilesystemCapability) -> AgentTool {
     read_tool_with_operations(filesystem, Arc::new(RealReadOperations))
 }
@@ -233,5 +246,42 @@ pub fn read_tool_with_operations(
         parameters: schema(),
         execution_mode: None,
         execute,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines() -> Vec<&'static str> {
+        vec!["line1", "line2", "line3"]
+    }
+
+    #[test]
+    fn huge_limit_with_offset_does_not_panic() {
+        let (selected, user_limited) = select_lines(&lines(), Some(2), Some(usize::MAX))
+            .expect("selection succeeds");
+        assert_eq!(selected, vec!["line2", "line3"]);
+        assert_eq!(user_limited, Some(2));
+    }
+
+    #[test]
+    fn normal_offset_and_limit_are_honored() {
+        let (selected, user_limited) =
+            select_lines(&lines(), Some(1), Some(1)).expect("selection succeeds");
+        assert_eq!(selected, vec!["line1"]);
+        assert_eq!(user_limited, Some(1));
+    }
+
+    #[test]
+    fn missing_offset_starts_at_line_one() {
+        let (selected, _) = select_lines(&lines(), None, None).expect("selection succeeds");
+        assert_eq!(selected, vec!["line1", "line2", "line3"]);
+    }
+
+    #[test]
+    fn offset_beyond_end_is_rejected() {
+        assert!(select_lines(&lines(), Some(99), None).is_err());
+        assert!(select_lines(&lines(), Some(0), None).is_ok());
     }
 }
