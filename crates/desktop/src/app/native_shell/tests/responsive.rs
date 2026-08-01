@@ -1,6 +1,99 @@
 use super::*;
 
 #[gpui::test]
+fn streaming_markdown_growth_uses_natural_height_and_keeps_the_tail_pinned(
+    cx: &mut TestAppContext,
+) {
+    initialize_visual_test(cx);
+    let projection_for = |text: String| {
+        let mut snapshot = visual_test_snapshot();
+        snapshot.transcript.items = vec![CodingAgentSessionTranscriptItem::Assistant {
+            id: "streaming-natural-height".into(),
+            text,
+            thinking: String::new(),
+            images: Vec::new(),
+            done: false,
+            reasoning_duration_millis: None,
+            model_id: None,
+            completed_at: None,
+        }];
+        DesktopProjection::new(snapshot).expect("streaming fixture is a valid projection")
+    };
+
+    let mut body = "# Streaming answer\n\n".to_owned();
+    let (shell, cx) = add_visual_shell(
+        cx,
+        DesktopRuntimeBridge::disconnected_for_test(),
+        projection_for(body.clone()),
+    );
+    cx.simulate_resize(size(px(700.), px(800.)));
+
+    let mut previous_height = 0.;
+    let mut previous_bottom: Option<f32> = None;
+    let mut pinned_growth_frames = 0;
+    for revision in 1..=6 {
+        body.push_str(&format!(
+            "## Chunk {revision}\n\n{}\n\n",
+            "A streamed Markdown sentence with **stable formatting**. ".repeat(18)
+        ));
+        let projection = projection_for(body.clone());
+        shell.update(cx, |shell, cx| {
+            let workspace = shell.app.workspaces.active_mut();
+            workspace.projection = Some(projection);
+            workspace
+                .presentation
+                .conversation_controller
+                .apply_projection_delta(true, None, revision);
+            shell.refresh_conversation_rows_at_width(600, cx);
+        });
+        settle_visual_measurements(cx);
+
+        let row = cx
+            .debug_bounds("conversation-last-row")
+            .expect("the streaming row remains mounted");
+        let card = cx
+            .debug_bounds("conversation-last-card")
+            .expect("the streaming Markdown card is laid out");
+        let composer = cx
+            .debug_bounds("desktop-composer-panel")
+            .expect("the Composer remains visible below the transcript");
+        let row_height = f32::from(row.size.height);
+
+        assert!(
+            (row_height
+                - (f32::from(card.size.height) + CONVERSATION_ROW_VERTICAL_PADDING_PX as f32))
+                .abs()
+                <= 1.,
+            "chunk {revision} must use the card's natural height in the same frame: row={row:?}, card={card:?}"
+        );
+        assert!(
+            row_height > previous_height,
+            "each parsed chunk must grow the row without an estimate collapse: {previous_height} -> {row_height}"
+        );
+        assert!(
+            row.bottom() <= composer.top() + px(1.),
+            "the followed tail must stay above the Composer: row={row:?}, composer={composer:?}"
+        );
+        if let Some(previous_bottom) = previous_bottom {
+            if (previous_bottom - f32::from(composer.top())).abs() <= 1. {
+                assert!(
+                    (f32::from(row.bottom()) - previous_bottom).abs() <= 1.,
+                    "once content overflows, tail following must absorb row growth without vertical oscillation: {previous_bottom} -> {} (row={row:?}, composer={composer:?})",
+                    f32::from(row.bottom())
+                );
+                pinned_growth_frames += 1;
+            }
+        }
+        previous_height = row_height;
+        previous_bottom = Some(f32::from(row.bottom()));
+    }
+    assert!(
+        pinned_growth_frames >= 3,
+        "the fixture must exercise several overflowing streaming growth frames"
+    );
+}
+
+#[gpui::test]
 fn final_long_markdown_tail_is_inside_measured_row_at_all_viewports(cx: &mut TestAppContext) {
     initialize_visual_test(cx);
     let (shell, cx) = add_visual_shell(
@@ -27,13 +120,6 @@ fn final_long_markdown_tail_is_inside_measured_row_at_all_viewports(cx: &mut Tes
                     .presentation
                     .conversation_controller
                     .row_count(),
-                shell
-                    .app
-                    .workspaces
-                    .active()
-                    .presentation
-                    .conversation_controller
-                    .render_heights_for_tests(),
                 shell
                     .app
                     .workspaces
@@ -455,9 +541,7 @@ fn tool_content_aligns_with_assistant_and_selection_has_no_focus_rail(cx: &mut T
 }
 
 #[gpui::test]
-fn width_refresh_holds_measured_row_heights_instead_of_reverting_to_estimates(
-    cx: &mut TestAppContext,
-) {
+fn width_refresh_remeasures_the_natural_row_without_an_estimate_frame(cx: &mut TestAppContext) {
     initialize_visual_test(cx);
     let (shell, cx) = add_visual_shell(
         cx,
@@ -467,7 +551,7 @@ fn width_refresh_holds_measured_row_heights_instead_of_reverting_to_estimates(
     cx.simulate_resize(size(px(1_000.), px(800.)));
     settle_visual_measurements(cx);
 
-    let (measured, active_width) = cx.update(|_, app| {
+    let active_width = cx.update(|_, app| {
         let controller = &shell
             .read(app)
             .app
@@ -475,44 +559,18 @@ fn width_refresh_holds_measured_row_heights_instead_of_reverting_to_estimates(
             .active()
             .presentation
             .conversation_controller;
-        (
-            controller.render_heights_for_tests().borrow().clone(),
-            controller.active_width_bucket(),
-        )
+        controller.active_width_bucket()
     });
     let active_width = active_width.expect("the transcript has rendered at a width");
-    assert!(
-        measured
-            .iter()
-            .any(|height| *height > TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT),
-        "the fixture must contain a card far taller than its character-grid estimate: {measured:?}"
-    );
 
-    // One bucket narrower, read back without an intervening frame. This is the
-    // frame that used to paint the whole transcript at `conversation_block_height`
-    // — a coarse guess no laid-out Markdown card matches — before the next
-    // prepaint measured the rows and snapped them back.
+    // One bucket narrower. The native dynamic list invalidates the affected
+    // items and measures their real elements during this layout pass; there is
+    // no controller-owned estimate to paint for an intermediate frame.
     let narrower = conversation_width_bucket(active_width - 1);
     assert_ne!(narrower, active_width);
-    let held = shell.update(cx, |shell, cx| {
+    shell.update(cx, |shell, cx| {
         shell.refresh_conversation_rows_at_width(narrower, cx);
-        shell
-            .app
-            .workspaces
-            .active()
-            .presentation
-            .conversation_controller
-            .render_heights_for_tests()
-            .borrow()
-            .clone()
     });
-    assert_eq!(
-        held, measured,
-        "a width refresh must hold each row's measured height until the row is measured again"
-    );
-
-    // The held heights are provisional, not frozen: the rows still re-measure at
-    // the new width and the virtual row keeps matching the painted card.
     settle_visual_measurements(cx);
     let row = cx
         .debug_bounds("conversation-last-row")
@@ -525,14 +583,16 @@ fn width_refresh_holds_measured_row_heights_instead_of_reverting_to_estimates(
             - (f32::from(card.size.height) + CONVERSATION_ROW_VERTICAL_PADDING_PX as f32))
             .abs()
             <= 1.,
-        "re-measured row must match actual card bounds: row={row:?}, card={card:?}"
+        "the resized native-list row must match its card in the same settled frame: row={row:?}, card={card:?}"
     );
 }
 
 #[gpui::test]
-fn assistant_reasoning_expands_downward_without_moving_its_top(cx: &mut TestAppContext) {
+fn assistant_reasoning_expansion_keeps_the_followed_tail_above_the_composer(
+    cx: &mut TestAppContext,
+) {
     initialize_visual_test(cx);
-    let (shell, cx) = add_visual_shell(
+    let (_, cx) = add_visual_shell(
         cx,
         DesktopRuntimeBridge::disconnected_for_test(),
         projection_with_last_item(CodingAgentSessionTranscriptItem::Assistant {
@@ -566,16 +626,7 @@ fn assistant_reasoning_expands_downward_without_moving_its_top(cx: &mut TestAppC
         .expect("the complete reasoning header is a disclosure action");
     cx.simulate_click(reasoning_header.center(), gpui::Modifiers::default());
     settle_visual_measurements(cx);
-    assert!(shell.read_with(cx, |shell, _| {
-        shell
-            .app
-            .workspaces
-            .active()
-            .presentation
-            .conversation_controller
-            .toggle_anchor_active_for_tests()
-    }));
-
+    assert_last_row_matches_card_and_tail(cx, "expanded Reasoning");
     let row = cx
         .debug_bounds("conversation-last-row")
         .expect("expanded reasoning row remains mounted");
@@ -590,10 +641,9 @@ fn assistant_reasoning_expands_downward_without_moving_its_top(cx: &mut TestAppC
         expanded_height > collapsed_height + 100.,
         "expanded reasoning must contribute its real content height: collapsed={collapsed_height}, expanded={expanded_height}"
     );
-    assert_eq!(
-        card.top(),
-        collapsed_top,
-        "expanding details must keep the message top fixed and grow downward"
+    assert!(
+        card.top() < collapsed_top,
+        "once expansion overflows the viewport, the followed row must grow upward"
     );
     assert!(
         (f32::from(row.size.height)
@@ -959,26 +1009,40 @@ fn sessions_show_names_search_name_and_id_and_offer_manual_rename(cx: &mut TestA
     assert!(cx.debug_bounds("desktop-session-row-0").is_some());
     assert!(cx.debug_bounds("desktop-session-row-1").is_some());
 
+    let search = cx
+        .debug_bounds("desktop-hit-global-search")
+        .expect("sidebar header exposes global search");
+    cx.simulate_click(search.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("desktop-global-search-dialog").is_some());
+
     cx.update(|window, app| {
         shell.update(app, |shell, app| {
-            shell.views.sessions_pane.update(app, |pane, app| {
-                pane.set_search_value("Release", window, app)
+            shell.views.root_modal_host.update(app, |modal, app| {
+                modal.set_search_value("Release", window, app)
             });
         });
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("desktop-session-row-0").is_some());
-    assert!(cx.debug_bounds("desktop-session-row-1").is_none());
+    assert!(cx.debug_bounds("desktop-global-search-session-0").is_some());
+    assert!(cx.debug_bounds("desktop-global-search-session-1").is_none());
 
     cx.update(|window, app| {
         shell.update(app, |shell, app| {
-            shell
-                .views
-                .sessions_pane
-                .update(app, |pane, app| pane.set_search_value("", window, app));
+            shell.views.root_modal_host.update(app, |modal, app| {
+                modal.set_search_value("unnamed-session-id", window, app)
+            });
         });
     });
     cx.run_until_parked();
+    assert!(cx.debug_bounds("desktop-global-search-session-0").is_some());
+    assert!(cx.debug_bounds("desktop-global-search-session-1").is_none());
+    let close_search = cx
+        .debug_bounds("desktop-close-global-search")
+        .expect("global search dialog exposes close action");
+    cx.simulate_click(close_search.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+
     let rename = cx
         .debug_bounds("desktop-hit-session-actions-1")
         .expect("unnamed session exposes its compact actions menu");

@@ -67,11 +67,13 @@ pub(crate) enum DesktopIcon {
     OpenExternal,
     Search,
     Refresh,
-    Clear,
     Close,
     Plus,
     /// Workspace scope shown in the Composer project selector.
     ProjectDirectory,
+    /// Project tree disclosure state.
+    ProjectDirectoryOpen,
+    ProjectDirectoryClosed,
     /// Composer submission.
     Submit,
     /// In-flight indicator that occupies the same box as the icon it replaces.
@@ -94,10 +96,11 @@ impl DesktopIcon {
             Self::OpenExternal => IconName::ExternalLink,
             Self::Search => IconName::Search,
             Self::Refresh => IconName::Redo2,
-            Self::Clear => IconName::CircleX,
             Self::Close => IconName::Close,
             Self::Plus => IconName::Plus,
             Self::ProjectDirectory => IconName::Folder,
+            Self::ProjectDirectoryOpen => IconName::FolderOpen,
+            Self::ProjectDirectoryClosed => IconName::FolderClosed,
             Self::Submit => IconName::ArrowUp,
             Self::Busy => IconName::LoaderCircle,
         }
@@ -471,6 +474,7 @@ pub(crate) struct DesktopActionRow {
     detail: Option<SharedString>,
     trailing: Option<gpui::AnyElement>,
     trailing_reserved_px: f32,
+    selection_background_only: bool,
 }
 
 impl DesktopActionRow {
@@ -490,6 +494,7 @@ impl DesktopActionRow {
             detail: None,
             trailing: None,
             trailing_reserved_px: 0.,
+            selection_background_only: false,
         }
     }
 
@@ -526,6 +531,16 @@ impl DesktopActionRow {
         self
     }
 
+    /// Express selection only through the row background.
+    ///
+    /// Session rows use this compact treatment because their surrounding tree
+    /// already communicates hierarchy; the generic accent rail remains the
+    /// default for other action rows.
+    pub(crate) const fn selection_background_only(mut self) -> Self {
+        self.selection_background_only = true;
+        self
+    }
+
     pub(crate) fn build(self, theme: SemanticTheme) -> Button {
         let text_color = if self.state.disabled {
             theme.subtle_text
@@ -539,6 +554,10 @@ impl DesktopActionRow {
         Button::new(self.id)
             .ghost()
             .selected(self.state.selected)
+            .when(
+                self.state.selected && self.selection_background_only,
+                |row| row.bg(rgb(theme.selection.value())),
+            )
             .disabled(self.state.disabled)
             .tooltip(self.accessible_label.clone())
             .w_full()
@@ -565,16 +584,18 @@ impl DesktopActionRow {
                     .text_color(rgb(text_color.value()))
                     // Selection rail is readable without colour and never
                     // changes the row's height.
-                    .child(
-                        div()
-                            .w(px(2.))
-                            .h(px(self.size.pixels() * 0.5))
-                            .flex_none()
-                            .rounded_token(DesignRadius::Sm)
-                            .when(self.state.selected, |rail| {
-                                rail.bg(rgb(theme.accent.value()))
-                            }),
-                    )
+                    .when(!self.selection_background_only, |row| {
+                        row.child(
+                            div()
+                                .w(px(2.))
+                                .h(px(self.size.pixels() * 0.5))
+                                .flex_none()
+                                .rounded_token(DesignRadius::Sm)
+                                .when(self.state.selected, |rail| {
+                                    rail.bg(rgb(theme.accent.value()))
+                                }),
+                        )
+                    })
                     .when_some(self.leading, |row, leading| row.child(leading))
                     .child(
                         div()
@@ -641,10 +662,11 @@ mod tests {
             DesktopIcon::OpenExternal,
             DesktopIcon::Search,
             DesktopIcon::Refresh,
-            DesktopIcon::Clear,
             DesktopIcon::Close,
             DesktopIcon::Plus,
             DesktopIcon::ProjectDirectory,
+            DesktopIcon::ProjectDirectoryOpen,
+            DesktopIcon::ProjectDirectoryClosed,
             DesktopIcon::Submit,
             DesktopIcon::Busy,
         ] {

@@ -114,6 +114,7 @@ pub(crate) struct ConversationHeaderViewModel {
     pub(crate) model_groups: Arc<[ConversationHeaderModelGroup]>,
     pub(crate) unavailable_current_model: Option<ConversationHeaderModelWarning>,
     pub(crate) profile_options: Arc<[ConversationHeaderSelectorOption]>,
+    pub(crate) session_name: Arc<str>,
     pub(crate) project_name: Arc<str>,
     pub(crate) keyboard_focus_visible: bool,
     pub(crate) panel_visibility: PanelVisibility,
@@ -189,6 +190,21 @@ pub(crate) fn view_model(
         .and_then(|name| name.to_str())
         .map(|name| desktop::ui::shell::truncate_label(name, 18))
         .unwrap_or_else(|| "Project".into());
+    let session_name = snapshot.map_or_else(
+        || "New task".to_owned(),
+        |snapshot| {
+            app.catalog
+                .project_groups()
+                .into_iter()
+                .flat_map(|group| group.sessions)
+                .find(|session| session.session_id == snapshot.session.session_id)
+                .and_then(|session| session.name)
+                .or_else(|| snapshot.session.name.clone())
+                .filter(|name| !name.trim().is_empty())
+                .map(|name| desktop::ui::shell::truncate_label(&name, 32))
+                .unwrap_or_else(|| "Untitled".into())
+        },
+    );
 
     ConversationHeaderViewModel {
         idle: workspace.projection.is_none(),
@@ -226,6 +242,7 @@ pub(crate) fn view_model(
         model_groups: model_groups.into(),
         unavailable_current_model,
         profile_options: profile_options.into(),
+        session_name: Arc::from(session_name),
         project_name: Arc::from(project_name),
         keyboard_focus_visible: ui.keyboard_focus_visible(),
         panel_visibility: PanelVisibility {
@@ -495,11 +512,7 @@ impl Render for ConversationHeader {
                                 div()
                                     .text_token(DesignText::Title)
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child(if view_model.idle {
-                                        "New task"
-                                    } else {
-                                        "Current task"
-                                    }),
+                                    .child(view_model.session_name.to_string()),
                             )
                             .child(
                                 div()

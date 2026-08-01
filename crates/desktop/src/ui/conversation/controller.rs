@@ -7,15 +7,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{ScrollStrategy, px, size};
-use gpui_component::VirtualListScrollHandle;
+use gpui::{FollowMode, ListAlignment, ListOffset, ListState, ScrollStrategy, px};
 
 use super::{
     ConversationBlockKind, ConversationItemKey, ConversationItemKind, ConversationProjection,
-    ConversationRowLayoutInput, ConversationRowLayoutState, ConversationRowMeasurement,
     ConversationRowRenderCache, ConversationRowRenderData, ConversationRowRenderSource,
-    ConversationViewport, SubmittedPromptPreview, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT,
-    conversation_block_height, conversation_effective_width,
+    ConversationViewport, SubmittedPromptPreview,
 };
 use desktop::projection::{
     DesktopMessageOverlay, DesktopMessageStatus, DesktopProjection, DesktopProjectionDelta,
@@ -26,7 +23,6 @@ pub(crate) const RESIZE_DEBOUNCE: Duration = Duration::from_millis(67);
 pub(crate) const MAX_DIRTY_SEQUENCES: usize = 256;
 pub(crate) const MAX_EXPANDED_DETAILS: usize = 256;
 
-const COLLAPSED_DETAIL_HEIGHT: f32 = 36.;
 const INITIAL_VISIBLE_ROWS: usize = 8;
 
 /// The bounded conversation inputs the controller is allowed to read.
@@ -40,14 +36,6 @@ pub(crate) struct ConversationSource<'a> {
     submitted: Option<&'a SubmittedPromptPreview>,
     messages: &'a VecDeque<DesktopMessageOverlay>,
     tools: &'a VecDeque<DesktopToolOverlay>,
-}
-
-#[derive(Clone)]
-struct ConversationToggleAnchor {
-    item_key: ConversationItemKey,
-    row_top: f32,
-    scroll_top: f32,
-    layout_applied: bool,
 }
 
 impl<'a> ConversationSource<'a> {
@@ -147,46 +135,34 @@ impl<'a> Iterator for LiveOverlayIter<'a> {
 
 pub(crate) struct ConversationController {
     viewport: ConversationViewport,
-    pub(crate) scroll: VirtualListScrollHandle,
-    layout: ConversationRowLayoutState,
-    live_layout: ConversationRowLayoutState,
+    pub(crate) scroll: ListState,
     render_cache: ConversationRowRenderCache,
     render_rows: Rc<RefCell<Vec<ConversationRowRenderData>>>,
-    render_heights: Rc<RefCell<Vec<f32>>>,
-    row_sizes: Rc<RefCell<Rc<Vec<gpui::Size<gpui::Pixels>>>>>,
     render_full_dirty: bool,
     render_live_dirty: bool,
     render_dirty_sequences: VecDeque<u64>,
     render_sequence_overflow: bool,
     render_width_bucket: Option<u32>,
     width_pending: Option<(u32, Instant)>,
-    height_refresh_deadline: Option<Instant>,
-    height_refresh_full: bool,
     expanded_details: HashSet<String>,
-    toggle_anchor: Option<ConversationToggleAnchor>,
 }
 
 impl Default for ConversationController {
     fn default() -> Self {
+        let scroll = ListState::new(0, ListAlignment::Top, px(1_000.));
+        scroll.set_follow_mode(FollowMode::Tail);
         Self {
             viewport: ConversationViewport::new(INITIAL_VISIBLE_ROWS),
-            scroll: VirtualListScrollHandle::new(),
-            layout: ConversationRowLayoutState::default(),
-            live_layout: ConversationRowLayoutState::default(),
+            scroll,
             render_cache: ConversationRowRenderCache::default(),
             render_rows: Rc::new(RefCell::new(Vec::new())),
-            render_heights: Rc::new(RefCell::new(Vec::new())),
-            row_sizes: Rc::new(RefCell::new(Rc::new(Vec::new()))),
             render_full_dirty: true,
             render_live_dirty: true,
             render_dirty_sequences: VecDeque::new(),
             render_sequence_overflow: false,
             render_width_bucket: None,
             width_pending: None,
-            height_refresh_deadline: None,
-            height_refresh_full: false,
             expanded_details: HashSet::new(),
-            toggle_anchor: None,
         }
     }
 }
@@ -194,48 +170,22 @@ impl Default for ConversationController {
 #[derive(Clone)]
 pub(crate) struct ConversationRenderReader {
     rows: Rc<RefCell<Vec<ConversationRowRenderData>>>,
-    heights: Rc<RefCell<Vec<f32>>>,
-    row_sizes: Rc<RefCell<Rc<Vec<gpui::Size<gpui::Pixels>>>>>,
 }
 
 impl ConversationRenderReader {
-    pub(crate) fn row(&self, index: usize) -> Option<(ConversationRowRenderData, f32)> {
-        let rows = self.rows.borrow();
-        let row = rows.get(index)?.clone();
-        let height = self
-            .heights
-            .borrow()
-            .get(index)
-            .copied()
-            .unwrap_or(row.estimated_height);
-        Some((row, height))
+    pub(crate) fn row(&self, index: usize) -> Option<ConversationRowRenderData> {
+        self.rows.borrow().get(index).cloned()
     }
 
     pub(crate) fn len(&self) -> usize {
         self.rows.borrow().len()
     }
-
-    pub(crate) fn row_sizes(&self) -> Rc<Vec<gpui::Size<gpui::Pixels>>> {
-        self.row_sizes.borrow().clone()
-    }
-}
-
-/// A height refresh the Root still has to arm on the GPUI executor.
-pub(crate) type ConversationRefresh = Option<(Duration, bool)>;
-
-/// What the Root must do after the controller consumed a row measurement.
-#[derive(Default)]
-pub(crate) struct ConversationMeasurementOutcome {
-    pub(crate) refresh: ConversationRefresh,
-    pub(crate) pane_dirty: bool,
 }
 
 impl ConversationController {
     pub(crate) fn render_reader(&self) -> ConversationRenderReader {
         ConversationRenderReader {
             rows: Rc::clone(&self.render_rows),
-            heights: Rc::clone(&self.render_heights),
-            row_sizes: Rc::clone(&self.row_sizes),
         }
     }
 
@@ -308,7 +258,15 @@ impl ConversationController {
     }
 
     pub(crate) fn scroll_to_row(&self, index: usize, strategy: ScrollStrategy) {
-        self.scroll.scroll_to_item(index, strategy);
+        match strategy {
+            ScrollStrategy::Top => self.scroll.scroll_to(ListOffset {
+                item_ix: index,
+                offset_in_item: px(0.),
+            }),
+            ScrollStrategy::Bottom | ScrollStrategy::Center | ScrollStrategy::Nearest => {
+                self.scroll.scroll_to_reveal_item(index);
+            }
+        }
     }
 
     pub(crate) fn reconcile_live_selection(&mut self, live_id: &str, durable_id: &str) {
@@ -320,22 +278,11 @@ impl ConversationController {
     /// The expanded set is bounded; overflowing it collapses everything rather
     /// than retaining unbounded per-row UI state.
     pub(crate) fn toggle_details(&mut self, block_id: &str) {
-        let anchor = {
-            let rows = self.render_rows.borrow();
-            let heights = self.render_heights.borrow();
-            rows.iter()
-                .position(|row| row.item_key.row_id() == block_id)
-                .and_then(|index| {
-                    let row = rows.get(index)?;
-                    let row_top = heights.get(..index)?.iter().copied().sum();
-                    Some(ConversationToggleAnchor {
-                        item_key: row.item_key.clone(),
-                        row_top,
-                        scroll_top: (-f32::from(self.scroll.offset().y)).max(0.),
-                        layout_applied: false,
-                    })
-                })
-        };
+        let row_index = self
+            .render_rows
+            .borrow()
+            .iter()
+            .position(|row| row.item_key.row_id() == block_id);
         let collapsed = self.expanded_details.remove(block_id);
         if !collapsed {
             if self.expanded_details.len() >= MAX_EXPANDED_DETAILS {
@@ -343,7 +290,9 @@ impl ConversationController {
             }
             self.expanded_details.insert(block_id.to_owned());
         }
-        self.toggle_anchor = anchor;
+        if let Some(index) = row_index {
+            self.scroll.remeasure_items(index..index + 1);
+        }
         self.render_full_dirty = true;
     }
 
@@ -389,7 +338,6 @@ impl ConversationController {
         source: &ConversationSource<'_>,
         content_revision: u64,
     ) {
-        self.toggle_anchor = None;
         let visible_blocks = source.visible_count();
         self.viewport
             .reconcile_hydration(source.conversation(), visible_blocks, content_revision);
@@ -402,7 +350,6 @@ impl ConversationController {
         source: &ConversationSource<'_>,
         content_revision: u64,
     ) {
-        self.toggle_anchor = None;
         let visible_blocks = source.visible_count();
         self.viewport
             .on_content_changed(visible_blocks, content_revision);
@@ -411,7 +358,7 @@ impl ConversationController {
 
     fn follow_latest_tail(&self, visible_blocks: usize) {
         if self.viewport.follow_latest() && visible_blocks > 0 {
-            self.align_scroll_to_bottom(visible_blocks);
+            self.scroll.scroll_to_end();
         }
     }
 
@@ -422,147 +369,35 @@ impl ConversationController {
     // ---- scrolling --------------------------------------------------------
 
     pub(crate) fn follow_latest(&mut self, visible_count: usize) {
-        self.toggle_anchor = None;
         self.viewport.resume_latest(visible_count);
         self.align_scroll_to_bottom(visible_count);
     }
 
-    /// The single way this controller pins the viewport to the newest row.
+    /// The single way this controller pins the native list to the newest row.
     ///
-    /// Everything that follows the tail routes through here so a projection
-    /// event and the frame's own `prepare_rows` cannot resolve the bottom two
-    /// different ways. The summed-height path is exact; `scroll_to_item` is the
-    /// fallback for when the height table has not caught up with the row count
-    /// yet, which is the case mid-way through applying a batch of events.
+    /// `FollowMode::Tail` keeps that invariant active while the last item's
+    /// natural height changes, including after asynchronous Markdown parses.
     pub(crate) fn align_scroll_to_bottom(&self, block_count: usize) {
-        if block_count == 0 {
-            let mut offset = self.scroll.offset();
-            offset.y = px(0.);
-            self.scroll.set_offset(offset);
-            return;
-        }
-
-        let viewport_height = f32::from(self.scroll.bounds().size.height);
-        if viewport_height > 0. && self.render_heights.borrow().len() == block_count {
-            let content_height = self.render_heights.borrow().iter().copied().sum::<f32>();
-            let mut offset = self.scroll.offset();
-            offset.y = px((viewport_height - content_height).min(0.));
-            self.scroll.set_offset(offset);
-        } else {
-            self.scroll
-                .scroll_to_item(block_count - 1, ScrollStrategy::Bottom);
+        self.scroll.set_follow_mode(FollowMode::Tail);
+        if block_count > 0 {
+            self.scroll.scroll_to_end();
         }
     }
 
     /// Returns whether follow-latest hysteresis changed and the pane and header
     /// have to be notified.
     pub(crate) fn reconcile_scroll(&mut self) -> bool {
-        self.toggle_anchor = None;
-        let offset_y = f32::from(self.scroll.offset().y);
-        let max_offset_y = f32::from(self.scroll.max_offset().y);
-        self.viewport
-            .reconcile_scroll_distance(distance_to_bottom(offset_y, max_offset_y))
-    }
-
-    // ---- measurement ------------------------------------------------------
-
-    pub(crate) fn submit_row_measurement(
-        &mut self,
-        source: &ConversationSource<'_>,
-        measurement: &ConversationRowMeasurement,
-    ) -> ConversationMeasurementOutcome {
-        let mut outcome = ConversationMeasurementOutcome::default();
-        let Some(index) = self
-            .render_rows
-            .borrow()
-            .iter()
-            .position(|row| row.item_key == measurement.item_key)
-        else {
-            tracing::trace!(target: "desktop", event = "row_measure_stale_drop", reason = "unmounted");
-            return outcome;
-        };
-        let row = self.render_rows.borrow()[index].clone();
-        let details_expanded = self.expanded_details.contains(row.item_key.row_id());
-        let durable = row.durable;
-        if row.source_revision != measurement.source_revision
-            || row.width_bucket != measurement.width_bucket
-            || row.text_phase != measurement.text_phase
-            || details_expanded != measurement.details_expanded
-        {
-            tracing::trace!(target: "desktop", event = "row_measure_stale_drop", reason = "render_data");
-            return outcome;
-        }
-
-        let layout = if durable {
-            &mut self.layout
+        let offset_y = f32::from(self.scroll.scroll_px_offset_for_scrollbar().y);
+        let max_offset_y = f32::from(self.scroll.max_offset_for_scrollbar().y);
+        let changed = self
+            .viewport
+            .reconcile_scroll_distance(distance_to_bottom(offset_y, max_offset_y));
+        if self.viewport.follow_latest() {
+            self.scroll.set_follow_mode(FollowMode::Tail);
         } else {
-            &mut self.live_layout
-        };
-        let Some(resolution) = layout.submit_measurement(measurement, Instant::now()) else {
-            return outcome;
-        };
-        let active_toggle_scroll_top = self
-            .toggle_anchor
-            .as_ref()
-            .filter(|anchor| anchor.layout_applied)
-            .map(|anchor| anchor.scroll_top);
-        if let Some(scroll_top) = active_toggle_scroll_top {
-            let current = (-f32::from(self.scroll.offset().y)).max(0.);
-            if (current - scroll_top).abs() > 0.5 {
-                let mut offset = self.scroll.offset();
-                offset.y = px(-scroll_top);
-                self.scroll.set_offset(offset);
-                tracing::trace!(
-                    target: "desktop",
-                    event = "toggle_scroll_anchor_restore_after_measurement",
-                    scroll_top,
-                );
-            }
+            self.scroll.set_follow_mode(FollowMode::Normal);
         }
-        if let Some(delay) = resolution.next_refresh_after {
-            outcome.refresh = Some((delay, durable));
-        }
-        if !resolution.height_changed {
-            return outcome;
-        }
-
-        let paused_scroll_top =
-            (active_toggle_scroll_top.is_none() && !self.viewport.follow_latest()).then(|| {
-                let scroll_top = (-f32::from(self.scroll.offset().y)).max(0.);
-                let render_heights = self.render_heights.borrow();
-                compensate_scroll_top_for_single_row_height(
-                    &render_heights,
-                    index,
-                    resolution.height,
-                    scroll_top,
-                )
-            });
-        self.render_heights.borrow_mut()[index] = resolution.height;
-        let mut row_sizes = self.row_sizes.borrow_mut();
-        if let Some(row_size) = Rc::make_mut(&mut row_sizes).get_mut(index) {
-            row_size.height = px(resolution.height);
-        }
-        drop(row_sizes);
-
-        if active_toggle_scroll_top.is_some() {
-            tracing::trace!(target: "desktop", event = "toggle_scroll_anchor_hold");
-        } else if self.viewport.follow_latest() {
-            self.align_scroll_to_bottom(source.visible_count());
-        } else if let Some(adjusted) = paused_scroll_top {
-            let current = (-f32::from(self.scroll.offset().y)).max(0.);
-            if (current - adjusted).abs() > 0.5 {
-                let mut offset = self.scroll.offset();
-                offset.y = px(-adjusted);
-                self.scroll.set_offset(offset);
-                tracing::trace!(
-                    target: "desktop",
-                    event = "scroll_anchor_compensate",
-                    delta = adjusted - current,
-                );
-            }
-        }
-        outcome.pane_dirty = true;
-        outcome
+        changed
     }
 
     // ---- width debounce ---------------------------------------------------
@@ -611,53 +446,6 @@ impl ConversationController {
             return false;
         };
         self.commit_pending_width(requested, deadline)
-    }
-
-    // ---- height refresh deadline ------------------------------------------
-
-    /// Arm the earliest pending height refresh. Returns the delay the Root has
-    /// to wait on when this call owns the new deadline.
-    pub(crate) fn arm_height_refresh(
-        &mut self,
-        refresh: ConversationRefresh,
-    ) -> Option<(Duration, Instant)> {
-        let (delay, requires_full) = refresh?;
-        let deadline = Instant::now() + delay;
-        if self
-            .height_refresh_deadline
-            .is_none_or(|scheduled| scheduled > deadline)
-        {
-            self.height_refresh_deadline = Some(deadline);
-            self.height_refresh_full = requires_full;
-            Some((delay, deadline))
-        } else {
-            if requires_full {
-                self.height_refresh_full = true;
-            }
-            None
-        }
-    }
-
-    /// Consume an armed height-refresh deadline once its timer fired.
-    pub(crate) fn fire_height_refresh(&mut self, deadline: Instant) -> bool {
-        if self.height_refresh_deadline != Some(deadline) {
-            return false;
-        }
-        self.height_refresh_deadline = None;
-        if self.height_refresh_full {
-            self.render_full_dirty = true;
-        } else {
-            self.render_live_dirty = true;
-        }
-        self.height_refresh_full = false;
-        true
-    }
-
-    pub(crate) fn fire_current_height_refresh(&mut self) -> bool {
-        let Some(deadline) = self.height_refresh_deadline else {
-            return false;
-        };
-        self.fire_height_refresh(deadline)
     }
 
     // ---- row construction --------------------------------------------------
@@ -826,7 +614,8 @@ impl ConversationController {
 
         self.render_cache.finish_frame();
         debug_assert_eq!(rows.len(), expected_count);
-        *self.render_rows.borrow_mut() = rows;
+        let previous_rows = self.render_rows.replace(rows.clone());
+        sync_list_rows(&self.scroll, &previous_rows, &rows);
         self.render_dirty_sequences.clear();
         self.render_sequence_overflow = false;
     }
@@ -859,10 +648,13 @@ impl ConversationController {
         }
         self.render_cache.finish_incremental();
 
+        let previous_rows = self.render_rows.borrow().clone();
         let mut render_rows = self.render_rows.borrow_mut();
         render_rows.truncate(durable_count);
         render_rows.extend(live_rows);
+        let next_rows = render_rows.clone();
         drop(render_rows);
+        sync_list_rows(&self.scroll, &previous_rows, &next_rows);
         self.render_dirty_sequences.clear();
         self.render_sequence_overflow = false;
     }
@@ -876,7 +668,7 @@ impl ConversationController {
         &mut self,
         source: &ConversationSource<'_>,
         panel_width: u32,
-    ) -> Result<Option<Duration>, ()> {
+    ) -> Result<(), ()> {
         if self.render_sequence_overflow || self.render_dirty_sequences.is_empty() {
             return Err(());
         }
@@ -885,8 +677,6 @@ impl ConversationController {
         let submitted_count = source.submitted_count();
         let session_id = source.session_id().to_owned();
         let sequences = std::mem::take(&mut self.render_dirty_sequences);
-        let now = Instant::now();
-        let mut next_refresh_after = None;
         self.render_cache.begin_frame();
 
         for sequence in sequences {
@@ -901,14 +691,10 @@ impl ConversationController {
             };
             let row = self.resolve_live_row(overlay, &session_id, panel_width);
             let desired_index = durable_count + submitted_count + position;
-            let refresh =
-                self.upsert_render_row(durable_count, desired_index, row, panel_width, now);
-            next_refresh_after = minimum_duration(next_refresh_after, refresh);
+            self.upsert_render_row(durable_count, desired_index, row);
         }
         self.render_cache.finish_incremental();
-        self.live_rows_match(source)
-            .then_some(next_refresh_after)
-            .ok_or(())
+        self.live_rows_match(source).then_some(()).ok_or(())
     }
 
     fn upsert_render_row(
@@ -916,14 +702,7 @@ impl ConversationController {
         durable_count: usize,
         desired_index: usize,
         row: ConversationRowRenderData,
-        panel_width: u32,
-        now: Instant,
-    ) -> Option<Duration> {
-        let layout = self.live_layout.resolve_one(
-            row_layout_input(&row, &self.expanded_details, panel_width),
-            panel_width,
-            now,
-        );
+    ) {
         let existing_index = self.render_rows.borrow()[durable_count..]
             .iter()
             .position(|candidate| candidate.item_key == row.item_key)
@@ -934,22 +713,13 @@ impl ConversationController {
             desired_index,
             row,
         );
-        let height_index = upsert_indexed_item(
-            &mut self.render_heights.borrow_mut(),
-            existing_index,
-            desired_index,
-            layout.height,
-        );
-        let mut row_sizes = self.row_sizes.borrow_mut();
-        let size_index = upsert_indexed_item(
-            Rc::make_mut(&mut row_sizes),
-            existing_index,
-            desired_index,
-            size(px(0.), px(layout.height)),
-        );
-        debug_assert_eq!(row_index, height_index);
-        debug_assert_eq!(row_index, size_index);
-        layout.next_refresh_after
+        if let Some(previous_index) = existing_index {
+            let start = previous_index.min(row_index);
+            let end = previous_index.max(row_index) + 1;
+            self.scroll.remeasure_items(start..end);
+        } else {
+            self.scroll.splice(row_index..row_index, 1);
+        }
     }
 
     /// Durable/live identity reconciliation: every live row must still line up
@@ -988,13 +758,8 @@ impl ConversationController {
 
     // ---- frame preparation -------------------------------------------------
 
-    /// Bring rows, heights and scroll position in line with the projection for
-    /// one frame at `layout_width`, and report the next height refresh.
-    pub(crate) fn prepare_rows(
-        &mut self,
-        source: &ConversationSource<'_>,
-        layout_width: u32,
-    ) -> ConversationRefresh {
+    /// Bring the native list's rows in line with the projection for one frame.
+    pub(crate) fn prepare_rows(&mut self, source: &ConversationSource<'_>, layout_width: u32) {
         let visible_conversation_count = source.visible_count();
         let _span = tracing::trace_span!(
             "desktop.render.prepare_rows",
@@ -1002,188 +767,35 @@ impl ConversationController {
             visible_rows = visible_conversation_count
         )
         .entered();
-        let toggle_anchor = self
-            .toggle_anchor
-            .as_ref()
-            .filter(|anchor| !anchor.layout_applied)
-            .cloned();
-        let previous_scroll_top =
-            (!self.viewport.follow_latest()).then(|| (-f32::from(self.scroll.offset().y)).max(0.0));
         let full_render_update =
             self.render_full_dirty || self.render_width_bucket != Some(layout_width);
-        let mut paused_scroll_top = None;
-        let mut toggle_scroll_top = None;
-        let mut next_refresh_after = None;
-        let mut refresh_requires_full = false;
         if full_render_update {
             self.rebuild_rows(source, layout_width);
-            let row_layout_inputs = self
-                .render_rows
-                .borrow()
-                .iter()
-                .map(|row| row_layout_input(row, &self.expanded_details, layout_width))
-                .collect::<Vec<_>>();
-            let row_layout = self.layout.resolve(
-                row_layout_inputs,
-                layout_width,
-                Instant::now(),
-                toggle_anchor
-                    .as_ref()
-                    .map(|anchor| anchor.row_top)
-                    .or(previous_scroll_top),
-            );
-            if let Some(anchor) = &toggle_anchor {
-                toggle_scroll_top = row_layout.paused_scroll_top.map(|resolved_row_top| {
-                    (anchor.scroll_top + resolved_row_top - anchor.row_top).max(0.)
-                });
-                if let Some(resolved_scroll_top) = toggle_scroll_top {
-                    let row_still_exists = self
-                        .render_rows
-                        .borrow()
-                        .iter()
-                        .any(|row| row.item_key == anchor.item_key);
-                    if row_still_exists {
-                        if let Some(current) = self
-                            .toggle_anchor
-                            .as_mut()
-                            .filter(|current| current.item_key == anchor.item_key)
-                        {
-                            current.scroll_top = resolved_scroll_top;
-                            current.layout_applied = true;
-                        }
-                    } else {
-                        self.toggle_anchor = None;
-                    }
-                } else {
-                    self.toggle_anchor = None;
-                }
-            } else {
-                paused_scroll_top = row_layout.paused_scroll_top;
-            }
-            next_refresh_after = row_layout.next_refresh_after;
-            refresh_requires_full = next_refresh_after.is_some();
-            let row_sizes = Rc::new(
-                row_layout
-                    .heights
-                    .iter()
-                    .map(|height| size(px(0.), px(*height)))
-                    .collect(),
-            );
-            *self.render_heights.borrow_mut() = row_layout.heights;
-            *self.row_sizes.borrow_mut() = row_sizes;
-
-            let durable_count = source.durable_count();
-            let live_inputs = self.render_rows.borrow()[durable_count..]
-                .iter()
-                .map(|row| row_layout_input(row, &self.expanded_details, layout_width))
-                .collect();
-            let _ = self
-                .live_layout
-                .resolve(live_inputs, layout_width, Instant::now(), None);
             self.render_width_bucket = Some(layout_width);
             self.render_full_dirty = false;
             self.render_live_dirty = false;
         } else if self.render_live_dirty {
-            let durable_count = source.durable_count();
             match self.update_rows_by_sequence(source, layout_width) {
-                Ok(refresh) => {
-                    next_refresh_after = refresh;
+                Ok(_) => {
                     self.render_sequence_overflow = false;
                 }
                 Err(()) => {
                     self.rebuild_live_rows(source, layout_width);
-                    let live_inputs = self.render_rows.borrow()[durable_count..]
-                        .iter()
-                        .map(|row| row_layout_input(row, &self.expanded_details, layout_width))
-                        .collect();
-                    let live_layout =
-                        self.live_layout
-                            .resolve(live_inputs, layout_width, Instant::now(), None);
-                    next_refresh_after = live_layout.next_refresh_after;
-                    let mut render_heights = self.render_heights.borrow_mut();
-                    render_heights.truncate(durable_count);
-                    render_heights.extend(live_layout.heights.iter().copied());
-                    let mut row_sizes = self.row_sizes.borrow_mut();
-                    let sizes = Rc::make_mut(&mut row_sizes);
-                    sizes.truncate(durable_count);
-                    sizes.extend(
-                        live_layout
-                            .heights
-                            .into_iter()
-                            .map(|height| size(px(0.), px(height))),
-                    );
                 }
             }
             self.render_live_dirty = false;
         }
-        let mut text_phase_requires_full = false;
-        let text_phase_refresh = self
-            .render_rows
-            .borrow()
-            .iter()
-            .filter_map(|row| {
-                let delay = row.next_text_phase_after?;
-                text_phase_requires_full |= row.durable;
-                Some(delay)
-            })
-            .min();
-        next_refresh_after = minimum_duration(next_refresh_after, text_phase_refresh);
-        refresh_requires_full |= text_phase_requires_full;
         debug_assert_eq!(self.render_rows.borrow().len(), visible_conversation_count);
-        debug_assert_eq!(
-            self.render_heights.borrow().len(),
-            visible_conversation_count
-        );
-        let toggle_anchor_active = self.toggle_anchor.is_some();
-        if let Some(toggle_scroll_top) = toggle_scroll_top {
-            let mut offset = self.scroll.offset();
-            offset.y = px(-toggle_scroll_top);
-            self.scroll.set_offset(offset);
-            tracing::trace!(
-                target: "desktop",
-                event = "toggle_scroll_anchor_apply",
-                scroll_top = toggle_scroll_top,
-            );
-        } else if let (Some(previous_scroll_top), Some(adjusted_scroll_top)) =
-            (previous_scroll_top, paused_scroll_top)
-            && (previous_scroll_top - adjusted_scroll_top).abs() > 0.5
-        {
-            let mut offset = self.scroll.offset();
-            offset.y = px(-adjusted_scroll_top);
-            self.scroll.set_offset(offset);
-        }
-        if self.viewport.follow_latest() && !toggle_anchor_active {
-            self.align_scroll_to_bottom(visible_conversation_count);
-        }
-        next_refresh_after.map(|delay| (delay, refresh_requires_full))
     }
 }
 
 #[cfg(test)]
 impl ConversationController {
-    pub(crate) fn set_scroll_top_for_tests(&self, scroll_top: f32) {
-        let mut offset = self.scroll.offset();
-        offset.y = px(-scroll_top);
-        self.scroll.set_offset(offset);
-    }
-
-    pub(crate) fn scroll_top_for_tests(&self) -> f32 {
-        (-f32::from(self.scroll.offset().y)).max(0.)
-    }
-
-    pub(crate) fn render_heights_for_tests(&self) -> Rc<RefCell<Vec<f32>>> {
-        Rc::clone(&self.render_heights)
-    }
-
     pub(crate) fn last_row_id_for_tests(&self) -> Option<String> {
         self.render_rows
             .borrow()
             .last()
             .map(|row| row.item_key.row_id().to_owned())
-    }
-
-    pub(crate) fn toggle_anchor_active_for_tests(&self) -> bool {
-        self.toggle_anchor.is_some()
     }
 }
 
@@ -1207,94 +819,6 @@ pub(crate) fn adjacent_conversation_index(
     )
 }
 
-pub(crate) fn minimum_duration(
-    current: Option<Duration>,
-    next: Option<Duration>,
-) -> Option<Duration> {
-    match (current, next) {
-        (Some(current), Some(next)) => Some(current.min(next)),
-        (Some(current), None) => Some(current),
-        (None, next) => next,
-    }
-}
-
-pub(crate) fn compensate_scroll_top_for_single_row_height(
-    heights: &[f32],
-    changed_index: usize,
-    measured_height: f32,
-    scroll_top: f32,
-) -> f32 {
-    if heights.is_empty() || changed_index >= heights.len() {
-        return scroll_top.max(0.);
-    }
-    let scroll_top = if scroll_top.is_finite() {
-        scroll_top.max(0.)
-    } else {
-        0.
-    };
-    let mut anchor_top = 0.;
-    let mut anchor = heights.len() - 1;
-    let mut intra_row = heights[anchor].max(0.);
-    for (index, height) in heights.iter().copied().enumerate() {
-        if scroll_top < anchor_top + height {
-            anchor = index;
-            intra_row = (scroll_top - anchor_top).max(0.);
-            break;
-        }
-        anchor_top += height;
-    }
-
-    if changed_index < anchor {
-        (scroll_top + measured_height - heights[changed_index]).max(0.)
-    } else if changed_index == anchor {
-        let changed_top = heights[..changed_index].iter().copied().sum::<f32>();
-        changed_top + intra_row.clamp(0., measured_height)
-    } else {
-        scroll_top
-    }
-}
-
-pub(crate) fn row_target_height(
-    row: &ConversationRowRenderData,
-    expanded_details: &HashSet<String>,
-    panel_width: u32,
-) -> f32 {
-    if expanded_details.contains(row.item_key.row_id()) {
-        return if row.width_bucket == conversation_effective_width(row.kind, panel_width) {
-            row.estimated_height
-        } else {
-            conversation_block_height(row.kind, &row.text, &row.detail, panel_width)
-        };
-    }
-    let collapsed = match row.kind {
-        ConversationBlockKind::Assistant if !row.detail.is_empty() => Some(
-            conversation_block_height(row.kind, &row.text, "", panel_width),
-        ),
-        ConversationBlockKind::Tool if !row.text.is_empty() || !row.detail.is_empty() => {
-            Some(conversation_block_height(row.kind, "", "", panel_width))
-        }
-        _ => None,
-    };
-    collapsed.map_or(row.estimated_height, |height| {
-        (height + COLLAPSED_DETAIL_HEIGHT).min(TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT)
-    })
-}
-
-pub(crate) fn row_layout_input(
-    row: &ConversationRowRenderData,
-    expanded_details: &HashSet<String>,
-    panel_width: u32,
-) -> ConversationRowLayoutInput {
-    ConversationRowLayoutInput {
-        item_key: row.item_key.clone(),
-        source_revision: row.source_revision,
-        kind: row.kind,
-        text_phase: row.text_phase,
-        details_expanded: expanded_details.contains(row.item_key.row_id()),
-        estimated_height: row_target_height(row, expanded_details, panel_width),
-    }
-}
-
 pub(crate) fn upsert_indexed_item<T>(
     items: &mut Vec<T>,
     existing_index: Option<usize>,
@@ -1316,6 +840,45 @@ pub(crate) fn upsert_indexed_item<T>(
     desired_index
 }
 
+/// Reconcile GPUI's measured list items with a replacement row projection.
+///
+/// Stable prefix/suffix items retain their measured size hints. Changed items
+/// are spliced, then every surviving item is marked for natural remeasurement;
+/// GPUI only lays out the visible/overdraw range and preserves the current
+/// logical scroll anchor while doing so.
+fn sync_list_rows(
+    list: &ListState,
+    previous: &[ConversationRowRenderData],
+    next: &[ConversationRowRenderData],
+) {
+    let mut prefix = 0;
+    while prefix < previous.len().min(next.len())
+        && previous[prefix].item_key == next[prefix].item_key
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix
+        < previous
+            .len()
+            .saturating_sub(prefix)
+            .min(next.len().saturating_sub(prefix))
+        && previous[previous.len() - 1 - suffix].item_key == next[next.len() - 1 - suffix].item_key
+    {
+        suffix += 1;
+    }
+
+    let old_end = previous.len().saturating_sub(suffix);
+    let replacement_count = next.len().saturating_sub(prefix + suffix);
+    if prefix != old_end || replacement_count != 0 {
+        list.splice(prefix..old_end, replacement_count);
+    }
+    if !next.is_empty() {
+        list.remeasure_items(0..next.len());
+    }
+}
+
 pub(crate) fn message_block_id(message: &DesktopMessageOverlay) -> String {
     message.message_id.as_ref().map_or_else(
         || format!("assistant:{}:{}", message.operation_id, message.turn_id),
@@ -1329,10 +892,7 @@ pub(crate) fn tool_block_id(tool: &DesktopToolOverlay) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        adjacent_conversation_index, compensate_scroll_top_for_single_row_height,
-        distance_to_bottom, upsert_indexed_item,
-    };
+    use super::{adjacent_conversation_index, distance_to_bottom, upsert_indexed_item};
 
     #[test]
     fn bottom_distance_matches_negative_gpui_offsets() {
@@ -1341,23 +901,6 @@ mod tests {
         assert_eq!(distance_to_bottom(-640.0, 640.0), 0.0);
         assert_eq!(distance_to_bottom(-641.0, 640.0), 0.0);
         assert_eq!(distance_to_bottom(4.0, 0.0), 0.0);
-    }
-
-    #[test]
-    fn single_measurement_compensates_the_exact_paused_anchor() {
-        let heights = [100., 100., 100.];
-        assert_eq!(
-            compensate_scroll_top_for_single_row_height(&heights, 0, 140., 150.),
-            190.
-        );
-        assert_eq!(
-            compensate_scroll_top_for_single_row_height(&heights, 1, 40., 150.),
-            140.
-        );
-        assert_eq!(
-            compensate_scroll_top_for_single_row_height(&heights, 2, 180., 150.),
-            150.
-        );
     }
 
     #[test]

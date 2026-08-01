@@ -34,6 +34,7 @@ pub(crate) struct ShellUiState {
     pub(crate) authorization_focus: FocusHandle,
     pub(crate) command_palette_focus: FocusHandle,
     pub(crate) full_message_focus: FocusHandle,
+    pub(crate) search_focus: FocusHandle,
     pub(crate) command_palette: DesktopCommandPalette,
     pub(crate) active_modal: Option<DesktopModalKind>,
     pub(crate) active_drawer: Option<CenterDrawerKind>,
@@ -60,6 +61,7 @@ impl ShellUiState {
         authorization_focus: FocusHandle,
         command_palette_focus: FocusHandle,
         full_message_focus: FocusHandle,
+        search_focus: FocusHandle,
     ) -> Self {
         Self {
             focus: FocusState::default(),
@@ -70,6 +72,7 @@ impl ShellUiState {
             authorization_focus,
             command_palette_focus,
             full_message_focus,
+            search_focus,
             command_palette: DesktopCommandPalette::default(),
             active_modal: None,
             active_drawer: None,

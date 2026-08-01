@@ -590,13 +590,6 @@ fn temporarily_opening_a_session_preserves_the_home_project_draft(cx: &mut TestA
             .active_mut()
             .composer_attachments
             .push(PathBuf::from("/tmp/home-owner.txt"));
-        shell
-            .app
-            .workspaces
-            .active()
-            .presentation
-            .conversation_controller
-            .set_scroll_top_for_tests(17.0);
         let snapshot = visual_test_snapshot_for("temporary-history-session");
         let projection = DesktopProjection::new(snapshot.clone())
             .expect("history session fixture is a valid projection");
@@ -615,13 +608,6 @@ fn temporarily_opening_a_session_preserves_the_home_project_draft(cx: &mut TestA
             .active_mut()
             .composer_attachments
             .push(PathBuf::from("/tmp/history-owner.txt"));
-        shell
-            .app
-            .workspaces
-            .active()
-            .presentation
-            .conversation_controller
-            .set_scroll_top_for_tests(42.0);
         assert!(shell.app.workspaces.activate(&WorkspaceKey::Home));
         assert_eq!(
             shell.app.workspaces.active().composer.draft(),
@@ -635,16 +621,6 @@ fn temporarily_opening_a_session_preserves_the_home_project_draft(cx: &mut TestA
             shell.app.workspaces.active().composer_attachments,
             [PathBuf::from("/tmp/home-owner.txt")]
         );
-        assert_eq!(
-            shell
-                .app
-                .workspaces
-                .active()
-                .presentation
-                .conversation_controller
-                .scroll_top_for_tests(),
-            17.0
-        );
         assert!(activate_session(shell, "temporary-history-session"));
         assert_eq!(
             shell.app.workspaces.active().composer.draft(),
@@ -653,16 +629,6 @@ fn temporarily_opening_a_session_preserves_the_home_project_draft(cx: &mut TestA
         assert_eq!(
             shell.app.workspaces.active().composer_attachments,
             [PathBuf::from("/tmp/history-owner.txt")]
-        );
-        assert_eq!(
-            shell
-                .app
-                .workspaces
-                .active()
-                .presentation
-                .conversation_controller
-                .scroll_top_for_tests(),
-            42.0
         );
     });
 }

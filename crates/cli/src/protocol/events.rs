@@ -9,7 +9,8 @@ use coding_agent::api::event::{
     CodingAgentDiagnosticProductEvent, CodingAgentMessageProductEvent, CodingAgentProductEvent,
     CodingAgentProductEventCapabilityRevocation, CodingAgentProductEventCheckOutput,
     CodingAgentProductEventKind, CodingAgentProductEventProfileKind,
-    CodingAgentProductEventReplacement, CodingAgentRecoveryResolution, CodingAgentRuntimeProductEvent, CodingAgentSessionProductEvent,
+    CodingAgentProductEventReplacement, CodingAgentRecoveryResolution,
+    CodingAgentRuntimeProductEvent, CodingAgentSessionProductEvent,
     CodingAgentSessionWriteFailureStatus, CodingAgentTeamProductEvent, CodingAgentToolProductEvent,
     CodingAgentWorkflowProductEvent,
 };

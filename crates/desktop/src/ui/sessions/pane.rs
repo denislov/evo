@@ -9,13 +9,11 @@ use gpui_component::{
     Icon, Sizable as _,
     menu::{DropdownMenu as _, PopupMenuItem},
 };
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::app::native_shell::{NativeDesktopState, semantic_status_color};
-use crate::application::catalog::{
-    ProjectCatalogGroup, ProjectCatalogState, session_matches_query, workspace_matches_query,
-};
+use crate::application::catalog::{ProjectCatalogGroup, ProjectCatalogState};
 use crate::application::{commands::DesktopCommandIntent, workspace::WorkspaceKey};
 use crate::ui::components::{
     brand::{EvoBrand, EvoBrandMode},
@@ -32,10 +30,12 @@ use crate::ui::shell::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionsPaneEvent {
     Navigate(CenterNavigationTarget),
+    NewConversationForProject(PathBuf),
     Refresh,
     SetProjectCollapsed { group_id: String, collapsed: bool },
     Rename(String, String),
     CloseSession(String),
+    OpenSearch,
     Dismiss,
 }
 
@@ -57,6 +57,7 @@ pub(crate) struct SessionsPaneViewModel {
     pub(crate) composer_running: bool,
     pub(crate) awaiting_prompt_start: bool,
     pub(crate) session_pending: bool,
+    pub(crate) home_project_directory_editable: bool,
     pub(crate) active_status: desktop::ui::shell::SemanticStatus,
     pub(crate) keyboard_focus_visible: bool,
     pub(crate) presented_as_drawer: bool,
@@ -105,6 +106,10 @@ pub(crate) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> Session
                 DesktopCommandIntent::CreateSession | DesktopCommandIntent::OpenSession { .. }
             )
         }),
+        home_project_directory_editable: app
+            .workspaces
+            .get(&WorkspaceKey::Home)
+            .is_some_and(|workspace| workspace.project_directory_editable()),
         active_status: semantic_status(workspace.projection.as_ref()),
         keyboard_focus_visible: ui.keyboard_focus_visible(),
         presented_as_drawer: ui.active_drawer == Some(CenterDrawerKind::Sessions),
@@ -114,11 +119,9 @@ pub(crate) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> Session
 
 pub(crate) struct SessionsPane {
     focus: FocusHandle,
-    search_input: gpui::Entity<InputState>,
     rename_input: gpui::Entity<InputState>,
     renaming_session_id: Option<String>,
     view_model: Option<SessionsPaneViewModel>,
-    _search_subscription: Subscription,
     _rename_subscription: Subscription,
 }
 
@@ -128,14 +131,6 @@ impl SessionsPane {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
-        let search_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search projects and sessions…"));
-        let search_subscription =
-            cx.subscribe_in(&search_input, window, |_, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            });
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
         let rename_subscription = cx.subscribe_in(
             &rename_input,
@@ -156,11 +151,9 @@ impl SessionsPane {
         );
         Self {
             focus,
-            search_input,
             rename_input,
             renaming_session_id: None,
             view_model: None,
-            _search_subscription: search_subscription,
             _rename_subscription: rename_subscription,
         }
     }
@@ -199,17 +192,6 @@ impl SessionsPane {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_search_value(
-        &mut self,
-        value: &str,
-        window: &mut Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        self.search_input
-            .update(cx, |input, cx| input.set_value(value, window, cx));
-    }
-
-    #[cfg(test)]
     pub(crate) fn set_rename_value(
         &mut self,
         value: &str,
@@ -235,31 +217,6 @@ fn relative_session_time(updated_at: &str, now: OffsetDateTime) -> String {
         86_400..=604_799 => format!("{}d ago", seconds / 86_400),
         _ => updated_at.get(0..10).unwrap_or(updated_at).to_owned(),
     }
-}
-
-fn visible_project_groups(
-    groups: &[ProjectCatalogGroup],
-    normalized_search: &str,
-) -> Vec<ProjectCatalogGroup> {
-    if normalized_search.is_empty() {
-        return groups.to_vec();
-    }
-    groups
-        .iter()
-        .filter_map(|group| {
-            let mut group = group.clone();
-            if !workspace_matches_query(&group.workspace, normalized_search) {
-                group
-                    .sessions
-                    .retain(|session| session_matches_query(session, normalized_search));
-            }
-            if group.sessions.is_empty() {
-                return None;
-            }
-            group.collapsed = false;
-            Some(group)
-        })
-        .collect()
 }
 
 fn semantic_status_priority(status: SemanticStatus) -> u8 {
@@ -356,28 +313,40 @@ impl Render for SessionsPane {
         let session_pending = view_model.session_pending;
         let session_catalog_pending = view_model.catalog_state.is_loading();
         let presented_as_drawer = view_model.presented_as_drawer;
-        let search_input = self.search_input.clone();
-        let clear_search_input = search_input.clone();
         let rename_input = self.rename_input.clone();
         let renaming_session_id = self.renaming_session_id.clone();
-        let search = search_input.read(cx).value().trim().to_lowercase();
         let omitted_sessions = view_model.omitted_sessions;
+        let home_project_directory_editable = view_model.home_project_directory_editable;
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let active_semantic_status = view_model.active_status;
         let runtime_states = Arc::clone(&view_model.runtime_states);
         let refresh_target = cx.entity().downgrade();
         let now = OffsetDateTime::now_utc();
-        let visible_groups = visible_project_groups(&view_model.project_groups, &search);
-        let visible_project_count = visible_groups.len();
-        let visible_session_count = visible_groups
+        let visible_groups = view_model.project_groups.to_vec();
+        let visible_project_count = visible_groups
             .iter()
+            .filter(|group| group.workspace.kind != CodingAgentWorkspaceKind::Projectless)
+            .count();
+        let visible_conversation_count = visible_groups
+            .iter()
+            .filter(|group| group.workspace.kind == CodingAgentWorkspaceKind::Projectless)
+            .map(|group| group.sessions.len())
+            .sum::<usize>();
+        let visible_project_session_count = visible_groups
+            .iter()
+            .filter(|group| group.workspace.kind != CodingAgentWorkspaceKind::Projectless)
             .map(|group| group.sessions.len())
             .sum::<usize>();
         let mut session_index = 0usize;
-        let project_group_elements = visible_groups
+        let catalog_group_elements = visible_groups
             .into_iter()
             .enumerate()
             .map(|(group_index, group)| {
+                let is_conversations =
+                    group.workspace.kind == CodingAgentWorkspaceKind::Projectless;
+                let new_project_path = (group.workspace.kind == CodingAgentWorkspaceKind::Project)
+                    .then(|| group.workspace.display_path.clone())
+                    .flatten();
                 let group_id = group.workspace.group_id.clone();
                 let expanded = !group.collapsed;
                 let title = project_title(&group);
@@ -409,10 +378,10 @@ impl Render for SessionsPane {
                     "{title}, {project_detail}, {}",
                     if expanded { "expanded" } else { "collapsed" }
                 );
-                let disclosure = if expanded {
-                    DesktopIcon::ChevronDown
+                let project_icon = if expanded {
+                    DesktopIcon::ProjectDirectoryOpen
                 } else {
-                    DesktopIcon::ChevronRight
+                    DesktopIcon::ProjectDirectoryClosed
                 };
                 let keyboard_group_id = group_id.clone();
                 let project_row = DesktopActionRow::new(
@@ -423,20 +392,11 @@ impl Render for SessionsPane {
                 .size(DesktopControlSize::Critical)
                 .expanded(expanded)
                 .leading(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_token(DesignSpace::Xs)
-                        .child(
-                            div()
-                                .text_color(rgb(theme.muted_text.value()))
-                                .child(Icon::new(disclosure.name()).small()),
-                        )
-                        .child(
-                            div()
-                                .text_color(project_status_color)
-                                .child(Icon::new(DesktopIcon::ProjectDirectory.name()).small()),
-                        ),
+                    div().flex().items_center().child(
+                        div()
+                            .text_color(project_status_color)
+                            .child(Icon::new(project_icon.name()).small()),
+                    ),
                 )
                 .detail(project_detail)
                 .build(theme)
@@ -482,24 +442,15 @@ impl Render for SessionsPane {
                             active_semantic_status,
                             &runtime_states,
                         );
-                        let (status_glyph, status, status_color) = if active || row_status.is_some()
-                        {
+                        let status = if active || row_status.is_some() {
                             let semantic_status = if active {
                                 active_semantic_status
                             } else {
                                 row_status.unwrap_or(desktop::ui::shell::SemanticStatus::Idle)
                             };
-                            (
-                                semantic_status.glyph(),
-                                runtime_status_label(Some(semantic_status), active),
-                                semantic_status_color(semantic_status, theme),
-                            )
+                            runtime_status_label(Some(semantic_status), active)
                         } else {
-                            (
-                                "○",
-                                runtime_status_label(None, false),
-                                rgb(theme.muted_text.value()),
-                            )
+                            runtime_status_label(None, false)
                         };
                         let accessible_label =
                             format!("{semantic_name}, {status}, updated {relative_time}");
@@ -517,7 +468,7 @@ impl Render for SessionsPane {
                             focus_visible: false,
                         })
                         .size(DesktopControlSize::Critical)
-                        .leading(div().text_color(status_color).child(status_glyph));
+                        .selection_background_only();
                         // The docked tree keeps status and time visible; the drawer
                         // additionally exposes the full session identity.
                         let row = if presented_as_drawer {
@@ -682,37 +633,102 @@ impl Render for SessionsPane {
                     }
                 }
 
-                div()
-                    .id(("project-tree-item", group_index))
-                    .role(Role::ListItem)
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_token(DesignSpace::Xs)
-                    .child(project_row)
-                    .when(expanded, |project| {
-                        project.child(
-                            div()
-                                .id(("project-session-list", group_index))
+                if is_conversations {
+                    (
+                        true,
+                        div()
+                            .id("conversation-session-list")
+                            .debug_selector(|| "desktop-conversation-sessions".into())
+                            .role(Role::List)
+                            .aria_label("Conversations without a project directory")
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_token(DesignSpace::Xs)
+                            .children(nested_sessions)
+                            .into_any_element(),
+                    )
+                } else {
+                    let project_header = div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_token(DesignSpace::Xs)
+                        .child(div().flex_1().min_w_0().child(project_row))
+                        .when_some(new_project_path, |header, path| {
+                            let new_project_title = title.clone();
+                            header.child(
+                                DesktopIconButton::new(
+                                    ("new-project-conversation", group_index),
+                                    DesktopIcon::Plus,
+                                    format!("Start a new conversation in {new_project_title}"),
+                                )
+                                .size(DesktopControlSize::Compact)
+                                .disabled(!home_project_directory_editable)
+                                .build()
                                 .debug_selector(move || {
-                                    format!("desktop-project-sessions-{group_index}")
+                                    format!("desktop-hit-new-project-conversation-{group_index}")
                                 })
-                                .role(Role::List)
-                                .aria_label(format!("Sessions in {title}"))
-                                .w_full()
-                                .min_w_0()
-                                .pl_token(DesignSpace::Lg)
-                                .flex()
-                                .flex_col()
-                                .gap_token(DesignSpace::Xs)
-                                .children(nested_sessions),
-                        )
-                    })
-                    .into_any_element()
+                                .on_click(cx.listener(
+                                    move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(SessionsPaneEvent::NewConversationForProject(
+                                            path.clone(),
+                                        ));
+                                    },
+                                )),
+                            )
+                        });
+                    (
+                        false,
+                        div()
+                            .id(("project-tree-item", group_index))
+                            .role(Role::ListItem)
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_token(DesignSpace::Xs)
+                            .child(project_header)
+                            .when(expanded, |project| {
+                                project.child(
+                                    div()
+                                        .id(("project-session-list", group_index))
+                                        .debug_selector(move || {
+                                            format!("desktop-project-sessions-{group_index}")
+                                        })
+                                        .role(Role::List)
+                                        .aria_label(format!("Sessions in {title}"))
+                                        .w_full()
+                                        .min_w_0()
+                                        .pl_token(DesignSpace::Lg)
+                                        .flex()
+                                        .flex_col()
+                                        .gap_token(DesignSpace::Xs)
+                                        .children(nested_sessions),
+                                )
+                            })
+                            .into_any_element(),
+                    )
+                }
             })
             .collect::<Vec<_>>();
-        let catalog_group_count = view_model.project_groups.len();
+        let mut conversation_group_elements = Vec::new();
+        let mut project_group_elements = Vec::new();
+        for (is_conversations, element) in catalog_group_elements {
+            if is_conversations {
+                conversation_group_elements.push(element);
+            } else {
+                project_group_elements.push(element);
+            }
+        }
+        let catalog_group_count = view_model
+            .project_groups
+            .iter()
+            .filter(|group| group.workspace.kind != CodingAgentWorkspaceKind::Projectless)
+            .count();
         let (catalog_status, catalog_status_color) = match &view_model.catalog_state {
             ProjectCatalogState::NotLoaded => ("Not loaded".to_owned(), theme.muted_text),
             ProjectCatalogState::Loading => ("Loading".to_owned(), theme.accent),
@@ -723,81 +739,65 @@ impl Render for SessionsPane {
             ProjectCatalogState::Error { .. } => ("Error".to_owned(), theme.danger),
             ProjectCatalogState::Stale { .. } => ("Stale".to_owned(), theme.warning),
         };
-        let catalog_notice = if !search.is_empty()
-            && visible_project_count == 0
-            && !view_model.project_groups.is_empty()
-        {
-            Some((
-                "search-empty",
-                "No matching projects".to_owned(),
-                Some(format!(
-                    "No project or session matches “{}”.",
-                    truncate_label(&search, 24)
-                )),
+        let catalog_notice = match &view_model.catalog_state {
+            ProjectCatalogState::NotLoaded => Some((
+                "not-loaded",
+                "Projects not loaded".to_owned(),
+                Some("Refresh when you want to load project and session history.".into()),
                 theme.muted_text,
-            ))
-        } else {
-            match &view_model.catalog_state {
-                ProjectCatalogState::NotLoaded => Some((
-                    "not-loaded",
-                    "Projects not loaded".to_owned(),
-                    Some("Refresh when you want to load project and session history.".into()),
-                    theme.muted_text,
+            )),
+            ProjectCatalogState::Loading if view_model.project_groups.is_empty() => Some((
+                "loading",
+                "Loading projects…".to_owned(),
+                Some("The current Home draft remains available.".into()),
+                theme.accent,
+            )),
+            ProjectCatalogState::Loading => Some((
+                "loading",
+                "Refreshing projects…".to_owned(),
+                Some("The previous project tree remains available while loading.".into()),
+                theme.accent,
+            )),
+            ProjectCatalogState::Error { message } => Some((
+                "error",
+                "Projects unavailable".to_owned(),
+                Some(format!(
+                    "{}. Use Refresh to retry.",
+                    truncate_label(
+                        view_model.catalog_state.error_message().unwrap_or(message),
+                        72
+                    )
                 )),
-                ProjectCatalogState::Loading if view_model.project_groups.is_empty() => Some((
-                    "loading",
-                    "Loading projects…".to_owned(),
-                    Some("The current Home draft remains available.".into()),
-                    theme.accent,
+                theme.danger,
+            )),
+            ProjectCatalogState::Stale {
+                error: Some(message),
+            } => Some((
+                "stale",
+                "Project history may be stale".to_owned(),
+                Some(format!(
+                    "{}. Refresh to reconcile the tree.",
+                    truncate_label(
+                        view_model.catalog_state.error_message().unwrap_or(message),
+                        72
+                    )
                 )),
-                ProjectCatalogState::Loading => Some((
-                    "loading",
-                    "Refreshing projects…".to_owned(),
-                    Some("The previous project tree remains available while loading.".into()),
-                    theme.accent,
-                )),
-                ProjectCatalogState::Error { message } => Some((
-                    "error",
-                    "Projects unavailable".to_owned(),
-                    Some(format!(
-                        "{}. Use Refresh to retry.",
-                        truncate_label(
-                            view_model.catalog_state.error_message().unwrap_or(message),
-                            72
-                        )
-                    )),
-                    theme.danger,
-                )),
-                ProjectCatalogState::Stale {
-                    error: Some(message),
-                } => Some((
-                    "stale",
-                    "Project history may be stale".to_owned(),
-                    Some(format!(
-                        "{}. Refresh to reconcile the tree.",
-                        truncate_label(
-                            view_model.catalog_state.error_message().unwrap_or(message),
-                            72
-                        )
-                    )),
-                    theme.warning,
-                )),
-                ProjectCatalogState::Stale { error: None } => Some((
-                    "stale",
-                    "Project history changed locally".to_owned(),
-                    Some("Refresh to reconcile with durable history.".into()),
-                    theme.warning,
-                )),
-                ProjectCatalogState::Ready if view_model.project_groups.is_empty() => Some((
-                    "empty",
-                    "No projects yet".to_owned(),
-                    Some("Start a conversation to create the first session.".into()),
-                    theme.muted_text,
-                )),
-                ProjectCatalogState::Ready => None,
-            }
+                theme.warning,
+            )),
+            ProjectCatalogState::Stale { error: None } => Some((
+                "stale",
+                "Project history changed locally".to_owned(),
+                Some("Refresh to reconcile with durable history.".into()),
+                theme.warning,
+            )),
+            ProjectCatalogState::Ready if view_model.project_groups.is_empty() => Some((
+                "empty",
+                "No projects yet".to_owned(),
+                Some("Start a conversation to create the first session.".into()),
+                theme.muted_text,
+            )),
+            ProjectCatalogState::Ready => None,
         };
-        let show_search = !view_model.project_groups.is_empty();
         let new_conversation_row = DesktopActionRow::new(
             "new-conversation",
             "New conversation",
@@ -875,25 +875,45 @@ impl Render for SessionsPane {
                                     .child("workspace"),
                             ),
                     )
-                    .when(presented_as_drawer, |header| {
-                        header.child(
-                            DesktopIconButton::new(
-                                "close-narrow-sessions",
-                                DesktopIcon::Close,
-                                "Close workspace navigation",
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_token(DesignSpace::Xs)
+                            .child(
+                                DesktopIconButton::new(
+                                    "open-global-search",
+                                    DesktopIcon::Search,
+                                    "Search sessions",
+                                )
+                                .build()
+                                .debug_selector(|| "desktop-hit-global-search".into())
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(SessionsPaneEvent::OpenSearch);
+                                })),
                             )
-                            .build()
-                            .debug_selector(|| "desktop-hit-close-narrow-sessions".into())
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(SessionsPaneEvent::Dismiss);
-                            })),
-                        )
-                    }),
+                            .when(presented_as_drawer, |actions| {
+                                actions.child(
+                                    DesktopIconButton::new(
+                                        "close-narrow-sessions",
+                                        DesktopIcon::Close,
+                                        "Close workspace navigation",
+                                    )
+                                    .build()
+                                    .debug_selector(|| {
+                                        "desktop-hit-close-narrow-sessions".into()
+                                    })
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(SessionsPaneEvent::Dismiss);
+                                    })),
+                                )
+                            }),
+                    ),
             )
             .child(
                 div()
                     .id("sessions-list")
-                    .aria_label("New conversation, Skills, Projects, and nested sessions")
+                    .aria_label("New conversation, Skills, Conversations, and Projects")
                     .w_full()
                     .flex_1()
                     .min_h_0()
@@ -961,6 +981,47 @@ impl Render for SessionsPane {
                                     )),
                             ),
                     )
+                    .when(visible_conversation_count > 0, |list| {
+                        list.child(
+                            div()
+                                .id("conversations-section")
+                                .debug_selector(|| "desktop-conversations-section".into())
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .gap_token(DesignSpace::Sm)
+                                .border_t_1()
+                                .border_color(rgb(theme.divider.value()))
+                                .py_token(DesignSpace::Lg)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_token(DesignSpace::Xs)
+                                        .child(
+                                            div()
+                                                .text_token(DesignText::Metadata)
+                                                .text_color(rgb(theme.muted_text.value()))
+                                                .child("CONVERSATIONS"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("conversations-count")
+                                                .role(Role::Status)
+                                                .aria_label(format!(
+                                                    "{visible_conversation_count} conversations without a project directory"
+                                                ))
+                                                .text_token(DesignText::Metadata)
+                                                .text_color(rgb(theme.muted_text.value()))
+                                                .child(count_label(
+                                                    visible_conversation_count,
+                                                    "session",
+                                                )),
+                                        ),
+                                )
+                                .children(conversation_group_elements),
+                        )
+                    })
                     .child(
                         div()
                             .id("projects-section")
@@ -1033,38 +1094,6 @@ impl Render for SessionsPane {
                                         }),
                                     ),
                             )
-                            .when(show_search, |section| section.child(
-                                div()
-                                    .id("sessions-search")
-                                    .debug_selector(|| "sessions-search".into())
-                                    .role(Role::Search)
-                                    .aria_label("Search projects and sessions")
-                                    .child(
-                                        Input::new(&search_input)
-                                            .role(Role::SearchInput)
-                                            .prefix(Icon::new(DesktopIcon::Search.name()).small())
-                                            .when(!search.is_empty(), |input| {
-                                                input.suffix(
-                                                    DesktopIconButton::new(
-                                                        "clear-session-search",
-                                                        DesktopIcon::Clear,
-                                                        "Clear session search",
-                                                    )
-                                                    .size(DesktopControlSize::Tool)
-                                                    .build()
-                                                    .on_click(move |_, window, cx| {
-                                                        clear_search_input.update(
-                                                            cx,
-                                                            |input, cx| {
-                                                                input.set_value("", window, cx);
-                                                            },
-                                                        );
-                                                    }),
-                                                )
-                                            })
-                                            .appearance(false),
-                                    ),
-                            ))
                             .when_some(catalog_notice, |section, notice| {
                                 let (selector, title, detail, color) = notice;
                                 let debug_selector = format!("desktop-projects-state-{selector}");
@@ -1106,7 +1135,7 @@ impl Render for SessionsPane {
                                         .debug_selector(|| "desktop-projects-tree".into())
                                         .role(Role::List)
                                         .aria_label(format!(
-                                            "{visible_project_count} projects containing {visible_session_count} sessions"
+                                            "{visible_project_count} projects containing {visible_project_session_count} sessions"
                                         ))
                                         .w_full()
                                         .min_w_0()
@@ -1296,24 +1325,6 @@ mod tests {
             project_runtime_summary(&group, "elsewhere", SemanticStatus::Idle, &runtime_states),
             (Some(SemanticStatus::Error), false)
         );
-    }
-
-    #[test]
-    fn search_reveals_matching_descendants_without_mutating_disclosure_state() {
-        let group = project_group(
-            "project:search",
-            CodingAgentWorkspaceKind::Project,
-            "Compiler",
-            &["matching-session"],
-            true,
-        );
-
-        let visible = visible_project_groups(std::slice::from_ref(&group), "matching-session");
-
-        assert_eq!(visible.len(), 1);
-        assert!(!visible[0].collapsed);
-        assert!(group.collapsed);
-        assert!(visible_project_groups(std::slice::from_ref(&group), "absent").is_empty());
     }
 
     #[test]

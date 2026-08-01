@@ -1,10 +1,9 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Instant;
 
-use desktop::ui::conversation::StreamingTextPhase;
 use gpui::{
-    AnyElement, ClipboardItem, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Styled as _, WeakEntity,
+    AnyElement, ClipboardItem, Entity, InteractiveElement as _, IntoElement, Styled as _,
+    WeakEntity,
 };
 use gpui_component::text::{TextView, TextViewState};
 
@@ -13,43 +12,29 @@ use crate::ui::conversation::pane::{ConversationPane, ConversationPaneEvent};
 
 const MARKDOWN_COMPLETION_TRACE_ENV: &str = "EVO_DESKTOP_MARKDOWN_TRACE";
 
-/// Lightweight conversation text renderer driven by the row's revision phase.
+/// Lightweight conversation Markdown renderer backed by a stable parse state.
 ///
-/// `StreamingPlainText` rows are raw text and own no parse state. Markdown rows
-/// render a [`TextViewState`] the pane owns and feeds, so the parsed document
-/// survives between frames and streaming deltas extend it incrementally on a
-/// background task rather than re-parsing it synchronously in every frame.
+/// The pane owns and feeds the [`TextViewState`], so the parsed document
+/// survives from the first streaming chunk through completion and append-only
+/// deltas extend it incrementally on a background task.
 pub(crate) struct StreamingText {
-    text: Arc<str>,
-    phase: StreamingTextPhase,
-    markdown: Option<Entity<TextViewState>>,
+    markdown: Entity<TextViewState>,
     event_target: WeakEntity<ConversationPane>,
 }
 
 impl StreamingText {
     pub(crate) fn new(
-        text: Arc<str>,
-        phase: StreamingTextPhase,
-        markdown: Option<Entity<TextViewState>>,
+        markdown: Entity<TextViewState>,
         event_target: WeakEntity<ConversationPane>,
     ) -> Self {
         Self {
-            text,
-            phase,
             markdown,
             event_target,
         }
     }
 
     pub(crate) fn into_any_element(self) -> AnyElement {
-        match (self.phase, self.markdown) {
-            (StreamingTextPhase::StreamingPlainText, _) | (_, None) => gpui::div()
-                .w_full()
-                .whitespace_normal()
-                .child(SharedString::new(self.text))
-                .into_any_element(),
-            (_, Some(state)) => markdown_element(&state, self.event_target),
-        }
+        markdown_element(&self.markdown, self.event_target)
     }
 }
 
@@ -96,20 +81,14 @@ pub(crate) fn trace_markdown_parse(state_key: &str, bytes: usize, started_at: In
         return;
     }
     let elapsed_micros = started_at.elapsed().as_micros();
-    let phase = if state_key.contains(":final:") {
-        "final"
-    } else {
-        "settling"
-    };
     tracing::trace!(
         state_key,
-        phase,
         bytes,
         parse_to_layout_us = elapsed_micros,
         "desktop.markdown.parse_complete"
     );
     eprintln!(
-        "desktop_trace\tmarkdown_parse_complete\tstate_key={state_key}\tphase={phase}\tbytes={bytes}\tmarkdown_parse_to_layout_us={elapsed_micros}"
+        "desktop_trace\tmarkdown_parse_complete\tstate_key={state_key}\tbytes={bytes}\tmarkdown_parse_to_layout_us={elapsed_micros}"
     );
 }
 

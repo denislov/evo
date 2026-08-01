@@ -27,9 +27,7 @@ use coding_agent::api::runtime::{
     CodingAgentRecoveryResolutionRequest, CodingAgentRecoveryRetryRequest, CodingAgentSession,
     CodingAgentSessionNameUpdateReceiver,
 };
-use coding_agent::api::view::{
-    CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot,
-};
+use coding_agent::api::view::{CodingAgentSessionTranscriptItem, CodingAgentTranscriptSnapshot};
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{mpsc, watch};
 use tokio::task;
@@ -65,8 +63,18 @@ impl HomeRuntimeContext {
         Ok(Self { context, options })
     }
 
-    fn load_session_context(&self) -> Result<CodingAgentEmbeddingContext, DesktopBridgeError> {
-        CodingAgentEmbeddingContext::load(self.options.clone()).map_err(DesktopBridgeError::from)
+    fn load_session_context(
+        &self,
+    ) -> Result<(String, CodingAgentEmbeddingContext), DesktopBridgeError> {
+        let (session_id, options) =
+            self.options
+                .clone()
+                .into_new_session()
+                .map_err(|error| DesktopBridgeError::Input {
+                    message: format!("desktop session workspace could not be resolved: {error}"),
+                })?;
+        let context = CodingAgentEmbeddingContext::load(options)?;
+        Ok((session_id, context))
     }
 
     pub(super) fn select_model(
@@ -373,8 +381,8 @@ impl RuntimeState {
         open_session_count: usize,
     ) -> Result<String, DesktopBridgeError> {
         self.ensure_capacity(open_session_count)?;
-        let context = self.home.load_session_context()?;
-        self.create_session_in_context(context)
+        let (session_id, context) = self.home.load_session_context()?;
+        self.create_session_in_context(session_id, context)
             .await
             .map(|(session_id, _)| session_id)
     }
@@ -397,11 +405,17 @@ impl RuntimeState {
         if let Some(session_root) = self.home.context.snapshot().settings.session_dir.as_ref() {
             options = options.with_session_dir(session_root);
         }
+        let (session_id, options) =
+            options
+                .into_new_session()
+                .map_err(|error| DesktopBridgeError::Input {
+                    message: format!("desktop session workspace could not be resolved: {error}"),
+                })?;
         let context = CodingAgentEmbeddingContext::load(options)?;
         let selected_model_id = context.snapshot().selected_model_id.clone();
         let (thinking_level, _) =
             admitted_model_thinking(&context, &selected_model_id, thinking_level)?;
-        let (session_id, snapshot) = self.create_session_in_context(context).await?;
+        let (session_id, snapshot) = self.create_session_in_context(session_id, context).await?;
         Ok(NewPromptSession {
             session_id,
             snapshot,
@@ -411,12 +425,12 @@ impl RuntimeState {
 
     async fn create_session_in_context(
         &mut self,
+        session_id: String,
         context: CodingAgentEmbeddingContext,
     ) -> Result<(String, DesktopRuntimeHydratedSnapshot), DesktopBridgeError> {
         let scope = RuntimeSessionWorkspace::scope_for_context(&context)?;
         let project = context.snapshot().clone();
-        let session = context.create_session().await?;
-        let session_id = session.view().session_id.clone();
+        let session = context.create_session_with_id(session_id.clone()).await?;
         let snapshot = DesktopRuntimeHydratedSnapshot {
             project,
             session: session.snapshot(),

@@ -2,8 +2,7 @@ use coding_agent::api::authorization::{ToolAuthorizationDecision, ToolAuthorizat
 use coding_agent::api::review::CodingAgentFileReviewRequest;
 use desktop::preferences::DesktopThinkingLevel;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
-use desktop::ui::conversation::ConversationRowMeasurement;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use super::{
     ComposerRunningMode, DesktopPaletteCommand, InspectorSection,
@@ -22,6 +21,7 @@ use crate::ui::shell::CenterNavigationTarget;
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum UiIntent {
     Navigate(CenterNavigationTarget),
+    NewConversationForProject(PathBuf),
     RefreshSessions,
     SetProjectCollapsed {
         group_id: String,
@@ -32,6 +32,7 @@ pub(super) enum UiIntent {
         name: String,
     },
     CloseSession(String),
+    OpenSearch,
     DismissDrawer,
     ToggleSessions,
     ToggleInspector,
@@ -64,7 +65,6 @@ pub(super) enum UiIntent {
         identity: DesktopRecoveryIdentity,
         action: DesktopRecoveryAction,
     },
-    ConversationMeasured(ConversationRowMeasurement),
     FollowLatest,
     RequestFileReview(CodingAgentFileReviewRequest),
     CopyReviewPath,
@@ -78,6 +78,8 @@ pub(super) enum UiIntent {
     },
     CopyFullMessage,
     CloseFullMessage,
+    NavigateSearch(String),
+    CloseSearch,
 }
 
 impl From<&ConversationPaneEvent> for UiIntent {
@@ -103,9 +105,6 @@ impl From<&ConversationPaneEvent> for UiIntent {
                 identity: identity.clone(),
                 action: *action,
             },
-            ConversationPaneEvent::Measured(measurement) => {
-                Self::ConversationMeasured(measurement.clone())
-            }
             ConversationPaneEvent::FollowLatest => Self::FollowLatest,
         }
     }
@@ -133,6 +132,9 @@ impl From<&SessionsPaneEvent> for UiIntent {
     fn from(event: &SessionsPaneEvent) -> Self {
         match event {
             SessionsPaneEvent::Navigate(target) => Self::Navigate(target.clone()),
+            SessionsPaneEvent::NewConversationForProject(path) => {
+                Self::NewConversationForProject(path.clone())
+            }
             SessionsPaneEvent::Refresh => Self::RefreshSessions,
             SessionsPaneEvent::SetProjectCollapsed {
                 group_id,
@@ -146,6 +148,7 @@ impl From<&SessionsPaneEvent> for UiIntent {
                 name: name.clone(),
             },
             SessionsPaneEvent::CloseSession(session_id) => Self::CloseSession(session_id.clone()),
+            SessionsPaneEvent::OpenSearch => Self::OpenSearch,
             SessionsPaneEvent::Dismiss => Self::DismissDrawer,
         }
     }
@@ -199,6 +202,10 @@ impl From<&RootModalHostEvent> for UiIntent {
             }
             RootModalHostEvent::CopyFullMessage => Self::CopyFullMessage,
             RootModalHostEvent::CloseFullMessage => Self::CloseFullMessage,
+            RootModalHostEvent::NavigateSearch(session_id) => {
+                Self::NavigateSearch(session_id.clone())
+            }
+            RootModalHostEvent::CloseSearch => Self::CloseSearch,
         }
     }
 }
@@ -224,6 +231,12 @@ mod tests {
                 session_id: "session-a".into(),
                 name: "Readable name".into(),
             }
+        );
+        assert_eq!(
+            UiIntent::from(&SessionsPaneEvent::NewConversationForProject(
+                PathBuf::from("/work/project-a"),
+            )),
+            UiIntent::NewConversationForProject(PathBuf::from("/work/project-a"))
         );
         assert_eq!(
             UiIntent::from(&ConversationHeaderEvent::SelectModel(Arc::from("model-a"))),

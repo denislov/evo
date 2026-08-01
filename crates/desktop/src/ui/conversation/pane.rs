@@ -1,11 +1,8 @@
 use gpui::{
-    ElementId, Entity, EventEmitter, IntoElement, ParentElement as _, Render, Role, SharedString,
-    Styled as _, Window, div, prelude::*, px, rgb,
+    ElementId, Entity, EventEmitter, IntoElement, ListState, ParentElement as _, Render, Role,
+    SharedString, Styled as _, Subscription, Window, div, list, prelude::*, px, rgb,
 };
-use gpui_component::{
-    ElementExt as _, Icon, Sizable as _, VirtualListScrollHandle, button::Button,
-    text::TextViewState, v_virtual_list,
-};
+use gpui_component::{Icon, Sizable as _, button::Button, text::TextViewState};
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -32,13 +29,11 @@ use crate::ui::shell::ShellUiState;
 use desktop::projection::DesktopRecoveryStatus;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
 use desktop::ui::conversation::{
-    ConversationRowMeasurement, TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, compact_duration,
-    conversation_copy_text,
+    TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, compact_duration, conversation_copy_text,
 };
 use desktop::ui::shell::{
-    ASSISTANT_MESSAGE_MAX_WIDTH, CONVERSATION_CONTENT_MAX_WIDTH,
-    CONVERSATION_ROW_VERTICAL_PADDING_PX, MONOSPACE_FONT_FAMILY, SemanticTheme,
-    USER_MESSAGE_MAX_WIDTH,
+    ASSISTANT_MESSAGE_MAX_WIDTH, CONVERSATION_CONTENT_MAX_WIDTH, MONOSPACE_FONT_FAMILY,
+    SemanticTheme, USER_MESSAGE_MAX_WIDTH,
 };
 
 /// Width of the leading rail that carries conversation selection now that
@@ -77,7 +72,6 @@ pub(crate) enum ConversationPaneEvent {
         identity: DesktopRecoveryIdentity,
         action: DesktopRecoveryAction,
     },
-    Measured(ConversationRowMeasurement),
     Scrolled,
     FollowLatest,
 }
@@ -85,7 +79,7 @@ pub(crate) enum ConversationPaneEvent {
 #[derive(Clone)]
 pub(crate) struct ConversationPaneViewModel {
     pub(crate) render: ConversationRenderReader,
-    pub(crate) scroll: VirtualListScrollHandle,
+    pub(crate) scroll: ListState,
     pub(crate) visible_count: usize,
     pub(crate) event_count: usize,
     pub(crate) message_count: usize,
@@ -210,7 +204,7 @@ pub(crate) fn visible_count(workspace: &SessionWorkspace) -> usize {
 /// Markdown parse states outlive the frame that rendered them so a streaming row
 /// can extend its document instead of re-parsing it.
 ///
-/// Only rows the virtual list actually renders get one, so the live set is
+/// Only rows the dynamic list actually renders get one, so the live set is
 /// bounded by the viewport; this cap is the backstop for scrolling churn.
 const MAX_MARKDOWN_PARSE_STATES: usize = 64;
 
@@ -221,6 +215,7 @@ struct MarkdownParseState {
     /// hands out, so an unchanged row costs one pointer comparison.
     fed: Arc<str>,
     touched: u64,
+    _subscription: Subscription,
 }
 
 pub(crate) struct ConversationPane {
@@ -235,6 +230,29 @@ impl ConversationPane {
             view_model: None,
             markdown_states: HashMap::new(),
             markdown_generation: 0,
+        }
+    }
+
+    /// Invalidate the outer dynamic-list item after an asynchronous Markdown
+    /// parse publishes new block geometry.
+    ///
+    /// A delta invalidates the item before `push_str` starts its background
+    /// parse, so that layout pass intentionally measures the previous parsed
+    /// document. `TextViewState` notifies when the new document lands; this
+    /// observation closes that timing gap and makes the next list layout adopt
+    /// the new natural height while preserving the native scroll anchor.
+    fn remeasure_markdown_row(&self, key: &Arc<str>) {
+        let Some(view_model) = &self.view_model else {
+            return;
+        };
+        let render = &view_model.render;
+        let row_index = (0..render.len()).find(|index| {
+            render.row(*index).is_some_and(|row| {
+                row.markdown_state_key == *key || row.detail_markdown_state_key == *key
+            })
+        });
+        if let Some(index) = row_index {
+            view_model.scroll.remeasure_items(index..index + 1);
         }
     }
 
@@ -291,6 +309,11 @@ impl ConversationPane {
         let initial = Arc::clone(text);
         let started_at = markdown_completion_trace_enabled().then(Instant::now);
         let state = cx.new(|cx| TextViewState::markdown(&initial, cx));
+        let observed_key = Arc::clone(key);
+        let subscription = cx.observe(&state, move |pane, _, cx| {
+            pane.remeasure_markdown_row(&observed_key);
+            cx.notify();
+        });
         if let Some(started_at) = started_at {
             trace_markdown_parse(key, initial.len(), started_at);
         }
@@ -300,6 +323,7 @@ impl ConversationPane {
                 state: state.clone(),
                 fed: initial,
                 touched: generation,
+                _subscription: subscription,
             },
         );
         state
@@ -332,7 +356,6 @@ impl Render for ConversationPane {
                 .aria_label("Conversation messages")
                 .flex_1();
         };
-        let transcript_rows = view_model.render.row_sizes();
         let scroll_handle = view_model.scroll;
         let visible_count = view_model.visible_count;
         let event_count = view_model.event_count;
@@ -347,15 +370,14 @@ impl Render for ConversationPane {
         let diagnostic_recovery = view_model.diagnostic_recovery;
         let render = view_model.render;
         let theme = SemanticTheme::current(cx);
-        let transcript_list = v_virtual_list(
-            cx.entity(),
-            "conversation-transcript",
-            transcript_rows,
-            move |pane, visible_range, _window, cx| {
+        let pane_entity = cx.entity();
+        let transcript_list = list(scroll_handle.clone(), move |index, _window, cx| {
+            pane_entity.update(cx, |pane, cx| {
                 pane.markdown_generation = pane.markdown_generation.wrapping_add(1);
-                let rows = visible_range
-                    .filter_map(|index| {
-                        let (block, row_height) = render.row(index)?;
+                let Some(block) = render.row(index) else {
+                    return div().into_any_element();
+                };
+                let row = {
                         let selected =
                             selected_block_id.as_deref() == Some(block.item_key.row_id());
                         let detail_expanded =
@@ -397,16 +419,6 @@ impl Render for ConversationPane {
                         let durable = block.durable;
                         let markdown_key = block.markdown_state_key.clone();
                         let detail_markdown_key = block.detail_markdown_state_key.clone();
-                        let text_phase = block.text_phase;
-                        let measurement = ConversationRowMeasurement {
-                            item_key: block.item_key.clone(),
-                            source_revision: block.source_revision,
-                            width_bucket: block.width_bucket,
-                            text_phase,
-                            details_expanded: detail_expanded,
-                            height: 0.,
-                        };
-                        let measurement_owner = cx.entity().downgrade();
                         let text = block.text.clone();
                         let detail_text = block.detail.clone();
                         let user_card_width = (block.kind == ConversationBlockKind::User)
@@ -414,9 +426,9 @@ impl Render for ConversationPane {
                         let visual = conversation_block_visual(block.kind, block.is_error, theme);
                         let is_assistant = block.kind == ConversationBlockKind::Assistant;
                         let previous_kind = index.checked_sub(1).and_then(|previous| {
-                            render.row(previous).map(|(row, _)| row.kind)
+                            render.row(previous).map(|row| row.kind)
                         });
-                        let next_kind = render.row(index + 1).map(|(row, _)| row.kind);
+                        let next_kind = render.row(index + 1).map(|row| row.kind);
                         let show_identity_header =
                             conversation_identity_header_visible(block.kind, previous_kind);
                         let reasoning_duration_label = block
@@ -486,8 +498,7 @@ impl Render for ConversationPane {
                                 .w(px(CONVERSATION_RAIL_WIDTH))
                                 .bg(rgb(theme.focus_ring.value()))
                         });
-                        Some(
-                            div()
+                div()
                                 .id((
                                     ElementId::from("conversation-block"),
                                     SharedString::new(block.item_key.stable_id_arc()),
@@ -504,7 +515,6 @@ impl Render for ConversationPane {
                                     row.aria_expanded(full_view_open)
                                 })
                                 .when(selected, |row| row.aria_active_descendant())
-                                .h(px(row_height))
                                 .w_full()
                                 .min_w_0()
                                 .py_token(DesignSpace::Xs)
@@ -542,21 +552,6 @@ impl Render for ConversationPane {
                                         .when(block.preview_truncated, |card| {
                                             card.max_h(px(TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT))
                                                 .overflow_hidden()
-                                        })
-                                        .on_prepaint(move |bounds, _, cx| {
-                                            let Some(pane) = measurement_owner.upgrade() else {
-                                                return;
-                                            };
-                                            let mut measurement = measurement;
-                                            // The measured card excludes the row's `py_1`
-                                            // padding (4px on each edge).
-                                            measurement.height = f32::from(bounds.size.height)
-                                                + CONVERSATION_ROW_VERTICAL_PADDING_PX as f32;
-                                            pane.update(cx, |_, cx| {
-                                                cx.emit(ConversationPaneEvent::Measured(
-                                                    measurement,
-                                                ));
-                                            });
                                         })
                                         .when_some(user_card_width, |card, width| {
                                             card.w(px(width))
@@ -1056,15 +1051,11 @@ impl Render for ConversationPane {
                                                     )
                                                     .child(
                                                         StreamingText::new(
-                                                            detail_text.clone(),
-                                                            text_phase,
-                                                            text_phase.renders_markdown().then(|| {
-                                                                pane.markdown_state(
-                                                                    &detail_markdown_key,
-                                                                    &detail_text,
-                                                                    cx,
-                                                                )
-                                                            }),
+                                                            pane.markdown_state(
+                                                                &detail_markdown_key,
+                                                                &detail_text,
+                                                                cx,
+                                                            ),
                                                             cx.entity().downgrade(),
                                                         )
                                                         .into_any_element(),
@@ -1279,17 +1270,11 @@ impl Render for ConversationPane {
                                                                     ))
                                                                     .child(
                                                                         StreamingText::new(
-                                                                            text.clone(),
-                                                                            text_phase,
-                                                                            text_phase
-                                                                                .renders_markdown()
-                                                                                .then(|| {
-                                                                                    pane.markdown_state(
-                                                                                        &markdown_key,
-                                                                                        &text,
-                                                                                        cx,
-                                                                                    )
-                                                                                }),
+                                                                            pane.markdown_state(
+                                                                                &markdown_key,
+                                                                                &text,
+                                                                                cx,
+                                                                            ),
                                                                             cx.entity()
                                                                                 .downgrade(),
                                                                         )
@@ -1318,17 +1303,11 @@ impl Render for ConversationPane {
                                                                                 ))
                                                                                 .child(
                                                                                     StreamingText::new(
-                                                                                        detail_text.clone(),
-                                                                                        text_phase,
-                                                                                        text_phase
-                                                                                            .renders_markdown()
-                                                                                            .then(|| {
-                                                                                                pane.markdown_state(
-                                                                                                    &detail_markdown_key,
-                                                                                                    &detail_text,
-                                                                                                    cx,
-                                                                                                )
-                                                                                            }),
+                                                                                        pane.markdown_state(
+                                                                                            &detail_markdown_key,
+                                                                                            &detail_text,
+                                                                                            cx,
+                                                                                        ),
                                                                                         cx.entity()
                                                                                             .downgrade(),
                                                                                     )
@@ -1375,11 +1354,7 @@ impl Render for ConversationPane {
                                         })
                                         .when(!text.is_empty() && !is_tool && !is_delegation, |card| {
                                             let content = StreamingText::new(
-                                                text.clone(),
-                                                text_phase,
-                                                text_phase.renders_markdown().then(|| {
-                                                    pane.markdown_state(&markdown_key, &text, cx)
-                                                }),
+                                                pane.markdown_state(&markdown_key, &text, cx),
                                                 cx.entity().downgrade(),
                                             )
                                             .into_any_element();
@@ -1399,15 +1374,11 @@ impl Render for ConversationPane {
                                                         .text_color(rgb(theme.muted_text.value()))
                                                         .child(
                                                             StreamingText::new(
-                                                                detail_text.clone(),
-                                                                text_phase,
-                                                                text_phase.renders_markdown().then(|| {
-                                                                    pane.markdown_state(
-                                                                        &detail_markdown_key,
-                                                                        &detail_text,
-                                                                        cx,
-                                                                    )
-                                                                }),
+                                                                pane.markdown_state(
+                                                                    &detail_markdown_key,
+                                                                    &detail_text,
+                                                                    cx,
+                                                                ),
                                                                 cx.entity().downgrade(),
                                                             )
                                                             .into_any_element(),
@@ -1593,21 +1564,28 @@ impl Render for ConversationPane {
                                                                 .text_color(rgb(
                                                                     theme.muted_text.value(),
                                                                 ))
+                                                                .opacity(0.)
+                                                                .group_hover(
+                                                                    hover_group.clone(),
+                                                                    |style| style.opacity(1.),
+                                                                )
+                                                                .when(selected, |metadata| {
+                                                                    metadata.opacity(1.)
+                                                                })
                                                                 .child(label),
                                                         )
                                                     }),
                                             )
                                         }),
                                         ),
-                                ),
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                                )
+                };
                 pane.evict_markdown_states();
-                rows
-            },
-        )
-        .track_scroll(&scroll_handle);
+                row.into_any_element()
+            })
+        })
+        .w_full()
+        .h_full();
 
         let follow_latest_label = if unseen_updates == 0 {
             "Latest ↓".to_owned()
@@ -1982,7 +1960,10 @@ fn is_empty_state_line(line: &str) -> bool {
 /// entries.
 fn count_entries(text: &str) -> usize {
     let lines = tool_result_lines(text);
-    if lines.first().is_some_and(|first| is_empty_state_line(first)) {
+    if lines
+        .first()
+        .is_some_and(|first| is_empty_state_line(first))
+    {
         0
     } else {
         lines.len()
@@ -2555,8 +2536,8 @@ mod tests {
         ];
         let full: String = chunks.concat();
 
-        let streamed_key: Arc<str> = Arc::from("transcript-markdown:row:settling");
-        let oneshot_key: Arc<str> = Arc::from("transcript-markdown:other:settling");
+        let streamed_key: Arc<str> = Arc::from("transcript-markdown:row:streaming");
+        let oneshot_key: Arc<str> = Arc::from("transcript-markdown:other:streaming");
 
         let mut accumulated = String::new();
         let mut streamed = None;
@@ -2608,7 +2589,7 @@ mod tests {
         visual_cx.run_until_parked();
 
         let pane = visual_cx.update(|_, cx| cx.new(|_| ConversationPane::new()));
-        let key: Arc<str> = Arc::from("transcript-markdown:rewound:settling");
+        let key: Arc<str> = Arc::from("transcript-markdown:rewound:streaming");
 
         let long: Arc<str> = Arc::from("paragraph\n\n".repeat(12).as_str());
         let long_state = pane.update(visual_cx, |pane, cx| pane.markdown_state(&key, &long, cx));
@@ -2648,7 +2629,7 @@ mod tests {
         pane.update(visual_cx, |pane, cx| {
             for index in 0..(MAX_MARKDOWN_PARSE_STATES * 3) {
                 pane.markdown_generation = pane.markdown_generation.wrapping_add(1);
-                let key: Arc<str> = Arc::from(format!("transcript-markdown:row-{index}:settling"));
+                let key: Arc<str> = Arc::from(format!("transcript-markdown:row-{index}:streaming"));
                 pane.markdown_state(&key, &text, cx);
             }
             pane.evict_markdown_states();

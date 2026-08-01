@@ -33,9 +33,10 @@ use crate::runtime::facade::{
     CodingAgentSessionOptions, CodingAgentSessionSummary, CodingSessionError,
 };
 use crate::runtime::public_error::safe_public_summary;
+use crate::session::id::new_session_id;
 use crate::workspace::{
     CodingAgentResolvedWorkspace, CodingAgentWorkspaceResolutionError, CodingAgentWorkspaceScope,
-    CodingAgentWorkspaceSelection,
+    CodingAgentWorkspaceSelection, projectless_workspace_id_for_session,
 };
 
 /// Product-owned options for loading one embeddable project context.
@@ -119,6 +120,29 @@ impl CodingAgentEmbeddingOptions {
     pub fn with_global_config_only(mut self) -> Self {
         self.global_config_only = true;
         self
+    }
+
+    /// Allocate the product session identity before loading its immutable
+    /// runtime context. Project sessions retain their selected directory;
+    /// projectless sessions receive a managed scratch scope derived from the
+    /// new session identity instead of sharing the Home draft's scratch scope.
+    pub fn into_new_session(
+        mut self,
+    ) -> Result<(String, Self), CodingAgentWorkspaceResolutionError> {
+        let session_id = new_session_id();
+        if matches!(
+            self.workspace.as_ref().map(|workspace| &workspace.scope),
+            Some(CodingAgentWorkspaceScope::Projectless { .. })
+        ) {
+            let workspace = CodingAgentWorkspaceSelection::projectless(
+                projectless_workspace_id_for_session(&session_id),
+            )
+            .resolve(global_config_directory())?;
+            self.cwd = workspace.execution_cwd.clone();
+            self.workspace = Some(workspace);
+            self.global_config_only = true;
+        }
+        Ok((session_id, self))
     }
 
     pub fn cwd(&self) -> &Path {

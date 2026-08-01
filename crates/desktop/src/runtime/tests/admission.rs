@@ -1139,6 +1139,16 @@ async fn desktop_session_catalog_lists_project_and_projectless_history() {
         focused_session_id: None,
         fail_next_prompt_start: false,
     };
+    let home_projectless_group_id = state
+        .home
+        .context
+        .snapshot()
+        .workspace
+        .as_ref()
+        .unwrap()
+        .overview
+        .group_id
+        .clone();
 
     let projectless = state
         .create_session_for_workspace(
@@ -1150,13 +1160,23 @@ async fn desktop_session_catalog_lists_project_and_projectless_history() {
         )
         .await
         .unwrap();
+    let second_projectless = state
+        .create_session_for_workspace(
+            CodingAgentWorkspaceSelection::projectless("catalog-projectless"),
+            "claude-sonnet-4-5".into(),
+            "default".into(),
+            None,
+            1,
+        )
+        .await
+        .unwrap();
     let project_session = state
         .create_session_for_workspace(
             CodingAgentWorkspaceSelection::project(&project),
             "claude-sonnet-4-5".into(),
             "default".into(),
             None,
-            1,
+            2,
         )
         .await
         .unwrap();
@@ -1168,6 +1188,24 @@ async fn desktop_session_catalog_lists_project_and_projectless_history() {
             && entry.workspace.kind
                 == coding_agent::api::view::CodingAgentWorkspaceKind::Projectless
     }));
+    let projectless_entries = catalog
+        .iter()
+        .filter(|entry| {
+            entry.workspace.kind == coding_agent::api::view::CodingAgentWorkspaceKind::Projectless
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(projectless_entries.len(), 2);
+    assert_ne!(
+        projectless_entries[0].workspace.group_id, projectless_entries[1].workspace.group_id,
+        "each projectless session must own a distinct managed scratch scope"
+    );
+    assert!(
+        projectless_entries
+            .iter()
+            .all(|entry| entry.workspace.group_id != home_projectless_group_id),
+        "the Home draft workspace identity must not leak into durable sessions"
+    );
+    assert_ne!(projectless.session_id, second_projectless.session_id);
     assert!(catalog.iter().any(|entry| {
         entry.session_id == project_session.session_id
             && entry.workspace.kind == coding_agent::api::view::CodingAgentWorkspaceKind::Project

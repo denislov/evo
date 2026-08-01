@@ -3,105 +3,14 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use unicode_width::UnicodeWidthStr as _;
 
 use super::markdown::bounded_markdown_preview;
 use super::model::{
     ConversationBlockKind, ConversationItemKey, DelegationMeta, MAX_TRANSCRIPT_BLOCKS, TurnMeta,
 };
-use crate::ui::shell::{ASSISTANT_MESSAGE_MAX_WIDTH, USER_MESSAGE_MAX_WIDTH};
 
-pub const STREAMING_MARKDOWN_SETTLE_DELAY: Duration = Duration::from_millis(100);
-pub const MAX_SETTLING_MARKDOWN_BYTES: usize = 64 * 1024;
 pub const MAX_ROW_RENDER_CACHE_ENTRIES: usize = MAX_TRANSCRIPT_BLOCKS + 256;
 pub const MAX_ROW_RENDER_CACHE_BYTES: usize = 40 * 1024 * 1024;
-
-/// Source lines measured exactly before the remainder is extrapolated.
-const ROW_ESTIMATE_SCAN_LINES: usize = 256;
-
-/// Rows a text block occupies at `columns` characters per row.
-///
-/// This estimate stands in for the real layout height until GPUI measures the
-/// card, and it is the *only* height an off-screen row ever gets, so it has to
-/// keep growing with the content. Clamping it at a row budget made every message
-/// past ~22 wrapped lines estimate to the same constant, which the measured
-/// height then had to undo on every streaming revision. `ROW_ESTIMATE_SCAN_LINES`
-/// bounds the work done here alone: lines past it are extrapolated at the
-/// average wrapped height of the lines that were measured.
-fn estimated_text_rows(text: &str, columns: usize) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-    let columns = columns.max(1);
-    let mut rows = 0usize;
-    let mut scanned = 0usize;
-    let mut lines = text.lines();
-    for line in lines.by_ref().take(ROW_ESTIMATE_SCAN_LINES) {
-        rows = rows.saturating_add(line.width().max(1).div_ceil(columns));
-        scanned = scanned.saturating_add(1);
-    }
-    let unscanned = lines.count();
-    if unscanned > 0 && scanned > 0 {
-        let average = rows.div_ceil(scanned);
-        rows = rows.saturating_add(average.saturating_mul(unscanned));
-    }
-    rows.max(1)
-}
-
-/// The width a row's card actually lays out at, after its per-kind clamp.
-///
-/// Cards stop growing at `USER_MESSAGE_MAX_WIDTH` / `ASSISTANT_MESSAGE_MAX_WIDTH`,
-/// so a panel resize above that cap re-flows nothing. Keying height invalidation
-/// on the raw panel bucket threw away every measured height for a resize the
-/// cards never saw, and the coarse estimate that replaced it was visible as a
-/// one-frame jump. This is the identity every width-sensitive height decision
-/// compares on instead.
-pub const fn conversation_effective_width(kind: ConversationBlockKind, panel_width: u32) -> u32 {
-    let maximum = if matches!(kind, ConversationBlockKind::User) {
-        USER_MESSAGE_MAX_WIDTH
-    } else {
-        ASSISTANT_MESSAGE_MAX_WIDTH
-    };
-    if panel_width < maximum {
-        panel_width
-    } else {
-        maximum
-    }
-}
-
-pub fn conversation_block_height(
-    kind: ConversationBlockKind,
-    text: &str,
-    detail: &str,
-    panel_width: u32,
-) -> f32 {
-    let effective_width = conversation_effective_width(kind, panel_width);
-    let columns = (effective_width.saturating_sub(128) as usize / 8).max(24);
-    let main_rows = estimated_text_rows(text, columns);
-    let detail_rows = estimated_text_rows(detail, columns.saturating_sub(4).max(20));
-    let chrome = match kind {
-        ConversationBlockKind::Diagnostic => 58.0,
-        ConversationBlockKind::User => 66.0,
-        _ => 72.0,
-    };
-    let main_height = main_rows.max(1) as f32 * 22.0;
-    let detail_height = if detail_rows == 0 {
-        0.0
-    } else if kind == ConversationBlockKind::Assistant {
-        42.0 + detail_rows as f32 * 19.0
-    } else {
-        24.0 + detail_rows as f32 * 19.0
-    };
-    let minimum = match kind {
-        ConversationBlockKind::Diagnostic => 86.0,
-        ConversationBlockKind::User => 94.0,
-        ConversationBlockKind::Tool => 106.0,
-        _ => 110.0,
-    };
-    (chrome + main_height + detail_height).max(minimum)
-}
 
 #[derive(Debug)]
 pub struct ConversationRowRenderSource<'a> {
@@ -124,36 +33,11 @@ pub struct ConversationRowRenderSource<'a> {
     pub model: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamingTextPhase {
-    StreamingPlainText,
-    SettlingMarkdown,
-    FinalMarkdown,
-}
-
-impl StreamingTextPhase {
-    /// Whether more deltas can still append to this row.
-    ///
-    /// Only `FinalMarkdown` is terminal. `SettlingMarkdown` is reached mid-stream
-    /// once a row has been quiet long enough to be worth parsing as Markdown, and
-    /// keeps receiving appends after that, so height throttling and measurement
-    /// reuse must treat it as streaming.
-    pub const fn is_streaming(self) -> bool {
-        !matches!(self, Self::FinalMarkdown)
-    }
-
-    /// Whether this phase lays content out as Markdown rather than raw text.
-    pub const fn renders_markdown(self) -> bool {
-        !matches!(self, Self::StreamingPlainText)
-    }
-}
-
 /// Cheaply cloned render input for a conversation row.
 ///
 /// Completed Markdown and its stable GPUI state keys remain frozen until the
-/// source revision changes. Width changes only invalidate the measured height,
-/// and only when the row's *effective* width moved — `width_bucket` holds
-/// `conversation_effective_width`, not the raw panel bucket.
+/// source revision changes. Geometry intentionally does not live here: GPUI's
+/// dynamic list measures the rendered element and owns its size hint.
 #[derive(Debug, Clone)]
 pub struct ConversationRowRenderData {
     pub item_key: ConversationItemKey,
@@ -164,8 +48,6 @@ pub struct ConversationRowRenderData {
     pub detail: Arc<str>,
     pub markdown_state_key: Arc<str>,
     pub detail_markdown_state_key: Arc<str>,
-    pub text_phase: StreamingTextPhase,
-    pub next_text_phase_after: Option<Duration>,
     pub kind: ConversationBlockKind,
     pub done: bool,
     pub is_error: bool,
@@ -174,8 +56,6 @@ pub struct ConversationRowRenderData {
     pub preview_truncated: bool,
     pub media_neutralized: bool,
     pub durable: bool,
-    pub width_bucket: u32,
-    pub estimated_height: f32,
     pub delegation: Option<DelegationMeta>,
     /// Model that actually produced this assistant message.
     pub model: Option<Arc<str>>,
@@ -206,7 +86,6 @@ struct ConversationRowRenderCacheEntry {
     data: ConversationRowRenderData,
     retained_bytes: usize,
     touched_generation: u64,
-    source_updated_at: Instant,
 }
 
 #[derive(Debug)]
@@ -247,68 +126,16 @@ impl ConversationRowRenderCache {
     pub fn resolve(
         &mut self,
         source: ConversationRowRenderSource<'_>,
-        panel_width: u32,
+        _panel_width: u32,
     ) -> ConversationRowRenderData {
-        self.resolve_at(source, panel_width, Instant::now())
-    }
-
-    fn resolve_at(
-        &mut self,
-        source: ConversationRowRenderSource<'_>,
-        panel_width: u32,
-        now: Instant,
-    ) -> ConversationRowRenderData {
-        if let Some(entry) = self.entries.get_mut(&source.item_key)
-            && entry.data.source_revision > source.source_revision
-        {
-            entry.touched_generation = self.generation;
-            return entry.data.clone();
-        }
         if let Some(entry) = self.entries.get_mut(&source.item_key)
             && entry.data.source_revision == source.source_revision
             && entry.data.sanitized_revision == source.source_revision
             && entry.data.done == source.done
         {
             entry.touched_generation = self.generation;
-            if !source.done
-                && entry.data.text_phase == StreamingTextPhase::StreamingPlainText
-                && entry.data.next_text_phase_after.is_some()
-            {
-                let elapsed = now.saturating_duration_since(entry.source_updated_at);
-                if elapsed >= STREAMING_MARKDOWN_SETTLE_DELAY {
-                    entry.data.text_phase = StreamingTextPhase::SettlingMarkdown;
-                    entry.data.next_text_phase_after = None;
-                } else {
-                    entry.data.next_text_phase_after =
-                        Some(STREAMING_MARKDOWN_SETTLE_DELAY.saturating_sub(elapsed));
-                }
-            }
-            let effective_width = conversation_effective_width(entry.data.kind, panel_width);
-            if entry.data.width_bucket != effective_width {
-                entry.data.width_bucket = effective_width;
-                entry.data.estimated_height = conversation_block_height(
-                    entry.data.kind,
-                    &entry.data.text,
-                    &entry.data.detail,
-                    effective_width,
-                );
-            }
             return entry.data.clone();
         }
-
-        let within_settling_bounds =
-            source.text.len().saturating_add(source.detail.len()) <= MAX_SETTLING_MARKDOWN_BYTES;
-        // Settling is one-way for the life of a row. A new revision used to throw
-        // an already-settled row back to raw text, and the two forms lay out
-        // differently (heading sizes, code block padding, list indents), so every
-        // burst boundary in a bursty stream was a full reflow. The byte bound
-        // covers the one synchronous parse that entering Markdown costs; every
-        // delta after it is an incremental append on a background task.
-        let settled_markdown = within_settling_bounds
-            && self
-                .entries
-                .get(&source.item_key)
-                .is_some_and(|entry| entry.data.text_phase.renders_markdown());
 
         let (text, detail, preview_truncated, media_neutralized) = if source.done {
             #[cfg(test)]
@@ -331,29 +158,13 @@ impl ConversationRowRenderCache {
                 false,
             )
         };
-        let effective_width = conversation_effective_width(source.kind, panel_width);
         let data = ConversationRowRenderData {
-            markdown_state_key: source.item_key.markdown_state_key(false, source.done),
-            detail_markdown_state_key: source.item_key.markdown_state_key(true, source.done),
-            text_phase: if source.done {
-                StreamingTextPhase::FinalMarkdown
-            } else if settled_markdown {
-                StreamingTextPhase::SettlingMarkdown
-            } else {
-                StreamingTextPhase::StreamingPlainText
-            },
-            next_text_phase_after: (!source.done && !settled_markdown && within_settling_bounds)
-                .then_some(STREAMING_MARKDOWN_SETTLE_DELAY),
+            markdown_state_key: source.item_key.markdown_state_key(false),
+            detail_markdown_state_key: source.item_key.markdown_state_key(true),
             item_key: source.item_key.clone(),
             source_revision: source.source_revision,
             sanitized_revision: source.source_revision,
             title: Arc::from(source.title.as_ref()),
-            estimated_height: conversation_block_height(
-                source.kind,
-                &text,
-                &detail,
-                effective_width,
-            ),
             text,
             detail,
             kind: source.kind,
@@ -364,7 +175,6 @@ impl ConversationRowRenderCache {
             preview_truncated,
             media_neutralized,
             durable: source.durable,
-            width_bucket: effective_width,
             delegation: source.delegation,
             model: source.model.map(Arc::from),
             turn: source.turn.cloned(),
@@ -374,7 +184,6 @@ impl ConversationRowRenderCache {
             data: data.clone(),
             retained_bytes,
             touched_generation: self.generation,
-            source_updated_at: now,
         };
         if let Some(previous) = self.entries.insert(source.item_key, entry) {
             self.retained_bytes = self.retained_bytes.saturating_sub(previous.retained_bytes);
@@ -440,12 +249,8 @@ impl ConversationRowRenderCache {
 mod tests {
     use std::borrow::Cow;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
-    use super::{
-        ConversationRowRenderCache, ConversationRowRenderSource, MAX_SETTLING_MARKDOWN_BYTES,
-        STREAMING_MARKDOWN_SETTLE_DELAY, StreamingTextPhase, conversation_block_height,
-    };
+    use super::{ConversationRowRenderCache, ConversationRowRenderSource};
     use crate::ui::conversation::{
         ConversationBlockKind, ConversationItemKey, ConversationItemKind,
     };
@@ -484,46 +289,6 @@ mod tests {
     }
 
     #[test]
-    fn conversation_row_estimates_use_display_width_for_unicode() {
-        assert_eq!(super::estimated_text_rows("abcdefghij", 10), 1);
-        assert_eq!(super::estimated_text_rows("界界界界界", 10), 1);
-        assert_eq!(super::estimated_text_rows("界界界界界界", 10), 2);
-        assert_eq!(super::estimated_text_rows("🙂🙂🙂🙂🙂", 10), 1);
-        assert_eq!(super::estimated_text_rows("e\u{301}e\u{301}e\u{301}", 3), 1);
-    }
-
-    #[test]
-    fn conversation_row_estimates_keep_growing_past_the_scan_window() {
-        // The estimate is the only height an off-screen row ever gets, and the
-        // height a streaming row falls back to whenever its measurement is
-        // invalidated, so it has to track content length instead of saturating.
-        let short = super::estimated_text_rows(&"line\n".repeat(20), 40);
-        let long = super::estimated_text_rows(&"line\n".repeat(400), 40);
-        assert_eq!(short, 20);
-        assert_eq!(long, 400);
-
-        let wrapped = super::estimated_text_rows(&"x".repeat(4_000), 40);
-        assert_eq!(wrapped, 100);
-
-        let tall = conversation_block_height(
-            ConversationBlockKind::Assistant,
-            &"long response ".repeat(1_000),
-            "",
-            900,
-        );
-        let taller = conversation_block_height(
-            ConversationBlockKind::Assistant,
-            &"long response ".repeat(2_000),
-            "",
-            900,
-        );
-        assert!(
-            taller > tall * 1.8,
-            "estimate must scale with content: {tall} -> {taller}"
-        );
-    }
-
-    #[test]
     fn completed_row_cache_sanitizes_once_and_freezes_revision_state() {
         let mut cache = ConversationRowRenderCache::default();
         let large = format!(
@@ -555,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn width_change_remeasures_without_resanitizing_or_cloning_text() {
+    fn width_change_reuses_sanitized_content() {
         let mut cache = ConversationRowRenderCache::default();
         let text = "wide conversation content ".repeat(200);
         cache.begin_frame();
@@ -565,8 +330,6 @@ mod tests {
 
         assert_eq!(cache.sanitization_count, 1);
         assert!(Arc::ptr_eq(&wide.text, &narrow.text));
-        assert_ne!(wide.width_bucket, narrow.width_bucket);
-        assert!(narrow.estimated_height >= wide.estimated_height);
     }
 
     #[test]
@@ -591,6 +354,18 @@ mod tests {
         assert!(Arc::ptr_eq(&first.text, &same.text));
         assert!(!Arc::ptr_eq(&same.text, &updated.text));
         assert_eq!(&*updated.text, "partial update");
+    }
+
+    #[test]
+    fn content_hash_revisions_are_compared_for_equality_not_order() {
+        let mut cache = ConversationRowRenderCache::default();
+        cache.begin_frame();
+        let first = cache.resolve(render_source("hashed", u64::MAX, "first", false), 800);
+        let updated = cache.resolve(render_source("hashed", 1, "updated", false), 800);
+
+        assert_eq!(first.source_revision, u64::MAX);
+        assert_eq!(updated.source_revision, 1);
+        assert_eq!(&*updated.text, "updated");
     }
 
     #[test]
@@ -685,23 +460,16 @@ mod tests {
                 .stable_id()
                 .contains("session-a:assistant:11:assistant:1")
         );
-        assert!(
-            durable
-                .markdown_state_key(false, false)
-                .contains(durable.stable_id())
-        );
-        assert!(
-            durable
-                .markdown_state_key(true, true)
-                .contains(durable.stable_id())
+        assert!(durable.markdown_state_key(false).contains("assistant:1"));
+        assert!(durable.markdown_state_key(true).contains("assistant:1"));
+        assert_eq!(
+            durable.markdown_state_key(false),
+            live.markdown_state_key(false),
+            "live-to-durable promotion must retain the parsed Markdown state"
         );
         assert_ne!(
-            durable.markdown_state_key(false, false),
-            durable.markdown_state_key(false, true)
-        );
-        assert_ne!(
-            durable.markdown_state_key(false, true),
-            durable.markdown_state_key(true, true)
+            durable.markdown_state_key(false),
+            durable.markdown_state_key(true)
         );
         assert_ne!(
             ConversationItemKey::new(
@@ -809,145 +577,6 @@ mod tests {
     }
 
     #[test]
-    fn streaming_revision_settles_after_quiet_window_and_rejects_stale_results() {
-        let mut cache = ConversationRowRenderCache::default();
-        let started = Instant::now();
-        cache.begin_frame();
-        let active = cache.resolve_at(
-            render_source("assistant:quiet", 2, "new revision", false),
-            900,
-            started,
-        );
-        assert_eq!(active.text_phase, StreamingTextPhase::StreamingPlainText);
-        assert_eq!(
-            active.next_text_phase_after,
-            Some(STREAMING_MARKDOWN_SETTLE_DELAY)
-        );
-
-        let before_settle = cache.resolve_at(
-            render_source("assistant:quiet", 2, "new revision", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY - Duration::from_millis(1),
-        );
-        assert_eq!(
-            before_settle.text_phase,
-            StreamingTextPhase::StreamingPlainText
-        );
-        assert_eq!(
-            before_settle.next_text_phase_after,
-            Some(Duration::from_millis(1))
-        );
-
-        let settled = cache.resolve_at(
-            render_source("assistant:quiet", 2, "new revision", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY,
-        );
-        assert_eq!(settled.text_phase, StreamingTextPhase::SettlingMarkdown);
-        assert_eq!(settled.next_text_phase_after, None);
-
-        let stale = cache.resolve_at(
-            render_source("assistant:quiet", 1, "stale revision", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(1),
-        );
-        assert_eq!(stale.source_revision, 2);
-        assert_eq!(stale.text.as_ref(), "new revision");
-        assert_eq!(stale.text_phase, StreamingTextPhase::SettlingMarkdown);
-        assert_eq!(stale.markdown_state_key, settled.markdown_state_key);
-
-        let final_row = cache.resolve_at(
-            render_source("assistant:quiet", 3, "**final**", true),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(2),
-        );
-        assert_eq!(final_row.text_phase, StreamingTextPhase::FinalMarkdown);
-        assert_eq!(final_row.next_text_phase_after, None);
-        assert_ne!(final_row.markdown_state_key, settled.markdown_state_key);
-
-        let oversized = "x".repeat(MAX_SETTLING_MARKDOWN_BYTES + 1);
-        let oversized_row = cache.resolve_at(
-            render_source("assistant:oversized", 1, &oversized, false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY,
-        );
-        assert_eq!(
-            oversized_row.text_phase,
-            StreamingTextPhase::StreamingPlainText
-        );
-        assert_eq!(oversized_row.next_text_phase_after, None);
-    }
-
-    #[test]
-    fn settled_markdown_survives_later_streaming_revisions() {
-        let mut cache = ConversationRowRenderCache::default();
-        let started = Instant::now();
-        cache.begin_frame();
-        let streaming = cache.resolve_at(
-            render_source("assistant:bursty", 1, "# heading", false),
-            900,
-            started,
-        );
-        assert_eq!(streaming.text_phase, StreamingTextPhase::StreamingPlainText);
-
-        let settled = cache.resolve_at(
-            render_source("assistant:bursty", 1, "# heading", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY,
-        );
-        assert_eq!(settled.text_phase, StreamingTextPhase::SettlingMarkdown);
-
-        // Real streaming is bursty, so lulls past the settle delay happen many
-        // times per answer. Throwing the row back to raw text on the next delta
-        // reflowed heading sizes, code block padding and list indents every time.
-        let appended = cache.resolve_at(
-            render_source("assistant:bursty", 2, "# heading\n\nbody", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(1),
-        );
-        assert_eq!(appended.text_phase, StreamingTextPhase::SettlingMarkdown);
-        assert_eq!(appended.next_text_phase_after, None);
-        assert_eq!(appended.text.as_ref(), "# heading\n\nbody");
-
-        let completed = cache.resolve_at(
-            render_source("assistant:bursty", 3, "# heading\n\nbody", true),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(2),
-        );
-        assert_eq!(completed.text_phase, StreamingTextPhase::FinalMarkdown);
-    }
-
-    #[test]
-    fn oversized_streaming_rows_stay_on_the_plain_text_path() {
-        let mut cache = ConversationRowRenderCache::default();
-        let started = Instant::now();
-        cache.begin_frame();
-        cache.resolve_at(
-            render_source("assistant:huge", 1, "small", false),
-            900,
-            started,
-        );
-        let settled = cache.resolve_at(
-            render_source("assistant:huge", 1, "small", false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY,
-        );
-        assert_eq!(settled.text_phase, StreamingTextPhase::SettlingMarkdown);
-
-        // Growing past the byte bound is the one demotion left, and it is
-        // deliberate: the alternative is an unbounded synchronous parse. Rows
-        // that large are already beyond what settling can pay for.
-        let oversized = "x".repeat(MAX_SETTLING_MARKDOWN_BYTES + 1);
-        let dropped = cache.resolve_at(
-            render_source("assistant:huge", 2, &oversized, false),
-            900,
-            started + STREAMING_MARKDOWN_SETTLE_DELAY + Duration::from_millis(1),
-        );
-        assert_eq!(dropped.text_phase, StreamingTextPhase::StreamingPlainText);
-        assert_eq!(dropped.next_text_phase_after, None);
-    }
-
-    #[test]
     fn markdown_state_key_is_stable_across_streaming_revisions() {
         let mut cache = ConversationRowRenderCache::default();
         cache.begin_frame();
@@ -969,7 +598,7 @@ mod tests {
             render_source("assistant:key", 3, "partial update", true),
             900,
         );
-        assert_ne!(first.markdown_state_key, completed.markdown_state_key);
+        assert_eq!(first.markdown_state_key, completed.markdown_state_key);
     }
 
     #[test]

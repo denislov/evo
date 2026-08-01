@@ -152,11 +152,11 @@ pub mod api {
             CodingAgentProductEventProfileKind, CodingAgentProductEventReceiver,
             CodingAgentProductEventReplacement, CodingAgentProductEventTerminalOperation,
             CodingAgentProductEventTerminalOperationKind, CodingAgentProductEventTerminalStatus,
-            CodingAgentProductEventUsage, CodingAgentRecoveryResolution, CodingAgentRuntimeProductEvent,
-            CodingAgentSessionProductEvent, CodingAgentSessionWriteFailureStatus,
-            CodingAgentSubmittedEventDurability, CodingAgentTeamProductEvent,
-            CodingAgentToolProductEvent, CodingAgentWorkflowProductEvent,
-            PRODUCT_EVENT_PROTOCOL_VERSION,
+            CodingAgentProductEventUsage, CodingAgentRecoveryResolution,
+            CodingAgentRuntimeProductEvent, CodingAgentSessionProductEvent,
+            CodingAgentSessionWriteFailureStatus, CodingAgentSubmittedEventDurability,
+            CodingAgentTeamProductEvent, CodingAgentToolProductEvent,
+            CodingAgentWorkflowProductEvent, PRODUCT_EVENT_PROTOCOL_VERSION,
         };
     }
 

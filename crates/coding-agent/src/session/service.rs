@@ -2146,6 +2146,7 @@ impl SessionService {
     pub(crate) fn view(&self) -> CodingAgentSessionView {
         CodingAgentSessionView {
             session_id: self.session_id().to_owned(),
+            name: self.transaction_writer.manifest_snapshot().name,
             default_agent_profile_id: self.current_default_agent_profile_id(),
         }
     }

@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_use_product_identity_and_preserve_global_and_group_recent_order() {
+    fn groups_preserve_project_identity_and_collect_projectless_conversations() {
         let same_name_a = workspace(
             "project:a",
             CodingAgentWorkspaceKind::Project,
@@ -400,8 +400,14 @@ mod tests {
             "repo",
             Some("/workspace/b/repo"),
         );
-        let projectless = workspace(
+        let projectless_one = workspace(
             "projectless:one",
+            CodingAgentWorkspaceKind::Projectless,
+            "Projectless",
+            None,
+        );
+        let projectless_two = workspace(
+            "projectless:two",
             CodingAgentWorkspaceKind::Projectless,
             "Projectless",
             None,
@@ -418,7 +424,8 @@ mod tests {
                 entry("a-new", Some("A new"), "05", same_name_a.clone()),
                 entry("b-only", Some("B"), "04", same_name_b),
                 entry("a-old", Some("A old"), "03", same_name_a),
-                entry("no-project", None, "02", projectless),
+                entry("no-project-new", None, "02", projectless_one),
+                entry("no-project-old", None, "015", projectless_two),
                 entry("legacy", None, "01", legacy),
             ],
             0,
@@ -433,7 +440,7 @@ mod tests {
             [
                 "project:a",
                 "project:b",
-                "projectless:one",
+                crate::application::catalog::PROJECTLESS_CONVERSATIONS_GROUP_ID,
                 "legacy:unscoped"
             ]
         );
@@ -456,6 +463,14 @@ mod tests {
         assert_eq!(
             groups[2].workspace.kind,
             CodingAgentWorkspaceKind::Projectless
+        );
+        assert_eq!(
+            groups[2]
+                .sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["no-project-new", "no-project-old"]
         );
         assert_eq!(groups[3].workspace.kind, CodingAgentWorkspaceKind::Legacy);
     }

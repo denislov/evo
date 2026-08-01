@@ -1,29 +1,9 @@
 use crate::app::native_shell::{
-    Context, ConversationRefresh, ConversationRowMeasurement, ConversationSource, DesktopModalKind,
-    DesktopTimerKind, FocusTarget, NativeShell, UiChangeSet, UiRegion, Window,
+    Context, ConversationSource, DesktopModalKind, FocusTarget, NativeShell, UiChangeSet, UiRegion,
+    Window,
 };
 
 impl NativeShell {
-    pub(super) fn submit_conversation_row_measurement(
-        &mut self,
-        measurement: &ConversationRowMeasurement,
-        cx: &mut Context<Self>,
-    ) {
-        let workspace = &mut self.app.workspaces.active_mut();
-        let Some(projection) = workspace.projection.as_ref() else {
-            return;
-        };
-        let source = ConversationSource::new(projection, workspace.composer.submitted());
-        let outcome = workspace
-            .presentation
-            .conversation_controller
-            .submit_row_measurement(&source, measurement);
-        self.schedule_conversation_height_refresh(outcome.refresh, cx);
-        if outcome.pane_dirty {
-            self.refresh_views(UiChangeSet::one(UiRegion::Conversation), cx);
-        }
-    }
-
     pub(super) fn refresh_conversation_rows_at_width(
         &mut self,
         layout_width: u32,
@@ -43,14 +23,13 @@ impl NativeShell {
                 .active_width_bucket()
                 != Some(layout_width);
         let source = ConversationSource::new(projection, workspace.composer.submitted());
-        let refresh = workspace
+        workspace
             .presentation
             .conversation_controller
             .prepare_rows(&source, layout_width);
         if pane_dirty {
             self.refresh_views(UiChangeSet::one(UiRegion::Conversation), cx);
         }
-        self.schedule_conversation_height_refresh(refresh, cx);
     }
 
     pub(super) fn refresh_conversation_rows_at_current_width(
@@ -69,38 +48,6 @@ impl NativeShell {
         };
         self.refresh_conversation_rows_at_width(layout_width, cx);
         true
-    }
-
-    pub(super) fn schedule_conversation_height_refresh(
-        &mut self,
-        refresh: ConversationRefresh,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((delay, _deadline)) = self
-            .app
-            .workspaces
-            .active_mut()
-            .presentation
-            .conversation_controller
-            .arm_height_refresh(refresh)
-        else {
-            return;
-        };
-        let owner = self.app.workspaces.active_key().clone();
-        match self.connection.controller.schedule_timer(
-            owner,
-            DesktopTimerKind::ConversationHeightRefresh,
-            delay,
-        ) {
-            Ok(transition) => self.apply_transition(transition, cx),
-            Err(error) => {
-                self.app
-                    .workspaces
-                    .active_mut()
-                    .set_preference_notice(error.to_string());
-                self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
-            }
-        }
     }
 
     pub(in crate::app) fn focus_composer_input(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -123,6 +70,7 @@ impl NativeShell {
                     self.ui.command_palette_focus.focus(window, cx);
                 }
                 Some(DesktopModalKind::FullMessage) => self.ui.full_message_focus.focus(window, cx),
+                Some(DesktopModalKind::Search) => self.ui.search_focus.focus(window, cx),
                 None => self.focus_composer_input(window, cx),
             },
         }

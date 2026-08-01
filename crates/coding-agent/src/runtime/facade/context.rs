@@ -144,6 +144,7 @@ impl CodingAgentSessionOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingAgentSessionView {
     pub session_id: String,
+    pub name: Option<String>,
     pub default_agent_profile_id: ProfileId,
 }
 

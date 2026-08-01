@@ -265,6 +265,74 @@ fn projects_local_empty_omitted_and_legacy_states_are_explicit(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn projectless_sessions_share_a_conversations_section_and_projects_offer_new_conversation(
+    cx: &mut TestAppContext,
+) {
+    initialize_visual_test(cx);
+    let (shell, cx) = add_idle_visual_shell(cx);
+    let project_path = PathBuf::from("/work/catalog-project");
+    shell.update(cx, |shell, cx| {
+        let projectless_workspace =
+            |group_id: &str| coding_agent::api::view::CodingAgentWorkspaceOverview {
+                group_id: group_id.into(),
+                kind: coding_agent::api::view::CodingAgentWorkspaceKind::Projectless,
+                display_name: "Projectless".into(),
+                display_path: None,
+            };
+        let project_workspace = coding_agent::api::view::CodingAgentWorkspaceOverview {
+            group_id: "project:catalog".into(),
+            kind: coding_agent::api::view::CodingAgentWorkspaceKind::Project,
+            display_name: "catalog-project".into(),
+            display_path: Some(project_path.clone()),
+        };
+        shell.app.catalog.replace_catalog(
+            vec![
+                desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id: "conversation-a".into(),
+                    workspace: projectless_workspace("projectless:session-a"),
+                    ..Default::default()
+                },
+                desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id: "conversation-b".into(),
+                    workspace: projectless_workspace("projectless:session-b"),
+                    ..Default::default()
+                },
+                desktop::runtime::DesktopSessionCatalogEntry {
+                    session_id: "project-session".into(),
+                    workspace: project_workspace,
+                    ..Default::default()
+                },
+            ],
+            0,
+        );
+        shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
+    });
+
+    cx.simulate_resize(size(px(1_300.), px(900.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("desktop-conversations-section").is_some());
+    assert!(cx.debug_bounds("desktop-conversation-sessions").is_some());
+    assert!(cx.debug_bounds("desktop-session-row-0").is_some());
+    assert!(cx.debug_bounds("desktop-session-row-1").is_some());
+    assert!(cx.debug_bounds("desktop-project-row-0").is_none());
+    assert!(cx.debug_bounds("desktop-project-row-1").is_some());
+    let new_project_conversation = cx
+        .debug_bounds("desktop-hit-new-project-conversation-1")
+        .expect("each project row exposes a direct new-conversation action");
+    cx.simulate_click(
+        new_project_conversation.center(),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+
+    assert!(shell.read_with(cx, |shell, _| {
+        shell.app.workspaces.active_key() == &WorkspaceKey::Home
+            && shell.app.workspaces.active().draft_workspace_selection
+                == CodingAgentWorkspaceSelection::project(project_path.clone())
+    }));
+}
+
+#[gpui::test]
 fn projects_tree_disclosure_preserves_order_at_minimum_width_and_in_drawer(
     cx: &mut TestAppContext,
 ) {
@@ -628,7 +696,8 @@ fn idle_sessions_drawer_renders_new_conversation_skills_and_history(cx: &mut Tes
     assert!(cx.debug_bounds("desktop-projects-section").is_some());
     assert!(cx.debug_bounds("desktop-project-row-0").is_some());
     assert!(cx.debug_bounds("desktop-session-row-0").is_some());
-    assert!(cx.debug_bounds("sessions-search").is_some());
+    assert!(cx.debug_bounds("desktop-hit-global-search").is_some());
+    assert!(cx.debug_bounds("sessions-search").is_none());
     assert_eq!(
         shell.read_with(cx, |shell, _| shell.ui.active_drawer),
         Some(CenterDrawerKind::Sessions)

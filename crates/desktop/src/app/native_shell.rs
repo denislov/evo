@@ -12,8 +12,8 @@ use desktop::runtime::{
     DesktopRuntimeSelectionKind, validate_prompt_attachments,
 };
 use desktop::ui::conversation::{
-    ComposerState, ComposerSubmissionKind, ConversationBlockKind, ConversationRowMeasurement,
-    DelegationStatus, MAX_COPY_BYTES, conversation_copy_text, conversation_width_bucket,
+    ComposerState, ComposerSubmissionKind, ConversationBlockKind, DelegationStatus, MAX_COPY_BYTES,
+    conversation_copy_text, conversation_width_bucket,
 };
 use desktop::ui::shell::{
     CONTEXT_PANEL_MAX_WIDTH, CONTEXT_PANEL_MIN_WIDTH, CONTEXT_PANEL_WIDTH,
@@ -38,7 +38,7 @@ use crate::actions::{
     ToggleSelectedConversationDetails, TrapOverlayFocus,
 };
 use crate::application::{
-    catalog::ProjectCatalogController,
+    catalog::{ProjectCatalogController, ProjectCatalogState},
     change_set::{UiChangeSet, UiRegion},
     commands::{CommandTracker, DesktopCommandIntent},
     effect::{
@@ -222,6 +222,7 @@ pub(crate) enum DesktopModalKind {
     Authorization,
     CommandPalette,
     FullMessage,
+    Search,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,6 +389,7 @@ impl NativeShell {
         let authorization_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let command_palette_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let full_message_focus = cx.focus_handle().tab_stop(true).tab_index(6);
+        let search_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let conversation_pane = cx.new(|_| ConversationPane::new());
         let conversation_header = cx.new(|_| ConversationHeader::new(center_header_focus.clone()));
         let sessions_pane = cx.new(|cx| SessionsPane::new(sidebar_focus.clone(), window, cx));
@@ -396,11 +398,14 @@ impl NativeShell {
         let skills_pane = cx.new(|_| SkillsPane::new());
         let inspector_pane = cx.new(|cx| InspectorPane::new(inspector_focus.clone(), cx));
         let toast_host = cx.new(|cx| ToastHost::new(window, cx));
-        let root_modal_host = cx.new(|_| {
+        let root_modal_host = cx.new(|cx| {
             RootModalHost::new(
                 authorization_focus.clone(),
                 command_palette_focus.clone(),
                 full_message_focus.clone(),
+                search_focus.clone(),
+                window,
+                cx,
             )
         });
         let center_drawer_host =
@@ -565,6 +570,7 @@ impl NativeShell {
                 authorization_focus,
                 command_palette_focus,
                 full_message_focus,
+                search_focus,
             ),
         };
         debug_assert!(shell.views.subscription_count() > 0);
@@ -593,6 +599,9 @@ impl NativeShell {
     ) {
         match intent {
             UiIntent::Navigate(target) => self.navigate_center(target, window, cx),
+            UiIntent::NewConversationForProject(path) => {
+                self.show_project_home_workspace(path, window, cx)
+            }
             UiIntent::RefreshSessions => self.request_session_catalog(cx),
             UiIntent::SetProjectCollapsed {
                 group_id,
@@ -628,6 +637,15 @@ impl NativeShell {
                 self.rename_session(session_id, name, cx);
             }
             UiIntent::CloseSession(session_id) => self.close_session(&session_id, cx),
+            UiIntent::OpenSearch => {
+                if matches!(self.app.catalog.state(), ProjectCatalogState::NotLoaded) {
+                    self.request_session_catalog(cx);
+                }
+                self.activate_modal(DesktopModalKind::Search, window, cx);
+                self.views.root_modal_host.update(cx, |host, cx| {
+                    host.open_search(window, cx);
+                });
+            }
             UiIntent::DismissDrawer => self.dismiss_drawer(window, cx, true),
             UiIntent::ToggleSessions => self.toggle_sessions(window, cx),
             UiIntent::ToggleInspector => self.toggle_context(window, cx),
@@ -693,9 +711,6 @@ impl NativeShell {
             UiIntent::Recovery { identity, action } => {
                 self.submit_recovery_action(identity, action, cx);
             }
-            UiIntent::ConversationMeasured(measurement) => {
-                self.submit_conversation_row_measurement(&measurement, cx);
-            }
             UiIntent::FollowLatest => self.follow_latest(cx),
             UiIntent::RequestFileReview(request) => self.request_file_review(request, cx),
             UiIntent::CopyReviewPath => self.copy_review_path(cx),
@@ -727,6 +742,11 @@ impl NativeShell {
                 }
             }
             UiIntent::CloseFullMessage => self.close_full_conversation_message(window, cx),
+            UiIntent::NavigateSearch(session_id) => {
+                self.dismiss_modal(window, cx);
+                self.navigate_center(CenterNavigationTarget::Session(session_id), window, cx);
+            }
+            UiIntent::CloseSearch => self.dismiss_modal(window, cx),
         }
     }
 
@@ -803,6 +823,28 @@ impl NativeShell {
         self.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
         self.refresh_views(UiChangeSet::one(UiRegion::Modal), cx);
         cx.notify();
+    }
+
+    fn show_project_home_workspace(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let home = WorkspaceKey::Home;
+        let Some(workspace) = self.app.workspaces.get_mut(&home) else {
+            return;
+        };
+        if !workspace.project_directory_editable() {
+            workspace.set_preference_notice(
+                "The new conversation is still being prepared; try again when it is idle.".into(),
+            );
+            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
+            cx.notify();
+            return;
+        }
+        workspace.draft_workspace_selection = CodingAgentWorkspaceSelection::project(path);
+        self.show_home_workspace(window, cx);
     }
 
     fn open_workspace_count(&self) -> usize {
@@ -1018,8 +1060,7 @@ mod tests;
 
 use crate::ui::conversation::composer_pane::{ComposerPane, ComposerPaneEvent};
 use crate::ui::conversation::controller::{
-    ConversationController, ConversationRefresh, ConversationSource,
-    RESIZE_DEBOUNCE as CONVERSATION_RESIZE_DEBOUNCE,
+    ConversationController, ConversationSource, RESIZE_DEBOUNCE as CONVERSATION_RESIZE_DEBOUNCE,
     message_block_id as message_conversation_block_id, tool_block_id as tool_conversation_block_id,
 };
 use crate::ui::conversation::header::{ConversationHeader, ConversationHeaderEvent};

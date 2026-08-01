@@ -67,15 +67,6 @@ impl PlatformUpdatePort for NativeShell {
         self.ui.clear_conversation_announcement(owner)
     }
 
-    fn fire_conversation_height_refresh(&mut self, owner: &WorkspaceKey) -> bool {
-        self.app.workspaces.get_mut(owner).is_some_and(|workspace| {
-            workspace
-                .presentation
-                .conversation_controller
-                .fire_current_height_refresh()
-        })
-    }
-
     fn commit_conversation_width(&mut self, owner: &WorkspaceKey) -> bool {
         self.app.workspaces.get_mut(owner).is_some_and(|workspace| {
             workspace

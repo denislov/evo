@@ -4,17 +4,24 @@ use coding_agent::api::authorization::{
 };
 use desktop::ui::shell::{DESKTOP_OVERLAY_SCRIM_RGBA, MONOSPACE_FONT_FAMILY, SemanticTheme};
 use gpui::{
-    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, SharedString,
-    Styled as _, Window, div, prelude::*, px, rgb, rgba,
+    EventEmitter, FocusHandle, Focusable as _, IntoElement, ParentElement as _, Render, Role,
+    SharedString, Styled as _, Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
-use gpui_component::{Selectable as _, button::Button};
+use gpui_component::{
+    Icon, Selectable as _, Sizable as _,
+    button::Button,
+    input::{Input, InputEvent, InputState},
+};
 use std::sync::Arc;
 
 use super::ShellUiState;
 use crate::actions::{self, DesktopPaletteCommand, PALETTE_ENTRIES};
 use crate::app::native_shell::{ConversationFullMessageView, NativeDesktopState};
 use crate::ui::components::{
-    controls::{DesktopCriticalButton, DesktopCriticalTone},
+    controls::{
+        DesktopActionRow, DesktopCriticalButton, DesktopCriticalTone, DesktopIcon,
+        DesktopIconButton, DesktopRowState,
+    },
     style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 
@@ -23,6 +30,8 @@ pub(crate) enum RootModalHostEvent {
     ExecutePalette(DesktopPaletteCommand),
     CopyFullMessage,
     CloseFullMessage,
+    NavigateSearch(String),
+    CloseSearch,
     DecideAuthorization {
         identity: ToolAuthorizationIdentity,
         decision: ToolAuthorizationDecision,
@@ -41,6 +50,21 @@ pub(crate) struct RootModalViewModel {
     pub(crate) palette_selected: usize,
     pub(crate) authorization: Option<RootModalAuthorizationView>,
     pub(crate) full_message: Option<ConversationFullMessageView>,
+    pub(crate) search_open: bool,
+    pub(crate) search_loading: bool,
+    pub(crate) search_sessions: Arc<[GlobalSearchSession]>,
+    pub(crate) active_session_id: Arc<str>,
+}
+
+/// One result category in the global search surface.
+///
+/// Keeping the dialog model independent from the sidebar tree means settings
+/// and other searchable resources can be added as sibling categories later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GlobalSearchSession {
+    pub(crate) session_id: Arc<str>,
+    pub(crate) name: Arc<str>,
+    pub(crate) workspace: Arc<str>,
 }
 
 pub(crate) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> RootModalViewModel {
@@ -64,11 +88,48 @@ pub(crate) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> RootMod
                 decision_pending,
             }
         });
+    let active_session_id = app
+        .workspaces
+        .active()
+        .projection
+        .as_ref()
+        .map(|projection| projection.snapshot().session.session_id.as_str())
+        .unwrap_or_default();
+    let search_sessions = app
+        .catalog
+        .project_groups()
+        .into_iter()
+        .flat_map(|group| {
+            let workspace: Arc<str> =
+                Arc::from(if group.workspace.display_name.trim().is_empty() {
+                    "No project".to_owned()
+                } else {
+                    group.workspace.display_name
+                });
+            group
+                .sessions
+                .into_iter()
+                .map(move |session| GlobalSearchSession {
+                    session_id: Arc::from(session.session_id),
+                    name: Arc::from(
+                        session
+                            .name
+                            .filter(|name| !name.trim().is_empty())
+                            .unwrap_or_else(|| "Untitled".into()),
+                    ),
+                    workspace: Arc::clone(&workspace),
+                })
+        })
+        .collect::<Vec<_>>();
     RootModalViewModel {
         palette_open: ui.command_palette.is_open(),
         palette_selected: ui.command_palette.selected(),
         authorization,
         full_message: ui.conversation_full_message.clone(),
+        search_open: ui.active_modal == Some(crate::app::native_shell::DesktopModalKind::Search),
+        search_loading: app.catalog.state().is_loading(),
+        search_sessions: search_sessions.into(),
+        active_session_id: Arc::from(active_session_id),
     }
 }
 
@@ -76,7 +137,10 @@ pub(crate) struct RootModalHost {
     authorization_focus: FocusHandle,
     command_palette_focus: FocusHandle,
     full_message_focus: FocusHandle,
+    search_focus: FocusHandle,
+    search_input: gpui::Entity<InputState>,
     view_model: Option<RootModalViewModel>,
+    _search_subscription: Subscription,
 }
 
 impl RootModalHost {
@@ -84,17 +148,63 @@ impl RootModalHost {
         authorization_focus: FocusHandle,
         command_palette_focus: FocusHandle,
         full_message_focus: FocusHandle,
+        search_focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
     ) -> Self {
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search sessions, settings, and more…")
+        });
+        let search_subscription = cx.subscribe_in(
+            &search_input,
+            window,
+            |this, input, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => {
+                    let query = input.read(cx).value();
+                    if let Some(session) = this.view_model.as_ref().and_then(|view_model| {
+                        filtered_search_sessions(&view_model.search_sessions, &query)
+                            .into_iter()
+                            .next()
+                    }) {
+                        cx.emit(RootModalHostEvent::NavigateSearch(
+                            session.session_id.to_string(),
+                        ));
+                    }
+                }
+                _ => {}
+            },
+        );
         Self {
             authorization_focus,
             command_palette_focus,
             full_message_focus,
+            search_focus,
+            search_input,
             view_model: None,
+            _search_subscription: search_subscription,
         }
     }
 
     pub(crate) fn set_view_model(&mut self, view_model: RootModalViewModel) {
         self.view_model = Some(view_model);
+    }
+
+    pub(crate) fn open_search(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        self.search_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.search_input.focus_handle(cx).focus(window, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_search_value(
+        &mut self,
+        value: &str,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.search_input
+            .update(cx, |input, cx| input.set_value(value, window, cx));
     }
 }
 
@@ -106,6 +216,34 @@ impl Render for RootModalHost {
             return div().into_any_element();
         };
         let theme = SemanticTheme::current(cx);
+        let search_input = self.search_input.clone();
+        let search_query = search_input.read(cx).value().to_string();
+        let search_results = filtered_search_sessions(&view_model.search_sessions, &search_query);
+        let search_result_count = search_results.len();
+        let search_rows = search_results
+            .into_iter()
+            .enumerate()
+            .map(|(index, session)| {
+                let target = session.session_id.to_string();
+                DesktopActionRow::new(
+                    ("global-search-session", index),
+                    session.name.to_string(),
+                    format!("Open session {} in {}", session.name, session.workspace),
+                )
+                .state(DesktopRowState {
+                    selected: session.session_id == view_model.active_session_id,
+                    disabled: false,
+                    focus_visible: false,
+                })
+                .detail(format!("{} · {}", session.workspace, session.session_id))
+                .selection_background_only()
+                .build(theme)
+                .debug_selector(move || format!("desktop-global-search-session-{index}"))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(RootModalHostEvent::NavigateSearch(target.clone()));
+                }))
+            })
+            .collect::<Vec<_>>();
         let palette_rows = PALETTE_ENTRIES
             .iter()
             .enumerate()
@@ -184,6 +322,105 @@ impl Render for RootModalHost {
                                 .role(Role::List)
                                 .aria_label("Available commands")
                                 .children(palette_rows),
+                        ),
+                )
+        });
+        let search_overlay = view_model.search_open.then(|| {
+            overlay_surface("global-search-overlay", &self.search_focus)
+                .role(Role::Dialog)
+                .aria_label("Search Evo")
+                .aria_description(
+                    "Search every session. Additional categories such as settings can be added here.",
+                )
+                .child(
+                    div()
+                        .id("global-search-dialog")
+                        .debug_selector(|| "desktop-global-search-dialog".to_owned())
+                        .w_full()
+                        .max_w(px(720.))
+                        .max_h(max_height)
+                        .overflow_hidden()
+                        .rounded_token(DesignRadius::Lg)
+                        .border_1()
+                        .border_color(rgb(theme.focus_ring.value()))
+                        .bg(rgb(theme.elevated.value()))
+                        .p_token(DesignSpace::Lg)
+                        .flex()
+                        .flex_col()
+                        .gap_token(DesignSpace::Md)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_token(DesignSpace::Md)
+                                .child(
+                                    div()
+                                        .text_token(DesignText::Title)
+                                        .text_color(rgb(theme.text.value()))
+                                        .child("Search"),
+                                )
+                                .child(
+                                    DesktopIconButton::new(
+                                        "close-global-search",
+                                        DesktopIcon::Close,
+                                        "Close search · Escape",
+                                    )
+                                    .build()
+                                    .debug_selector(|| "desktop-close-global-search".into())
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(RootModalHostEvent::CloseSearch);
+                                    })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("global-search-input")
+                                .role(Role::Search)
+                                .aria_label("Search all sessions")
+                                .child(
+                                    Input::new(&search_input)
+                                        .role(Role::SearchInput)
+                                        .prefix(Icon::new(DesktopIcon::Search.name()).small())
+                                        .appearance(false),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .text_token(DesignText::Metadata)
+                                .text_color(rgb(theme.muted_text.value()))
+                                .child("SESSIONS")
+                                .child(format!("{search_result_count} results")),
+                        )
+                        .child(
+                            div()
+                                .id("global-search-results")
+                                .role(Role::List)
+                                .aria_label("Session search results")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap_token(DesignSpace::Xs)
+                                .when(search_result_count == 0, |results| {
+                                    results.child(
+                                        div()
+                                            .id("global-search-empty")
+                                            .role(Role::Status)
+                                            .p_token(DesignSpace::Lg)
+                                            .text_color(rgb(theme.muted_text.value()))
+                                            .child(if view_model.search_loading {
+                                                "Loading sessions…"
+                                            } else {
+                                                "No sessions match this search."
+                                            }),
+                                    )
+                                })
+                                .children(search_rows),
                         ),
                 )
         });
@@ -400,10 +637,29 @@ impl Render for RootModalHost {
             .absolute()
             .size_full()
             .children(command_palette_overlay)
+            .children(search_overlay)
             .children(full_message_overlay)
             .children(authorization_overlay)
             .into_any_element()
     }
+}
+
+fn filtered_search_sessions<'a>(
+    sessions: &'a [GlobalSearchSession],
+    query: &str,
+) -> Vec<&'a GlobalSearchSession> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return sessions.iter().collect();
+    }
+    sessions
+        .iter()
+        .filter(|session| {
+            session.name.to_lowercase().contains(&query)
+                || session.session_id.to_lowercase().contains(&query)
+                || session.workspace.to_lowercase().contains(&query)
+        })
+        .collect()
 }
 
 fn overlay_surface(id: &'static str, focus: &gpui::FocusHandle) -> gpui::Stateful<gpui::Div> {
@@ -532,5 +788,32 @@ fn authorization_scope_text(scope: &ToolAuthorizationScope) -> String {
         ToolAuthorizationScope::ToolArguments { fingerprint } => {
             format!("tool arguments · {fingerprint}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn search_session(id: &str, name: &str, workspace: &str) -> GlobalSearchSession {
+        GlobalSearchSession {
+            session_id: Arc::from(id),
+            name: Arc::from(name),
+            workspace: Arc::from(workspace),
+        }
+    }
+
+    #[test]
+    fn global_search_matches_every_session_field_case_insensitively() {
+        let sessions = [
+            search_session("session-alpha", "Fix Parser", "Compiler"),
+            search_session("session-beta", "Write docs", "Website"),
+        ];
+
+        assert_eq!(filtered_search_sessions(&sessions, "parser").len(), 1);
+        assert_eq!(filtered_search_sessions(&sessions, "SESSION-BETA").len(), 1);
+        assert_eq!(filtered_search_sessions(&sessions, "compiler").len(), 1);
+        assert_eq!(filtered_search_sessions(&sessions, "").len(), 2);
+        assert!(filtered_search_sessions(&sessions, "settings").is_empty());
     }
 }

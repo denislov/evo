@@ -292,6 +292,7 @@ impl NativeShell {
                 DesktopModalKind::FullMessage => {
                     self.close_full_conversation_message(window, cx);
                 }
+                DesktopModalKind::Search => self.dismiss_modal(window, cx),
             }
             return;
         }

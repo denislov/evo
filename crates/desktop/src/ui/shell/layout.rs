@@ -83,6 +83,7 @@ pub const DESKTOP_DESIGN_TOKENS: DesktopDesignTokens = DesktopDesignTokens {
 };
 
 /// Vertical space owned by the virtual transcript row outside the measured card.
+#[cfg(test)]
 pub const CONVERSATION_ROW_VERTICAL_PADDING_PX: u32 = DESKTOP_DESIGN_TOKENS.spacing.xs * 2;
 pub const DESKTOP_OVERLAY_SCRIM_RGBA: u32 = 0x0b0e_14dd;
 

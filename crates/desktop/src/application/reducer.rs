@@ -284,7 +284,6 @@ pub(crate) trait PlatformUpdatePort {
     fn set_notice(&mut self, owner: &WorkspaceKey, notice: String);
     fn show_conversation_announcement(&mut self, owner: &WorkspaceKey, message: String);
     fn clear_conversation_announcement(&mut self, owner: &WorkspaceKey) -> bool;
-    fn fire_conversation_height_refresh(&mut self, owner: &WorkspaceKey) -> bool;
     fn commit_conversation_width(&mut self, owner: &WorkspaceKey) -> bool;
     fn refresh_inspector_telemetry(&mut self, owner: &WorkspaceKey) -> bool;
     fn complete_resync_admission(
@@ -1748,9 +1747,6 @@ fn reduce_timer_result(port: &mut impl PlatformUpdatePort, timer: DesktopTimer) 
         DesktopTimerKind::ConversationAnnouncement => {
             (port.clear_conversation_announcement(owner), UiRegion::Root)
         }
-        DesktopTimerKind::ConversationHeightRefresh => {
-            (port.fire_conversation_height_refresh(owner), UiRegion::Root)
-        }
         DesktopTimerKind::ConversationWidthCommit => {
             (port.commit_conversation_width(owner), UiRegion::Root)
         }
@@ -1898,10 +1894,6 @@ mod tests {
             } else {
                 false
             }
-        }
-
-        fn fire_conversation_height_refresh(&mut self, _owner: &WorkspaceKey) -> bool {
-            self.record_timer(DesktopTimerKind::ConversationHeightRefresh)
         }
 
         fn commit_conversation_width(&mut self, _owner: &WorkspaceKey) -> bool {
@@ -2192,7 +2184,7 @@ mod tests {
         let first = controller
             .schedule_timer(
                 owner.clone(),
-                DesktopTimerKind::ConversationHeightRefresh,
+                DesktopTimerKind::ConversationWidthCommit,
                 Duration::from_millis(10),
             )
             .unwrap();
@@ -2203,7 +2195,7 @@ mod tests {
         let second = controller
             .schedule_timer(
                 owner.clone(),
-                DesktopTimerKind::ConversationHeightRefresh,
+                DesktopTimerKind::ConversationWidthCommit,
                 Duration::from_millis(10),
             )
             .unwrap();
@@ -2220,7 +2212,7 @@ mod tests {
         let current = controller.reduce_async(&mut port, DesktopEvent::Timer(second_timer));
         assert!(current.changes().contains(UiRegion::Root));
         assert_eq!(
-            port.timer_fires[&DesktopTimerKind::ConversationHeightRefresh],
+            port.timer_fires[&DesktopTimerKind::ConversationWidthCommit],
             1
         );
     }

@@ -298,8 +298,7 @@ async fn dispatch_command_inner(
                 // cannot be switched mid-session.
                 DesktopRuntimeOwnerTarget::Session { .. } => {
                     return Err(DesktopBridgeError::SessionTarget {
-                        message:
-                            "the session profile is locked to its creation choice".into(),
+                        message: "the session profile is locked to its creation choice".into(),
                     });
                 }
             };

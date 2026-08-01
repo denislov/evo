@@ -42,7 +42,6 @@ pub(crate) enum DesktopPickerKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DesktopTimerKind {
     ConversationAnnouncement,
-    ConversationHeightRefresh,
     ConversationWidthCommit,
     InspectorTelemetryRefresh,
 }

@@ -220,6 +220,7 @@ fn visual_test_snapshot_for(session_id: &str) -> desktop::runtime::DesktopRuntim
             version: UI_SNAPSHOT_PROTOCOL_VERSION,
             session: CodingAgentSessionView {
                 session_id: session_id.clone(),
+                name: None,
                 default_agent_profile_id: ProfileId::from("default"),
             },
             capabilities: CodingAgentCapabilities::idle(false),

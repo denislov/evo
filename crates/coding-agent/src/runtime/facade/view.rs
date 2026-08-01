@@ -85,6 +85,7 @@ impl CodingAgentSession {
             SessionPersistence::Persistent(session_service) => session_service.view(),
             SessionPersistence::NonPersistent(state) => CodingAgentSessionView {
                 session_id: state.runtime_id.clone(),
+                name: None,
                 default_agent_profile_id: state.default_agent_profile_id.clone(),
             },
         }

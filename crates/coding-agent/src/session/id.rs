@@ -23,7 +23,7 @@ pub(crate) struct SystemIdGenerator;
 
 impl IdGenerator for SystemIdGenerator {
     fn next_session_id(&mut self) -> String {
-        prefixed_id("sess")
+        new_session_id()
     }
 
     fn next_event_id(&mut self) -> String {
@@ -75,6 +75,10 @@ impl Clock for SystemClock {
 
 fn prefixed_id(prefix: &str) -> String {
     format!("{prefix}_{}", create_session_id())
+}
+
+pub(crate) fn new_session_id() -> String {
+    prefixed_id("sess")
 }
 
 pub(crate) fn new_product_event_stream_id() -> String {

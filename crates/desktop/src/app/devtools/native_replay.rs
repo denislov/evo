@@ -1038,6 +1038,7 @@ fn hydrated_snapshot(
             version: UI_SNAPSHOT_PROTOCOL_VERSION,
             session: CodingAgentSessionView {
                 session_id,
+                name: None,
                 default_agent_profile_id: ProfileId::from("default"),
             },
             capabilities: CodingAgentCapabilities::idle(false),

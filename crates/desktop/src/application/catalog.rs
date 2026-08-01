@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use coding_agent::api::view::CodingAgentWorkspaceOverview;
+use coding_agent::api::view::{CodingAgentWorkspaceKind, CodingAgentWorkspaceOverview};
 use desktop::runtime::{DesktopSessionCatalogEntry, MAX_DESKTOP_SESSION_CATALOG};
+
+pub(crate) const PROJECTLESS_CONVERSATIONS_GROUP_ID: &str = "projectless:conversations";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProjectCatalogState {
@@ -106,14 +108,16 @@ impl ProjectCatalogController {
         let mut group_indexes = HashMap::<String, usize>::new();
         let mut groups = Vec::<ProjectCatalogGroup>::new();
         for session in &self.catalog {
-            let group_id = session.workspace.group_id.clone();
+            let group_id = catalog_group_id(session);
             let group_index = match group_indexes.get(&group_id).copied() {
                 Some(index) => index,
                 None => {
                     let index = groups.len();
                     group_indexes.insert(group_id.clone(), index);
+                    let mut workspace = session.workspace.clone();
+                    workspace.group_id = group_id.clone();
                     groups.push(ProjectCatalogGroup {
-                        workspace: session.workspace.clone(),
+                        workspace,
                         sessions: Vec::new(),
                         collapsed: self.collapsed_group_ids.contains(&group_id),
                     });
@@ -147,7 +151,7 @@ impl ProjectCatalogController {
         if !self
             .catalog
             .iter()
-            .any(|session| session.workspace.group_id == group_id)
+            .any(|session| catalog_group_id(session) == group_id)
         {
             return false;
         }
@@ -233,6 +237,14 @@ impl ProjectCatalogController {
             | ProjectCatalogState::Ready
             | ProjectCatalogState::Stale { .. } => {}
         }
+    }
+}
+
+fn catalog_group_id(session: &DesktopSessionCatalogEntry) -> String {
+    if session.workspace.kind == CodingAgentWorkspaceKind::Projectless {
+        PROJECTLESS_CONVERSATIONS_GROUP_ID.to_owned()
+    } else {
+        session.workspace.group_id.clone()
     }
 }
 
