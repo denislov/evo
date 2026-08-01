@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::model::Model;
-use crate::protocol::stream::EventStream;
-use crate::protocol::{Context, StreamOptions};
+use crate::protocol::stream::{EventStream, complete};
+use crate::protocol::{AssistantMessage, Context, StreamOptions};
 use crate::providers;
 use crate::registry::{
     ApiProvider, EnvProviderAuthResolver, ProviderAuthResolver, ProviderRegistry,
@@ -70,5 +70,53 @@ impl AiClient {
     ) -> EventStream {
         self.registry
             .stream_model_with_auth(model, ctx, opts, self.auth_resolver.as_ref())
+    }
+
+    /// Execute a model request and collect its stream into one terminal message.
+    ///
+    /// Providers retain one streaming implementation and this convenience API
+    /// gives non-incremental consumers a complete response without duplicating
+    /// provider transports or parsing state machines.
+    pub async fn complete_model(
+        &self,
+        model: &Model,
+        ctx: Context,
+        opts: Option<StreamOptions>,
+    ) -> Result<AssistantMessage, String> {
+        complete(self.stream_model(model, ctx, opts)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AiClient;
+    use crate::protocol::{ContentBlock, Context};
+    use crate::providers::faux::FauxProvider;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn complete_model_collects_the_registered_provider_stream() {
+        let client = AiClient::new();
+        client.register_provider("test-faux", Arc::new(FauxProvider::simple_text("complete")));
+        let mut model =
+            crate::model::get_model("deepseek", "deepseek-v4-flash").expect("catalog model exists");
+        model.api = "test-faux".into();
+
+        let message = client
+            .complete_model(
+                &model,
+                Context {
+                    system_prompt: None,
+                    messages: Vec::new(),
+                    tools: None,
+                },
+                None,
+            )
+            .await
+            .expect("stream completes");
+        assert!(matches!(
+            message.content.as_slice(),
+            [ContentBlock::Text { text, .. }] if text == "complete"
+        ));
     }
 }

@@ -2730,6 +2730,7 @@ fn text_from_persisted_content(content: &[PersistedContentBlock]) -> String {
             PersistedContentBlock::Text { text } => Some(text.trim()),
             PersistedContentBlock::Thinking { thinking, .. } => Some(thinking.trim()),
             PersistedContentBlock::Image { .. } => None,
+            PersistedContentBlock::ProviderItem { .. } => None,
         })
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
@@ -2921,7 +2922,8 @@ fn persisted_content_blocks_text(
         .filter_map(|block| match block {
             crate::session::event::PersistedContentBlock::Text { text } => Some(text.clone()),
             crate::session::event::PersistedContentBlock::Thinking { .. }
-            | crate::session::event::PersistedContentBlock::Image { .. } => None,
+            | crate::session::event::PersistedContentBlock::Image { .. }
+            | crate::session::event::PersistedContentBlock::ProviderItem { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

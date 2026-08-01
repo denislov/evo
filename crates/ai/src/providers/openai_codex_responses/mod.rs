@@ -11,7 +11,7 @@ use crate::protocol::{
 
 use crate::model::Model;
 use crate::protocol::stream::EventStream;
-use crate::providers::openai::responses;
+use crate::providers::responses;
 use crate::registry::ApiProvider;
 use crate::transport::http::send_json_stream;
 use convert::build_request;

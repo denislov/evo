@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use crate::protocol::{AssistantMessageEvent, ContentBlock, Context, StopReason};
+use crate::protocol::{AssistantMessageEvent, ContentBlock, Context, StopReason, ToolCallKind};
 use futures::StreamExt;
 
 #[test]
@@ -145,9 +145,11 @@ data: {"type":"response.completed","response":{"id":"r_1","status":"completed","
         &done.content[0],
         ContentBlock::Thinking {
             thinking,
-            thinking_signature: Some(signature),
+            provider_metadata: Some(metadata),
             ..
-        } if thinking == "need weather" && signature == "rs_1"
+        } if thinking == "need weather"
+            && metadata.api == "deepseek-responses"
+            && metadata.item_id.as_deref() == Some("rs_1")
     ));
     assert!(matches!(
         &done.content[1],
@@ -206,6 +208,153 @@ fn deepseek_catalog_routes_only_flash_to_responses() {
         .expect("DeepSeek V4 Pro is in the catalog");
     assert_eq!(flash.api, "deepseek-responses");
     assert_eq!(pro.api, "openai-completions");
+}
+
+#[test]
+fn repository_model_overrides_match_bundled_catalog() {
+    let overrides: serde_json::Value =
+        serde_json::from_str(include_str!("../tools/model_overrides.json"))
+            .expect("model overrides are valid JSON");
+    for override_value in overrides.as_array().expect("overrides are an array") {
+        let provider = override_value["provider"]
+            .as_str()
+            .expect("override provider is a string");
+        let id = override_value["id"]
+            .as_str()
+            .expect("override id is a string");
+        let model = crate::model::get_model(provider, id)
+            .unwrap_or_else(|| panic!("override target {provider}/{id} exists"));
+        let model_value = serde_json::to_value(model).expect("model serializes");
+        for (field, expected) in override_value["set"]
+            .as_object()
+            .expect("override set is an object")
+        {
+            assert_eq!(
+                model_value.get(field),
+                Some(expected),
+                "override field {provider}/{id}.{field} drifted"
+            );
+        }
+        for field in override_value["remove"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            assert!(
+                model_value.get(field).is_none(),
+                "removed override field {provider}/{id}.{field} returned"
+            );
+        }
+    }
+}
+
+#[test]
+fn openai_responses_replays_structured_reasoning_metadata() {
+    let model = crate::model::get_model("openai", "gpt-4o").expect("gpt-4o in catalog");
+    let context = Context {
+        system_prompt: None,
+        messages: vec![crate::protocol::Message::Assistant {
+            content: vec![ContentBlock::Thinking {
+                thinking: "reasoning text".into(),
+                thinking_signature: None,
+                provider_metadata: Some(crate::protocol::ProviderMetadata {
+                    api: "openai-responses".into(),
+                    item_id: Some("reasoning-item-1".into()),
+                    encrypted_content: Some("opaque-ciphertext".into()),
+                }),
+                redacted: None,
+            }],
+        }],
+        tools: None,
+    };
+    let request =
+        crate::providers::openai::responses::convert::build_request(&model, &context, &None);
+    let value = serde_json::to_value(request).expect("request serializes");
+    assert_eq!(value["input"][0]["type"], "reasoning");
+    assert_eq!(value["input"][0]["id"], "reasoning-item-1");
+    assert_eq!(value["input"][0]["encrypted_content"], "opaque-ciphertext");
+}
+
+#[tokio::test]
+async fn responses_reasoning_keeps_encrypted_content_when_done_omits_it() {
+    let sse_body = r#"data: {"type":"response.created","response":{"id":"r_encrypted","status":"in_progress","model":"gpt-4o"}}
+
+data: {"type":"response.output_item.added","item":{"type":"reasoning","id":"reasoning_encrypted","encrypted_content":"opaque-ciphertext"}}
+
+data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"reasoning_encrypted"}}
+
+data: {"type":"response.completed","response":{"id":"r_encrypted","status":"completed","model":"gpt-4o","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}
+
+"#;
+    let model = crate::model::get_model("openai", "gpt-4o").expect("gpt-4o in catalog");
+    let body = futures::stream::iter(vec![Ok::<_, String>(bytes::Bytes::from(sse_body))]);
+    let message = crate::protocol::stream::complete(
+        crate::providers::responses::stream::process_with_api_name(
+            body,
+            model,
+            None,
+            "openai-responses",
+        ),
+    )
+    .await
+    .expect("Responses stream completes");
+    assert!(matches!(
+        &message.content[0],
+        ContentBlock::Thinking {
+            provider_metadata: Some(metadata),
+            ..
+        } if metadata.encrypted_content.as_deref() == Some("opaque-ciphertext")
+    ));
+}
+
+#[test]
+fn legacy_thinking_blocks_deserialize_without_provider_metadata() {
+    let block: ContentBlock = serde_json::from_value(serde_json::json!({
+        "type": "thinking",
+        "thinking": "legacy",
+        "thinking_signature": "anthropic-signature"
+    }))
+    .expect("legacy thinking block remains readable");
+    assert!(matches!(
+        block,
+        ContentBlock::Thinking {
+            thinking_signature: Some(signature),
+            provider_metadata: None,
+            ..
+        } if signature == "anthropic-signature"
+    ));
+}
+
+#[tokio::test]
+async fn unknown_incomplete_reason_remains_a_provider_error() {
+    let sse_body = r#"data: {"type":"response.created","response":{"id":"r_unknown","status":"in_progress"}}
+
+data: {"type":"response.incomplete","response":{"id":"r_unknown","status":"incomplete","incomplete_details":{"reason":"future_policy_reason"}}}
+
+"#;
+    let model = crate::model::get_model("deepseek", "deepseek-v4-flash")
+        .expect("DeepSeek V4 Flash is in the catalog");
+    let body = futures::stream::iter(vec![Ok::<_, String>(bytes::Bytes::from(sse_body))]);
+    let mut stream = crate::providers::responses::stream::process_with_api_name(
+        body,
+        model,
+        None,
+        "deepseek-responses",
+    );
+    let mut terminal = None;
+    while let Some(event) = stream.next().await {
+        if matches!(
+            event,
+            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+        ) {
+            terminal = Some(event);
+        }
+    }
+    assert!(matches!(
+        terminal,
+        Some(AssistantMessageEvent::Error { .. })
+    ));
 }
 
 #[tokio::test]
@@ -381,6 +530,7 @@ fn provider_event_budget_charges_deltas_and_still_limits() {
         id: "tool-1".into(),
         name: "fn".into(),
         arguments: serde_json::json!({}),
+        kind: ToolCallKind::Function,
         thought_signature: None,
     });
     budget
@@ -435,4 +585,124 @@ fn provider_event_budget_charges_deltas_and_still_limits() {
             message: partial.clone(),
         })
         .expect("Done never trips the budget");
+}
+
+async fn collect_deepseek_fixture(sse_body: &'static str) -> Vec<AssistantMessageEvent> {
+    let model = crate::model::get_model("deepseek", "deepseek-v4-flash")
+        .expect("DeepSeek V4 Flash is in the catalog");
+    let body = futures::stream::iter(vec![Ok::<_, String>(bytes::Bytes::from_static(
+        sse_body.as_bytes(),
+    ))]);
+    let mut stream = crate::providers::responses::stream::process_with_api_name(
+        body,
+        model,
+        None,
+        "deepseek-responses",
+    );
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+    events
+}
+
+#[tokio::test]
+async fn recorded_deepseek_reasoning_function_fixture_preserves_metadata_and_usage() {
+    let events = collect_deepseek_fixture(include_str!(
+        "providers/deepseek/fixtures/reasoning_function.sse"
+    ))
+    .await;
+    let done = events
+        .iter()
+        .find_map(|event| match event {
+            AssistantMessageEvent::Done { message, .. } => Some(message),
+            _ => None,
+        })
+        .expect("fixture has a successful terminal");
+    assert_eq!(done.response_model.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(done.usage.input, 258);
+    assert_eq!(done.usage.cache_read, 32);
+    assert_eq!(done.usage.reasoning_tokens, 20);
+    assert!(matches!(
+        &done.content[0],
+        ContentBlock::Thinking {
+            provider_metadata: Some(metadata),
+            ..
+        } if metadata.api == "deepseek-responses"
+            && metadata.item_id.as_deref() == Some("reasoning_1")
+    ));
+}
+
+#[tokio::test]
+async fn recorded_deepseek_custom_tool_fixture_preserves_raw_input() {
+    let events =
+        collect_deepseek_fixture(include_str!("providers/deepseek/fixtures/custom_tool.sse")).await;
+    let done = events
+        .iter()
+        .find_map(|event| match event {
+            AssistantMessageEvent::Done { message, .. } => Some(message),
+            _ => None,
+        })
+        .expect("fixture has a successful terminal");
+    assert_eq!(done.stop_reason, StopReason::ToolUse);
+    assert!(matches!(
+        &done.content[0],
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments: serde_json::Value::String(input),
+            kind: ToolCallKind::Custom,
+            ..
+        } if id == "call_custom_1"
+            && name == "apply_patch"
+            && input == "*** Begin Patch\n*** End Patch\n"
+    ));
+}
+
+#[tokio::test]
+async fn recorded_deepseek_web_search_fixture_is_replayable() {
+    let events =
+        collect_deepseek_fixture(include_str!("providers/deepseek/fixtures/web_search.sse")).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AssistantMessageEvent::ProviderItemStart { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AssistantMessageEvent::ProviderItemDelta { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AssistantMessageEvent::ProviderItemEnd { .. }))
+            .count(),
+        1
+    );
+    let done = events
+        .iter()
+        .find_map(|event| match event {
+            AssistantMessageEvent::Done { message, .. } => Some(message),
+            _ => None,
+        })
+        .expect("fixture has a successful terminal");
+    assert_eq!(done.stop_reason, StopReason::Stop);
+    assert!(matches!(
+        &done.content[0],
+        ContentBlock::ProviderItem { api, item }
+            if api == "deepseek-responses"
+                && item.get("type").and_then(serde_json::Value::as_str)
+                    == Some("web_search_call")
+                && item.get("status").and_then(serde_json::Value::as_str)
+                    == Some("completed")
+    ));
+    assert!(matches!(
+        &done.content[1],
+        ContentBlock::Text { text, .. } if text == "api-docs.deepseek.com"
+    ));
 }

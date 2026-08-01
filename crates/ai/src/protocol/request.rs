@@ -13,10 +13,95 @@ pub struct Context {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tool {
+    #[serde(
+        rename = "type",
+        default,
+        skip_serializing_if = "ToolKind::is_function"
+    )]
+    pub kind: ToolKind,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub parameters: serde_json::Value,
+}
+
+impl Tool {
+    pub fn function(
+        name: impl Into<String>,
+        description: Option<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            kind: ToolKind::Function,
+            name: name.into(),
+            description,
+            parameters,
+        }
+    }
+
+    pub fn web_search() -> Self {
+        Self {
+            kind: ToolKind::WebSearch,
+            name: "web_search".into(),
+            description: None,
+            parameters: serde_json::Value::Null,
+        }
+    }
+
+    pub fn custom(name: impl Into<String>, description: Option<String>) -> Self {
+        Self {
+            kind: ToolKind::Custom,
+            name: name.into(),
+            description,
+            parameters: serde_json::Value::Null,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    #[default]
+    Function,
+    WebSearch,
+    Custom,
+}
+
+impl ToolKind {
+    fn is_function(&self) -> bool {
+        *self == Self::Function
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponsesTextFormat {
+    Text,
+    JsonObject,
+    JsonSchema {
+        name: String,
+        schema: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+}
+
+/// Options belonging to the stateless Responses protocol rather than to a
+/// local agent session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ResponsesOptions {
+    #[serde(rename = "topP", skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(rename = "topLogprobs", skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u8>,
+    #[serde(rename = "textFormat", skip_serializing_if = "Option::is_none")]
+    pub text_format: Option<ResponsesTextFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(rename = "promptCacheKey", skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +147,10 @@ pub struct StreamOptions {
     /// Request/session affinity identifier for APIs that explicitly support it.
     #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Responses-protocol controls. DeepSeek rejects `prompt_cache_key`
+    /// because its context cache is automatic; OpenAI may serialize it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub responses: Option<ResponsesOptions>,
     #[serde(skip)]
     pub headers: Option<serde_json::Value>,
     /// Cooperative cancellation token checked at every async transport wait.
@@ -98,6 +187,7 @@ impl std::fmt::Debug for StreamOptions {
             .field("thinking", &self.thinking)
             .field("tool_choice", &self.tool_choice)
             .field("session_id", &self.session_id)
+            .field("responses", &self.responses)
             .field("headers", &self.headers.as_ref().map(|_| "[REDACTED]"))
             .field("cancel", &self.cancel.is_some())
             .field("timeout_ms", &self.timeout_ms)

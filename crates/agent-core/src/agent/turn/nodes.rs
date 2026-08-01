@@ -454,9 +454,15 @@ pub(crate) fn decide_after_assistant(
 /// data before they enter committed history or the execution pipeline.
 fn normalize_terminal_tool_arguments(assistant: &mut AssistantMessage) -> Result<(), ()> {
     for block in &mut assistant.content {
-        let ContentBlock::ToolCall { arguments, .. } = block else {
+        let ContentBlock::ToolCall {
+            arguments, kind, ..
+        } = block
+        else {
             continue;
         };
+        if *kind == ai::api::conversation::ToolCallKind::Custom {
+            continue;
+        }
         let serde_json::Value::String(raw) = arguments else {
             continue;
         };
@@ -558,12 +564,8 @@ pub(crate) async fn maybe_prepare_next_turn(
 
             Ok(AgentTurnDecision::Continue)
         }
-        StopReason::Error => {
-            Ok(AgentTurnDecision::Error)
-        }
-        StopReason::Aborted => {
-            Ok(AgentTurnDecision::Aborted)
-        }
+        StopReason::Error => Ok(AgentTurnDecision::Error),
+        StopReason::Aborted => Ok(AgentTurnDecision::Aborted),
     }
 }
 

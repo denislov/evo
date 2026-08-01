@@ -1395,6 +1395,53 @@ fn map_assistant_event(
                 text: delta.clone(),
             })]
         }
+        AssistantMessageEvent::ProviderItemStart {
+            content_index,
+            partial,
+        } => provider_item(partial, *content_index)
+            .map(|(id, name, item)| {
+                vec![PromptStreamEvent::Tool(ToolEvent::Started {
+                    operation_id: context.operation_id.clone(),
+                    turn_id: context.turn_id.clone(),
+                    tool_call_id: id,
+                    name,
+                    arguments_json: item.to_string(),
+                })]
+            })
+            .unwrap_or_default(),
+        AssistantMessageEvent::ProviderItemDelta {
+            content_index,
+            delta,
+            partial,
+        } => provider_item(partial, *content_index)
+            .map(|(id, name, _)| {
+                vec![PromptStreamEvent::Tool(ToolEvent::Updated {
+                    operation_id: context.operation_id.clone(),
+                    turn_id: context.turn_id.clone(),
+                    tool_call_id: id,
+                    name,
+                    message: delta.clone(),
+                })]
+            })
+            .unwrap_or_default(),
+        AssistantMessageEvent::ProviderItemEnd {
+            content_index,
+            partial,
+        } => provider_item(partial, *content_index)
+            .map(|(id, name, item)| {
+                vec![PromptStreamEvent::Tool(ToolEvent::Completed {
+                    operation_id: context.operation_id.clone(),
+                    turn_id: context.turn_id.clone(),
+                    tool_call_id: id,
+                    name,
+                    summary: item
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("completed")
+                        .to_owned(),
+                })]
+            })
+            .unwrap_or_default(),
         AssistantMessageEvent::Error { .. } => Vec::new(),
         AssistantMessageEvent::Done { message, .. } => {
             vec![PromptStreamEvent::Message(MessageEvent::Completed {
@@ -1415,6 +1462,24 @@ fn map_assistant_event(
     }
 }
 
+fn provider_item(
+    partial: &ai::api::conversation::AssistantMessage,
+    content_index: u32,
+) -> Option<(String, String, &serde_json::Value)> {
+    let ContentBlock::ProviderItem { item, .. } = partial.content.get(content_index as usize)?
+    else {
+        return None;
+    };
+    let id = item.get("id")?.as_str()?.to_owned();
+    let name = item
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("provider_tool")
+        .trim_end_matches("_call")
+        .to_owned();
+    Some((id, name, item))
+}
+
 fn content_blocks_text(content: &[ContentBlock]) -> String {
     content
         .iter()
@@ -1423,6 +1488,7 @@ fn content_blocks_text(content: &[ContentBlock]) -> String {
             ContentBlock::Thinking { thinking, .. } => thinking.clone(),
             ContentBlock::Image { mime_type, .. } => format!("[image:{mime_type}]"),
             ContentBlock::ToolCall { name, .. } => format!("[tool_call:{name}]"),
+            ContentBlock::ProviderItem { api, .. } => format!("[provider_item:{api}]"),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1554,5 +1620,74 @@ fn map_recv_error(error: broadcast::error::RecvError) -> CodingSessionError {
         broadcast::error::RecvError::Lagged(skipped) => {
             CodingSessionError::EventStreamLag { skipped }
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_item_tests {
+    use super::{AgentEventMappingContext, map_assistant_event};
+    use crate::events::prompt_stream::PromptStreamEvent;
+    use crate::events::tool::ToolEvent;
+    use ai::api::conversation::{AssistantMessage, ContentBlock};
+    use ai::api::stream::AssistantMessageEvent;
+
+    fn partial(status: &str) -> AssistantMessage {
+        let mut message = AssistantMessage::empty("deepseek-responses", "deepseek-v4-flash");
+        message.content.push(ContentBlock::ProviderItem {
+            api: "deepseek-responses".into(),
+            item: serde_json::json!({
+                "type": "web_search_call",
+                "id": "web_1",
+                "status": status
+            }),
+        });
+        message
+    }
+
+    #[test]
+    fn web_search_lifecycle_maps_to_product_tool_events() {
+        let context = AgentEventMappingContext::new("op_1", "turn_1");
+        let started = map_assistant_event(
+            &context,
+            &AssistantMessageEvent::ProviderItemStart {
+                content_index: 0,
+                partial: partial("in_progress"),
+            },
+        );
+        assert!(matches!(
+            started.as_slice(),
+            [PromptStreamEvent::Tool(ToolEvent::Started {
+                tool_call_id,
+                name,
+                ..
+            })] if tool_call_id == "web_1" && name == "web_search"
+        ));
+
+        let updated = map_assistant_event(
+            &context,
+            &AssistantMessageEvent::ProviderItemDelta {
+                content_index: 0,
+                delta: "searching".into(),
+                partial: partial("searching"),
+            },
+        );
+        assert!(matches!(
+            updated.as_slice(),
+            [PromptStreamEvent::Tool(ToolEvent::Updated { message, .. })]
+                if message == "searching"
+        ));
+
+        let completed = map_assistant_event(
+            &context,
+            &AssistantMessageEvent::ProviderItemEnd {
+                content_index: 0,
+                partial: partial("completed"),
+            },
+        );
+        assert!(matches!(
+            completed.as_slice(),
+            [PromptStreamEvent::Tool(ToolEvent::Completed { summary, .. })]
+                if summary == "completed"
+        ));
     }
 }

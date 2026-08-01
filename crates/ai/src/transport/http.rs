@@ -354,15 +354,36 @@ pub(crate) fn validate_options(api: &str, opts: Option<&StreamOptions>) -> Resul
     }
 
     if opts.session_id.is_some()
-        && !matches!(
-            api,
-            "deepseek-responses"
-                | "openai-responses"
-                | "mistral-conversations"
-                | "openai-codex-responses"
-        )
+        && !matches!(api, "mistral-conversations" | "openai-codex-responses")
     {
         return Err(format!("session_id is unsupported by API `{api}`"));
+    }
+
+    if let Some(responses) = &opts.responses {
+        if !matches!(api, "deepseek-responses" | "openai-responses") {
+            return Err(format!("Responses options are unsupported by API `{api}`"));
+        }
+        if responses
+            .top_p
+            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return Err("Responses top_p must be between 0.0 and 1.0".into());
+        }
+        if responses.top_logprobs.is_some_and(|value| value > 20) {
+            return Err("Responses top_logprobs must be between 0 and 20".into());
+        }
+        if responses
+            .user
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err("Responses user must not be empty".into());
+        }
+        if api == "deepseek-responses" && responses.prompt_cache_key.is_some() {
+            return Err(
+                "DeepSeek Responses does not support prompt_cache_key; caching is automatic".into(),
+            );
+        }
     }
 
     if let Some(tool_choice) = &opts.tool_choice

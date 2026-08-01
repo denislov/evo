@@ -107,6 +107,7 @@ impl SseEventHandler for AnthropicHandler {
                         partial.content.push(ContentBlock::Thinking {
                             thinking: thinking.clone(),
                             thinking_signature: None,
+                            provider_metadata: None,
                             redacted: None,
                         });
                         events.push(AssistantMessageEvent::ThinkingStart {
@@ -126,6 +127,7 @@ impl SseEventHandler for AnthropicHandler {
                         partial.content.push(ContentBlock::Thinking {
                             thinking: String::new(),
                             thinking_signature: None,
+                            provider_metadata: None,
                             redacted: Some(true),
                         });
                         events.push(AssistantMessageEvent::ThinkingStart {
@@ -140,6 +142,7 @@ impl SseEventHandler for AnthropicHandler {
                             id: id.clone(),
                             name: name.clone(),
                             arguments: serde_json::json!({}),
+                            kind: Default::default(),
                             thought_signature: None,
                         });
                         events.push(AssistantMessageEvent::ToolcallStart {
@@ -246,7 +249,8 @@ impl SseEventHandler for AnthropicHandler {
                             ..
                         }) = partial.content.get_mut(self.block_index as usize)
                         {
-                            *arguments = parse_terminal_tool_arguments(&self.accumulated_tool_args)?;
+                            *arguments =
+                                parse_terminal_tool_arguments(&self.accumulated_tool_args)?;
                             *thought_signature = self.pending_thought_signature.take();
                         }
                         events.push(AssistantMessageEvent::ToolcallEnd {
@@ -274,6 +278,7 @@ impl SseEventHandler for AnthropicHandler {
                 let mut usage = Usage {
                     input: self.message_usage.input_tokens,
                     output: self.message_usage.output_tokens,
+                    reasoning_tokens: 0,
                     cache_read: self.message_usage.cache_read_input_tokens.unwrap_or(0),
                     cache_write: self.message_usage.cache_creation_input_tokens.unwrap_or(0),
                     total_tokens: crate::protocol::usage::saturating_token_total(

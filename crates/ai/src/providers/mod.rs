@@ -6,6 +6,7 @@ pub mod google;
 pub mod mistral;
 pub mod openai;
 pub mod openai_codex_responses;
+pub(crate) mod responses;
 
 use crate::registry::{ApiProvider, ProviderRegistry};
 use std::sync::Arc;

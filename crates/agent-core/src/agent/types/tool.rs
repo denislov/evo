@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::{collections::BTreeSet, fmt};
 
 use ai::api::conversation::ContentBlock;
+use ai::api::conversation::ToolKind;
 use tokio_util::sync::CancellationToken;
 
 // ── ToolExecutionMode ──────────────────────────────
@@ -179,6 +180,7 @@ pub type ToolFn = Arc<
 pub type ToolUpdateCallback = Arc<dyn Fn(AgentToolOutput) + Send + Sync>;
 #[derive(Clone)]
 pub struct AgentTool {
+    pub kind: ToolKind,
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
@@ -257,6 +259,16 @@ impl AgentTool {
                 "tool description must be non-empty and at most 1024 characters/4096 bytes",
             ));
         }
+        if self.kind == ToolKind::Custom {
+            return if self.parameters.is_null() {
+                Ok(())
+            } else {
+                Err(AgentToolDefinitionError::new(
+                    "parameters",
+                    "custom tools accept raw string input and must not declare a JSON schema",
+                ))
+            };
+        }
         let serialized = serde_json::to_vec(&self.parameters).map_err(|error| {
             AgentToolDefinitionError::new(
                 "parameters",
@@ -278,7 +290,10 @@ impl AgentTool {
         &self,
         arguments: &serde_json::Value,
     ) -> Result<(), AgentToolArgumentError> {
-        if tool_arguments_match_schema(&self.parameters, arguments) {
+        if (self.kind == ToolKind::Custom && arguments.is_string())
+            || (self.kind == ToolKind::Function
+                && tool_arguments_match_schema(&self.parameters, arguments))
+        {
             Ok(())
         } else {
             Err(AgentToolArgumentError {
@@ -301,6 +316,7 @@ impl AgentTool {
         Fut: Future<Output = Result<String, String>> + Send + 'static,
     {
         Self {
+            kind: ToolKind::Function,
             name: name.into(),
             description: description.into(),
             parameters,
@@ -317,6 +333,22 @@ impl AgentTool {
                 })
             }),
         }
+    }
+
+    /// Register a raw-string custom tool. Responses providers currently use
+    /// this for Codex-compatible `apply_patch` calls.
+    pub fn new_custom_text<F, Fut>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        f: F,
+    ) -> Self
+    where
+        F: Fn(ToolExecutionContext, serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, String>> + Send + 'static,
+    {
+        let mut tool = Self::new_text(name, description, serde_json::Value::Null, f);
+        tool.kind = ToolKind::Custom;
+        tool
     }
 }
 
@@ -752,6 +784,7 @@ mod tests {
 
     fn make_tool(parameters: serde_json::Value) -> AgentTool {
         AgentTool {
+            kind: Default::default(),
             name: "test_tool".into(),
             description: "A test tool".into(),
             parameters,
@@ -794,6 +827,18 @@ mod tests {
     fn root_must_be_an_object() {
         let tool = make_tool(serde_json::json!({"type": "string"}));
         assert!(tool.validate().is_err());
+    }
+
+    #[test]
+    fn custom_tool_accepts_raw_string_and_no_schema() {
+        let mut tool = make_tool(serde_json::Value::Null);
+        tool.kind = ToolKind::Custom;
+        assert!(tool.validate().is_ok());
+        assert!(
+            tool.validate_arguments(&serde_json::Value::String("*** Begin Patch".into()))
+                .is_ok()
+        );
+        assert!(tool.validate_arguments(&serde_json::json!({})).is_err());
     }
 
     #[test]
@@ -850,10 +895,19 @@ mod tests {
             },
             "required": ["query"]
         }));
-        assert!(tool.validate_arguments(&serde_json::json!({"query": "x"})).is_ok());
-        assert!(tool.validate_arguments(&serde_json::json!({"query": "x", "limit": 3})).is_ok());
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"query": "x"}))
+                .is_ok()
+        );
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"query": "x", "limit": 3}))
+                .is_ok()
+        );
         assert!(tool.validate_arguments(&serde_json::json!({})).is_err());
-        assert!(tool.validate_arguments(&serde_json::json!({"query": 3})).is_err());
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"query": 3}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -863,8 +917,14 @@ mod tests {
             "properties": {"a": {"type": "string"}},
             "additionalProperties": false
         }));
-        assert!(tool.validate_arguments(&serde_json::json!({"a": "x"})).is_ok());
-        assert!(tool.validate_arguments(&serde_json::json!({"b": "x"})).is_err());
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"a": "x"}))
+                .is_ok()
+        );
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"b": "x"}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -876,8 +936,14 @@ mod tests {
             }
         }));
         assert!(tool.validate().is_ok());
-        assert!(tool.validate_arguments(&serde_json::json!({"mode": "fast"})).is_ok());
-        assert!(tool.validate_arguments(&serde_json::json!({"mode": "warp"})).is_err());
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"mode": "fast"}))
+                .is_ok()
+        );
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"mode": "warp"}))
+                .is_err()
+        );
 
         let bad_enum = make_tool(serde_json::json!({
             "type": "object",
@@ -896,8 +962,17 @@ mod tests {
                 "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 3}
             }
         }));
-        assert!(tool.validate_arguments(&serde_json::json!({"tags": ["a"]})).is_ok());
-        assert!(tool.validate_arguments(&serde_json::json!({"tags": []})).is_err());
-        assert!(tool.validate_arguments(&serde_json::json!({"tags": ["a", "b", "c", "d"]})).is_err());
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"tags": ["a"]}))
+                .is_ok()
+        );
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"tags": []}))
+                .is_err()
+        );
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"tags": ["a", "b", "c", "d"]}))
+                .is_err()
+        );
     }
 }

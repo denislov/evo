@@ -86,6 +86,7 @@ impl SseEventHandler for GoogleHandler {
                             id: format!("{}-{}", fc.name, self.tool_serial),
                             name: fc.name.clone(),
                             arguments: fc.args.clone(),
+                            kind: Default::default(),
                             thought_signature: None,
                         });
                         events.push(AssistantMessageEvent::ToolcallStart {
@@ -208,6 +209,7 @@ fn emit_thinking_delta(
         partial.content.push(ContentBlock::Thinking {
             thinking: String::new(),
             thinking_signature: None,
+            provider_metadata: None,
             redacted: None,
         });
         *current_block = Some(OpenBlock::Thinking(content_index));
@@ -269,6 +271,7 @@ fn map_usage(usage: &wire::UsageMetadata, model: &Model) -> Usage {
     let mut result = Usage {
         input: non_cached_input,
         output: usage.candidates_token_count,
+        reasoning_tokens: 0,
         cache_read: cache_tokens,
         cache_write: 0,
         total_tokens: usage.total_token_count,

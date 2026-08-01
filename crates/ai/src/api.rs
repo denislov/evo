@@ -13,7 +13,8 @@ pub mod model {
 pub mod conversation {
     pub use crate::protocol::{
         AssistantMessage, AssistantMessageDiagnostic, ContentBlock, Context, Cost,
-        DiagnosticErrorInfo, Message, StopReason, Tool, Usage,
+        DiagnosticErrorInfo, Message, ProviderMetadata, ResponsesTextFormat, StopReason, Tool,
+        ToolCallKind, ToolKind, Usage,
     };
 }
 
@@ -21,7 +22,7 @@ pub mod conversation {
 /// decoding used at provider-neutral streaming boundaries.
 pub mod stream {
     pub use crate::protocol::stream::{EventStream, complete};
-    pub use crate::protocol::{AssistantMessageEvent, StreamOptions};
+    pub use crate::protocol::{AssistantMessageEvent, ResponsesOptions, StreamOptions};
 
     pub mod json {
         pub use crate::protocol::json::{parse_streaming_json, parse_terminal_json, repair_json};

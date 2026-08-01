@@ -157,6 +157,7 @@ impl ApiProvider for FauxProvider {
                     partial.content.push(ContentBlock::Thinking {
                         thinking: String::new(),
                         thinking_signature: None,
+                        provider_metadata: None,
                         redacted: None,
                     });
                     yield AssistantMessageEvent::ThinkingStart { content_index: 0, partial: partial.clone() };
@@ -178,6 +179,7 @@ impl ApiProvider for FauxProvider {
                         id: tc.id.clone(),
                         name: tc.name.clone(),
                         arguments: tc.final_arguments.clone(),
+                        kind: Default::default(),
                         thought_signature: None,
                     });
                     yield AssistantMessageEvent::ToolcallStart { content_index: 0, partial: partial.clone() };

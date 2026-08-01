@@ -274,6 +274,11 @@ impl RuntimeService {
                             id: tool_call_id.clone(),
                             name: name.clone(),
                             arguments: arguments.clone(),
+                            kind: if name == "apply_patch" && arguments.is_string() {
+                                ai::api::conversation::ToolCallKind::Custom
+                            } else {
+                                ai::api::conversation::ToolCallKind::Function
+                            },
                             thought_signature: None,
                         });
                     pending_tool_results.push(AgentMessage::ToolResult {
@@ -440,15 +445,21 @@ fn replay_content_blocks(content: &[PersistedContentBlock]) -> Vec<ContentBlock>
             PersistedContentBlock::Thinking {
                 thinking,
                 thinking_signature,
+                provider_metadata,
                 redacted,
             } => ContentBlock::Thinking {
                 thinking: thinking.clone(),
                 thinking_signature: thinking_signature.clone(),
+                provider_metadata: provider_metadata.clone(),
                 redacted: *redacted,
             },
             PersistedContentBlock::Image { mime_type, data } => ContentBlock::Image {
                 mime_type: mime_type.clone(),
                 data: data.clone(),
+            },
+            PersistedContentBlock::ProviderItem { api, item } => ContentBlock::ProviderItem {
+                api: api.clone(),
+                item: item.clone(),
             },
         })
         .collect()

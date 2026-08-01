@@ -172,21 +172,31 @@ fn content_bytes(content: &[ContentBlock]) -> usize {
             ContentBlock::Thinking {
                 thinking,
                 thinking_signature,
+                provider_metadata,
                 ..
             } => thinking
                 .len()
-                .saturating_add(thinking_signature.as_ref().map_or(0, String::len)),
+                .saturating_add(thinking_signature.as_ref().map_or(0, String::len))
+                .saturating_add(provider_metadata.as_ref().map_or(0, |metadata| {
+                    metadata
+                        .api
+                        .len()
+                        .saturating_add(metadata.item_id.as_ref().map_or(0, String::len))
+                        .saturating_add(metadata.encrypted_content.as_ref().map_or(0, String::len))
+                })),
             ContentBlock::Image { data, mime_type } => data.len().saturating_add(mime_type.len()),
             ContentBlock::ToolCall {
                 id,
                 name,
                 arguments,
                 thought_signature,
+                ..
             } => id
                 .len()
                 .saturating_add(name.len())
                 .saturating_add(json_bytes(arguments))
                 .saturating_add(thought_signature.as_ref().map_or(0, String::len)),
+            ContentBlock::ProviderItem { api, item } => api.len().saturating_add(json_bytes(item)),
         };
         total.saturating_add(block_bytes)
     })

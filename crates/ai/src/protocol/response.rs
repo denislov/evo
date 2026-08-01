@@ -74,6 +74,25 @@ pub enum AssistantMessageEvent {
         content_index: u32,
         partial: AssistantMessage,
     },
+    #[serde(rename = "provider_item_start")]
+    ProviderItemStart {
+        #[serde(rename = "contentIndex")]
+        content_index: u32,
+        partial: AssistantMessage,
+    },
+    #[serde(rename = "provider_item_delta")]
+    ProviderItemDelta {
+        #[serde(rename = "contentIndex")]
+        content_index: u32,
+        delta: String,
+        partial: AssistantMessage,
+    },
+    #[serde(rename = "provider_item_end")]
+    ProviderItemEnd {
+        #[serde(rename = "contentIndex")]
+        content_index: u32,
+        partial: AssistantMessage,
+    },
     #[serde(rename = "done")]
     /// Successful provider completion.
     Done {

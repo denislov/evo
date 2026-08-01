@@ -1197,7 +1197,10 @@ impl PromptTurnContext {
             | AssistantMessageEvent::ThinkingDelta { .. }
             | AssistantMessageEvent::ToolcallStart { .. }
             | AssistantMessageEvent::ToolcallDelta { .. }
-            | AssistantMessageEvent::ToolcallEnd { .. } => {
+            | AssistantMessageEvent::ToolcallEnd { .. }
+            | AssistantMessageEvent::ProviderItemStart { .. }
+            | AssistantMessageEvent::ProviderItemDelta { .. }
+            | AssistantMessageEvent::ProviderItemEnd { .. } => {
                 self.ensure_assistant_session_message_started()?;
                 Ok(())
             }
@@ -1588,16 +1591,22 @@ fn persisted_content_block(content: &ContentBlock) -> PersistedContentBlock {
         ContentBlock::Thinking {
             thinking,
             thinking_signature,
+            provider_metadata,
             redacted,
         } => PersistedContentBlock::Thinking {
             thinking: thinking.clone(),
             thinking_signature: thinking_signature.clone(),
+            provider_metadata: provider_metadata.clone(),
             redacted: *redacted,
         },
         ContentBlock::ToolCall {
             name, arguments, ..
         } => PersistedContentBlock::Text {
             text: format!("[tool_call:{name} {arguments}]"),
+        },
+        ContentBlock::ProviderItem { api, item } => PersistedContentBlock::ProviderItem {
+            api: api.clone(),
+            item: item.clone(),
         },
     }
 }
@@ -1612,10 +1621,12 @@ fn persisted_assistant_content_blocks(content: &[ContentBlock]) -> Vec<Persisted
             ContentBlock::Thinking {
                 thinking,
                 thinking_signature,
+                provider_metadata,
                 redacted,
             } => Some(PersistedContentBlock::Thinking {
                 thinking: thinking.clone(),
                 thinking_signature: thinking_signature.clone(),
+                provider_metadata: provider_metadata.clone(),
                 redacted: *redacted,
             }),
             ContentBlock::Image { mime_type, data } => Some(PersistedContentBlock::Image {
@@ -1623,6 +1634,10 @@ fn persisted_assistant_content_blocks(content: &[ContentBlock]) -> Vec<Persisted
                 data: data.clone(),
             }),
             ContentBlock::ToolCall { .. } => None,
+            ContentBlock::ProviderItem { api, item } => Some(PersistedContentBlock::ProviderItem {
+                api: api.clone(),
+                item: item.clone(),
+            }),
         })
         .collect()
 }
@@ -1634,6 +1649,7 @@ fn persisted_content_blocks_text(content: &[PersistedContentBlock]) -> String {
             PersistedContentBlock::Text { text } => text.clone(),
             PersistedContentBlock::Thinking { thinking, .. } => thinking.clone(),
             PersistedContentBlock::Image { mime_type, .. } => format!("[image:{mime_type}]"),
+            PersistedContentBlock::ProviderItem { api, .. } => format!("[provider_item:{api}]"),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1647,6 +1663,7 @@ fn content_blocks_text(content: &[ContentBlock]) -> String {
             ContentBlock::Thinking { thinking, .. } => thinking.clone(),
             ContentBlock::Image { mime_type, .. } => format!("[image:{mime_type}]"),
             ContentBlock::ToolCall { name, .. } => format!("[tool_call:{name}]"),
+            ContentBlock::ProviderItem { api, .. } => format!("[provider_item:{api}]"),
         })
         .collect::<Vec<_>>()
         .join("\n")

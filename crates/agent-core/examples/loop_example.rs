@@ -51,6 +51,7 @@ async fn main() {
 
     agent
         .add_tool(AgentTool {
+            kind: Default::default(),
             name: "search".into(),
             description: "Search the web".into(),
             parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),

@@ -75,11 +75,7 @@ pub fn build_request(model: &Model, ctx: &Context, opts: &Option<StreamOptions>)
                     "auto".into()
                 },
                 // `adaptive` rejects an explicit budget on the wire.
-                budget_tokens: if adaptive {
-                    None
-                } else {
-                    t.budget_tokens
-                },
+                budget_tokens: if adaptive { None } else { t.budget_tokens },
             }
         })
     });
@@ -178,36 +174,33 @@ fn add_cache_control_to_last_user_message(messages: &mut [wire::RequestMessage])
 fn convert_content(blocks: &[ContentBlock]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = blocks
         .iter()
-        .map(|b| match b {
+        .filter_map(|b| match b {
             ContentBlock::Text { text, .. } => {
-                serde_json::json!({ "type": "text", "text": text })
+                Some(serde_json::json!({ "type": "text", "text": text }))
             }
             ContentBlock::Thinking { thinking, .. } => {
-                serde_json::json!({ "type": "thinking", "thinking": thinking })
+                Some(serde_json::json!({ "type": "thinking", "thinking": thinking }))
             }
-            ContentBlock::Image { data, mime_type } => {
-                serde_json::json!({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime_type,
-                        "data": data,
-                    }
-                })
-            }
+            ContentBlock::Image { data, mime_type } => Some(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": data,
+                }
+            })),
             ContentBlock::ToolCall {
                 id,
                 name,
                 arguments,
                 ..
-            } => {
-                serde_json::json!({
-                    "type": "tool_use",
-                    "id": normalize_tool_call_id(id, None),
-                    "name": name,
-                    "input": arguments,
-                })
-            }
+            } => Some(serde_json::json!({
+                "type": "tool_use",
+                "id": normalize_tool_call_id(id, None),
+                "name": name,
+                "input": arguments,
+            })),
+            ContentBlock::ProviderItem { .. } => None,
         })
         .collect();
     serde_json::Value::Array(items)

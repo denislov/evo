@@ -97,7 +97,8 @@ impl ProviderEventBudget {
                 // image blocks, which have no dedicated stream events.
                 self.observe_snapshot(&partial.content)
             }
-            AssistantMessageEvent::TextStart { .. } | AssistantMessageEvent::ThinkingStart { .. } => {
+            AssistantMessageEvent::TextStart { .. }
+            | AssistantMessageEvent::ThinkingStart { .. } => {
                 self.content_blocks = checked_total(
                     self.content_blocks,
                     1,
@@ -108,7 +109,10 @@ impl ProviderEventBudget {
                 // built-in provider; only the block boundary is charged here.
                 Ok(())
             }
-            AssistantMessageEvent::ToolcallStart { content_index, partial } => {
+            AssistantMessageEvent::ToolcallStart {
+                content_index,
+                partial,
+            } => {
                 self.content_blocks = checked_total(
                     self.content_blocks,
                     1,
@@ -136,8 +140,31 @@ impl ProviderEventBudget {
                 }
                 Ok(())
             }
+            AssistantMessageEvent::ProviderItemStart {
+                content_index,
+                partial,
+            } => {
+                self.content_blocks = checked_total(
+                    self.content_blocks,
+                    1,
+                    self.limits.content_blocks,
+                    ProviderLimit::ContentBlocks,
+                )?;
+                if let Some(ContentBlock::ProviderItem { api, item }) =
+                    partial.content.get(*content_index as usize)
+                {
+                    self.charge_content(api.len())?;
+                    self.charge_content(
+                        serialized_json_bytes(item).map_err(|_| ProviderLimit::ContentBytes)?,
+                    )?;
+                }
+                Ok(())
+            }
             AssistantMessageEvent::TextDelta { delta, .. }
             | AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+                self.charge_content(delta.len())
+            }
+            AssistantMessageEvent::ProviderItemDelta { delta, .. } => {
                 self.charge_content(delta.len())
             }
             AssistantMessageEvent::ToolcallDelta { delta, .. } => {
@@ -153,7 +180,10 @@ impl ProviderEventBudget {
                 )?;
                 Ok(())
             }
-            AssistantMessageEvent::TextEnd { content_index, partial } => {
+            AssistantMessageEvent::TextEnd {
+                content_index,
+                partial,
+            } => {
                 if let Some(ContentBlock::Text { text_signature, .. }) =
                     partial.content.get(*content_index as usize)
                     && let Some(signature) = text_signature
@@ -162,7 +192,10 @@ impl ProviderEventBudget {
                 }
                 Ok(())
             }
-            AssistantMessageEvent::ThinkingEnd { content_index, partial } => {
+            AssistantMessageEvent::ThinkingEnd {
+                content_index,
+                partial,
+            } => {
                 if let Some(ContentBlock::Thinking {
                     thinking_signature, ..
                 }) = partial.content.get(*content_index as usize)
@@ -172,13 +205,29 @@ impl ProviderEventBudget {
                 }
                 Ok(())
             }
-            AssistantMessageEvent::ToolcallEnd { content_index, partial } => {
+            AssistantMessageEvent::ToolcallEnd {
+                content_index,
+                partial,
+            } => {
                 if let Some(ContentBlock::ToolCall {
                     thought_signature, ..
                 }) = partial.content.get(*content_index as usize)
                     && let Some(signature) = thought_signature
                 {
                     self.charge_content(signature.len())?;
+                }
+                Ok(())
+            }
+            AssistantMessageEvent::ProviderItemEnd {
+                content_index,
+                partial,
+            } => {
+                if let Some(ContentBlock::ProviderItem { item, .. }) =
+                    partial.content.get(*content_index as usize)
+                {
+                    self.charge_content(
+                        serialized_json_bytes(item).map_err(|_| ProviderLimit::ContentBytes)?,
+                    )?;
                 }
                 Ok(())
             }
@@ -234,6 +283,7 @@ impl ProviderEventBudget {
                     name,
                     arguments,
                     thought_signature,
+                    ..
                 } => {
                     self.tool_calls = checked_total(
                         self.tool_calls,
@@ -253,6 +303,14 @@ impl ProviderEventBudget {
                         argument_bytes,
                         self.limits.tool_argument_bytes,
                         ProviderLimit::ToolArgumentBytes,
+                    )?;
+                }
+                ContentBlock::ProviderItem { api, item } => {
+                    self.charge_content(api.len())?;
+                    self.charge_content(
+                        serde_json::to_vec(item)
+                            .map_err(|_| ProviderLimit::ContentBytes)?
+                            .len(),
                     )?;
                 }
             }

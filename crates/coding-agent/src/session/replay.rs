@@ -1082,6 +1082,7 @@ fn content_blocks_text(content: &[PersistedContentBlock]) -> String {
             PersistedContentBlock::Text { text } => text.clone(),
             PersistedContentBlock::Thinking { thinking, .. } => thinking.clone(),
             PersistedContentBlock::Image { mime_type, .. } => format!("[image:{mime_type}]"),
+            PersistedContentBlock::ProviderItem { api, .. } => format!("[provider_item:{api}]"),
         })
         .collect::<Vec<_>>()
         .join("\n")

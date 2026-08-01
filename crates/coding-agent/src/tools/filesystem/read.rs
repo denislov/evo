@@ -241,6 +241,7 @@ pub fn read_tool_with_operations(
         })
     });
     AgentTool {
+        kind: Default::default(),
         name: "read".into(),
         description: DESCRIPTION.into(),
         parameters: schema(),
@@ -259,8 +260,8 @@ mod tests {
 
     #[test]
     fn huge_limit_with_offset_does_not_panic() {
-        let (selected, user_limited) = select_lines(&lines(), Some(2), Some(usize::MAX))
-            .expect("selection succeeds");
+        let (selected, user_limited) =
+            select_lines(&lines(), Some(2), Some(usize::MAX)).expect("selection succeeds");
         assert_eq!(selected, vec!["line2", "line3"]);
         assert_eq!(user_limited, Some(2));
     }

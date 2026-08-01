@@ -523,6 +523,7 @@ pub fn bash_tool_with_operations(
         })
     });
     AgentTool {
+        kind: Default::default(),
         name: "bash".into(),
         description: DESCRIPTION.into(),
         parameters: schema(),

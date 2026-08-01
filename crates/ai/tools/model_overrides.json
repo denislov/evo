@@ -1,0 +1,17 @@
+[
+  {
+    "provider": "deepseek",
+    "id": "deepseek-v4-flash",
+    "set": {
+      "api": "deepseek-responses",
+      "thinkingLevelMap": {
+        "minimal": "low",
+        "low": "low",
+        "medium": "high",
+        "high": "high",
+        "xhigh": "max"
+      }
+    },
+    "remove": ["compat"]
+  }
+]

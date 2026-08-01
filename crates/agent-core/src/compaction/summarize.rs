@@ -151,7 +151,8 @@ fn push_content_records(
             }
             ContentBlock::Text { .. }
             | ContentBlock::Thinking { .. }
-            | ContentBlock::ToolCall { .. } => {}
+            | ContentBlock::ToolCall { .. }
+            | ContentBlock::ProviderItem { .. } => {}
         }
     }
     Ok(())
@@ -204,7 +205,9 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> Result<String, Compa
                                 mime_type.len(),
                             )?;
                         }
-                        ContentBlock::Text { .. } | ContentBlock::Thinking { .. } => {}
+                        ContentBlock::Text { .. }
+                        | ContentBlock::Thinking { .. }
+                        | ContentBlock::ProviderItem { .. } => {}
                     }
                 }
             }
@@ -224,7 +227,8 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> Result<String, Compa
                         }
                         ContentBlock::Text { .. }
                         | ContentBlock::Thinking { .. }
-                        | ContentBlock::ToolCall { .. } => continue,
+                        | ContentBlock::ToolCall { .. }
+                        | ContentBlock::ProviderItem { .. } => continue,
                     };
                     writer.push(
                         &SummaryRecord {

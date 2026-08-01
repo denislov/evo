@@ -145,6 +145,7 @@ pub fn write_tool_with_operations(
         })
     });
     AgentTool {
+        kind: Default::default(),
         name: "write".into(),
         description: DESCRIPTION.into(),
         parameters: schema(),

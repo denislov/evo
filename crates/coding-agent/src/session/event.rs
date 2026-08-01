@@ -4,7 +4,7 @@ use serde_json::Value;
 use crate::authorization::{ToolAuthorizationDecision, ToolAuthorizationRequest};
 use crate::operations::delegation::DelegationLineageEntry;
 use crate::profiles::{ProfileId, ProfileKind};
-use ai::api::conversation::Usage;
+use ai::api::conversation::{ProviderMetadata, Usage};
 use ai::api::model::Model;
 
 use super::manifest::{EVENT_SCHEMA, EVENT_VERSION, PersistedWorkspaceScope};
@@ -398,12 +398,18 @@ pub(crate) enum PersistedContentBlock {
         thinking: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thinking_signature: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
         #[serde(skip_serializing_if = "Option::is_none")]
         redacted: Option<bool>,
     },
     Image {
         mime_type: String,
         data: String,
+    },
+    ProviderItem {
+        api: String,
+        item: Value,
     },
 }
 
@@ -457,4 +463,57 @@ pub(crate) enum DiagnosticLevel {
     Info,
     Warn,
     Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PersistedContentBlock;
+    use ai::api::conversation::ProviderMetadata;
+
+    #[test]
+    fn legacy_thinking_content_without_provider_metadata_still_deserializes() {
+        let block: PersistedContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "thinking",
+            "data": {
+                "thinking": "legacy reasoning",
+                "thinking_signature": "legacy-signature"
+            }
+        }))
+        .expect("legacy persisted thinking remains readable");
+        assert!(matches!(
+            block,
+            PersistedContentBlock::Thinking {
+                provider_metadata: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn responses_replay_metadata_and_provider_items_round_trip() {
+        let blocks = vec![
+            PersistedContentBlock::Thinking {
+                thinking: "reasoning".into(),
+                thinking_signature: None,
+                provider_metadata: Some(ProviderMetadata {
+                    api: "deepseek-responses".into(),
+                    item_id: Some("reasoning_1".into()),
+                    encrypted_content: None,
+                }),
+                redacted: None,
+            },
+            PersistedContentBlock::ProviderItem {
+                api: "deepseek-responses".into(),
+                item: serde_json::json!({
+                    "type": "web_search_call",
+                    "id": "web_1",
+                    "status": "completed"
+                }),
+            },
+        ];
+        let encoded = serde_json::to_value(&blocks).expect("persisted content serializes");
+        let decoded: Vec<PersistedContentBlock> =
+            serde_json::from_value(encoded).expect("persisted content deserializes");
+        assert_eq!(decoded, blocks);
+    }
 }

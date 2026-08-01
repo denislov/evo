@@ -149,6 +149,7 @@ impl SseEventHandler for MistralHandler {
                                 id: tool_call.id.clone().unwrap_or_default(),
                                 name: String::new(),
                                 arguments: serde_json::json!({}),
+                                kind: Default::default(),
                                 thought_signature: None,
                             });
                             events.push(AssistantMessageEvent::ToolcallStart {
@@ -290,6 +291,7 @@ fn emit_thinking_delta(
         partial.content.push(ContentBlock::Thinking {
             thinking: String::new(),
             thinking_signature: None,
+            provider_metadata: None,
             redacted: None,
         });
         *current_block = Some(OpenBlock::Thinking(content_index));
@@ -347,6 +349,7 @@ fn map_usage(usage: &wire::ChatUsage, model: &Model) -> Usage {
     let mut result = Usage {
         input: usage.prompt_tokens,
         output: usage.completion_tokens,
+        reasoning_tokens: 0,
         cache_read: 0,
         cache_write: 0,
         total_tokens: if usage.total_tokens == 0 {

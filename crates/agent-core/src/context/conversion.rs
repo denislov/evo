@@ -130,6 +130,7 @@ pub fn assemble_context(
             tools
                 .iter()
                 .map(|t| Tool {
+                    kind: t.kind,
                     name: t.name.clone(),
                     description: Some(t.description.clone()),
                     parameters: t.parameters.clone(),

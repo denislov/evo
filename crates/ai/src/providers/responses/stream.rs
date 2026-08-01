@@ -1,3 +1,5 @@
+//! Provider-neutral Responses SSE state machine.
+
 use std::collections::HashMap;
 
 use super::wire;
@@ -6,7 +8,7 @@ use crate::model::calculate_cost;
 use crate::protocol::json::parse_streaming_json;
 use crate::protocol::stream::EventStream;
 use crate::protocol::{
-    AssistantMessage, AssistantMessageEvent, ContentBlock, Cost, StopReason, Usage,
+    AssistantMessage, AssistantMessageEvent, ContentBlock, Cost, StopReason, ToolCallKind, Usage,
 };
 use crate::providers::common::{
     SseEventHandler, SseEventResult, parse_terminal_tool_arguments, process_sse,
@@ -42,7 +44,11 @@ where
 enum OutputKind {
     Text,
     Thinking,
-    Tool { arguments: String },
+    Tool {
+        arguments: String,
+        kind: ToolCallKind,
+    },
+    ProviderItem,
 }
 
 #[derive(Debug)]
@@ -117,19 +123,30 @@ impl ResponsesHandler {
             return;
         }
         let content_index = partial.content.len() as u32;
+        let kind = if item.item_type == "custom_tool_call" {
+            ToolCallKind::Custom
+        } else {
+            ToolCallKind::Function
+        };
+        let arguments = match kind {
+            ToolCallKind::Function => item.arguments.unwrap_or_default(),
+            ToolCallKind::Custom => item.input.unwrap_or_default(),
+        };
         partial.content.push(ContentBlock::ToolCall {
             id: item.call_id.unwrap_or_else(|| item.id.clone()),
             name: item.name.unwrap_or_default(),
-            arguments: serde_json::json!({}),
+            arguments: match kind {
+                ToolCallKind::Function => serde_json::json!({}),
+                ToolCallKind::Custom => serde_json::Value::String(arguments.clone()),
+            },
+            kind,
             thought_signature: None,
         });
         self.outputs.insert(
             key.clone(),
             OutputState {
                 content_index,
-                kind: OutputKind::Tool {
-                    arguments: item.arguments.unwrap_or_default(),
-                },
+                kind: OutputKind::Tool { arguments, kind },
                 ended: false,
             },
         );
@@ -144,6 +161,7 @@ impl ResponsesHandler {
     fn start_thinking(
         &mut self,
         item_id: Option<String>,
+        encrypted_content: Option<String>,
         partial: &mut AssistantMessage,
         events: &mut Vec<AssistantMessageEvent>,
     ) -> String {
@@ -155,7 +173,12 @@ impl ResponsesHandler {
         let content_index = partial.content.len() as u32;
         partial.content.push(ContentBlock::Thinking {
             thinking: String::new(),
-            thinking_signature: Some(key.clone()),
+            thinking_signature: None,
+            provider_metadata: Some(crate::protocol::ProviderMetadata {
+                api: partial.api.clone(),
+                item_id: Some(key.clone()),
+                encrypted_content,
+            }),
             redacted: None,
         });
         self.outputs.insert(
@@ -173,6 +196,36 @@ impl ResponsesHandler {
             partial: partial.clone(),
         });
         key
+    }
+
+    fn start_provider_item(
+        &mut self,
+        item: wire::OutputItem,
+        partial: &mut AssistantMessage,
+        events: &mut Vec<AssistantMessageEvent>,
+    ) {
+        let key = item.id.clone();
+        if self.outputs.contains_key(&key) {
+            return;
+        }
+        let content_index = partial.content.len() as u32;
+        partial.content.push(ContentBlock::ProviderItem {
+            api: partial.api.clone(),
+            item: item.raw,
+        });
+        self.outputs.insert(
+            key.clone(),
+            OutputState {
+                content_index,
+                kind: OutputKind::ProviderItem,
+                ended: false,
+            },
+        );
+        self.output_order.push(key);
+        events.push(AssistantMessageEvent::ProviderItemStart {
+            content_index,
+            partial: partial.clone(),
+        });
     }
 
     fn finish_output(
@@ -197,8 +250,11 @@ impl ResponsesHandler {
                 content_index: output.content_index,
                 partial: partial.clone(),
             },
-            OutputKind::Tool { arguments } => {
-                let parsed = parse_terminal_tool_arguments(arguments)?;
+            OutputKind::Tool { arguments, kind } => {
+                let parsed = match kind {
+                    ToolCallKind::Function => parse_terminal_tool_arguments(arguments)?,
+                    ToolCallKind::Custom => serde_json::Value::String(arguments.clone()),
+                };
                 if let Some(ContentBlock::ToolCall {
                     arguments: value, ..
                 }) = partial.content.get_mut(output.content_index as usize)
@@ -210,6 +266,10 @@ impl ResponsesHandler {
                     partial: partial.clone(),
                 }
             }
+            OutputKind::ProviderItem => AssistantMessageEvent::ProviderItemEnd {
+                content_index: output.content_index,
+                partial: partial.clone(),
+            },
         };
         Ok(Some(event))
     }
@@ -247,6 +307,7 @@ impl SseEventHandler for ResponsesHandler {
                 }
                 self.response_id = Some(response.id);
                 partial.response_id = self.response_id.clone();
+                partial.response_model = response.model;
                 partial.timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -259,9 +320,15 @@ impl SseEventHandler for ResponsesHandler {
             }
             wire::ResponseStreamEvent::OutputItemAdded { item } => match item.item_type.as_str() {
                 "reasoning" => {
-                    self.start_thinking(Some(item.id), partial, &mut events);
+                    self.start_thinking(
+                        Some(item.id),
+                        item.encrypted_content,
+                        partial,
+                        &mut events,
+                    );
                 }
-                "function_call" => self.start_tool(item, partial, &mut events),
+                "function_call" | "custom_tool_call" => self.start_tool(item, partial, &mut events),
+                "web_search_call" => self.start_provider_item(item, partial, &mut events),
                 _ => {}
             },
             wire::ResponseStreamEvent::ContentPartAdded { item_id, part } => {
@@ -283,7 +350,7 @@ impl SseEventHandler for ResponsesHandler {
                         });
                     }
                 } else if part.part_type == "reasoning_text" {
-                    let key = self.start_thinking(item_id, partial, &mut events);
+                    let key = self.start_thinking(item_id, None, partial, &mut events);
                     if let Some(text) = part.text
                         && !text.is_empty()
                     {
@@ -406,7 +473,11 @@ impl SseEventHandler for ResponsesHandler {
                 let output = self.outputs.get_mut(&key).ok_or_else(|| {
                     format!("function_call_arguments.delta references unknown item {key}")
                 })?;
-                let OutputKind::Tool { arguments } = &mut output.kind else {
+                let OutputKind::Tool {
+                    arguments,
+                    kind: ToolCallKind::Function,
+                } = &mut output.kind
+                else {
                     return Err(format!(
                         "function_call_arguments.delta references non-tool item {key}"
                     ));
@@ -430,7 +501,138 @@ impl SseEventHandler for ResponsesHandler {
                     partial: partial.clone(),
                 });
             }
+            wire::ResponseStreamEvent::CustomToolCallInputDelta { item_id, delta } => {
+                let key = item_id
+                    .or_else(|| self.last_tool_output.clone())
+                    .ok_or_else(|| {
+                        "custom_tool_call_input.delta arrived before a tool output item".to_string()
+                    })?;
+                let output = self.outputs.get_mut(&key).ok_or_else(|| {
+                    format!("custom_tool_call_input.delta references unknown item {key}")
+                })?;
+                let OutputKind::Tool {
+                    arguments,
+                    kind: ToolCallKind::Custom,
+                } = &mut output.kind
+                else {
+                    return Err(format!(
+                        "custom_tool_call_input.delta references non-custom item {key}"
+                    ));
+                };
+                if output.ended {
+                    return Err(format!(
+                        "custom_tool_call_input.delta references closed item {key}"
+                    ));
+                }
+                arguments.push_str(&delta);
+                if let Some(ContentBlock::ToolCall {
+                    arguments: value, ..
+                }) = partial.content.get_mut(output.content_index as usize)
+                {
+                    *value = serde_json::Value::String(arguments.clone());
+                }
+                events.push(AssistantMessageEvent::ToolcallDelta {
+                    content_index: output.content_index,
+                    delta,
+                    partial: partial.clone(),
+                });
+            }
+            wire::ResponseStreamEvent::CustomToolCallInputDone { item_id, input } => {
+                let Some(full_input) = input else {
+                    return Ok(SseEventResult::Continue(events));
+                };
+                let key = item_id
+                    .or_else(|| self.last_tool_output.clone())
+                    .ok_or_else(|| {
+                        "custom_tool_call_input.done arrived before a tool output item".to_string()
+                    })?;
+                let output = self.outputs.get_mut(&key).ok_or_else(|| {
+                    format!("custom_tool_call_input.done references unknown item {key}")
+                })?;
+                let OutputKind::Tool {
+                    arguments,
+                    kind: ToolCallKind::Custom,
+                } = &mut output.kind
+                else {
+                    return Err(format!(
+                        "custom_tool_call_input.done references non-custom item {key}"
+                    ));
+                };
+                if full_input != *arguments {
+                    let Some(suffix) = full_input.strip_prefix(arguments.as_str()) else {
+                        return Err(format!(
+                            "custom_tool_call_input.done contradicts accumulated input for item {key}"
+                        ));
+                    };
+                    if !suffix.is_empty() {
+                        arguments.push_str(suffix);
+                        if let Some(ContentBlock::ToolCall {
+                            arguments: value, ..
+                        }) = partial.content.get_mut(output.content_index as usize)
+                        {
+                            *value = serde_json::Value::String(arguments.clone());
+                        }
+                        events.push(AssistantMessageEvent::ToolcallDelta {
+                            content_index: output.content_index,
+                            delta: suffix.to_owned(),
+                            partial: partial.clone(),
+                        });
+                    }
+                }
+            }
+            wire::ResponseStreamEvent::WebSearchCallStatus { item_id, status } => {
+                let key = item_id
+                    .ok_or_else(|| "web_search_call status is missing its item_id".to_string())?;
+                let output = self.outputs.get(&key).ok_or_else(|| {
+                    format!("web_search_call status references unknown item {key}")
+                })?;
+                if output.ended || !matches!(output.kind, OutputKind::ProviderItem) {
+                    return Err(format!(
+                        "web_search_call status references closed/non-provider item {key}"
+                    ));
+                }
+                if let Some(ContentBlock::ProviderItem { item, .. }) =
+                    partial.content.get_mut(output.content_index as usize)
+                {
+                    item["status"] = serde_json::Value::String(status.clone());
+                }
+                events.push(AssistantMessageEvent::ProviderItemDelta {
+                    content_index: output.content_index,
+                    delta: status,
+                    partial: partial.clone(),
+                });
+            }
             wire::ResponseStreamEvent::OutputItemDone { item } => {
+                if item.item_type == "web_search_call" {
+                    let output = self.outputs.get(&item.id).ok_or_else(|| {
+                        format!(
+                            "web_search output_item.done references unknown item {}",
+                            item.id
+                        )
+                    })?;
+                    if let Some(ContentBlock::ProviderItem { item: raw, .. }) =
+                        partial.content.get_mut(output.content_index as usize)
+                    {
+                        *raw = item.raw;
+                    }
+                }
+                if item.item_type == "reasoning"
+                    && let Some(encrypted_content) = item.encrypted_content.clone()
+                    && let Some(ContentBlock::Thinking {
+                        provider_metadata: Some(metadata),
+                        ..
+                    }) = partial.content.iter_mut().find(|block| {
+                        matches!(
+                            block,
+                            ContentBlock::Thinking {
+                                provider_metadata: Some(metadata),
+                                ..
+                            } if metadata.item_id.as_deref() == Some(item.id.as_str())
+                        )
+                    })
+                {
+                    metadata.encrypted_content = Some(encrypted_content);
+                }
                 let key = if self.outputs.contains_key(&item.id) {
                     item.id
                 } else if item.item_type == "message" {
@@ -449,6 +651,7 @@ impl SseEventHandler for ResponsesHandler {
                     return Err("response.completed arrived before response.created".into());
                 }
                 partial.response_id = Some(response.id);
+                partial.response_model = response.model;
                 self.usage = response.usage;
                 return Ok(SseEventResult::ProviderDone(events));
             }
@@ -467,6 +670,7 @@ impl SseEventHandler for ResponsesHandler {
                     .is_some_and(|reason| matches!(reason, "max_output_tokens" | "max_tokens"))
                 {
                     partial.response_id = Some(response.id);
+                    partial.response_model = response.model;
                     self.usage = response.usage;
                     self.terminal_stop_reason = Some(StopReason::Length);
                     return Ok(SseEventResult::ProviderDone(events));
@@ -558,6 +762,11 @@ fn map_usage(usage: &wire::ResponseUsage, model: &Model) -> Usage {
     let mut result = Usage {
         input: non_cached_input,
         output: usage.output_tokens,
+        reasoning_tokens: usage
+            .output_tokens_details
+            .as_ref()
+            .map(|details| details.reasoning_tokens)
+            .unwrap_or(0),
         cache_read: cache_tokens,
         cache_write: 0,
         total_tokens: if usage.total_tokens == 0 {

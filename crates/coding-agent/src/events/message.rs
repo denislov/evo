@@ -97,6 +97,7 @@ impl MessageEvent {
                     usage: CodingAgentProductEventUsage {
                         input: usage.input,
                         output: usage.output,
+                        reasoning_tokens: usage.reasoning_tokens,
                         cache_read: usage.cache_read,
                         cache_write: usage.cache_write,
                         total_tokens: usage.total_tokens,

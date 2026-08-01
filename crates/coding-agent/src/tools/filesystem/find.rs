@@ -172,6 +172,7 @@ pub fn find_tool(filesystem: FilesystemCapability) -> AgentTool {
         })
     });
     AgentTool {
+        kind: Default::default(),
         name: "find".into(),
         description: DESCRIPTION.into(),
         parameters: schema(),

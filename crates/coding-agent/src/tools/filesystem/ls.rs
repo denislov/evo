@@ -126,6 +126,7 @@ pub fn ls_tool(filesystem: FilesystemCapability) -> AgentTool {
         })
     });
     AgentTool {
+        kind: Default::default(),
         name: "ls".into(),
         description: DESCRIPTION.into(),
         parameters: schema(),

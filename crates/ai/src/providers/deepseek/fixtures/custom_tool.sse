@@ -1,0 +1,20 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_custom","status":"in_progress","model":"deepseek-v4-flash","usage":null},"sequence_number":0}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"custom_item_1","call_id":"call_custom_1","status":"in_progress","name":"apply_patch","input":""},"output_index":0,"sequence_number":1}
+
+event: response.custom_tool_call_input.delta
+data: {"type":"response.custom_tool_call_input.delta","delta":"*** Begin Patch\n","item_id":"custom_item_1","output_index":0,"sequence_number":2}
+
+event: response.custom_tool_call_input.delta
+data: {"type":"response.custom_tool_call_input.delta","delta":"*** End Patch\n","item_id":"custom_item_1","output_index":0,"sequence_number":3}
+
+event: response.custom_tool_call_input.done
+data: {"type":"response.custom_tool_call_input.done","input":"*** Begin Patch\n*** End Patch\n","item_id":"custom_item_1","output_index":0,"sequence_number":4}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"custom_tool_call","id":"custom_item_1","call_id":"call_custom_1","status":"completed","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},"output_index":0,"sequence_number":5}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_custom","status":"completed","model":"deepseek-v4-flash","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":0},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":130}},"sequence_number":6}

@@ -327,6 +327,7 @@ pub fn grep_tool(filesystem: FilesystemCapability) -> AgentTool {
         })
     });
     AgentTool {
+        kind: Default::default(),
         name: "grep".into(),
         description: DESCRIPTION.into(),
         parameters: schema(),

@@ -94,12 +94,14 @@ crates/ai/src/
 ├── model/               # 模型元数据与目录
 │   ├── catalog.rs       # 模型目录查询接口
 │   └── generated.json   # 100+ 模型定义（~19k 行）
-├── providers/           # 7 个内置提供商实现
+├── providers/           # 内置提供商实现
 │   ├── anthropic/       # Claude Messages API
 │   ├── openai/completions/  # Completions API
-│   ├── openai/responses/    # Responses API
+│   ├── openai/responses/    # OpenAI Responses 请求转换
+│   ├── responses/       # Responses SSE 共享解析器
 │   ├── openai_codex_responses/
 │   ├── azure_openai_responses/
+│   ├── deepseek/        # DeepSeek Responses API
 │   ├── google/          # Gemini
 │   └── mistral/
 ├── protocol/            # 协议无关的消息/请求/工具类型
@@ -670,6 +672,7 @@ crate::<private_module>   ←  仅 crate 内部访问
 | Anthropic (Claude) | `api.anthropic.com` | Messages API |
 | OpenAI (GPT/Codex) | `api.openai.com` | Completions / Responses API |
 | Azure OpenAI | 自定义实例 | Responses API |
+| DeepSeek | `api.deepseek.com` | Responses API |
 | Google (Gemini) | Generative AI API | Gemini API |
 | Mistral | `api.mistral.ai` | Conversations API |
 

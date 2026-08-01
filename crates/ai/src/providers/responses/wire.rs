@@ -1,3 +1,6 @@
+//! Shared Responses wire vocabulary. Provider dialects may use narrower
+//! request types while sharing the response/event schema.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -12,13 +15,26 @@ pub struct ResponseCreateRequest {
     pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    #[serde(rename = "top_p", skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(rename = "top_logprobs", skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u8>,
     #[serde(rename = "tool_choice", skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
     #[serde(rename = "prompt_cache_key", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ResponseReasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<ResponseText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
     pub stream: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseText {
+    pub format: crate::protocol::ResponsesTextFormat,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -27,12 +43,28 @@ pub struct ResponseReasoning {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
+#[serde(untagged)]
 pub enum ResponseInputItem {
+    Known(ResponseKnownInputItem),
+    Provider(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum ResponseKnownInputItem {
     #[serde(rename = "message")]
     Message {
         role: String,
         content: serde_json::Value,
+    },
+    #[serde(rename = "reasoning")]
+    Reasoning {
+        id: String,
+        summary: Vec<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<serde_json::Value>,
+        #[serde(rename = "encrypted_content", skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
     },
     #[serde(rename = "function_call")]
     FunctionCall {
@@ -42,16 +74,34 @@ pub enum ResponseInputItem {
     },
     #[serde(rename = "function_call_output")]
     FunctionCallOutput { call_id: String, output: String },
+    #[serde(rename = "custom_tool_call")]
+    CustomToolCall {
+        call_id: String,
+        name: String,
+        input: String,
+    },
+    #[serde(rename = "custom_tool_call_output")]
+    CustomToolCallOutput { call_id: String, output: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ResponseTool {
-    #[serde(rename = "type")]
-    pub tool_type: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub parameters: serde_json::Value,
+#[serde(tag = "type")]
+pub enum ResponseTool {
+    #[serde(rename = "function")]
+    Function {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        parameters: serde_json::Value,
+    },
+    #[serde(rename = "web_search")]
+    WebSearch,
+    #[serde(rename = "custom")]
+    Custom {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
 }
 
 // ── SSE event types ────────────────────────────────────
@@ -83,6 +133,18 @@ pub enum ResponseStreamEvent {
     FunctionCallArgumentsDelta {
         item_id: Option<String>,
         delta: String,
+    },
+    CustomToolCallInputDelta {
+        item_id: Option<String>,
+        delta: String,
+    },
+    CustomToolCallInputDone {
+        item_id: Option<String>,
+        input: Option<String>,
+    },
+    WebSearchCallStatus {
+        item_id: Option<String>,
+        status: String,
     },
     OutputItemDone {
         item: OutputItem,
@@ -123,7 +185,7 @@ impl ResponseStreamEvent {
                 response: field(&raw, "response")?,
             }),
             "response.output_item.added" => Ok(Self::OutputItemAdded {
-                item: field(&raw, "item")?,
+                item: output_item(&raw)?,
             }),
             "response.content_part.added" => Ok(Self::ContentPartAdded {
                 item_id: optional_string(&raw, "item_id"),
@@ -145,8 +207,28 @@ impl ResponseStreamEvent {
                 item_id: optional_string(&raw, "item_id"),
                 delta: field(&raw, "delta")?,
             }),
+            "response.custom_tool_call_input.delta" => Ok(Self::CustomToolCallInputDelta {
+                item_id: optional_string(&raw, "item_id"),
+                delta: field(&raw, "delta")?,
+            }),
+            "response.custom_tool_call_input.done" => Ok(Self::CustomToolCallInputDone {
+                item_id: optional_string(&raw, "item_id"),
+                input: optional_string(&raw, "input"),
+            }),
+            "response.web_search_call.in_progress" => Ok(Self::WebSearchCallStatus {
+                item_id: optional_string(&raw, "item_id"),
+                status: "in_progress".into(),
+            }),
+            "response.web_search_call.searching" => Ok(Self::WebSearchCallStatus {
+                item_id: optional_string(&raw, "item_id"),
+                status: "searching".into(),
+            }),
+            "response.web_search_call.completed" => Ok(Self::WebSearchCallStatus {
+                item_id: optional_string(&raw, "item_id"),
+                status: "completed".into(),
+            }),
             "response.output_item.done" => Ok(Self::OutputItemDone {
-                item: field(&raw, "item")?,
+                item: output_item(&raw)?,
             }),
             "response.completed" => Ok(Self::ResponseCompleted {
                 response: field(&raw, "response")?,
@@ -180,6 +262,17 @@ impl ResponseStreamEvent {
     }
 }
 
+fn output_item(raw: &serde_json::Value) -> Result<OutputItem, String> {
+    let value = raw
+        .get("item")
+        .cloned()
+        .ok_or_else(|| "event is missing field `item`".to_string())?;
+    let mut item: OutputItem = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid `item` field: {error}"))?;
+    item.raw = value;
+    Ok(item)
+}
+
 fn field<T: serde::de::DeserializeOwned>(raw: &serde_json::Value, name: &str) -> Result<T, String> {
     serde_json::from_value(
         raw.get(name)
@@ -198,6 +291,8 @@ fn optional_string(raw: &serde_json::Value, name: &str) -> Option<String> {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResponseInfo {
     pub id: String,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -234,6 +329,14 @@ pub struct ResponseUsage {
     pub total_tokens: u32,
     #[serde(default, rename = "input_tokens_details")]
     pub input_tokens_details: Option<InputTokensDetails>,
+    #[serde(default, rename = "output_tokens_details")]
+    pub output_tokens_details: Option<OutputTokensDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutputTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -253,6 +356,12 @@ pub struct OutputItem {
     pub call_id: Option<String>,
     #[serde(default)]
     pub arguments: Option<String>,
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub encrypted_content: Option<String>,
+    #[serde(skip)]
+    pub raw: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -851,7 +851,10 @@ async fn stream_model_repair(
             | AssistantMessageEvent::ThinkingEnd { .. }
             | AssistantMessageEvent::ToolcallStart { .. }
             | AssistantMessageEvent::ToolcallDelta { .. }
-            | AssistantMessageEvent::ToolcallEnd { .. } => {}
+            | AssistantMessageEvent::ToolcallEnd { .. }
+            | AssistantMessageEvent::ProviderItemStart { .. }
+            | AssistantMessageEvent::ProviderItemDelta { .. }
+            | AssistantMessageEvent::ProviderItemEnd { .. } => {}
         }
     }
     let text = final_text.ok_or_else(|| {

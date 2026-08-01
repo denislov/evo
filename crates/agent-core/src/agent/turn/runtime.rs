@@ -1,5 +1,5 @@
-use futures::channel::mpsc;
 use futures::Stream;
+use futures::channel::mpsc;
 use std::pin::Pin;
 use std::sync::{
     Arc, RwLock,
@@ -53,10 +53,7 @@ impl AgentTurnRunner {
     }
 }
 
-type TurnRunOutcome = (
-    Result<AgentTurnResult, AgentTurnError>,
-    AgentTurnContext,
-);
+type TurnRunOutcome = (Result<AgentTurnResult, AgentTurnError>, AgentTurnContext);
 
 /// One multi-turn agent loop, implemented as a hand-written `Stream` so the
 /// in-flight `AgentTurnContext` is committed back to the shared `AgentState`
@@ -479,12 +476,18 @@ mod transition_tests {
             (AgentTurnState::Start, AgentTurnDecision::Done),
             (AgentTurnState::Start, AgentTurnDecision::Continue),
             (AgentTurnState::ProviderStream, AgentTurnDecision::Tools),
-            (AgentTurnState::DecideAfterAssistant, AgentTurnDecision::Next),
+            (
+                AgentTurnState::DecideAfterAssistant,
+                AgentTurnDecision::Next,
+            ),
             (AgentTurnState::ExecuteTools, AgentTurnDecision::Done),
             (AgentTurnState::ExecuteTools, AgentTurnDecision::Tools),
             (AgentTurnState::Finish, AgentTurnDecision::Next),
             (AgentTurnState::DrainQueuedInput, AgentTurnDecision::Next),
-            (AgentTurnState::CompactRuntimeContext, AgentTurnDecision::Next),
+            (
+                AgentTurnState::CompactRuntimeContext,
+                AgentTurnDecision::Next,
+            ),
             (AgentTurnState::PrepareNextTurn, AgentTurnDecision::Next),
         ] {
             assert!(
@@ -498,8 +501,8 @@ mod transition_tests {
 #[cfg(all(test, feature = "test-support"))]
 mod loop_tests {
     use super::*;
-    use crate::agent::types::{AgentConfig, AgentEvent, AgentMessage};
     use crate::agent::Agent;
+    use crate::agent::types::{AgentConfig, AgentEvent, AgentMessage};
     use ai::api::client::AiClient;
     use ai::api::conversation::{ContentBlock, StopReason};
     use ai::api::model::{Model, ModelCost, ModelInput};
@@ -588,7 +591,10 @@ mod loop_tests {
             text_call("done", StopReason::Stop),
         ]);
         let mut stream = agent.prompt("hello");
-        assert!(matches!(stream.next().await, Some(AgentEvent::TurnStart { .. })));
+        assert!(matches!(
+            stream.next().await,
+            Some(AgentEvent::TurnStart { .. })
+        ));
         drop(stream);
         assert!(
             agent
@@ -606,9 +612,13 @@ mod loop_tests {
 
     #[tokio::test]
     async fn dropping_after_tool_turn_preserves_tool_results() {
-        let agent = test_agent(vec![tool_call("searching"), text_call("found", StopReason::Stop)]);
+        let agent = test_agent(vec![
+            tool_call("searching"),
+            text_call("found", StopReason::Stop),
+        ]);
         agent
             .add_tool(crate::agent::types::AgentTool {
+                kind: Default::default(),
                 name: "test_tool".into(),
                 description: "A test tool".into(),
                 parameters: serde_json::json!({"type": "object"}),
@@ -633,17 +643,22 @@ mod loop_tests {
         }
         drop(stream);
         assert_eq!(agent.messages().len(), 3);
-        let has_tool_result = agent.messages().iter().any(|message| {
-            matches!(message, AgentMessage::ToolResult { .. })
-        });
+        let has_tool_result = agent
+            .messages()
+            .iter()
+            .any(|message| matches!(message, AgentMessage::ToolResult { .. }));
         assert!(has_tool_result, "tool result must survive an early drop");
     }
 
     #[tokio::test]
     async fn clear_queues_during_turn_empties_queued_input() {
-        let agent = test_agent(vec![tool_call("searching"), text_call("found", StopReason::Stop)]);
+        let agent = test_agent(vec![
+            tool_call("searching"),
+            text_call("found", StopReason::Stop),
+        ]);
         agent
             .add_tool(crate::agent::types::AgentTool {
+                kind: Default::default(),
                 name: "test_tool".into(),
                 description: "A test tool".into(),
                 parameters: serde_json::json!({"type": "object"}),

@@ -1,6 +1,5 @@
 pub mod convert;
-pub mod stream;
-pub mod wire;
+pub use crate::providers::responses::{stream, wire};
 
 use async_stream::stream;
 

@@ -112,6 +112,7 @@ impl SseEventHandler for CompletionsHandler {
                     partial.content.push(ContentBlock::Thinking {
                         thinking: String::new(),
                         thinking_signature: None,
+                        provider_metadata: None,
                         redacted: None,
                     });
                     events.push(AssistantMessageEvent::ThinkingStart {
@@ -154,6 +155,7 @@ impl SseEventHandler for CompletionsHandler {
                                 id: tc.id.clone().unwrap_or_default(),
                                 name: String::new(),
                                 arguments: serde_json::json!({}),
+                                kind: Default::default(),
                                 thought_signature: None,
                             });
                             events.push(AssistantMessageEvent::ToolcallStart {
@@ -312,6 +314,7 @@ fn map_usage(usage: &wire::ChatUsage, model: &Model) -> Usage {
     let mut result = Usage {
         input: non_cached_input,
         output: usage.completion_tokens,
+        reasoning_tokens: 0,
         cache_read: cache_tokens,
         cache_write: 0,
         total_tokens: if usage.total_tokens == 0 {

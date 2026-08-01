@@ -47,6 +47,7 @@ fn empty_usage() -> CodingAgentProductEventUsage {
     CodingAgentProductEventUsage {
         input: 0,
         output: 0,
+        reasoning_tokens: 0,
         cache_read: 0,
         cache_write: 0,
         total_tokens: 0,
@@ -117,6 +118,7 @@ fn coding_event_bridge_maps_assistant_events() {
             usage: CodingAgentProductEventUsage {
                 input: 100,
                 output: 50,
+                reasoning_tokens: 0,
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: 150,
@@ -158,6 +160,7 @@ fn coding_event_bridge_maps_assistant_events() {
             usage: CodingAgentProductEventUsage {
                 input: 30,
                 output: 20,
+                reasoning_tokens: 0,
                 cache_read: 5,
                 cache_write: 0,
                 total_tokens: 0,

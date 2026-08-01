@@ -1,0 +1,35 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_web","status":"in_progress","model":"deepseek-v4-flash","usage":null},"sequence_number":0}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"web_search_call","id":"web_call_1","status":"in_progress"},"output_index":0,"sequence_number":1}
+
+event: response.web_search_call.in_progress
+data: {"type":"response.web_search_call.in_progress","item_id":"web_call_1","output_index":0,"sequence_number":2}
+
+event: response.web_search_call.searching
+data: {"type":"response.web_search_call.searching","item_id":"web_call_1","output_index":0,"sequence_number":3}
+
+event: response.web_search_call.completed
+data: {"type":"response.web_search_call.completed","item_id":"web_call_1","output_index":0,"sequence_number":4}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"web_search_call","id":"web_call_1","status":"completed","action":{"type":"search","queries":["DeepSeek API docs"]}},"output_index":0,"sequence_number":5}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"message","id":"message_1","status":"in_progress","content":[],"phase":"final_answer","role":"assistant"},"output_index":1,"sequence_number":6}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","content_index":0,"item_id":"message_1","output_index":1,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""},"sequence_number":7}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","content_index":0,"delta":"api-docs.deepseek.com","item_id":"message_1","output_index":1,"sequence_number":8}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","content_index":0,"item_id":"message_1","output_index":1,"sequence_number":9,"text":"api-docs.deepseek.com"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"message","id":"message_1","status":"completed","content":[{"type":"output_text","text":"api-docs.deepseek.com"}],"phase":"final_answer","role":"assistant"},"output_index":1,"sequence_number":10}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_web","status":"completed","model":"deepseek-v4-flash","usage":{"input_tokens":200,"input_tokens_details":{"cached_tokens":64},"output_tokens":40,"output_tokens_details":{"reasoning_tokens":10},"total_tokens":240}},"sequence_number":11}

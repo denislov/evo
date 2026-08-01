@@ -52,6 +52,7 @@ fn estimate_block_tokens(block: &ContentBlock) -> u32 {
         }
         ContentBlock::Thinking { thinking, .. } => estimate_text_tokens(thinking),
         ContentBlock::Image { .. } => 4800u32.div_ceil(4),
+        ContentBlock::ProviderItem { item, .. } => estimate_text_tokens(&item.to_string()),
     }
 }
 
@@ -171,6 +172,7 @@ mod tests {
         Usage {
             input,
             output,
+            reasoning_tokens: 0,
             cache_read: 0,
             cache_write: 0,
             total_tokens: total,
@@ -193,7 +195,10 @@ mod tests {
         let estimate = estimate_context_tokens(&messages);
         assert_eq!(estimate.usage_tokens, 150);
         assert!(estimate.trailing_tokens > 0);
-        assert_eq!(estimate.tokens, estimate.usage_tokens + estimate.trailing_tokens);
+        assert_eq!(
+            estimate.tokens,
+            estimate.usage_tokens + estimate.trailing_tokens
+        );
         assert_eq!(estimate.last_usage_index, Some(0));
     }
 
@@ -228,6 +233,7 @@ mod tests {
         let with_total = Usage {
             input: 1,
             output: 2,
+            reasoning_tokens: 0,
             cache_read: 3,
             cache_write: 4,
             total_tokens: 100,
@@ -238,6 +244,7 @@ mod tests {
         let without_total = Usage {
             input: 1,
             output: 2,
+            reasoning_tokens: 0,
             cache_read: 3,
             cache_write: 4,
             total_tokens: 0,

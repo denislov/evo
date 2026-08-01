@@ -171,6 +171,8 @@ pub type CodingAgentProductEventError = crate::runtime::public_error::CodingAgen
 pub struct CodingAgentProductEventUsage {
     pub input: u32,
     pub output: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reasoning_tokens: u32,
     pub cache_read: u32,
     pub cache_write: u32,
     pub total_tokens: u32,
@@ -188,6 +190,10 @@ const fn default_true() -> bool {
 
 const fn is_true(value: &bool) -> bool {
     *value
+}
+
+const fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -214,6 +220,7 @@ impl From<ai::api::conversation::Usage> for CodingAgentProductEventUsage {
         Self {
             input: usage.input,
             output: usage.output,
+            reasoning_tokens: usage.reasoning_tokens,
             cache_read: usage.cache_read,
             cache_write: usage.cache_write,
             total_tokens: usage.total_tokens,

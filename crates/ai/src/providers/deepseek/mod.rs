@@ -88,7 +88,7 @@ impl ApiProvider for DeepSeekResponsesProvider {
             request,
             payload,
             |body, model, cancel| {
-                crate::providers::openai::responses::stream::process_with_api_name(
+                crate::providers::responses::stream::process_with_api_name(
                     body, model, cancel, API_NAME,
                 )
             },
@@ -115,7 +115,9 @@ fn error_stream(model: &Model, error: impl Into<String>) -> EventStream {
 #[cfg(test)]
 mod tests {
     use super::{DeepSeekResponsesProvider, resolve_responses_url};
-    use crate::protocol::{AssistantMessageEvent, Context};
+    use crate::protocol::{
+        AssistantMessageEvent, ContentBlock, Context, Message, StreamOptions, ThinkingConfig,
+    };
     use crate::registry::ApiProvider;
     use futures::StreamExt;
 
@@ -159,5 +161,57 @@ mod tests {
         };
         assert_eq!(message.api, "deepseek-responses");
         assert_eq!(message.provider.as_deref(), Some("deepseek"));
+    }
+
+    /// Paid, opt-in contract test. The key is supplied by the caller and is
+    /// never read from or written to a repository path.
+    #[tokio::test]
+    #[ignore = "requires DEEPSEEK_LIVE_API_KEY and performs a paid network request"]
+    async fn live_reasoning_stream_matches_provider_contract() {
+        let api_key = std::env::var("DEEPSEEK_LIVE_API_KEY")
+            .expect("set DEEPSEEK_LIVE_API_KEY to run the paid contract test");
+        let model = crate::model::get_model("deepseek", "deepseek-v4-flash")
+            .expect("DeepSeek V4 Flash is in the catalog");
+        let provider = DeepSeekResponsesProvider::new(Some(api_key));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User {
+                content: vec![ContentBlock::Text {
+                    text: "What is 13 * 17? Answer with the number only.".into(),
+                    text_signature: None,
+                }],
+            }],
+            tools: None,
+        };
+        let options = StreamOptions {
+            max_tokens: Some(96),
+            timeout_ms: Some(60_000),
+            thinking: Some(ThinkingConfig {
+                enabled: true,
+                budget_tokens: None,
+                effort: Some("low".into()),
+            }),
+            ..StreamOptions::default()
+        };
+
+        let message =
+            crate::protocol::stream::complete(provider.stream(&model, context, Some(options)))
+                .await
+                .expect("live DeepSeek stream completes successfully");
+        assert_eq!(message.api, "deepseek-responses");
+        assert_eq!(message.provider.as_deref(), Some("deepseek"));
+        assert_eq!(message.response_model.as_deref(), Some("deepseek-v4-flash"));
+        assert!(message.usage.total_tokens > 0);
+        assert!(message.content.iter().any(|block| matches!(
+            block,
+            ContentBlock::Thinking {
+                provider_metadata: Some(metadata),
+                ..
+            } if metadata.api == "deepseek-responses" && metadata.item_id.is_some()
+        )));
+        assert!(message.content.iter().any(|block| matches!(
+            block,
+            ContentBlock::Text { text, .. } if !text.is_empty()
+        )));
     }
 }

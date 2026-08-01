@@ -565,6 +565,7 @@ pub fn edit_tool_with_operations(
         })
     });
     AgentTool {
+        kind: Default::default(),
         name: "edit".into(),
         description: DESCRIPTION.into(),
         parameters: schema(),
