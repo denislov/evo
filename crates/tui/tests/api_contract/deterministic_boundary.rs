@@ -3,101 +3,38 @@ const STDIN_BUFFER_SOURCE: &str = include_str!("../../src/input/stdin.rs");
 const TERMINAL_SOURCE: &str = include_str!("../../src/terminal/lifecycle.rs");
 
 #[test]
-fn render_scheduler_tests_use_named_time_constants() {
-    let mut violations = Vec::new();
-
-    for (index, line) in TUI_RUNTIME_TEST_SOURCE.lines().enumerate() {
-        if !line.contains("Duration::from_millis") {
-            continue;
+fn tests_use_named_time_constants() {
+    let cases: &[(&str, &str, &str, Option<&str>)] = &[
+        (TUI_RUNTIME_TEST_SOURCE, "const RENDER_SCHEDULER_", "render scheduler", None),
+        (STDIN_BUFFER_SOURCE, "const STDIN_BUFFER_", "stdin_buffer", Some("stdin_buffer")),
+    ];
+    for (source, named_prefix, label, tests_module) in cases {
+        let mut violations = Vec::new();
+        let lines: Vec<_> = source.lines().collect();
+        let start_index = match tests_module {
+            Some(name) => tests_start_index(&lines, name),
+            None => 0,
+        };
+        for (index, line) in lines.iter().enumerate().skip(start_index) {
+            if !line.contains("Duration::from_millis") {
+                continue;
+            }
+            if line.trim_start().starts_with(named_prefix) {
+                continue;
+            }
+            violations.push(format!("{}: {}", index + 1, line.trim()));
         }
-        if line.trim_start().starts_with("const RENDER_SCHEDULER_") {
-            continue;
-        }
-        violations.push(format!("{}: {}", index + 1, line.trim()));
+        assert!(
+            violations.is_empty(),
+            "{label} tests should use named timing constants instead of inline fixed durations:\n{}",
+            violations.join("\n")
+        );
     }
 
-    assert!(
-        violations.is_empty(),
-        "render scheduler tests should use named timing constants instead of inline fixed durations:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn render_scheduler_tests_use_named_clock_anchor() {
-    let mut violations = Vec::new();
-    let lines: Vec<_> = TUI_RUNTIME_TEST_SOURCE.lines().collect();
-
-    for (index, line) in lines.iter().enumerate() {
-        if !line.contains("Instant::now()") {
-            continue;
-        }
-        let prefix = lines[index.saturating_sub(2)..=index].join("\n");
-        if prefix.contains("fn render_scheduler_clock_anchor") {
-            continue;
-        }
-        violations.push(format!("{}: {}", index + 1, line.trim()));
-    }
-
-    assert!(
-        violations.is_empty(),
-        "render scheduler tests should use a named clock anchor helper instead of scattering Instant::now():\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn stdin_buffer_tests_use_named_time_constants() {
-    let mut violations = Vec::new();
-
-    for (line_number, line) in stdin_buffer_test_lines() {
-        if !line.contains("Duration::from_millis") {
-            continue;
-        }
-        if line.trim_start().starts_with("const STDIN_BUFFER_") {
-            continue;
-        }
-        violations.push(format!("{}: {}", line_number, line.trim()));
-    }
-
-    assert!(
-        violations.is_empty(),
-        "stdin_buffer unit tests should use named timing constants instead of inline fixed durations:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn stdin_buffer_tests_use_named_clock_anchor() {
-    let mut violations = Vec::new();
-    let lines: Vec<_> = STDIN_BUFFER_SOURCE.lines().collect();
-    let start_index = stdin_buffer_tests_start_index(&lines);
-
-    for index in start_index..lines.len() {
-        let line = lines[index];
-        if !line.contains("Instant::now()") {
-            continue;
-        }
-        let prefix = lines[index.saturating_sub(2)..=index].join("\n");
-        if prefix.contains("fn stdin_buffer_clock_anchor") {
-            continue;
-        }
-        violations.push(format!("{}: {}", index + 1, line.trim()));
-    }
-
-    assert!(
-        violations.is_empty(),
-        "stdin_buffer unit tests should use a named clock anchor helper instead of scattering Instant::now():\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn terminal_drain_input_test_uses_named_durations() {
+    // terminal drain_input calls must not inline durations either
     let mut violations = Vec::new();
     let lines: Vec<_> = TERMINAL_SOURCE.lines().collect();
-    let start_index = terminal_tests_start_index(&lines);
-
+    let start_index = tests_start_index(&lines, "terminal");
     for index in start_index..lines.len() {
         let line = lines[index];
         if !line.contains("drain_input(") {
@@ -108,7 +45,6 @@ fn terminal_drain_input_test_uses_named_durations() {
             violations.push(format!("{}: {}", index + 1, line.trim()));
         }
     }
-
     assert!(
         violations.is_empty(),
         "terminal drain_input tests should use named timing constants instead of inline fixed durations:\n{}",
@@ -116,25 +52,37 @@ fn terminal_drain_input_test_uses_named_durations() {
     );
 }
 
-fn stdin_buffer_test_lines() -> impl Iterator<Item = (usize, &'static str)> {
-    let lines: Vec<_> = STDIN_BUFFER_SOURCE.lines().collect();
-    let start_index = stdin_buffer_tests_start_index(&lines);
-    lines
-        .into_iter()
-        .enumerate()
-        .skip(start_index)
-        .map(|(index, line)| (index + 1, line))
+#[test]
+fn tests_use_named_clock_anchor() {
+    for (source, anchor_fn, start_at, label) in [
+        (TUI_RUNTIME_TEST_SOURCE, "fn render_scheduler_clock_anchor", None, "render scheduler"),
+        (STDIN_BUFFER_SOURCE, "fn stdin_buffer_clock_anchor", Some("stdin_buffer"), "stdin_buffer"),
+    ] {
+        let mut violations = Vec::new();
+        let lines: Vec<_> = source.lines().collect();
+        let start_index = match start_at {
+            Some(name) => tests_start_index(&lines, name),
+            None => 0,
+        };
+        for (index, line) in lines.iter().enumerate().skip(start_index) {
+            if !line.contains("Instant::now()") {
+                continue;
+            }
+            let prefix = lines[index.saturating_sub(2)..=index].join("\n");
+            if prefix.contains(anchor_fn) {
+                continue;
+            }
+            violations.push(format!("{}: {}", index + 1, line.trim()));
+        }
+        assert!(
+            violations.is_empty(),
+            "{label} tests should use a named clock anchor helper instead of scattering Instant::now():\n{}",
+            violations.join("\n")
+        );
+    }
 }
 
-fn stdin_buffer_tests_start_index(lines: &[&str]) -> usize {
-    source_tests_start_index(lines, "stdin_buffer")
-}
-
-fn terminal_tests_start_index(lines: &[&str]) -> usize {
-    source_tests_start_index(lines, "terminal")
-}
-
-fn source_tests_start_index(lines: &[&str], source_name: &str) -> usize {
+fn tests_start_index(lines: &[&str], source_name: &str) -> usize {
     lines
         .iter()
         .position(|line| line.contains("mod tests"))

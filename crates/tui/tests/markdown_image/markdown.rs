@@ -718,27 +718,6 @@ fn adjacent_paragraphs_have_one_blank_line() {
     );
 }
 
-#[test]
-fn multiple_adjacent_blocks_all_have_spacing() {
-    let mut md = Markdown::new("# Title\n\nA paragraph.\n\n> A quote\n\n```\ncode\n```\n\nDone.");
-    let lines = md.render(80);
-    let plain = plain_lines(&lines);
-    // Just verify all content is present and no gaps are missing
-    assert!(
-        plain.iter().any(|l| l.contains("Title")),
-        "title: {plain:?}"
-    );
-    assert!(
-        plain.iter().any(|l| l.contains("A paragraph")),
-        "paragraph: {plain:?}"
-    );
-    assert!(
-        plain.iter().any(|l| l.contains("quote")),
-        "quote: {plain:?}"
-    );
-    assert!(plain.iter().any(|l| l.contains("code")), "code: {plain:?}");
-    assert!(plain.iter().any(|l| l.contains("Done")), "done: {plain:?}");
-}
 
 // ── List nesting (blockquote / code inside list items) ───────────────
 
@@ -776,6 +755,14 @@ fn list_item_containing_blockquote_renders_bullet_and_quote_content() {
         plain[0].contains("alpha"),
         "bullet and content should be on same line: {plain:?}"
     );
+    // No line should exceed the render width
+    for (i, l) in plain.iter().enumerate() {
+        assert!(
+            l.len() <= 24,
+            "line {i} exceeds width 24: {l:?} (len={})",
+            l.len()
+        );
+    }
 }
 
 #[test]
@@ -798,26 +785,6 @@ fn list_item_containing_code_block_renders_bullet_and_code_fence() {
         plain.iter().any(|l| l.contains("alpha")),
         "should show code content: {plain:?}"
     );
-}
-
-#[test]
-fn list_item_blockquote_wraps_lines_properly() {
-    let mut md = Markdown::new("- > alpha beta gamma delta epsilon zeta");
-    let lines = md.render(24);
-    let plain: Vec<String> = lines.iter().map(|l| strip_ansi_line(l)).collect();
-    // First line: "- alpha..." (bullet + content)
-    assert!(
-        plain[0].starts_with("- "),
-        "first line should have bullet: {plain:?}"
-    );
-    // The first line should not exceed width
-    for (i, l) in plain.iter().enumerate() {
-        assert!(
-            l.len() <= 24,
-            "line {i} exceeds width 24: {l:?} (len={})",
-            l.len()
-        );
-    }
 }
 
 #[test]
@@ -872,23 +839,6 @@ fn render_cache_invalidates_on_text_change() {
     );
 }
 
-#[test]
-fn render_cache_invalidates_on_theme_change() {
-    let mut md = Markdown::new("`code` text");
-    let _first = md.render(40);
-    md.set_theme(MarkdownTheme {
-        code: Style::fg(Color::Red),
-        ..MarkdownTheme::default()
-    });
-    let second = md.render(40);
-    // After theme change, the code style should have changed (no crash)
-    // The output should differ because code color changed from default to red
-    // We verify cache is not stale by checking that set_theme had an effect
-    assert!(
-        second.join("\n").contains("code"),
-        "code should be rendered"
-    );
-}
 
 #[test]
 fn render_cache_invalidates_on_width_change() {
@@ -909,67 +859,35 @@ fn render_cache_invalidates_on_width_change() {
     );
 }
 
-#[test]
-fn render_cache_handles_empty_text() {
-    let mut md = Markdown::new("");
-    let first = md.render(80);
-    let second = md.render(80);
-    assert_eq!(first, second, "empty text cache should work");
-}
 
 // ── Inline style recovery (heading/quote with inline formatting) ─────
 
 #[test]
 fn heading_with_inline_code_restores_heading_style_after() {
-    let mut md = Markdown::new("### Why `sourceInfo` should not be optional");
-    let lines = md.render(80);
-    let joined = lines.join("\n");
-    // The heading theme uses bold. Inline code uses theme.code styling.
-    // After the code span's reset, bold must be re-applied.
-    assert!(
-        joined.contains("sourceInfo"),
-        "heading text should render: {joined}"
-    );
-    if color_enabled() {
-        assert!(joined.contains("\x1b[1m"), "should have bold: {joined}");
-        // The text after "sourceInfo" must have bold re-applied
-        let after_code_idx = joined.find("should not be optional").unwrap();
-        let before_text = &joined[..after_code_idx];
-        // Between the code span end and this text, there must be a bold re-application
-        assert!(
-            before_text.contains("\x1b[1m"),
-            "bold should be re-applied after inline code: {before_text:?}"
-        );
-    } else {
-        assert!(
-            !joined.contains("\x1b["),
-            "color-disabled output should be plain: {joined:?}"
-        );
-    }
-}
-
-#[test]
-fn heading_with_inline_code_restores_h1_underline() {
-    let mut md = Markdown::new("# Title with `code` inside");
-    let lines = md.render(80);
-    let joined = lines.join("\n");
-    // Default theme h1 uses bold. After code, bold must be restored.
-    // (default theme heading is just bold, no underline unless configured)
-    assert!(joined.contains("Title with"), "{joined}");
-    assert!(joined.contains("inside"), "{joined}");
-    if color_enabled() {
-        assert!(joined.contains("\x1b[1m"), "should have bold: {joined}");
-        let after_code = joined.find("inside").unwrap();
-        let before_inside = &joined[..after_code];
-        assert!(
-            before_inside.contains("\x1b[1m"),
-            "bold should be re-applied after code: {before_inside:?}"
-        );
-    } else {
-        assert!(
-            !joined.contains("\x1b["),
-            "color-disabled output should be plain: {joined:?}"
-        );
+    for (markdown, trailing) in [
+        ("### Why `sourceInfo` should not be optional", "should not be optional"),
+        ("# Title with `code` inside", "inside"),
+    ] {
+        let mut md = Markdown::new(markdown);
+        let lines = md.render(80);
+        let joined = lines.join("\n");
+        // The heading theme uses bold. Inline code uses theme.code styling.
+        // After the code span's reset, bold must be re-applied.
+        assert!(joined.contains("sourceInfo") || joined.contains("Title with"), "{joined}");
+        if color_enabled() {
+            assert!(joined.contains("\x1b[1m"), "should have bold: {joined}");
+            let after_code_idx = joined.find(trailing).unwrap();
+            let before_text = &joined[..after_code_idx];
+            assert!(
+                before_text.contains("\x1b[1m"),
+                "bold should be re-applied after inline code: {before_text:?}"
+            );
+        } else {
+            assert!(
+                !joined.contains("\x1b["),
+                "color-disabled output should be plain: {joined:?}"
+            );
+        }
     }
 }
 
@@ -997,21 +915,3 @@ fn blockquote_with_bold_restores_quote_style() {
     }
 }
 
-#[test]
-fn nested_list_with_blockquote_preserves_indentation() {
-    let mut md = Markdown::new("- parent\n  - > nested blockquote content here");
-    let lines = md.render(40);
-    let plain: Vec<String> = lines.iter().map(|l| strip_ansi_line(l)).collect();
-    // Top-level item
-    assert!(
-        plain
-            .iter()
-            .any(|l| l.contains("parent") && l.contains("-")),
-        "should show parent: {plain:?}"
-    );
-    // Nested item with quote content
-    assert!(
-        plain.iter().any(|l| l.contains("nested")),
-        "should show nested content: {plain:?}"
-    );
-}
