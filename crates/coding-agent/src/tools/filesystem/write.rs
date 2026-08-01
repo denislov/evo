@@ -52,9 +52,15 @@ impl WriteOperations for RealWriteOperations {
             tokio::task::spawn_blocking(move || {
                 if target.is_vacant() {
                     let mut file = target.create_vacant_file()?;
-                    return file.write_all(&content).map_err(|error| {
+                    file.write_all(&content).map_err(|error| {
                         format!(
                             "write: failed to write created file {}: {error}",
+                            target.display_path().display()
+                        )
+                    })?;
+                    return file.sync_all().map_err(|error| {
+                        format!(
+                            "write: failed to sync created file {}: {error}",
                             target.display_path().display()
                         )
                     });
@@ -78,6 +84,14 @@ impl WriteOperations for RealWriteOperations {
                 file.write_all(&content).map_err(|error| {
                     format!(
                         "write: failed to write opened file {}: {error}",
+                        target.display_path().display()
+                    )
+                })?;
+                // Not crash-atomic (the write goes through the bound handle);
+                // force the bytes to disk before reporting success.
+                file.sync_all().map_err(|error| {
+                    format!(
+                        "write: failed to sync opened file {}: {error}",
                         target.display_path().display()
                     )
                 })

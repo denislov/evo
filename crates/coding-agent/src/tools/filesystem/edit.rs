@@ -384,6 +384,15 @@ impl OpenedEditFile for RealOpenedEditFile {
                         "edit: failed to write opened file {}: {error}",
                         display.display()
                     )
+                })?;
+                // The write goes through the opened handle (renaming would
+                // detach the bound file object), so it is not crash-atomic;
+                // at least force the bytes to disk before reporting success.
+                file.sync_all().map_err(|error| {
+                    format!(
+                        "edit: failed to sync opened file {}: {error}",
+                        display.display()
+                    )
                 })
             })
             .await
