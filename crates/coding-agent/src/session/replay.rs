@@ -476,4 +476,65 @@ mod message_model_attribution_tests {
         };
         assert!(model_id.is_none(), "legacy events must stay unattributed");
     }
+
+    #[test]
+    fn provider_web_search_lifecycle_replays_as_a_completed_tool_call() {
+        let started = SessionEventEnvelope::new(
+            "session-model",
+            "event-ws-start",
+            "2026-01-01T00:00:00Z",
+            SessionEventData::ToolCallStarted {
+                tool_call_id: "call_ws_1".into(),
+                name: "web_search".into(),
+                arguments: serde_json::json!({
+                    "type": "web_search_call",
+                    "id": "call_ws_1",
+                    "status": "in_progress"
+                }),
+            },
+        );
+        let updated = SessionEventEnvelope::new(
+            "session-model",
+            "event-ws-update",
+            "2026-01-01T00:00:00.5Z",
+            SessionEventData::ToolCallUpdated {
+                tool_call_id: "call_ws_1".into(),
+                message: "searching".into(),
+            },
+        );
+        let completed = SessionEventEnvelope::new(
+            "session-model",
+            "event-ws-done",
+            "2026-01-01T00:00:01Z",
+            SessionEventData::ToolCallCompleted {
+                tool_call_id: "call_ws_1".into(),
+                result: PersistedToolResult::Json {
+                    value: serde_json::json!({
+                        "status": "completed",
+                        "action": {"type": "search", "queries": ["2025年诺贝尔物理学奖"]}
+                    }),
+                },
+            },
+        );
+        let replay = fold_events(&[started, updated, completed]);
+        let [TranscriptItem::ToolCall {
+            name,
+            summary,
+            status,
+            ..
+        }] = replay.transcript.as_slice()
+        else {
+            panic!("expected one tool call, got {:?}", replay.transcript);
+        };
+        assert_eq!(name, "web_search");
+        assert_eq!(status, &ToolCallStatus::Completed);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(summary).is_ok_and(|value| value
+                == serde_json::json!({
+                    "status": "completed",
+                    "action": {"type": "search", "queries": ["2025年诺贝尔物理学奖"]}
+                })),
+            "replayed summary must carry the action, got {summary:?}"
+        );
+    }
 }

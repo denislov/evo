@@ -1071,6 +1071,7 @@ impl Render for ConversationPane {
                                             let is_ls = tool_name_str == "ls";
                                             let is_find = tool_name_str == "find";
                                             let is_grep = tool_name_str == "grep";
+                                            let is_web_search = tool_name_str == "web_search";
                                             card.child(
                                                 div()
                                                     .id(("tool-output-region", index))
@@ -1183,13 +1184,20 @@ impl Render for ConversationPane {
                                                                     &theme,
                                                                 ))
                                                             })
+                                                            .when(is_web_search, |region| {
+                                                                region.child(web_search_view(
+                                                                    &text,
+                                                                    &theme,
+                                                                ))
+                                                            })
                                                             .when(
                                                                 !is_shell
                                                                     && !is_edit
                                                                     && !is_write
                                                                     && !is_ls
                                                                     && !is_find
-                                                                    && !is_grep,
+                                                                    && !is_grep
+                                                                    && !is_web_search,
                                                                 |region| {
                                                                     region.child(
                                                                         div()
@@ -1812,6 +1820,7 @@ fn tool_display_label(name: &str) -> &'static str {
         "ls" => "Files",
         "find" => "Find",
         "grep" => "Search",
+        "web_search" => "Web search",
         _ => "Tool",
     }
 }
@@ -1928,8 +1937,50 @@ fn tool_summary(name: &str, detail: &str, text: &str) -> String {
                 format!("{pattern} · {}", pluralized(matches, "match", "matches"))
             }
         }
+        "web_search" => web_search_summary(text),
         _ => String::new(),
     }
+}
+
+/// Summary line for a completed provider web-search item. The `summary`
+/// carries the terminal item JSON (`{"status": ..., "action": {...}}`) so the
+/// action type, search queries and opened-page URL survive into the
+/// transcript; legacy items fall back to an empty summary.
+fn web_search_summary(summary: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(summary) else {
+        return String::new();
+    };
+    let Some(action) = value.get("action") else {
+        return String::new();
+    };
+    match action.get("type").and_then(serde_json::Value::as_str) {
+        Some("search") => {
+            let queries = action
+                .get("queries")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|query| !query.starts_with("ws_call_id="))
+                .collect::<Vec<_>>();
+            match queries.len() {
+                0 => "搜索完成".into(),
+                1 => format!("搜索：{}", queries[0]),
+                n => format!("搜索 {} 个查询：{}", n, queries[0]),
+            }
+        }
+        Some("open_page") => action
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .map(|url| format!("打开页面：{}", strip_ws_call_id(url)))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Removes the `#ws_call_id=...` marker DeepSeek appends to opened-page URLs.
+fn strip_ws_call_id(url: &str) -> &str {
+    url.split('#').next().unwrap_or(url)
 }
 
 /// Non-empty content lines of an ls/find/grep result, excluding the trailing
@@ -2106,6 +2157,77 @@ fn grep_view(text: &str, theme: &SemanticTheme) -> gpui::AnyElement {
     container.into_any_element()
 }
 
+/// Renders a completed provider web-search item: one line per search query,
+/// or the opened-page URL. The terminal `summary` carries the item JSON
+/// (`{"status": ..., "action": {...}}`); legacy items render their raw text.
+fn web_search_view(summary: &str, theme: &SemanticTheme) -> gpui::AnyElement {
+    let mut container = div().flex().flex_col();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(summary) else {
+        container = container.child(
+            div()
+                .text_color(rgb(theme.text.value()))
+                .child(SharedString::new(summary)),
+        );
+        return container.into_any_element();
+    };
+    let Some(action) = value.get("action") else {
+        container = container.child(
+            div()
+                .text_color(rgb(theme.text.value()))
+                .child(SharedString::new(summary)),
+        );
+        return container.into_any_element();
+    };
+    match action.get("type").and_then(serde_json::Value::as_str) {
+        Some("search") => {
+            let queries = action
+                .get("queries")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|query| !query.starts_with("ws_call_id="))
+                .collect::<Vec<_>>();
+            if queries.is_empty() {
+                container = container.child(
+                    div()
+                        .text_color(rgb(theme.subtle_text.value()))
+                        .child(SharedString::new("搜索完成，无查询记录")),
+                );
+            } else {
+                for query in queries {
+                    container = container.child(
+                        div()
+                            .text_color(rgb(theme.text.value()))
+                            .child(SharedString::new(format!("• {query}"))),
+                    );
+                }
+            }
+        }
+        Some("open_page") => {
+            if let Some(url) = action
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .map(strip_ws_call_id)
+            {
+                container = container.child(
+                    div()
+                        .text_color(rgb(theme.accent.value()))
+                        .child(SharedString::new(url)),
+                );
+            }
+        }
+        _ => {
+            container = container.child(
+                div()
+                    .text_color(rgb(theme.text.value()))
+                    .child(SharedString::new(summary)),
+            );
+        }
+    }
+    container.into_any_element()
+}
+
 fn edit_diff_view(detail: &str, text: &str, theme: &SemanticTheme) -> gpui::AnyElement {
     let args = tool_arguments_json(detail, text);
     let mut container = div().flex().flex_col();
@@ -2215,8 +2337,8 @@ mod tests {
         ConversationBlockKind, ConversationPane, MAX_MARKDOWN_PARSE_STATES,
         conversation_copy_footer_visible, conversation_identity_header_visible,
         delegation_task_summary, edit_diff_text, parse_grep_context, parse_grep_match,
-        tool_detail_copy_text, tool_disclosure_icon, tool_name_from_title, tool_summary,
-        user_message_width, write_diff_text,
+        strip_ws_call_id, tool_detail_copy_text, tool_disclosure_icon, tool_display_label,
+        tool_name_from_title, tool_summary, user_message_width, write_diff_text,
     };
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::{Theme, ThemeMode, text::TextViewState};
@@ -2230,6 +2352,41 @@ mod tests {
             user_message_width(&"long wrapping prompt ".repeat(200)),
             desktop::ui::shell::USER_MESSAGE_MAX_WIDTH as f32
         );
+    }
+
+    #[test]
+    fn web_search_tools_render_action_specific_summaries() {
+        assert_eq!(tool_display_label("web_search"), "Web search");
+        // Search action: queries carry the internal `ws_call_id` marker that
+        // must be hidden before counting.
+        assert_eq!(
+            tool_summary(
+                "web_search",
+                r#"{"type":"web_search_call","id":"call_1","status":"in_progress"}"#,
+                r#"{"status":"completed","action":{"type":"search","queries":["2025年诺贝尔物理学奖 获奖者","ws_call_id=call_1"]}}"#,
+            ),
+            "搜索：2025年诺贝尔物理学奖 获奖者"
+        );
+        assert_eq!(
+            tool_summary(
+                "web_search",
+                "{}",
+                r#"{"status":"completed","action":{"type":"search","queries":["2025年诺贝尔物理学奖 获奖者","Nobel Prize Physics 2025"]}}"#,
+            ),
+            "搜索 2 个查询：2025年诺贝尔物理学奖 获奖者"
+        );
+        // Open-page action strips the trailing `#ws_call_id` fragment.
+        assert_eq!(
+            tool_summary(
+                "web_search",
+                "{}",
+                r#"{"status":"completed","action":{"type":"open_page","url":"https://nobelprize.org/prizes/physics/2025/summary/#ws_call_id=call_2"}}"#,
+            ),
+            "打开页面：https://nobelprize.org/prizes/physics/2025/summary/"
+        );
+        // Legacy items without an action fall back to no summary.
+        assert_eq!(tool_summary("web_search", "{}", "completed"), "");
+        assert_eq!(strip_ws_call_id("https://x/y#ws_call_id=abc"), "https://x/y");
     }
 
     #[test]

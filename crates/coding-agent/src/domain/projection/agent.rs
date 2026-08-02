@@ -206,11 +206,7 @@ fn map_assistant_event(
                     turn_id: context.turn_id.clone(),
                     tool_call_id: id,
                     name,
-                    summary: item
-                        .get("status")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("completed")
-                        .to_owned(),
+                    summary: web_search_completed_summary(item),
                 })]
             })
             .unwrap_or_default(),
@@ -234,7 +230,7 @@ fn map_assistant_event(
     }
 }
 
-fn provider_item(
+pub(crate) fn provider_item(
     partial: &ai::api::conversation::AssistantMessage,
     content_index: u32,
 ) -> Option<(String, String, &serde_json::Value)> {
@@ -250,6 +246,22 @@ fn provider_item(
         .trim_end_matches("_call")
         .to_owned();
     Some((id, name, item))
+}
+
+/// Serializes the terminal state of a provider-executed web-search item so
+/// downstream consumers (live projections and the durable session log) can
+/// render the action (search queries or opened page) without re-parsing the
+/// raw wire item. Falls back to the bare status string when the item carries
+/// no action (legacy or incomplete items).
+pub(crate) fn web_search_completed_summary(item: &serde_json::Value) -> String {
+    let status = item
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("completed");
+    let Some(action) = item.get("action") else {
+        return status.to_owned();
+    };
+    serde_json::json!({ "status": status, "action": action }).to_string()
 }
 
 fn content_blocks_text(content: &[ContentBlock]) -> String {
@@ -366,6 +378,17 @@ mod provider_item_tests {
         message
     }
 
+    fn partial_with_action(status: &str, action: serde_json::Value) -> AssistantMessage {
+        let mut message = partial(status);
+        let ContentBlock::ProviderItem { item, .. } =
+            &mut message.content[0]
+        else {
+            panic!("partial must carry a ProviderItem");
+        };
+        item["action"] = action;
+        message
+    }
+
     #[test]
     fn web_search_lifecycle_maps_to_product_tool_events() {
         let context = AgentEventMappingContext::new("op_1", "turn_1");
@@ -399,6 +422,31 @@ mod provider_item_tests {
                 if message == "searching"
         ));
 
+        let completed = map_assistant_event(
+            &context,
+            &AssistantMessageEvent::ProviderItemEnd {
+                content_index: 0,
+                partial: partial_with_action(
+                    "completed",
+                    serde_json::json!({"type": "search", "queries": ["DeepSeek API docs"]}),
+                ),
+            },
+        );
+        assert!(matches!(
+            completed.as_slice(),
+            [PromptStreamEvent::Tool(ToolEvent::Completed { summary, .. })]
+                if serde_json::from_str::<serde_json::Value>(summary)
+                    .is_ok_and(|value| value
+                        == serde_json::json!({
+                            "status": "completed",
+                            "action": {"type": "search", "queries": ["DeepSeek API docs"]}
+                        }))
+        ));
+    }
+
+    #[test]
+    fn web_search_completion_without_action_falls_back_to_status() {
+        let context = AgentEventMappingContext::new("op_1", "turn_1");
         let completed = map_assistant_event(
             &context,
             &AssistantMessageEvent::ProviderItemEnd {

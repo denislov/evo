@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::domain::projection::agent::{provider_item, web_search_completed_summary};
+
 impl PromptTurnContext {
     pub(crate) fn completed_transcript_items(&self) -> Vec<TranscriptItem> {
         let mut transcript = Vec::new();
@@ -274,11 +276,49 @@ impl PromptTurnContext {
             | AssistantMessageEvent::ThinkingDelta { .. }
             | AssistantMessageEvent::ToolcallStart { .. }
             | AssistantMessageEvent::ToolcallDelta { .. }
-            | AssistantMessageEvent::ToolcallEnd { .. }
-            | AssistantMessageEvent::ProviderItemStart { .. }
-            | AssistantMessageEvent::ProviderItemDelta { .. }
-            | AssistantMessageEvent::ProviderItemEnd { .. } => {
+            | AssistantMessageEvent::ToolcallEnd { .. } => {
                 self.ensure_assistant_session_message_started()?;
+                Ok(())
+            }
+            AssistantMessageEvent::ProviderItemStart {
+                content_index,
+                partial,
+            } => {
+                self.ensure_assistant_session_message_started()?;
+                if let Some((id, name, item)) = provider_item(partial, *content_index) {
+                    self.ensure_tool_session_call_started(&id, &name, Some(item))?;
+                }
+                Ok(())
+            }
+            AssistantMessageEvent::ProviderItemDelta {
+                content_index,
+                delta,
+                partial,
+            } => {
+                self.ensure_assistant_session_message_started()?;
+                if let Some((id, name, _)) = provider_item(partial, *content_index) {
+                    let session_tool_call_id =
+                        self.ensure_tool_session_call_started(&id, &name, None)?;
+                    self.transaction_mut_required()?
+                        .record_tool_updated(session_tool_call_id, delta)?;
+                }
+                Ok(())
+            }
+            AssistantMessageEvent::ProviderItemEnd {
+                content_index,
+                partial,
+            } => {
+                self.ensure_assistant_session_message_started()?;
+                if let Some((id, name, item)) = provider_item(partial, *content_index) {
+                    let session_tool_call_id =
+                        self.ensure_tool_session_call_started(&id, &name, None)?;
+                    let summary = web_search_completed_summary(item);
+                    let result = serde_json::from_str::<serde_json::Value>(&summary)
+                        .map(|value| PersistedToolResult::Json { value })
+                        .unwrap_or(PersistedToolResult::Text { text: summary });
+                    self.transaction_mut_required()?
+                        .record_tool_completed(session_tool_call_id, result)?;
+                }
                 Ok(())
             }
             AssistantMessageEvent::ThinkingStart { content_index, .. } => {
