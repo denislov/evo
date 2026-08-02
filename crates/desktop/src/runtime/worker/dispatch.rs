@@ -56,7 +56,7 @@ async fn dispatch_command_inner(
             let metadata = match target {
                 DesktopRuntimeOwnerTarget::Home => {
                     state.home.context.reload_local_resources()?;
-                    state.metadata_snapshot(None)
+                    state.metadata_snapshot(None)?
                 }
                 DesktopRuntimeOwnerTarget::Session { session_id } => {
                     let session_id = resolve_target(state, active, Some(&session_id))?;
@@ -70,7 +70,7 @@ async fn dispatch_command_inner(
                             .expect("resolved idle workspace must remain present")
                             .context
                             .reload_local_resources()?;
-                        state.metadata_snapshot(Some(&session_id))
+                        state.metadata_snapshot(Some(&session_id))?
                     }
                 }
             };
@@ -110,7 +110,7 @@ async fn dispatch_command_inner(
                     let (thinking_level, thinking_fallback) =
                         state.home.select_model(model_id, thinking_level)?;
                     (
-                        state.metadata_snapshot(None),
+                        state.metadata_snapshot(None)?,
                         thinking_level,
                         thinking_fallback,
                     )
@@ -141,7 +141,7 @@ async fn dispatch_command_inner(
                         )?;
                         workspace.context.select_model(model_id)?;
                         (
-                            state.metadata_snapshot(Some(&session_id)),
+                            state.metadata_snapshot(Some(&session_id))?,
                             thinking_level,
                             thinking_fallback,
                         )
@@ -292,7 +292,7 @@ async fn dispatch_command_inner(
             let metadata = match target {
                 DesktopRuntimeOwnerTarget::Home => {
                     state.home.select_profile(profile_id)?;
-                    state.metadata_snapshot(None)
+                    state.metadata_snapshot(None)?
                 }
                 // A session's profile is locked to its creation choice; it
                 // cannot be switched mid-session.
@@ -316,7 +316,7 @@ async fn dispatch_command_inner(
             ..
         } => {
             let session_id = resolve_idle_target(state, active, session_id.as_deref())?;
-            let (recovery_id, recovery) = state.retry_recovery(&session_id, identity)?;
+            let (recovery_id, recovery) = state.retry_recovery(&session_id, identity).await?;
             Ok(DesktopRuntimeUpdate::RecoveryChanged {
                 command_id,
                 action: DesktopRecoveryAction::Retry,
@@ -335,8 +335,9 @@ async fn dispatch_command_inner(
                 CodingAgentRecoveryResolution::Failed => DesktopRecoveryAction::MarkFailed,
                 CodingAgentRecoveryResolution::Aborted => DesktopRecoveryAction::Abort,
             };
-            let (recovery_id, recovery) =
-                state.resolve_recovery(&session_id, identity, resolution)?;
+            let (recovery_id, recovery) = state
+                .resolve_recovery(&session_id, identity, resolution)
+                .await?;
             Ok(DesktopRuntimeUpdate::RecoveryChanged {
                 command_id,
                 action,
@@ -373,7 +374,8 @@ async fn dispatch_command_inner(
                     .get(&session_id)
                     .expect("resolved active session must remain present"),
                 command,
-            ))
+            )
+            .await)
         }
     }
 }
@@ -457,7 +459,7 @@ fn resolve_active_target(
     Ok(session_id)
 }
 
-pub(in crate::runtime) fn dispatch_active_command(
+pub(in crate::runtime) async fn dispatch_active_command(
     active: &ActivePrompt,
     command: DesktopRuntimeCommand,
 ) -> DesktopRuntimeUpdate {
@@ -478,6 +480,7 @@ pub(in crate::runtime) fn dispatch_active_command(
         return match active
             .connection
             .decide_tool_authorization(&identity, decision.clone())
+            .await
         {
             Ok(()) => DesktopRuntimeUpdate::AuthorizationDecisionAccepted {
                 command_id,

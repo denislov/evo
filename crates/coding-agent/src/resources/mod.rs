@@ -1,9 +1,9 @@
 use crate::app::error::ApplicationError;
-use crate::bounded_io;
 use crate::limits::{
     MAX_CONTEXT_FILE_BYTES, MAX_CONTEXT_TOTAL_BYTES, MAX_PRODUCT_RESOURCE_DIAGNOSTICS,
     MAX_THEME_FILE_BYTES, MAX_THEME_FILES,
 };
+use crate::platform::io::bounded as bounded_io;
 use crate::theme::ThemeJson;
 use agent_core::api::resources::{
     AgentResources, DiagnosticSeverity, PromptTemplate, ResourceDiagnostic, Skill,

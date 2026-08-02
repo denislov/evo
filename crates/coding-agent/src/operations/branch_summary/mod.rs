@@ -2,16 +2,15 @@ use self::runner::{
     BranchSummaryContext, BranchSummaryOptions, BranchSummaryRunner, branch_summary_failed_outcome,
     branch_summary_outcome_text, branch_summary_success_outcome,
 };
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::application::operation::control::OperationCancellationHandle;
+use crate::kernel::capability::{SessionReadCapability, SessionWriteCapability};
+use crate::kernel::error::CodingSessionError;
 use crate::operations::prompt::context::{
     InternalPromptTurnOutcome, PromptTurnOptions, RuntimeSnapshot,
 };
-use crate::runtime::capability::{
-    OperationCapabilitySnapshot, SessionReadCapability, SessionWriteCapability,
-};
-use crate::runtime::facade::CodingSessionError;
-use crate::runtime::operation::control::OperationCancellationHandle;
+use crate::platform::time::{IdGenerator, SystemIdGenerator};
 use crate::services::event::EventService;
-use crate::session::id::{IdGenerator, SystemIdGenerator};
 use crate::session::service::{SessionPersistence, SessionService};
 use tokio_util::sync::CancellationToken;
 
@@ -40,7 +39,7 @@ pub(crate) fn reused_outcome(
         snapshot.operation_id.clone(),
         turn_id,
         session_service.session_id().to_owned(),
-        session_service.current_active_leaf_id(),
+        session_service.current_active_leaf_id()?,
         &runtime,
         summary,
     )))
@@ -105,16 +104,14 @@ pub(crate) async fn run(
                     reason: reason.clone(),
                     session_id: Some(session_service.session_id().to_owned()),
                 };
-                let finalized = session_service.abort_prompt_transaction(
-                    context.take_transaction(),
-                    operation_id,
-                    reason,
-                )?;
+                let finalized = session_service
+                    .abort_prompt_transaction(context.take_transaction(), operation_id, reason)
+                    .await?;
                 outcome.apply_success_session_write_metadata(
                     finalized.session_id.clone(),
                     finalized.leaf_id.clone(),
                 );
-                event_service.emit_session_write_events(&finalized);
+                event_service.emit_session_write_events(&finalized)?;
                 return Ok(outcome);
             }
             let final_text = branch_summary_outcome_text(&branch_summary);
@@ -122,17 +119,18 @@ pub(crate) async fn run(
                 operation_id.clone(),
                 turn_id,
                 session_service.session_id().to_owned(),
-                session_service.current_active_leaf_id(),
+                session_service.current_active_leaf_id()?,
                 &runtime,
                 final_text,
             );
             let finalized = session_service
-                .commit_branch_summary_transaction(context.take_transaction(), operation_id)?;
+                .commit_branch_summary_transaction(context.take_transaction(), operation_id)
+                .await?;
             outcome.apply_success_session_write_metadata(
                 finalized.session_id.clone(),
                 finalized.leaf_id.clone(),
             );
-            event_service.emit_session_write_events(&finalized);
+            event_service.emit_session_write_events(&finalized)?;
             Ok(outcome)
         }
         Err(error) => {
@@ -144,31 +142,31 @@ pub(crate) async fn run(
                     reason: reason.clone(),
                     session_id: Some(session_service.session_id().to_owned()),
                 };
-                let finalized = session_service.abort_prompt_transaction(
-                    context.take_transaction(),
-                    operation_id,
-                    reason,
-                )?;
+                let finalized = session_service
+                    .abort_prompt_transaction(context.take_transaction(), operation_id, reason)
+                    .await?;
                 outcome.apply_success_session_write_metadata(
                     finalized.session_id.clone(),
                     finalized.leaf_id.clone(),
                 );
-                event_service.emit_session_write_events(&finalized);
+                event_service.emit_session_write_events(&finalized)?;
                 return Ok(outcome);
             }
             let mut outcome =
                 branch_summary_failed_outcome(operation_id.clone(), turn_id, error.clone());
-            let finalized = session_service.fail_prompt_transaction(
-                context.take_transaction(),
-                operation_id,
-                error.code(),
-                error.to_string(),
-            )?;
+            let finalized = session_service
+                .fail_prompt_transaction(
+                    context.take_transaction(),
+                    operation_id,
+                    error.code(),
+                    error.to_string(),
+                )
+                .await?;
             outcome.apply_success_session_write_metadata(
                 finalized.session_id.clone(),
                 finalized.leaf_id.clone(),
             );
-            event_service.emit_session_write_events(&finalized);
+            event_service.emit_session_write_events(&finalized)?;
             Ok(outcome)
         }
     }

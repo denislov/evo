@@ -56,7 +56,10 @@ pub mod auth {
 /// Low-level agent runtimes must not depend on this category.
 pub mod provider {
     pub use crate::providers::faux;
-    pub use crate::providers::{builtin_provider_apis, register_builtins_into};
+    pub use crate::providers::{
+        WEB_SEARCH_PROVIDER_APIS, builtin_provider_apis, model_supports_web_search,
+        register_builtins_into,
+    };
     pub use crate::registry::{ApiProvider, ProviderRegistry};
 }
 
@@ -68,6 +71,7 @@ pub mod error {
 /// Transport policy values that are stable for product composition. HTTP,
 /// SSE, and header implementations remain private.
 pub mod transport {
+    pub use crate::transport::client::TransportConfig;
     pub use crate::transport::retry::{RetryConfig, is_retryable_status, parse_retry_after_ms};
 }
 

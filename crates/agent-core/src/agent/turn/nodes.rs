@@ -872,6 +872,15 @@ fn invalid_tool_call_result(
             call.name
         )));
     };
+    // Provider-executed tools are declared to the provider but never dispatched
+    // here. A call arriving for one means the provider echoed a server tool
+    // back as a function call, so refuse it rather than running the stub.
+    if tool.is_provider_executed() {
+        return Some(AgentToolResult::error(format!(
+            "{} is executed by the provider and cannot be called locally",
+            call.name
+        )));
+    }
     tool.validate_arguments(&call.arguments)
         .err()
         .map(|error| AgentToolResult::error(error.to_string()))

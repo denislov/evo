@@ -1,12 +1,6 @@
-pub(crate) mod capability;
 pub(crate) mod client;
-pub(crate) mod error;
 pub(crate) mod facade;
 pub(crate) mod file_review;
 pub(crate) mod intent;
-pub(crate) mod operation;
 pub(crate) mod owners;
-pub(crate) mod public_error;
-pub(crate) mod session_coordinator;
-pub(crate) mod snapshot;
 pub(crate) mod version;

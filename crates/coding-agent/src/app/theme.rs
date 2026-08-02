@@ -200,11 +200,11 @@ impl CodingAgentThemeController {
             "light" => Ok(CodingAgentThemeSnapshot::light()),
             custom => {
                 let path = self.themes_dir.join(format!("{custom}.json"));
-                let content =
-                    crate::bounded_io::read_text(&path, crate::limits::MAX_THEME_FILE_BYTES)
-                        .map_err(|error| {
-                            theme_error(format!("theme could not be read: {error}"))
-                        })?;
+                let content = crate::platform::io::bounded::read_text(
+                    &path,
+                    crate::limits::MAX_THEME_FILE_BYTES,
+                )
+                .map_err(|error| theme_error(format!("theme could not be read: {error}")))?;
                 let theme = serde_json::from_str(&content)
                     .map_err(|error| theme_error(format!("theme is invalid: {error}")))?;
                 CodingAgentThemeSnapshot::from_resource(&ThemeResource {

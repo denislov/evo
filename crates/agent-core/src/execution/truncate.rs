@@ -215,8 +215,17 @@ mod tests {
 
     #[test]
     fn tail_truncates_by_lines_keeping_the_end() {
-        let content = (1..=10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
-        let result = truncate_tail(&content, TruncationLimit { max_lines: 3, max_bytes: 1024 });
+        let content = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_tail(
+            &content,
+            TruncationLimit {
+                max_lines: 3,
+                max_bytes: 1024,
+            },
+        );
         assert!(result.truncated);
         assert_eq!(result.truncated_by.as_deref(), Some("lines"));
         assert_eq!(result.content, "line8\nline9\nline10");
@@ -226,7 +235,13 @@ mod tests {
     #[test]
     fn tail_truncates_by_bytes_and_partially_keeps_a_long_last_line() {
         let content = "a\nb\ncdefghijkl";
-        let result = truncate_tail(&content, TruncationLimit { max_lines: 2, max_bytes: 6 });
+        let result = truncate_tail(
+            content,
+            TruncationLimit {
+                max_lines: 2,
+                max_bytes: 6,
+            },
+        );
         assert!(result.truncated);
         assert_eq!(result.truncated_by.as_deref(), Some("bytes"));
         assert!(result.last_line_partial);
@@ -235,8 +250,17 @@ mod tests {
 
     #[test]
     fn head_truncates_by_lines_keeping_the_start() {
-        let content = (1..=10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
-        let result = truncate_head(&content, TruncationLimit { max_lines: 3, max_bytes: 1024 });
+        let content = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_head(
+            &content,
+            TruncationLimit {
+                max_lines: 3,
+                max_bytes: 1024,
+            },
+        );
         assert!(result.truncated);
         assert_eq!(result.content, "line1\nline2\nline3");
     }
@@ -245,8 +269,11 @@ mod tests {
     fn head_drops_everything_when_the_first_line_exceeds_the_byte_limit() {
         let content = "a_very_long_line_exceeding_the_budget\nshort";
         let result = truncate_head(
-            &content,
-            TruncationLimit { max_lines: 10, max_bytes: 16 },
+            content,
+            TruncationLimit {
+                max_lines: 10,
+                max_bytes: 16,
+            },
         );
         assert!(result.truncated);
         assert!(result.first_line_exceeds_limit);
@@ -268,7 +295,13 @@ mod tests {
 
     #[test]
     fn zero_byte_limit_keeps_only_empty_output() {
-        let result = truncate_tail("line", TruncationLimit { max_lines: 10, max_bytes: 0 });
+        let result = truncate_tail(
+            "line",
+            TruncationLimit {
+                max_lines: 10,
+                max_bytes: 0,
+            },
+        );
         assert!(result.truncated);
         assert_eq!(result.content, "");
     }
@@ -276,7 +309,13 @@ mod tests {
     #[test]
     fn multi_byte_characters_are_kept_whole() {
         let content = "中文输出测试";
-        let result = truncate_tail(&content, TruncationLimit { max_lines: 10, max_bytes: 7 });
+        let result = truncate_tail(
+            content,
+            TruncationLimit {
+                max_lines: 10,
+                max_bytes: 7,
+            },
+        );
         assert_eq!(result.content, "测试");
     }
 }

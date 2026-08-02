@@ -8,33 +8,32 @@ use futures::{
     future::{BoxFuture, FutureExt},
 };
 use serde::Deserialize;
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+pub use crate::kernel::self_healing::{
+    SelfHealingEditCheckOutput, SelfHealingEditDiagnostic, SelfHealingEditRepairAttempt,
+    SelfHealingEditReplacement,
+};
 
 use crate::tools::filesystem::edit::{
     EditOperations, RealEditOperations, edit_execute_with_target,
 };
 
+use crate::application::operation::control::OperationCancellationHandle;
+use crate::kernel::capability::ModelCapability;
+use crate::kernel::error::CodingSessionError;
 use crate::operations::prompt::context::{PromptTurnOptions, RuntimeSnapshot};
-use crate::runtime::capability::{FilesystemCapability, FilesystemTarget, ModelCapability};
-use crate::runtime::facade::CodingSessionError;
-use crate::runtime::operation::control::OperationCancellationHandle;
+use crate::platform::fs::capability::{FilesystemCapability, FilesystemTarget};
+use crate::platform::io::output::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use crate::platform::process::{
+    EnvPolicy, OutputBudget, ProcessOutcome, ProcessSpec, ProgramKind, run as run_process,
+};
 use crate::services::runtime::stream_model_for_scoped_runtime;
+use crate::tools::shell::safe_process_env;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelfHealingEditReplacement {
-    pub old_text: String,
-    pub new_text: String,
-}
+const DEFAULT_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl SelfHealingEditReplacement {
-    pub fn new(old_text: impl Into<String>, new_text: impl Into<String>) -> Self {
-        Self {
-            old_text: old_text.into(),
-            new_text: new_text.into(),
-        }
-    }
-
     fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "oldText": self.old_text,
@@ -158,33 +157,13 @@ impl SelfHealingEditRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelfHealingEditDiagnostic {
-    pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelfHealingEditCheckOutput {
-    pub command: String,
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelfHealingEditRepairAttempt {
-    pub attempt: usize,
-    pub replacements: Vec<SelfHealingEditReplacement>,
-    pub diagnostics: Vec<SelfHealingEditDiagnostic>,
-    pub check_output: Option<SelfHealingEditCheckOutput>,
-}
-
 pub(crate) trait SelfHealingEditCheckRunner: Send + Sync {
     fn run_check<'a>(
         &'a self,
         cwd: &'a Path,
         command: &'a str,
-    ) -> BoxFuture<'a, Result<SelfHealingEditCheckOutput, String>>;
+        cancellation: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<SelfHealingEditCheckOutput, CodingSessionError>>;
 }
 
 pub(crate) trait SelfHealingEditRepairStrategy: Send + Sync {
@@ -330,7 +309,7 @@ impl SelfHealingEditOptions {
     }
 
     pub(crate) fn with_real_check_runner(mut self) -> Self {
-        self.check_runner = Some(Arc::new(RealSelfHealingEditCheckRunner));
+        self.check_runner = Some(Arc::new(RealSelfHealingEditCheckRunner::default()));
         self
     }
 
@@ -513,14 +492,19 @@ impl SelfHealingEditContext {
             .target
             .as_ref()
             .ok_or_else(|| session_error("self-healing edit target is not bound"))?;
-        let output = edit_execute_with_target(target, args, self.options.operations.clone())
-            .await
-            .map_err(session_error)?;
+        let result = edit_execute_with_target(target, args, self.options.operations.clone()).await;
+        if let Some(cancellation_handle) = &self.cancellation_handle {
+            cancellation_handle.reopen()?;
+        }
+        let output = result.map_err(session_error)?;
         self.apply_output = Some(output);
         Ok(())
     }
 
-    async fn run_check(&mut self) -> Result<(), CodingSessionError> {
+    async fn run_check(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), CodingSessionError> {
         self.check_failed = false;
         let Some(command) = self.options.check_command.as_deref() else {
             return Ok(());
@@ -534,11 +518,8 @@ impl SelfHealingEditContext {
             session_error("self-healing edit check command requires a check runner")
         })?;
         let output = runner
-            .run_check(&self.options.filesystem.cwd, command)
-            .await
-            .map_err(|error| {
-                session_error(format!("self-healing edit check failed to run: {error}"))
-            })?;
+            .run_check(&self.options.filesystem.cwd, command, cancellation)
+            .await?;
         self.check_failed = output.exit_code != 0;
         if self.check_failed {
             self.diagnostics.push(SelfHealingEditDiagnostic {
@@ -549,7 +530,10 @@ impl SelfHealingEditContext {
         Ok(())
     }
 
-    async fn repair_patch(&mut self) -> Result<(), CodingSessionError> {
+    async fn repair_patch(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), CodingSessionError> {
         if !self.check_failed {
             return Ok(());
         }
@@ -561,6 +545,7 @@ impl SelfHealingEditContext {
         }
 
         while self.check_failed && self.repair_attempts < self.options.max_repair_attempts {
+            ensure_not_cancelled(cancellation)?;
             self.repair_attempts += 1;
             let replacements = match strategy
                 .repair(
@@ -574,6 +559,7 @@ impl SelfHealingEditContext {
                 Ok(replacements) => replacements,
                 Err(error) => return Err(self.repair_failure_error(error)),
             };
+            ensure_not_cancelled(cancellation)?;
             if replacements.is_empty() {
                 return Err(session_error(
                     "self-healing edit repair produced no replacements",
@@ -584,7 +570,7 @@ impl SelfHealingEditContext {
             self.proposal_ready = true;
             self.validate_patch()?;
             self.apply_patch().await?;
-            self.run_check().await?;
+            self.run_check(cancellation).await?;
             let repair = SelfHealingEditRepairAttempt {
                 attempt: self.repair_attempts,
                 replacements: applied_replacements,
@@ -692,79 +678,121 @@ impl SelfHealingEditRunner {
         ctx: &mut SelfHealingEditContext,
         cancellation: Option<CancellationToken>,
     ) -> Result<(), CodingSessionError> {
-        Self::check_cancellation(&cancellation)?;
+        let cancellation = cancellation.unwrap_or_default();
+        ensure_not_cancelled(&cancellation)?;
         ctx.start_edit_workflow()?;
-        Self::check_cancellation(&cancellation)?;
+        ensure_not_cancelled(&cancellation)?;
         ctx.read_target().await?;
-        Self::check_cancellation(&cancellation)?;
+        ensure_not_cancelled(&cancellation)?;
         ctx.propose_patch()?;
-        Self::check_cancellation(&cancellation)?;
+        ensure_not_cancelled(&cancellation)?;
         ctx.validate_patch()?;
-        Self::check_cancellation(&cancellation)?;
+        ensure_not_cancelled(&cancellation)?;
         ctx.apply_patch().await?;
-        Self::check_cancellation(&cancellation)?;
-        ctx.run_check().await?;
-        Self::check_cancellation(&cancellation)?;
-        ctx.repair_patch().await?;
-        Self::check_cancellation(&cancellation)?;
+        ensure_not_cancelled(&cancellation)?;
+        ctx.run_check(&cancellation).await?;
+        ensure_not_cancelled(&cancellation)?;
+        ctx.repair_patch(&cancellation).await?;
+        ensure_not_cancelled(&cancellation)?;
         ctx.record_result()?;
-        Ok(())
-    }
-
-    fn check_cancellation(
-        cancellation: &Option<CancellationToken>,
-    ) -> Result<(), CodingSessionError> {
-        if cancellation
-            .as_ref()
-            .is_some_and(|token| token.is_cancelled())
-        {
-            return Err(CodingSessionError::Cancelled);
-        }
         Ok(())
     }
 }
 
-struct RealSelfHealingEditCheckRunner;
+fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), CodingSessionError> {
+    if cancellation.is_cancelled() {
+        Err(CodingSessionError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+struct RealSelfHealingEditCheckRunner {
+    timeout: std::time::Duration,
+}
+
+impl Default for RealSelfHealingEditCheckRunner {
+    fn default() -> Self {
+        Self {
+            timeout: DEFAULT_CHECK_TIMEOUT,
+        }
+    }
+}
 
 impl SelfHealingEditCheckRunner for RealSelfHealingEditCheckRunner {
     fn run_check<'a>(
         &'a self,
         cwd: &'a Path,
         command: &'a str,
-    ) -> BoxFuture<'a, Result<SelfHealingEditCheckOutput, String>> {
+        cancellation: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<SelfHealingEditCheckOutput, CodingSessionError>> {
         async move {
-            let output = shell_check_command(command)
-                .current_dir(cwd)
-                .kill_on_drop(true)
-                .output()
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(SelfHealingEditCheckOutput {
-                command: command.to_owned(),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                exit_code: output.status.code().unwrap_or(-1),
-            })
+            let outcome = run_process(
+                ProcessSpec {
+                    program: shell_check_program(),
+                    command: command.to_owned(),
+                    cwd: cwd.to_path_buf(),
+                    env: EnvPolicy::AllowList(safe_process_env()),
+                    timeout: self.timeout,
+                    output_budget: OutputBudget::new(DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES),
+                },
+                cancellation,
+                None,
+            )
+            .await;
+            match outcome {
+                ProcessOutcome::Completed { exit_code, output } => Ok(SelfHealingEditCheckOutput {
+                    command: command.to_owned(),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    exit_code: exit_code.unwrap_or(-1),
+                }),
+                ProcessOutcome::TimedOut { output } => Err(CodingSessionError::Tool {
+                    message: process_error_message(
+                        command,
+                        &output.merged,
+                        format!(
+                            "self-healing edit check timed out after {} seconds",
+                            self.timeout.as_secs_f64()
+                        ),
+                    ),
+                }),
+                ProcessOutcome::Cancelled { .. } => Err(CodingSessionError::Cancelled),
+                ProcessOutcome::Failed { message, output } => Err(CodingSessionError::Tool {
+                    message: process_error_message(
+                        command,
+                        &output.merged,
+                        format!("self-healing edit check failed to run: {message}"),
+                    ),
+                }),
+            }
         }
         .boxed()
     }
 }
 
-fn shell_check_command(command: &str) -> Command {
+fn process_error_message(command: &str, output: &str, reason: impl std::fmt::Display) -> String {
+    if output.is_empty() {
+        format!("{reason}: {command}")
+    } else {
+        format!("{reason}: {command}\n\n{output}")
+    }
+}
+
+fn shell_check_program() -> ProgramKind {
     #[cfg(windows)]
     {
-        let mut shell = Command::new("cmd");
-        shell.arg("/C").arg(command);
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        shell.as_std_mut().creation_flags(CREATE_NO_WINDOW);
-        shell
+        ProgramKind::Direct {
+            program: "cmd".into(),
+            args: vec!["/C".into()],
+        }
     }
     #[cfg(not(windows))]
     {
-        let mut shell = Command::new("sh");
-        shell.arg("-c").arg(command);
-        shell
+        ProgramKind::Direct {
+            program: "sh".into(),
+            args: vec!["-c".into()],
+        }
     }
 }
 
@@ -781,159 +809,9 @@ struct ModelRepairEdit {
     new_text: String,
 }
 
-fn model_repair_prompt(
-    attempt: usize,
-    path: &str,
-    replacements: &[SelfHealingEditReplacement],
-    diagnostics: &[SelfHealingEditDiagnostic],
-) -> String {
-    let replacement_values = replacements
-        .iter()
-        .map(SelfHealingEditReplacement::to_json)
-        .collect::<Vec<_>>();
-    let replacements_json =
-        serde_json::to_string(&replacement_values).unwrap_or_else(|_| "[]".to_string());
-    let diagnostic_messages = diagnostics
-        .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect::<Vec<_>>();
-    let diagnostics_json =
-        serde_json::to_string(&diagnostic_messages).unwrap_or_else(|_| "[]".to_string());
-    format!(
-        "A self-healing edit check failed. Return only JSON shaped as {{\"edits\":[{{\"oldText\":\"...\",\"newText\":\"...\"}}]}} with replacements to apply to the current file.\nPath: {path}\nRepair attempt: {attempt}\nCurrent edits: {replacements_json}\nDiagnostics: {diagnostics_json}"
-    )
-}
+mod model_repair;
 
-async fn stream_model_repair(
-    runtime: &RuntimeSnapshot,
-    model_capability: &ModelCapability,
-    prompt: String,
-) -> Result<String, String> {
-    let context = Context {
-        system_prompt: runtime.system_prompt().map(str::to_owned),
-        messages: vec![Message::User {
-            content: vec![ContentBlock::Text {
-                text: prompt,
-                text_signature: None,
-            }],
-        }],
-        tools: None,
-    };
-    let mut stream = stream_model_for_scoped_runtime(
-        runtime,
-        model_capability,
-        context,
-        model_repair_stream_options(runtime),
-    )
-    .map_err(|error| error.to_string())?;
-    let mut final_text = None;
-    while let Some(event) = stream.next().await {
-        match event {
-            AssistantMessageEvent::Done { message, .. } => {
-                if matches!(message.stop_reason, StopReason::Error) {
-                    return Err(message.error_message.unwrap_or_else(|| {
-                        "self-healing edit model repair returned an error".into()
-                    }));
-                }
-                final_text = Some(assistant_message_text(&message));
-            }
-            AssistantMessageEvent::Error { message, .. } => {
-                return Err(message
-                    .error_message
-                    .unwrap_or_else(|| "self-healing edit model repair stream failed".into()));
-            }
-            AssistantMessageEvent::Start { .. }
-            | AssistantMessageEvent::TextStart { .. }
-            | AssistantMessageEvent::TextDelta { .. }
-            | AssistantMessageEvent::TextEnd { .. }
-            | AssistantMessageEvent::ThinkingStart { .. }
-            | AssistantMessageEvent::ThinkingDelta { .. }
-            | AssistantMessageEvent::ThinkingEnd { .. }
-            | AssistantMessageEvent::ToolcallStart { .. }
-            | AssistantMessageEvent::ToolcallDelta { .. }
-            | AssistantMessageEvent::ToolcallEnd { .. }
-            | AssistantMessageEvent::ProviderItemStart { .. }
-            | AssistantMessageEvent::ProviderItemDelta { .. }
-            | AssistantMessageEvent::ProviderItemEnd { .. } => {}
-        }
-    }
-    let text = final_text.ok_or_else(|| {
-        "self-healing edit model repair did not return a final message".to_string()
-    })?;
-    if text.trim().is_empty() {
-        return Err("self-healing edit model repair returned empty text".into());
-    }
-    Ok(text)
-}
+use model_repair::*;
 
-fn model_repair_stream_options(runtime: &RuntimeSnapshot) -> Option<StreamOptions> {
-    crate::app::bootstrap::build_agent_config_with_auth_diagnostics(
-        runtime.model().clone(),
-        runtime.system_prompt().map(str::to_owned),
-        runtime.max_turns(),
-        runtime.api_key().map(str::to_owned),
-        runtime.auth_diagnostics().to_vec(),
-        runtime.thinking_level(),
-        runtime.tool_execution(),
-        runtime.resources().clone(),
-        runtime.settings(),
-    )
-    .stream_options
-}
-
-fn assistant_message_text(message: &AssistantMessage) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn parse_model_repair_response(text: &str) -> Result<Vec<SelfHealingEditReplacement>, String> {
-    let response: ModelRepairResponse = serde_json::from_str(text.trim()).map_err(|error| {
-        format!("self-healing edit model repair response was not valid JSON edits: {error}")
-    })?;
-    if response.edits.is_empty() {
-        return Err("self-healing edit model repair response contained no edits".into());
-    }
-    Ok(response
-        .edits
-        .into_iter()
-        .map(|edit| SelfHealingEditReplacement::new(edit.old_text, edit.new_text))
-        .collect())
-}
-
-fn session_error(message: impl Into<String>) -> CodingSessionError {
-    CodingSessionError::Session {
-        message: message.into(),
-    }
-}
-
-fn check_failure_message(output: &SelfHealingEditCheckOutput) -> String {
-    let mut message = format!(
-        "self-healing edit check failed: `{}` exited with {}",
-        output.command, output.exit_code
-    );
-    let stderr = output.stderr.trim();
-    let stdout = output.stdout.trim();
-    if !stderr.is_empty() {
-        message.push_str(&format!("; stderr: {}", compact_check_text(stderr)));
-    } else if !stdout.is_empty() {
-        message.push_str(&format!("; stdout: {}", compact_check_text(stdout)));
-    }
-    message
-}
-
-fn compact_check_text(text: &str) -> String {
-    const MAX_LEN: usize = 240;
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= MAX_LEN {
-        compact
-    } else {
-        format!("{}...", compact.chars().take(MAX_LEN).collect::<String>())
-    }
-}
+#[cfg(test)]
+mod tests_file;

@@ -7,9 +7,9 @@ mod model;
 // tree; it is not part of the public facade contract.
 mod protocol;
 mod providers;
+mod registry;
 #[cfg(test)]
 mod regression_tests;
-mod registry;
 mod transport;
 
 /// Stable facade for embedding `ai`.

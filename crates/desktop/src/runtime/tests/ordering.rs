@@ -431,10 +431,10 @@ async fn persisted_sessions_in_one_project_receive_independent_runtime_owners() 
     )
     .unwrap();
     let mut first = project_context.create_session().await.unwrap();
-    let first_id = first.view().session_id;
+    let first_id = first.view().expect("first session view").session_id;
     first.shutdown().await.unwrap();
     let mut second = project_context.create_session().await.unwrap();
-    let second_id = second.view().session_id;
+    let second_id = second.view().expect("second session view").session_id;
     second.shutdown().await.unwrap();
     let home_options =
         CodingAgentEmbeddingOptions::for_workspace(CodingAgentWorkspaceSelection::project(&home))

@@ -6,22 +6,24 @@ use super::{
 use crate::session::service::SessionPersistence;
 
 impl CodingAgentSession {
-    pub fn resolve_recovery(
+    pub async fn resolve_recovery(
         &mut self,
         request: CodingAgentRecoveryResolutionRequest,
     ) -> Result<CodingAgentRecoveryResolutionResult, CodingAgentPublicError> {
         self.resolve_recovery_internal(request)
+            .await
             .map_err(CodingAgentPublicError::from)
     }
 
-    pub(crate) fn resolve_recovery_internal(
+    pub(crate) async fn resolve_recovery_internal(
         &mut self,
         request: CodingAgentRecoveryResolutionRequest,
     ) -> Result<CodingAgentRecoveryResolutionResult, CodingSessionError> {
         self.resolve_recovery_with_authority(request, "trusted_host")
+            .await
     }
 
-    pub(crate) fn resolve_recovery_with_authority(
+    pub(crate) async fn resolve_recovery_with_authority(
         &mut self,
         request: CodingAgentRecoveryResolutionRequest,
         authorization_subject: &str,
@@ -37,7 +39,9 @@ impl CodingAgentSession {
                 capability: "recovery resolution requires a persistent session".into(),
             });
         };
-        let commit = service.resolve_recovery_as(&request, authorization_subject)?;
+        let commit = service
+            .resolve_recovery_as(&request, authorization_subject)
+            .await?;
         let operation_kind =
             super::connection::persisted_runtime_operation_kind(commit.operation_kind.clone())
                 .ok_or_else(|| CodingSessionError::UnsupportedCapability {
@@ -46,7 +50,7 @@ impl CodingAgentSession {
                 })?;
         self.runtime_host
             .events
-            .emit_committed_terminal_draft(commit.draft, operation_kind);
+            .emit_committed_terminal_draft(commit.draft, operation_kind)?;
         Ok(CodingAgentRecoveryResolutionResult {
             operation_id: commit.operation_id,
             recovery_id: commit.recovery_id,
@@ -56,15 +60,16 @@ impl CodingAgentSession {
 }
 
 impl CodingAgentSession {
-    pub fn retry_recovery(
+    pub async fn retry_recovery(
         &mut self,
         request: CodingAgentRecoveryRetryRequest,
     ) -> Result<CodingAgentRecoveryRetryResult, CodingAgentPublicError> {
         self.retry_recovery_internal(request)
+            .await
             .map_err(CodingAgentPublicError::from)
     }
 
-    pub(crate) fn retry_recovery_internal(
+    pub(crate) async fn retry_recovery_internal(
         &mut self,
         request: CodingAgentRecoveryRetryRequest,
     ) -> Result<CodingAgentRecoveryRetryResult, CodingSessionError> {
@@ -79,7 +84,7 @@ impl CodingAgentSession {
                 capability: "recovery retry requires a persistent session".into(),
             });
         };
-        let commit = service.retry_recovery(&request)?;
+        let commit = service.retry_recovery(&request).await?;
         let operation_kind =
             super::connection::persisted_runtime_operation_kind(commit.operation_kind);
         self.runtime_host
@@ -88,7 +93,7 @@ impl CodingAgentSession {
                 commit.draft,
                 operation_kind,
                 commit.capability_generation,
-            );
+            )?;
         Ok(CodingAgentRecoveryRetryResult {
             operation_id: commit.operation_id,
             recovery_id: commit.recovery_id,

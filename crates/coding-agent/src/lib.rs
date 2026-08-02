@@ -1,13 +1,17 @@
 #![doc = include_str!("../README.md")]
 
 mod app;
+mod application;
 mod authorization;
-mod bounded_io;
+mod domain;
 mod events;
-mod limits;
+mod kernel;
+pub(crate) use kernel::limits;
+mod mutex;
 mod operations;
+mod platform;
 mod profiles;
-mod redaction;
+mod public_error;
 mod runtime;
 mod services;
 
@@ -154,9 +158,10 @@ pub mod api {
             CodingAgentProductEventTerminalOperationKind, CodingAgentProductEventTerminalStatus,
             CodingAgentProductEventUsage, CodingAgentRecoveryResolution,
             CodingAgentRuntimeProductEvent, CodingAgentSessionProductEvent,
-            CodingAgentSessionWriteFailureStatus, CodingAgentSubmittedEventDurability,
-            CodingAgentTeamProductEvent, CodingAgentToolProductEvent,
-            CodingAgentWorkflowProductEvent, PRODUCT_EVENT_PROTOCOL_VERSION,
+            CodingAgentSessionWriteFailureReason, CodingAgentSessionWriteFailureStatus,
+            CodingAgentSubmittedEventDurability, CodingAgentTeamProductEvent,
+            CodingAgentToolProductEvent, CodingAgentWorkflowProductEvent,
+            PRODUCT_EVENT_PROTOCOL_VERSION,
         };
     }
 
@@ -202,8 +207,9 @@ pub mod api {
             CodingAgentRecoveryPending, CodingAgentSessionExport, CodingAgentSessionExportItem,
             CodingAgentSessionOverview, CodingAgentSessionSummary,
             CodingAgentSessionTranscriptItem, CodingAgentSessionView,
-            CodingAgentTeamProfileSummary, CodingAgentTranscriptSnapshot, ProfileId, ProfileKind,
-            ProfileSource, TeamStrategy, TeamSupervisor,
+            CodingAgentTeamProfileSummary, CodingAgentTranscriptContinuation,
+            CodingAgentTranscriptSnapshot, ProfileId, ProfileKind, ProfileSource,
+            SessionStorageHandle, TeamStrategy, TeamSupervisor,
         };
         pub use crate::workspace::{
             CodingAgentWorkspaceKind, CodingAgentWorkspaceMigration,
@@ -212,37 +218,6 @@ pub mod api {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 #[allow(deprecated)]
-pub(crate) mod test_support {
-    use std::sync::Arc;
-
-    use ai::api::client::AiClient;
-    use ai::api::provider::ApiProvider;
-
-    pub(crate) struct ProviderGuard {
-        ai_client: AiClient,
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the optional test-support feature compiles provider helpers outside the unit-test targets that consume every constructor"
-    )]
-    impl ProviderGuard {
-        pub(crate) fn register(api: impl Into<String>, provider: Arc<dyn ApiProvider>) -> Self {
-            Self::register_many(vec![(api.into(), provider)])
-        }
-
-        pub(crate) fn register_many(providers: Vec<(String, Arc<dyn ApiProvider>)>) -> Self {
-            let ai_client = AiClient::new();
-            for (api, provider) in providers {
-                ai_client.register_provider(api, provider);
-            }
-            Self { ai_client }
-        }
-
-        pub(crate) fn ai_client(&self) -> AiClient {
-            self.ai_client.clone()
-        }
-    }
-}
+pub(crate) mod test_support;

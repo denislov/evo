@@ -41,10 +41,10 @@ mod tests {
 
     #[test]
     fn tool_copy_includes_arguments_and_result_without_exceeding_the_copy_cap() {
-        let projection = ConversationProjection::hydrate(CodingAgentTranscriptSnapshot {
-            session_id: "session-1".into(),
-            active_leaf_id: Some("leaf-1".into()),
-            items: vec![CodingAgentSessionTranscriptItem::Tool {
+        let projection = ConversationProjection::hydrate(CodingAgentTranscriptSnapshot::new(
+            "session-1",
+            Some("leaf-1".into()),
+            vec![CodingAgentSessionTranscriptItem::Tool {
                 call_id: "call-1".into(),
                 name: "shell".into(),
                 args: serde_json::json!({"command": "x".repeat(MAX_TOOL_ARGUMENT_BYTES)}),
@@ -52,7 +52,7 @@ mod tests {
                 is_error: false,
                 duration_millis: Some(1_240),
             }],
-        });
+        ));
         let block = projection.blocks().front().unwrap();
         assert_eq!(block.title, "Tool · shell · 1.2 s");
         let copied = block.copy_text();

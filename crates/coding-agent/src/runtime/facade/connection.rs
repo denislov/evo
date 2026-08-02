@@ -1,11 +1,11 @@
 use super::*;
+use crate::mutex::MutexExt;
 
 impl CodingAgentSession {
-    /// Returns the resolved durable session directory used by legacy adapter
-    /// protocols. The query exposes no repository or writer authority.
-    pub fn session_storage_path(&self) -> Result<Option<PathBuf>, CodingAgentPublicError> {
+    /// Returns read-only storage authority for legacy adapter protocols.
+    pub fn session_storage(&self) -> Result<Option<SessionStorageHandle>, CodingAgentPublicError> {
         self.hydrate_current()
-            .map(|hydration| hydration.map(|value| value.summary.session_dir))
+            .map(|hydration| hydration.map(|value| value.summary.storage))
             .map_err(CodingAgentPublicError::from)
     }
 
@@ -44,22 +44,24 @@ impl CodingAgentSession {
         match &self.runtime_host.session_coordinator.persistence {
             SessionPersistence::Persistent(session_service) => {
                 let hydration = session_service.hydrated_view()?;
-                Ok(CodingAgentTranscriptSnapshot {
-                    session_id: hydration.summary.session_id,
-                    active_leaf_id: hydration.summary.active_leaf_id,
-                    items: hydration.transcript,
-                })
+                Ok(CodingAgentTranscriptSnapshot::new_bounded(
+                    hydration.summary.session_id,
+                    hydration.summary.active_leaf_id,
+                    hydration.transcript,
+                    hydration.omitted_items,
+                    hydration.continuation,
+                ))
             }
-            SessionPersistence::NonPersistent(state) => Ok(CodingAgentTranscriptSnapshot {
-                session_id: state.runtime_id.clone(),
-                active_leaf_id: None,
-                items: state
+            SessionPersistence::NonPersistent(state) => Ok(CodingAgentTranscriptSnapshot::new(
+                state.runtime_id.clone(),
+                None,
+                state
                     .transcript
                     .iter()
                     .cloned()
                     .map(crate::session::service::coding_transcript_item_from_replay)
                     .collect(),
-            }),
+            )),
         }
     }
 
@@ -74,14 +76,20 @@ impl CodingAgentSession {
         }
     }
 
-    pub(crate) fn subscribe_product_events(&self) -> ProductEventReceiver {
+    pub(crate) fn subscribe_product_events(
+        &self,
+    ) -> Result<ProductEventReceiver, CodingSessionError> {
         let receiver = self.runtime_host.events.subscribe_product_events();
-        self.emit_pending_startup_recovery_markers();
-        receiver
+        self.emit_pending_startup_recovery_markers()?;
+        Ok(receiver)
     }
 
-    pub fn subscribe_product_events_public(&self) -> CodingAgentProductEventReceiver {
-        CodingAgentProductEventReceiver::new(self.subscribe_product_events())
+    pub fn subscribe_product_events_public(
+        &self,
+    ) -> Result<CodingAgentProductEventReceiver, CodingAgentPublicError> {
+        self.subscribe_product_events()
+            .map(CodingAgentProductEventReceiver::new)
+            .map_err(CodingAgentPublicError::from)
     }
 
     pub fn runtime_shutdown_handle(&self) -> CodingAgentRuntimeShutdownHandle {
@@ -113,47 +121,46 @@ impl CodingAgentSession {
             .runtime_host
             .client_projection
             .snapshots
-            .request_shutdown()
+            .request_shutdown()?
             == snapshot_coordinator::RuntimeLifecycle::ShutDown
         {
             return Ok(CodingAgentShutdownOutcome::AlreadyShutDown);
         }
         self.runtime_host
             .authorization_service
-            .cancel_all("tool authorization cancelled by runtime shutdown");
+            .cancel_all("tool authorization cancelled by runtime shutdown")?;
         self.runtime_host
             .operation_supervisor
             .control
-            .cancel_open_operations_for_shutdown();
+            .cancel_open_operations_for_shutdown()?;
         self.runtime_host
             .client_projection
             .snapshots
             .wait_for_active_operation_to_drain()
-            .await;
+            .await?;
         self.runtime_host.session_coordinator.shutdown_writer()?;
-        self.runtime_host.events.emit_runtime_shutdown();
+        self.runtime_host.events.emit_runtime_shutdown()?;
         self.runtime_host
             .client_projection
             .snapshots
-            .finish_shutdown();
+            .finish_shutdown()?;
         Ok(CodingAgentShutdownOutcome::ShutDown)
     }
 
-    fn emit_pending_startup_recovery_markers(&self) {
+    fn emit_pending_startup_recovery_markers(&self) -> Result<(), CodingSessionError> {
         let markers = {
             let mut markers = self
                 .runtime_host
                 .session_coordinator
                 .startup_recovery_markers
-                .lock()
-                .unwrap();
+                .lock_resource("startup recovery markers")?;
             std::mem::take(&mut *markers)
         };
         if !markers.is_empty() {
             self.runtime_host
                 .client_projection
                 .snapshots
-                .mark_recovery_projected();
+                .mark_recovery_projected()?;
         }
         for marker in markers {
             self.runtime_host.events.emit_startup_recovery_pending(
@@ -168,17 +175,20 @@ impl CodingAgentSession {
                 marker.attempt_count,
                 marker.last_attempt_at,
                 marker.next_attempt_at,
-            );
+            )?;
         }
+        Ok(())
     }
 
-    pub fn snapshot(&self) -> CodingAgentSnapshot {
-        self.emit_pending_startup_recovery_markers();
+    pub fn snapshot(&self) -> Result<CodingAgentSnapshot, CodingAgentPublicError> {
+        self.emit_pending_startup_recovery_markers()
+            .map_err(CodingAgentPublicError::from)?;
         self.runtime_host
             .client_projection
             .snapshots
             .snapshot()
-            .into()
+            .map(Into::into)
+            .map_err(CodingAgentPublicError::from)
     }
 
     pub fn connect(
@@ -228,14 +238,21 @@ impl CodingAgentSession {
         ))
     }
 
-    pub(in crate::runtime) fn refresh_snapshot_projection(&self) {
-        let session = self.view();
-        let capabilities = self.capabilities();
+    pub(crate) fn refresh_snapshot_projection(&self) -> Result<(), CodingSessionError> {
+        let session = match &self.runtime_host.session_coordinator.persistence {
+            SessionPersistence::Persistent(session_service) => session_service.view()?,
+            SessionPersistence::NonPersistent(state) => CodingAgentSessionView {
+                session_id: state.runtime_id.clone(),
+                name: None,
+                default_agent_profile_id: state.default_agent_profile_id.clone(),
+            },
+        };
+        let capabilities = self.capabilities_internal()?;
         let generation = self
             .runtime_host
             .operation_supervisor
             .capabilities
-            .current_generation();
+            .current_generation()?;
         let committed_session_sequence = match &self.runtime_host.session_coordinator.persistence {
             SessionPersistence::Persistent(session_service) => {
                 session_service.committed_session_sequence()
@@ -250,7 +267,8 @@ impl CodingAgentSession {
                 capabilities,
                 generation,
                 committed_session_sequence,
-            );
+            )?;
+        Ok(())
     }
 }
 
@@ -273,8 +291,8 @@ impl CodingAgentSessionNameUpdateReceiver {
 
 pub(super) fn persisted_runtime_operation_kind(
     kind: crate::session::event::OperationKind,
-) -> Option<crate::runtime::operation::control::OperationKind> {
-    use crate::runtime::operation::control::OperationKind as RuntimeKind;
+) -> Option<crate::kernel::operation::OperationKind> {
+    use crate::kernel::operation::OperationKind as RuntimeKind;
     use crate::session::event::OperationKind as SessionKind;
     match kind {
         SessionKind::Prompt => Some(RuntimeKind::Prompt),

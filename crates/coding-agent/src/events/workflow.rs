@@ -3,11 +3,11 @@ use super::{
     CodingAgentProductEventDurability, CodingAgentProductEventKind,
     CodingAgentProductEventTerminalStatus, CodingAgentWorkflowProductEvent,
 };
+use crate::kernel::error::CodingSessionError;
+use crate::kernel::operation::OperationRootTerminalEvidence;
 use crate::operations::self_healing_edit::runner::{
     SelfHealingEditCheckOutput, SelfHealingEditDiagnostic, SelfHealingEditReplacement,
 };
-use crate::runtime::facade::CodingSessionError;
-use crate::runtime::operation::contract::OperationRootTerminalEvidence;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SelfHealingEditEvent {

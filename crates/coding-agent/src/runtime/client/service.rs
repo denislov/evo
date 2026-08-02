@@ -1,7 +1,7 @@
-use crate::runtime::client::state::ClientConnectionId;
-use crate::runtime::snapshot::{
+use crate::application::snapshot::{
     ClientHandle, ClientRegistryError, DraftRecord, SnapshotCoordinator,
 };
+use crate::runtime::client::state::ClientConnectionId;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ impl ClientService {
         &self,
         handle: &ClientHandle,
         operation_id: String,
-        descriptor: crate::runtime::operation::contract::OperationDescriptor,
+        descriptor: crate::kernel::operation::OperationDescriptor,
         expected_prompt_draft: Option<&DraftRecord>,
     ) -> Result<(), ClientRegistryError> {
         self.coordinator.commit_submission_running(

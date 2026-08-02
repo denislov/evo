@@ -1,10 +1,10 @@
 use crate::app::error::ApplicationError;
-use crate::bounded_io;
 use crate::limits::{
     MAX_AT_FILE_BYTES, MAX_AT_FILE_REFERENCES, MAX_IMAGE_DECODE_ALLOC_BYTES,
     MAX_IMAGE_DECODE_DIMENSION, MAX_INPUT_IMAGE_ENCODED_TOTAL_BYTES, MAX_INPUT_IMAGES,
     MAX_PROMPT_INPUT_BYTES,
 };
+use crate::platform::io::bounded as bounded_io;
 use ai::api::conversation::ContentBlock;
 use base64::Engine;
 use image::{GenericImageView, ImageFormat, ImageReader, Limits};

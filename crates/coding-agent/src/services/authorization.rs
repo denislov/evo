@@ -1,18 +1,18 @@
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::application::snapshot::SnapshotCoordinator;
 use crate::authorization::{
     ToolAuthorizationDecision, ToolAuthorizationMode, ToolAuthorizationPreview,
     ToolAuthorizationRequest, ToolAuthorizationRisk, ToolAuthorizationScope,
 };
+use crate::kernel::error::CodingSessionError;
+use crate::mutex::{MutexExt, report_infallible_resource_error};
 use crate::operations::delegation::{DelegationToolResult, DelegationToolResultStatus};
 use crate::operations::prompt::context::DelegationRequest;
+use crate::platform::fs::capability::{FilesystemBindingDescriptor, FilesystemCapability};
 use crate::profiles::{ProfileId, ProfileKind};
-use crate::runtime::capability::{
-    FilesystemBindingDescriptor, FilesystemCapability, OperationCapabilitySnapshot,
-};
-use crate::runtime::facade::CodingSessionError;
-use crate::runtime::snapshot::SnapshotCoordinator;
 use crate::services::event::EventService;
+use crate::services::ports::{CapabilityQuery, EventSink, SessionWriterPort};
 use crate::session::event::{PersistedToolAuthorizationResolution, SessionEventData};
-use crate::session::service::SessionEventWriter;
 use agent_core::api::agent::{BeforeToolCallContext, BeforeToolCallResult};
 use agent_core::api::tool::AgentTool;
 use agent_core::api::transcript::create_session_id;
@@ -69,7 +69,7 @@ pub(crate) struct AuthorizationHookContext {
     pub(crate) service: AuthorizationService,
     pub(crate) turn_id: String,
     pub(crate) capability_snapshot: OperationCapabilitySnapshot,
-    pub(crate) event_writer: Option<SessionEventWriter>,
+    pub(crate) event_writer: Option<SessionWriterPort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -82,7 +82,7 @@ struct OperationGrant {
 struct PendingAuthorization {
     request: ToolAuthorizationRequest,
     sender: oneshot::Sender<PendingResolution>,
-    event_writer: Option<SessionEventWriter>,
+    event_writer: Option<SessionWriterPort>,
     filesystem_binding: Option<PendingFilesystemBinding>,
 }
 
@@ -115,8 +115,8 @@ struct AuthorizationState {
 #[derive(Clone)]
 pub(crate) struct AuthorizationService {
     mode: ToolAuthorizationMode,
-    coordinator: Arc<SnapshotCoordinator>,
-    event_service: EventService,
+    capabilities: Arc<dyn CapabilityQuery>,
+    events: Arc<dyn EventSink>,
     state: Arc<Mutex<AuthorizationState>>,
 }
 
@@ -134,15 +134,18 @@ impl Drop for AuthorizationWaiterGuard {
             binding.discard();
         }
         let reason = "tool authorization waiter was dropped";
-        self.service.persist_resolution_or_diagnose(
+        self.service.persist_resolution_or_diagnose_blocking(
             &entry,
             PersistedToolAuthorizationResolution::Cancelled {
                 reason: reason.into(),
             },
         );
-        self.service
-            .event_service
-            .emit_tool_authorization_cancelled(entry.request, reason);
+        report_infallible_resource_error(
+            "authorization waiter Drop event",
+            self.service
+                .events
+                .tool_authorization_cancelled(entry.request, reason.into()),
+        );
     }
 }
 
@@ -150,7 +153,14 @@ impl std::fmt::Debug for AuthorizationService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthorizationService")
             .field("mode", &self.mode)
-            .field("pending", &self.state.lock().unwrap().pending.len())
+            .field(
+                "pending",
+                &self
+                    .state
+                    .lock_or_recover("authorization state")
+                    .pending
+                    .len(),
+            )
             .finish()
     }
 }
@@ -161,16 +171,25 @@ impl AuthorizationService {
         coordinator: Arc<SnapshotCoordinator>,
         event_service: EventService,
     ) -> Self {
+        Self::with_ports(mode, coordinator, Arc::new(event_service))
+    }
+
+    fn with_ports(
+        mode: ToolAuthorizationMode,
+        capabilities: Arc<dyn CapabilityQuery>,
+        events: Arc<dyn EventSink>,
+    ) -> Self {
         Self {
             mode,
-            coordinator,
-            event_service,
+            capabilities,
+            events,
             state: Arc::new(Mutex::new(AuthorizationState::default())),
         }
     }
 
-    pub(crate) fn pending(&self) -> Vec<ToolAuthorizationRequest> {
-        pending_requests(&self.state.lock().unwrap())
+    pub(crate) fn pending(&self) -> Result<Vec<ToolAuthorizationRequest>, CodingSessionError> {
+        let state = self.state.lock_resource("authorization state")?;
+        Ok(pending_requests(&state))
     }
 
     pub(crate) fn uses_interactive_waiters(&self) -> bool {
@@ -183,7 +202,7 @@ impl AuthorizationService {
         turn_id: String,
         snapshot: OperationCapabilitySnapshot,
         inventory: ToolAuthorizationInventory,
-        event_writer: Option<SessionEventWriter>,
+        event_writer: Option<SessionWriterPort>,
     ) -> Result<Option<BeforeToolCallResult>, String> {
         let operation_id = context
             .execution_context
@@ -195,7 +214,18 @@ impl AuthorizationService {
         }
 
         let mut evaluation = evaluate(&context, &snapshot, &inventory)?;
-        let filesystem_binding = bind_filesystem_target(&context, &snapshot).await?;
+        let filesystem_binding = match bind_filesystem_target(&context, &snapshot).await {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.events
+                    .diagnostic(
+                        Some(operation_id.clone()),
+                        format!("filesystem capability binding failed: {error}"),
+                    )
+                    .map_err(|emit_error| emit_error.to_string())?;
+                return Err(error);
+            }
+        };
         if let Some(descriptor) = filesystem_binding.as_ref() {
             evaluation.bind_filesystem_descriptor(descriptor);
         }
@@ -212,7 +242,13 @@ impl AuthorizationService {
             tool_name: context.tool_name.clone(),
             scope: scope.clone(),
         };
-        if self.state.lock().unwrap().grants.contains(&grant) {
+        if self
+            .state
+            .lock_resource("authorization state")
+            .map_err(|error| error.to_string())?
+            .grants
+            .contains(&grant)
+        {
             return Ok(None);
         }
 
@@ -241,24 +277,30 @@ impl AuthorizationService {
                     Some(PersistedToolAuthorizationResolution::Denied {
                         reason: reason.into(),
                     }),
-                )?;
-                self.event_service
-                    .emit_tool_authorization_required(request.clone());
-                self.event_service
-                    .emit_tool_authorization_denied(request, reason);
+                )
+                .await?;
+                self.events
+                    .tool_authorization_required(request.clone())
+                    .map_err(|error| error.to_string())?;
+                self.events
+                    .tool_authorization_denied(request, reason.into())
+                    .map_err(|error| error.to_string())?;
                 return Ok(Some(blocked(reason)));
             }
             ToolAuthorizationMode::Interactive => {}
         }
         if let Err(error) =
-            persist_authorization_events(event_writer.as_ref(), &request, true, None)
+            persist_authorization_events(event_writer.as_ref(), &request, true, None).await
         {
             discard_filesystem_binding(&context, &snapshot);
             return Err(error);
         }
         let (sender, mut receiver) = oneshot::channel();
         let (revision, pending) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self
+                .state
+                .lock_resource("authorization state")
+                .map_err(|error| error.to_string())?;
             state.pending.insert(
                 authorization_id.clone(),
                 PendingAuthorization {
@@ -279,9 +321,12 @@ impl AuthorizationService {
             state.revision = state.revision.wrapping_add(1);
             (state.revision, pending_requests(&state))
         };
-        self.sync_pending_snapshot(revision, pending);
+        self.sync_pending_snapshot(revision, pending)
+            .map_err(|error| error.to_string())?;
         let identity = request.identity();
-        self.event_service.emit_tool_authorization_required(request);
+        self.events
+            .tool_authorization_required(request)
+            .map_err(|error| error.to_string())?;
         let _waiter_guard = AuthorizationWaiterGuard {
             service: self.clone(),
             authorization_id: authorization_id.clone(),
@@ -294,26 +339,32 @@ impl AuthorizationService {
                     if let Some(binding) = entry.filesystem_binding.as_ref() {
                         binding.discard();
                     }
-                    self.persist_resolution_or_diagnose(
+                    self.persist_resolution_or_diagnose_async(
                         &entry,
                         PersistedToolAuthorizationResolution::Cancelled {
                             reason: "tool authorization was cancelled".into(),
                         },
-                    );
-                    self.event_service.emit_tool_authorization_cancelled(
-                        entry.request,
-                        "tool authorization was cancelled",
-                    );
+                    )
+                    .await;
+                    self.events
+                        .tool_authorization_cancelled(
+                            entry.request,
+                            "tool authorization was cancelled".into(),
+                        )
+                        .map_err(|error| error.to_string())?;
                 }
                 return Ok(Some(blocked("tool authorization was cancelled")));
             }
             _ = tokio::time::sleep(TOOL_AUTHORIZATION_RESPONSE_TIMEOUT) => {
-                match self.decide(
-                    &identity,
-                    ToolAuthorizationDecision::Deny {
-                        reason: Some(TOOL_AUTHORIZATION_TIMEOUT_REASON.into()),
-                    },
-                ) {
+                match self
+                    .decide(
+                        &identity,
+                        ToolAuthorizationDecision::Deny {
+                            reason: Some(TOOL_AUTHORIZATION_TIMEOUT_REASON.into()),
+                        },
+                    )
+                    .await
+                {
                     Ok(()) | Err(CodingSessionError::Input { .. }) => receiver.await,
                     Err(error) => return Err(error.to_string()),
                 }
@@ -323,8 +374,9 @@ impl AuthorizationService {
             Ok(PendingResolution::Allow) => Ok(None),
             Ok(PendingResolution::Deny(reason)) => {
                 if let Some(request) = delegation_request(&context, &turn_id, &snapshot) {
-                    self.event_service
-                        .emit_delegation_rejected(&request, &reason);
+                    self.events
+                        .delegation_rejected(&request, &reason)
+                        .map_err(|error| error.to_string())?;
                     Ok(Some(blocked(delegation_rejected_result(&request, &reason))))
                 } else {
                     Ok(Some(blocked(reason)))
@@ -334,15 +386,15 @@ impl AuthorizationService {
         }
     }
 
-    pub(crate) fn decide(
+    pub(crate) async fn decide(
         &self,
         identity: &crate::authorization::ToolAuthorizationIdentity,
         decision: ToolAuthorizationDecision,
     ) -> Result<(), CodingSessionError> {
-        let _capability_transition = self.coordinator.capability_transition_guard();
-        let current_generation = self.coordinator.current_capability_generation().get();
+        let capability_transition = self.capabilities.acquire_transition()?;
+        let current_generation = self.capabilities.current_generation()?.get();
         let (entry, revision, pending) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_resource("authorization state")?;
             let Some(entry) = state.pending.get(&identity.authorization_id) else {
                 return Err(CodingSessionError::Input {
                     message: format!(
@@ -365,21 +417,23 @@ impl AuthorizationService {
             let pending = pending_requests(&state);
             (entry, revision, pending)
         };
-        self.sync_pending_snapshot(revision, pending);
+        self.sync_pending_snapshot(revision, pending)?;
+        drop(capability_transition);
 
         if entry.request.capability_generation != current_generation {
             let reason = "tool authorization capability generation is stale";
             if let Some(binding) = entry.filesystem_binding.as_ref() {
                 binding.discard();
             }
-            self.persist_resolution_or_diagnose(
+            self.persist_resolution_or_diagnose_async(
                 &entry,
                 PersistedToolAuthorizationResolution::Cancelled {
                     reason: reason.into(),
                 },
-            );
-            self.event_service
-                .emit_tool_authorization_cancelled(entry.request.clone(), reason);
+            )
+            .await;
+            self.events
+                .tool_authorization_cancelled(entry.request.clone(), reason.into())?;
             let _ = entry.sender.send(PendingResolution::Deny(reason.into()));
             return Err(CodingSessionError::Input {
                 message: reason.into(),
@@ -410,9 +464,33 @@ impl AuthorizationService {
             &entry.request,
             false,
             Some(persisted_resolution),
-        ) {
-            self.restore_pending(identity.authorization_id.clone(), entry);
+        )
+        .await
+        {
+            self.restore_pending(identity.authorization_id.clone(), entry)?;
             return Err(CodingSessionError::Session { message });
+        }
+
+        let capability_transition = self.capabilities.acquire_transition()?;
+        if entry.request.capability_generation != self.capabilities.current_generation()?.get() {
+            drop(capability_transition);
+            let reason = "tool authorization capability generation changed while persisting";
+            if let Some(binding) = entry.filesystem_binding.as_ref() {
+                binding.discard();
+            }
+            self.persist_resolution_or_diagnose_async(
+                &entry,
+                PersistedToolAuthorizationResolution::Cancelled {
+                    reason: reason.into(),
+                },
+            )
+            .await;
+            self.events
+                .tool_authorization_cancelled(entry.request.clone(), reason.into())?;
+            let _ = entry.sender.send(PendingResolution::Deny(reason.into()));
+            return Err(CodingSessionError::Input {
+                message: reason.into(),
+            });
         }
         if matches!(&resolution, PendingResolution::Deny(_))
             && let Some(binding) = entry.filesystem_binding.as_ref()
@@ -427,16 +505,19 @@ impl AuthorizationService {
                 scope: entry.request.scope.clone(),
             });
         if let Some(grant) = operation_grant.clone() {
-            self.state.lock().unwrap().grants.insert(grant);
+            self.state
+                .lock_resource("authorization state")?
+                .grants
+                .insert(grant);
         }
         match &resolution {
             PendingResolution::Allow => {
-                self.event_service
-                    .emit_tool_authorization_approved(entry.request.clone(), decision);
+                self.events
+                    .tool_authorization_approved(entry.request.clone(), decision)?;
             }
             PendingResolution::Deny(reason) => {
-                self.event_service
-                    .emit_tool_authorization_denied(entry.request.clone(), reason.clone());
+                self.events
+                    .tool_authorization_denied(entry.request.clone(), reason.clone())?;
             }
         }
         if entry.sender.send(resolution).is_err() {
@@ -444,12 +525,15 @@ impl AuthorizationService {
                 binding.discard();
             }
             if let Some(grant) = operation_grant {
-                self.state.lock().unwrap().grants.remove(&grant);
+                self.state
+                    .lock_resource("authorization state")?
+                    .grants
+                    .remove(&grant);
             }
-            self.event_service.emit_tool_authorization_cancelled(
+            self.events.tool_authorization_cancelled(
                 entry.request,
-                "authorization waiter is no longer active",
-            );
+                "authorization waiter is no longer active".into(),
+            )?;
             return Err(CodingSessionError::Input {
                 message: format!(
                     "authorization waiter is no longer active: {}",
@@ -460,9 +544,13 @@ impl AuthorizationService {
         Ok(())
     }
 
-    pub(crate) fn cancel_operation(&self, operation_id: &str, reason: &str) {
+    pub(crate) async fn cancel_operation(
+        &self,
+        operation_id: &str,
+        reason: &str,
+    ) -> Result<(), CodingSessionError> {
         let (entries, revision, pending) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_resource("authorization state")?;
             let ids = state
                 .pending
                 .iter()
@@ -482,28 +570,76 @@ impl AuthorizationService {
             let pending = pending_requests(&state);
             (entries, state.revision, pending)
         };
-        self.sync_pending_snapshot(revision, pending);
+        self.sync_pending_snapshot(revision, pending)?;
         for entry in entries {
             if let Some(binding) = entry.filesystem_binding.as_ref() {
                 binding.discard();
             }
-            self.persist_resolution_or_diagnose(
+            self.persist_resolution_or_diagnose_async(
+                &entry,
+                PersistedToolAuthorizationResolution::Cancelled {
+                    reason: reason.to_owned(),
+                },
+            )
+            .await;
+            self.events
+                .tool_authorization_cancelled(entry.request.clone(), reason.into())?;
+            let _ = entry
+                .sender
+                .send(PendingResolution::Deny(reason.to_owned()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancel_operation_blocking(
+        &self,
+        operation_id: &str,
+        reason: &str,
+    ) -> Result<(), CodingSessionError> {
+        let (entries, revision, pending) = {
+            let mut state = self.state.lock_resource("authorization state")?;
+            let ids = state
+                .pending
+                .iter()
+                .filter(|(_, entry)| entry.request.operation_id == operation_id)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            let entries = ids
+                .into_iter()
+                .filter_map(|id| state.pending.remove(&id))
+                .collect::<Vec<_>>();
+            if !entries.is_empty() {
+                state.revision = state.revision.wrapping_add(1);
+            }
+            state
+                .grants
+                .retain(|grant| grant.operation_id != operation_id);
+            let pending = pending_requests(&state);
+            (entries, state.revision, pending)
+        };
+        self.sync_pending_snapshot(revision, pending)?;
+        for entry in entries {
+            if let Some(binding) = entry.filesystem_binding.as_ref() {
+                binding.discard();
+            }
+            self.persist_resolution_or_diagnose_blocking(
                 &entry,
                 PersistedToolAuthorizationResolution::Cancelled {
                     reason: reason.to_owned(),
                 },
             );
-            self.event_service
-                .emit_tool_authorization_cancelled(entry.request.clone(), reason);
+            self.events
+                .tool_authorization_cancelled(entry.request.clone(), reason.into())?;
             let _ = entry
                 .sender
                 .send(PendingResolution::Deny(reason.to_owned()));
         }
+        Ok(())
     }
 
-    pub(crate) fn cancel_all(&self, reason: &str) {
+    pub(crate) fn cancel_all(&self, reason: &str) -> Result<(), CodingSessionError> {
         let (entries, revision) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_resource("authorization state")?;
             let entries = std::mem::take(&mut state.pending)
                 .into_values()
                 .collect::<Vec<_>>();
@@ -513,28 +649,31 @@ impl AuthorizationService {
             state.grants.clear();
             (entries, state.revision)
         };
-        self.sync_pending_snapshot(revision, Vec::new());
+        self.sync_pending_snapshot(revision, Vec::new())?;
         for entry in entries {
             if let Some(binding) = entry.filesystem_binding.as_ref() {
                 binding.discard();
             }
-            self.persist_resolution_or_diagnose(
+            self.persist_resolution_or_diagnose_blocking(
                 &entry,
                 PersistedToolAuthorizationResolution::Cancelled {
                     reason: reason.to_owned(),
                 },
             );
-            self.event_service
-                .emit_tool_authorization_cancelled(entry.request.clone(), reason);
+            self.events
+                .tool_authorization_cancelled(entry.request.clone(), reason.into())?;
             let _ = entry
                 .sender
                 .send(PendingResolution::Deny(reason.to_owned()));
         }
+        Ok(())
     }
 
     fn remove_pending(&self, authorization_id: &str) -> Option<PendingAuthorization> {
         let (entry, revision, pending) = {
-            let mut state = self.state.lock().unwrap();
+            // Called by AuthorizationWaiterGuard::drop. Recover only to remove
+            // the abandoned waiter and report poison once.
+            let mut state = self.state.lock_or_recover("authorization state");
             let entry = state.pending.remove(authorization_id);
             if entry.is_some() {
                 state.revision = state.revision.wrapping_add(1);
@@ -542,21 +681,54 @@ impl AuthorizationService {
             let pending = pending_requests(&state);
             (entry, state.revision, pending)
         };
-        self.sync_pending_snapshot(revision, pending);
+        if let Err(error) = self.sync_pending_snapshot(revision, pending) {
+            report_infallible_resource_error(
+                "authorization Drop cleanup diagnostic",
+                self.events.diagnostic(
+                    None::<String>,
+                    format!("authorization cleanup could not refresh pending state: {error}"),
+                ),
+            );
+        }
         entry
     }
 
-    fn restore_pending(&self, authorization_id: String, entry: PendingAuthorization) {
+    fn restore_pending(
+        &self,
+        authorization_id: String,
+        entry: PendingAuthorization,
+    ) -> Result<(), CodingSessionError> {
         let (revision, pending) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_resource("authorization state")?;
             state.pending.insert(authorization_id, entry);
             state.revision = state.revision.wrapping_add(1);
             (state.revision, pending_requests(&state))
         };
-        self.sync_pending_snapshot(revision, pending);
+        self.sync_pending_snapshot(revision, pending)
     }
 
-    fn persist_resolution_or_diagnose(
+    fn persist_resolution_or_diagnose_blocking(
+        &self,
+        entry: &PendingAuthorization,
+        resolution: PersistedToolAuthorizationResolution,
+    ) {
+        if let Err(message) = persist_authorization_events_blocking(
+            entry.event_writer.as_ref(),
+            &entry.request,
+            false,
+            Some(resolution),
+        ) {
+            report_infallible_resource_error(
+                "authorization blocking audit diagnostic",
+                self.events.diagnostic(
+                    Some(entry.request.operation_id.clone()),
+                    format!("tool authorization audit write failed: {message}"),
+                ),
+            );
+        }
+    }
+
+    async fn persist_resolution_or_diagnose_async(
         &self,
         entry: &PendingAuthorization,
         resolution: PersistedToolAuthorizationResolution,
@@ -566,20 +738,29 @@ impl AuthorizationService {
             &entry.request,
             false,
             Some(resolution),
-        ) {
-            self.event_service.emit_diagnostic(
-                Some(entry.request.operation_id.clone()),
-                format!("tool authorization audit write failed: {message}"),
+        )
+        .await
+        {
+            report_infallible_resource_error(
+                "authorization audit diagnostic",
+                self.events.diagnostic(
+                    Some(entry.request.operation_id.clone()),
+                    format!("tool authorization audit write failed: {message}"),
+                ),
             );
         }
     }
 
-    fn sync_pending_snapshot(&self, mut revision: u64, mut pending: Vec<ToolAuthorizationRequest>) {
+    fn sync_pending_snapshot(
+        &self,
+        mut revision: u64,
+        mut pending: Vec<ToolAuthorizationRequest>,
+    ) -> Result<(), CodingSessionError> {
         loop {
-            self.coordinator.set_pending_authorizations(pending);
-            let state = self.state.lock().unwrap();
+            self.capabilities.set_pending_authorizations(pending)?;
+            let state = self.state.lock_resource("authorization state")?;
             if state.revision == revision {
-                return;
+                return Ok(());
             }
             revision = state.revision;
             pending = pending_requests(&state);
@@ -587,8 +768,8 @@ impl AuthorizationService {
     }
 }
 
-fn persist_authorization_events(
-    event_writer: Option<&SessionEventWriter>,
+async fn persist_authorization_events(
+    event_writer: Option<&SessionWriterPort>,
     request: &ToolAuthorizationRequest,
     include_request: bool,
     resolution: Option<PersistedToolAuthorizationResolution>,
@@ -610,6 +791,33 @@ fn persist_authorization_events(
     }
     event_writer
         .append(&request.operation_id, &request.turn_id, events)
+        .await
+        .map_err(|error| format!("failed to persist tool authorization fact: {error}"))
+}
+
+fn persist_authorization_events_blocking(
+    event_writer: Option<&SessionWriterPort>,
+    request: &ToolAuthorizationRequest,
+    include_request: bool,
+    resolution: Option<PersistedToolAuthorizationResolution>,
+) -> Result<(), String> {
+    let Some(event_writer) = event_writer else {
+        return Ok(());
+    };
+    let mut events = Vec::with_capacity(usize::from(resolution.is_some()) + 1);
+    if include_request {
+        events.push(SessionEventData::ToolAuthorizationRequested {
+            request: request.clone(),
+        });
+    }
+    if let Some(resolution) = resolution {
+        events.push(SessionEventData::ToolAuthorizationResolved {
+            authorization_id: request.authorization_id.clone(),
+            resolution,
+        });
+    }
+    event_writer
+        .append_blocking(&request.operation_id, &request.turn_id, events)
         .map_err(|error| format!("failed to persist tool authorization fact: {error}"))
 }
 
@@ -627,330 +835,9 @@ fn pending_requests(state: &AuthorizationState) -> Vec<ToolAuthorizationRequest>
     requests
 }
 
-enum Evaluation {
-    Allow,
-    Ask {
-        risk: ToolAuthorizationRisk,
-        scope: ToolAuthorizationScope,
-        preview: ToolAuthorizationPreview,
-    },
-}
+mod evaluation;
 
-impl Evaluation {
-    fn bind_filesystem_descriptor(&mut self, descriptor: &FilesystemBindingDescriptor) {
-        let Self::Ask { scope, preview, .. } = self else {
-            return;
-        };
-        let path = descriptor.display.to_string_lossy().into_owned();
-        *scope = ToolAuthorizationScope::FilesystemTarget {
-            path: path.clone(),
-            target_fingerprint: descriptor.target_fingerprint.clone(),
-        };
-        preview.path = Some(path);
-    }
-}
+#[cfg(test)]
+mod tests;
 
-async fn bind_filesystem_target(
-    context: &BeforeToolCallContext,
-    snapshot: &OperationCapabilitySnapshot,
-) -> Result<Option<FilesystemBindingDescriptor>, String> {
-    let path = match context.tool_name.as_str() {
-        "read" | "grep" | "find" | "ls" => context
-            .arguments
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or("."),
-        "write" | "edit" => context
-            .arguments
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "filesystem mutation is missing `path`".to_owned())?,
-        _ => return Ok(None),
-    };
-    let filesystem = snapshot
-        .filesystem
-        .as_ref()
-        .ok_or_else(|| "filesystem capability is not granted".to_owned())?;
-    filesystem
-        .bind_tool_target(
-            &snapshot.operation_id,
-            &context.tool_call_id,
-            &context.tool_name,
-            path,
-        )
-        .await
-        .map(Some)
-        .map_err(|error| error.to_string())
-}
-
-fn discard_filesystem_binding(
-    context: &BeforeToolCallContext,
-    snapshot: &OperationCapabilitySnapshot,
-) {
-    if let Some(filesystem) = snapshot.filesystem.as_ref() {
-        filesystem.discard_bound_tool_target(&snapshot.operation_id, &context.tool_call_id);
-    }
-}
-
-fn evaluate(
-    context: &BeforeToolCallContext,
-    snapshot: &OperationCapabilitySnapshot,
-    inventory: &ToolAuthorizationInventory,
-) -> Result<Evaluation, String> {
-    match context.tool_name.as_str() {
-        "read" | "grep" | "find" | "ls" => {
-            let Some(filesystem) = snapshot.filesystem.as_ref() else {
-                return Err("filesystem capability is not granted".into());
-            };
-            let path = context
-                .arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or(".");
-            let preview = filesystem
-                .preview_path(path)
-                .map_err(|error| error.to_string())?;
-            if preview.workspace_local {
-                Ok(Evaluation::Allow)
-            } else {
-                Ok(path_request(
-                    ToolAuthorizationRisk::ExternalRead,
-                    preview.display,
-                    "Read outside the workspace",
-                ))
-            }
-        }
-        "write" | "edit" => {
-            let Some(filesystem) = snapshot.filesystem.as_ref() else {
-                return Err("filesystem capability is not granted".into());
-            };
-            let path = context
-                .arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "filesystem mutation is missing `path`".to_owned())?;
-            let target = filesystem
-                .preview_path(path)
-                .map_err(|error| error.to_string())?;
-            Ok(path_request_with_content(
-                ToolAuthorizationRisk::FilesystemMutation,
-                target.display,
-                "Modify a file",
-                mutation_content_preview(context),
-            ))
-        }
-        "bash" => {
-            let Some(shell) = snapshot.shell.as_ref() else {
-                return Err("shell capability is not granted".into());
-            };
-            let command = context
-                .arguments
-                .get("command")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "shell invocation is missing `command`".to_owned())?;
-            let redacted = redact_command(command);
-            Ok(Evaluation::Ask {
-                risk: ToolAuthorizationRisk::ShellExecution,
-                scope: ToolAuthorizationScope::Shell {
-                    cwd: shell.cwd.to_string_lossy().into_owned(),
-                    command_fingerprint: fingerprint(command.as_bytes()),
-                },
-                preview: ToolAuthorizationPreview {
-                    summary: "Execute a shell command".into(),
-                    path: None,
-                    command: Some(redacted),
-                    cwd: Some(shell.cwd.to_string_lossy().into_owned()),
-                    content_preview: None,
-                },
-            })
-        }
-        "delegate_agent" | "delegate_team" => {
-            match inventory
-                .explicit_tools
-                .get(context.tool_name.as_str())
-                .copied()
-                .flatten()
-            {
-                Some(DeclaredToolAuthorizationRisk::SideEffect) => Ok(argument_request(
-                    context,
-                    ToolAuthorizationRisk::DeclaredSideEffect,
-                    "Delegate work to a child agent",
-                )),
-                _ => Ok(Evaluation::Allow),
-            }
-        }
-        name if inventory.explicit_tools.contains_key(name) => {
-            match inventory.explicit_tools.get(name).copied().flatten() {
-                Some(DeclaredToolAuthorizationRisk::WorkspaceLocalReadOnly) => {
-                    Ok(Evaluation::Allow)
-                }
-                Some(DeclaredToolAuthorizationRisk::SideEffect) | None => Ok(argument_request(
-                    context,
-                    ToolAuthorizationRisk::DeclaredSideEffect,
-                    "Run a custom tool",
-                )),
-            }
-        }
-        _ => Ok(argument_request(
-            context,
-            ToolAuthorizationRisk::Unknown,
-            "Run a tool without risk metadata",
-        )),
-    }
-}
-
-fn path_request(risk: ToolAuthorizationRisk, path: PathBuf, summary: &str) -> Evaluation {
-    path_request_with_content(risk, path, summary, None)
-}
-
-fn path_request_with_content(
-    risk: ToolAuthorizationRisk,
-    path: PathBuf,
-    summary: &str,
-    content_preview: Option<String>,
-) -> Evaluation {
-    let path = path.to_string_lossy().into_owned();
-    Evaluation::Ask {
-        risk,
-        scope: ToolAuthorizationScope::Path { path: path.clone() },
-        preview: ToolAuthorizationPreview {
-            summary: summary.into(),
-            path: Some(path),
-            command: None,
-            cwd: None,
-            content_preview,
-        },
-    }
-}
-
-fn argument_request(
-    context: &BeforeToolCallContext,
-    risk: ToolAuthorizationRisk,
-    summary: &str,
-) -> Evaluation {
-    Evaluation::Ask {
-        risk,
-        scope: ToolAuthorizationScope::ToolArguments {
-            fingerprint: argument_fingerprint(&context.arguments),
-        },
-        preview: ToolAuthorizationPreview {
-            summary: format!("{summary}: {}", context.tool_name),
-            path: None,
-            command: None,
-            cwd: None,
-            content_preview: None,
-        },
-    }
-}
-
-fn blocked(reason: impl Into<String>) -> BeforeToolCallResult {
-    BeforeToolCallResult {
-        block: true,
-        reason: Some(reason.into()),
-    }
-}
-
-fn delegation_request(
-    context: &BeforeToolCallContext,
-    turn_id: &str,
-    snapshot: &OperationCapabilitySnapshot,
-) -> Option<DelegationRequest> {
-    let (target_kind, target_field) = match context.tool_name.as_str() {
-        "delegate_agent" => (ProfileKind::Agent, "agent_id"),
-        "delegate_team" => (ProfileKind::Team, "team_id"),
-        _ => return None,
-    };
-    let operation_id = context.execution_context.scope_id()?.to_owned();
-    let requesting_profile_id = snapshot.model.as_ref()?.profile_id.clone()?;
-    let target_id =
-        ProfileId::new(context.arguments.get(target_field)?.as_str()?.to_owned()).ok()?;
-    let task = context.arguments.get("task")?.as_str()?.trim().to_owned();
-    if task.is_empty() {
-        return None;
-    }
-    Some(DelegationRequest {
-        operation_id,
-        turn_id: turn_id.to_owned(),
-        tool_call_id: context.tool_call_id.clone(),
-        requesting_profile_id,
-        target_kind,
-        target_id,
-        task,
-    })
-}
-
-fn delegation_rejected_result(request: &DelegationRequest, reason: &str) -> String {
-    let mut result =
-        DelegationToolResult::from_request(request, DelegationToolResultStatus::Rejected);
-    result.error = Some(reason.to_owned());
-    result.to_json()
-}
-
-fn argument_fingerprint(arguments: &Value) -> String {
-    fingerprint(canonical_json(arguments).as_bytes())
-}
-
-fn fingerprint(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-fn canonical_json(value: &Value) -> String {
-    match value {
-        Value::Object(values) => {
-            let mut fields = values.iter().collect::<Vec<_>>();
-            fields.sort_by_key(|(name, _)| *name);
-            let fields = fields
-                .into_iter()
-                .map(|(key, value)| {
-                    format!(
-                        "{}:{}",
-                        serde_json::to_string(key).unwrap(),
-                        canonical_json(value)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{{{fields}}}")
-        }
-        Value::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(canonical_json)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        _ => serde_json::to_string(value).unwrap(),
-    }
-}
-
-fn redact_command(command: &str) -> String {
-    crate::redaction::redact_sensitive_text(command)
-}
-
-fn mutation_content_preview(context: &BeforeToolCallContext) -> Option<String> {
-    let raw = if context.tool_name == "write" {
-        context.arguments.get("content")?.as_str()?.to_owned()
-    } else {
-        context
-            .arguments
-            .get("edits")?
-            .as_array()?
-            .iter()
-            .take(4)
-            .flat_map(|edit| {
-                let old = edit.get("oldText").and_then(Value::as_str).unwrap_or("");
-                let new = edit.get("newText").and_then(Value::as_str).unwrap_or("");
-                old.lines()
-                    .take(3)
-                    .map(|line| format!("- {line}"))
-                    .chain(new.lines().take(3).map(|line| format!("+ {line}")))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let bounded = raw.lines().take(12).collect::<Vec<_>>().join("\n");
-    let bounded = bounded.chars().take(1_200).collect::<String>();
-    (!bounded.is_empty()).then(|| crate::redaction::redact_sensitive_text(&bounded))
-}
+use evaluation::*;

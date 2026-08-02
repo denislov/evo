@@ -249,11 +249,12 @@ pub struct ConversationProjection {
 
 impl ConversationProjection {
     pub fn hydrate(snapshot: CodingAgentTranscriptSnapshot) -> Self {
+        let omitted_items = snapshot.omitted_items;
         let mut projection = Self {
             session_id: snapshot.session_id,
             active_leaf_id: snapshot.active_leaf_id,
             blocks: VecDeque::new(),
-            omitted_blocks: 0,
+            omitted_blocks: omitted_items,
             retained_bytes: 0,
         };
         for (index, item) in snapshot.items.into_iter().enumerate() {
@@ -736,11 +737,7 @@ mod tests {
     };
 
     fn transcript(items: Vec<CodingAgentSessionTranscriptItem>) -> CodingAgentTranscriptSnapshot {
-        CodingAgentTranscriptSnapshot {
-            session_id: "session-1".into(),
-            active_leaf_id: Some("leaf-1".into()),
-            items,
-        }
+        CodingAgentTranscriptSnapshot::new("session-1", Some("leaf-1".into()), items)
     }
 
     fn user(index: usize) -> CodingAgentSessionTranscriptItem {

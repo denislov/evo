@@ -19,8 +19,8 @@ use coding_agent::api::event::PRODUCT_EVENT_PROTOCOL_VERSION;
 use coding_agent::api::operation::{AgentInvocationOutcome, AgentTeamOutcome, PromptTurnOutcome};
 use coding_agent::api::runtime::{CodingAgentRuntimeShutdownHandle, CodingAgentSession};
 use coding_agent::api::settings::CodingAgentQueueMode;
+use coding_agent::api::view::SessionStorageHandle;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +95,7 @@ pub(super) struct RpcState {
     pub(super) follow_up_mode: CodingAgentQueueMode,
     pub(super) auto_compaction_enabled: bool,
     pub(super) session_name: Option<String>,
-    pub(super) active_session_path: Option<PathBuf>,
+    pub(super) active_session_storage: Option<SessionStorageHandle>,
     pub(super) active_leaf_id: Option<String>,
     pub(super) coding_session: Option<CodingAgentSession>,
     pub(super) client_connection: Option<CodingAgentClientConnection>,
@@ -137,7 +137,7 @@ pub(super) struct RpcBackgroundCompletion {
 
 pub(super) struct CodingOperationTaskResult {
     pub(super) session: Option<CodingAgentSession>,
-    pub(super) session_root: Option<PathBuf>,
+    pub(super) session_storage: Option<SessionStorageHandle>,
     pub(super) outcome: CodingOperationOutcome,
 }
 
@@ -177,7 +177,7 @@ impl RpcState {
             follow_up_mode: CodingAgentQueueMode::OneAtATime,
             auto_compaction_enabled,
             session_name: None,
-            active_session_path: None,
+            active_session_storage: None,
             active_leaf_id: None,
             coding_session: None,
             client_connection: None,
@@ -232,15 +232,18 @@ impl RpcState {
         );
     }
 
-    pub(super) fn ensure_session_event_pump(&mut self, session: &CodingAgentSession) {
-        let stream_id = session.snapshot().cursor.stream_id;
+    pub(super) fn ensure_session_event_pump(
+        &mut self,
+        session: &CodingAgentSession,
+    ) -> Result<(), CliError> {
+        let stream_id = session.snapshot()?.cursor.stream_id;
         if self.session_event_stream_id.as_deref() == Some(stream_id.as_str())
             && self.session_events.is_some()
         {
-            return;
+            return Ok(());
         }
 
-        let mut source = session.subscribe_product_events_public();
+        let mut source = session.subscribe_product_events_public()?;
         let (sender, receiver) = RpcProductEventQueue::new();
         let (flush_tx, mut flush_rx) =
             mpsc::channel::<oneshot::Sender<()>>(RPC_EVENT_FLUSH_QUEUE_CAPACITY);
@@ -301,6 +304,7 @@ impl RpcState {
             self.model.id.clone(),
         );
         self.adapter_applied_sequence = ProductEventSequence::default();
+        Ok(())
     }
 
     pub(super) async fn detach_client(

@@ -4,7 +4,7 @@ use futures::StreamExt;
 use super::CodingSessionError;
 use super::context::{CodingDiagnostic, PromptTurnContext, QueuedPromptInput};
 use crate::app::bootstrap::PromptInvocation;
-use crate::runtime::operation::control::PromptControlCommand;
+use crate::kernel::control::PromptControlCommand;
 use crate::services::runtime::RuntimeService;
 
 pub(crate) struct PromptTurnRunner;
@@ -43,7 +43,7 @@ impl PromptTurnRunner {
                 PromptTurnStep::LoadResources => load_resources(ctx),
                 PromptTurnStep::OpenSession => open_session(ctx),
                 PromptTurnStep::BuildAgentRuntime => build_agent_runtime(ctx),
-                PromptTurnStep::RecordUserInput => record_user_input(ctx),
+                PromptTurnStep::RecordUserInput => record_user_input(ctx).await,
                 PromptTurnStep::RunAgentTurn => run_agent_turn(ctx).await,
                 PromptTurnStep::FinalizeTurn => finalize_turn(ctx),
                 PromptTurnStep::EmitCompletion => return emit_completion(ctx),
@@ -178,8 +178,8 @@ fn build_agent_runtime(ctx: &mut PromptTurnContext) -> Result<(), CodingSessionE
     step_complete()
 }
 
-fn record_user_input(ctx: &mut PromptTurnContext) -> Result<(), CodingSessionError> {
-    ctx.record_user_input()?;
+async fn record_user_input(ctx: &mut PromptTurnContext) -> Result<(), CodingSessionError> {
+    ctx.record_user_input().await?;
     step_complete()
 }
 

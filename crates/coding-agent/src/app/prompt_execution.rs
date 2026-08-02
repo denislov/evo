@@ -140,7 +140,9 @@ impl CodingAgentPromptExecution {
         let mut session = open_headless_prompt_session(&self.options)
             .await
             .map_err(CodingAgentPublicError::from)?;
-        let receiver = session.subscribe_product_events();
+        let receiver = session
+            .subscribe_product_events()
+            .map_err(CodingAgentPublicError::from)?;
         let prompt_options = PromptTurnOptions::from_prompt_runtime_options(self.options);
         let task = tokio::spawn(async move {
             session

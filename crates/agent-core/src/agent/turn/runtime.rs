@@ -500,7 +500,6 @@ mod transition_tests {
 
 #[cfg(all(test, feature = "test-support"))]
 mod loop_tests {
-    use super::*;
     use crate::agent::Agent;
     use crate::agent::types::{AgentConfig, AgentEvent, AgentMessage};
     use ai::api::client::AiClient;

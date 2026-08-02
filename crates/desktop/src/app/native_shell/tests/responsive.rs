@@ -74,15 +74,15 @@ fn streaming_markdown_growth_uses_natural_height_and_keeps_the_tail_pinned(
             row.bottom() <= composer.top() + px(1.),
             "the followed tail must stay above the Composer: row={row:?}, composer={composer:?}"
         );
-        if let Some(previous_bottom) = previous_bottom {
-            if (previous_bottom - f32::from(composer.top())).abs() <= 1. {
-                assert!(
-                    (f32::from(row.bottom()) - previous_bottom).abs() <= 1.,
-                    "once content overflows, tail following must absorb row growth without vertical oscillation: {previous_bottom} -> {} (row={row:?}, composer={composer:?})",
-                    f32::from(row.bottom())
-                );
-                pinned_growth_frames += 1;
-            }
+        if let Some(previous_bottom) = previous_bottom
+            && (previous_bottom - f32::from(composer.top())).abs() <= 1.
+        {
+            assert!(
+                (f32::from(row.bottom()) - previous_bottom).abs() <= 1.,
+                "once content overflows, tail following must absorb row growth without vertical oscillation: {previous_bottom} -> {} (row={row:?}, composer={composer:?})",
+                f32::from(row.bottom())
+            );
+            pinned_growth_frames += 1;
         }
         previous_height = row_height;
         previous_bottom = Some(f32::from(row.bottom()));

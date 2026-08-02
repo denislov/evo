@@ -25,11 +25,8 @@ pub struct OpenAICodexResponsesProvider {
 }
 
 impl OpenAICodexResponsesProvider {
-    pub fn new(api_key: Option<String>) -> Self {
-        Self {
-            client: crate::transport::client::authenticated_client(),
-            api_key,
-        }
+    pub(crate) fn with_client(api_key: Option<String>, client: reqwest::Client) -> Self {
+        Self { client, api_key }
     }
 
     fn resolve_key(&self) -> Option<String> {
@@ -127,7 +124,10 @@ impl ApiProvider for OpenAICodexResponsesProvider {
             });
         };
 
-        let req_body = build_request(model, &ctx, &opts);
+        let req_body = match build_request(model, &ctx, &opts) {
+            Ok(body) => body,
+            Err(error) => return error_stream(model, error),
+        };
         let payload = match serde_json::to_value(&req_body) {
             Ok(payload) => payload,
             Err(error) => {

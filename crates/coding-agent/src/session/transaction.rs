@@ -1,23 +1,34 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+#[cfg(test)]
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot};
 
-const SESSION_TRANSACTION_WRITER_CAPACITY: usize = 32;
+// A 100-checkpoint burst is the reliability-plan stress target. Keeping the
+// entire burst plus 28% headroom bounded avoids producer failure during one
+// slow fsync without allowing an unbounded command backlog.
+const SESSION_TRANSACTION_WRITER_CAPACITY: usize = 128;
+const SESSION_TRANSACTION_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+const SESSION_TRANSACTION_BLOCKING_RETRY_INTERVAL: Duration = Duration::from_millis(1);
 
 use ai::api::conversation::Usage;
+use futures::future::BoxFuture;
 use serde_json::Value;
 
-use super::id::{Clock, IdGenerator};
 use super::manifest::SessionManifest;
 use super::repository::{ManifestPatch, SessionHandle, SessionLogStore, SessionWriteLease};
 use crate::events::outbox::{DurableOutboxIntent, DurableOutboxRecordCandidate};
+use crate::kernel::error::CodingSessionError;
+use crate::kernel::error::SessionWriteFailureReason;
+use crate::mutex::{MutexExt, recover_poisoned};
 use crate::operations::self_healing_edit::runner::{
     SelfHealingEditOutcome, SelfHealingEditRepairAttempt,
 };
+use crate::platform::time::{Clock, IdGenerator};
 use crate::profiles::{ProfileId, ProfileKind};
-use crate::runtime::facade::CodingSessionError;
 use crate::session::event::{
     DiagnosticLevel, OperationKind, PersistedContentBlock, PersistedDelegationStatus,
     PersistedRole, PersistedRuntimeGenerationRef, PersistedSelfHealingEditCheckOutput,
@@ -51,11 +62,15 @@ pub(crate) struct SessionCommitReceipt {
 
 #[derive(Debug)]
 struct SessionTransactionWriterInner {
-    sender: Mutex<Option<SyncSender<SessionTransactionWriterEnvelope>>>,
+    sender: Mutex<Option<mpsc::Sender<SessionTransactionWriterEnvelope>>>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     owners: AtomicUsize,
     #[cfg(test)]
     last_owner_release_pause: Mutex<Option<(SyncSender<()>, std::sync::mpsc::Receiver<()>)>>,
+    #[cfg(test)]
+    command_delay_millis: Arc<AtomicU64>,
+    #[cfg(test)]
+    enqueue_timeout_millis: AtomicU64,
     snapshot: Arc<Mutex<SessionManifest>>,
     committed_session_sequence: Arc<AtomicU64>,
     startup_storage_recoveries: Vec<String>,
@@ -71,7 +86,7 @@ struct SessionWriterOwnerLease {
 #[derive(Debug)]
 struct SessionTransactionWriterEnvelope {
     command: SessionTransactionWriterCommand,
-    reply: SyncSender<Result<SessionCommitReceipt, CodingSessionError>>,
+    reply: oneshot::Sender<Result<SessionCommitReceipt, CodingSessionError>>,
 }
 
 #[derive(Debug)]
@@ -105,191 +120,18 @@ enum SessionTransactionWriterCommand {
     },
 }
 
-impl SessionTransactionWriter {
-    pub(crate) fn new(
-        store: SessionLogStore,
-        handle: SessionHandle,
-    ) -> Result<Self, CodingSessionError> {
-        let key = writer_registry_key(&handle);
-        let registry = SESSION_WRITER_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut registry = registry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.retain(|_, writer| writer.is_open());
-        if let Some(inner) = registry.get(&key).cloned() {
-            inner.acquire_owner();
-            return Ok(Self::from_owner(inner));
-        }
-
-        let mut write_lease = store.acquire_write_lease(&handle)?;
-        let initial_committed_sequence = write_lease.committed_sequence();
-        let startup_storage_recoveries = write_lease.tail_recoveries().to_vec();
-        let (sender, receiver) =
-            sync_channel::<SessionTransactionWriterEnvelope>(SESSION_TRANSACTION_WRITER_CAPACITY);
-        let snapshot = Arc::new(Mutex::new(handle.manifest().clone()));
-        let worker_snapshot = snapshot.clone();
-        let committed_session_sequence = Arc::new(AtomicU64::new(initial_committed_sequence));
-        let worker_committed_session_sequence = committed_session_sequence.clone();
-        let worker = std::thread::spawn(move || {
-            let mut handle = handle;
-            while let Ok(envelope) = receiver.recv() {
-                let result =
-                    execute_writer_command(&store, &mut handle, &mut write_lease, envelope.command);
-                if result.is_ok()
-                    && let Ok(mut snapshot) = worker_snapshot.lock()
-                {
-                    *snapshot = handle.manifest().clone();
-                }
-                if let Ok(receipt) = result.as_ref()
-                    && let Some(sequence) = receipt.committed_session_sequence
-                {
-                    worker_committed_session_sequence.fetch_max(sequence, Ordering::AcqRel);
-                }
-                let _ = envelope.reply.send(result);
-            }
-        });
-        let inner = Arc::new(SessionTransactionWriterInner {
-            sender: Mutex::new(Some(sender)),
-            worker: Mutex::new(Some(worker)),
-            owners: AtomicUsize::new(1),
-            #[cfg(test)]
-            last_owner_release_pause: Mutex::new(None),
-            snapshot,
-            committed_session_sequence,
-            startup_storage_recoveries,
-            registry_key: key.clone(),
-        });
-        registry.insert(key, inner.clone());
-        Ok(Self::from_owner(inner))
-    }
-
-    fn from_owner(inner: Arc<SessionTransactionWriterInner>) -> Self {
-        Self {
-            owner: Arc::new(SessionWriterOwnerLease {
-                inner: Arc::downgrade(&inner),
-                released: AtomicBool::new(false),
-            }),
-            inner,
-        }
-    }
-
-    fn execute(
-        &self,
-        command: SessionTransactionWriterCommand,
-    ) -> Result<SessionCommitReceipt, CodingSessionError> {
-        let (reply, response) = sync_channel(1);
-        let envelope = SessionTransactionWriterEnvelope { command, reply };
-        let sender = self
-            .inner
-            .sender
-            .lock()
-            .map_err(|_| CodingSessionError::Session {
-                message: "session transaction writer sender lock is poisoned".into(),
-            })?
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| CodingSessionError::Session {
-                message: "session transaction writer is closed".into(),
-            })?;
-        match sender.try_send(envelope) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                return Err(CodingSessionError::Session {
-                    message: "session transaction writer queue is full".into(),
-                });
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(CodingSessionError::Session {
-                    message: "session transaction writer is closed".into(),
-                });
-            }
-        }
-        response.recv().map_err(|_| CodingSessionError::Session {
-            message: "session transaction writer closed before replying".into(),
-        })?
-    }
-
-    pub(crate) fn append_checkpoint_events(
-        &self,
-        events: Vec<SessionEventEnvelope>,
-    ) -> Result<(), CodingSessionError> {
-        self.append_checkpoint_events_with_receipt(events)
-            .map(|_| ())
-    }
-
-    pub(crate) fn append_checkpoint_events_with_receipt(
-        &self,
-        events: Vec<SessionEventEnvelope>,
-    ) -> Result<SessionCommitReceipt, CodingSessionError> {
-        self.execute(SessionTransactionWriterCommand::Checkpoint { events })
-    }
-
-    pub(crate) fn initialize_session_with_receipt(
-        &self,
-        event: SessionEventEnvelope,
-    ) -> Result<SessionCommitReceipt, CodingSessionError> {
-        self.execute(SessionTransactionWriterCommand::InitializeSession { event })
-    }
-
-    pub(crate) fn commit_session_mutation(
-        &self,
-        events: Vec<SessionEventEnvelope>,
-        manifest_patch: ManifestPatch,
-        operation_id: Option<String>,
-    ) -> Result<SessionCommitReceipt, CodingSessionError> {
-        self.commit_session_mutation_with_outbox(events, Vec::new(), manifest_patch, operation_id)
-    }
-
-    pub(crate) fn commit_session_mutation_with_outbox(
-        &self,
-        events: Vec<SessionEventEnvelope>,
-        outbox_records: Vec<DurableOutboxRecordCandidate>,
-        manifest_patch: ManifestPatch,
-        operation_id: Option<String>,
-    ) -> Result<SessionCommitReceipt, CodingSessionError> {
-        self.execute(SessionTransactionWriterCommand::CommitSessionMutation {
-            events,
-            outbox_records,
-            manifest_patch,
-            operation_id,
-        })
-    }
-
-    pub(crate) fn commit_session_name_if_unset(
-        &self,
-        events: Vec<SessionEventEnvelope>,
-        manifest_patch: ManifestPatch,
-        operation_id: String,
-    ) -> Result<SessionCommitReceipt, CodingSessionError> {
-        self.execute(SessionTransactionWriterCommand::CommitSessionNameIfUnset {
-            events,
-            manifest_patch,
-            operation_id,
-        })
-    }
-
-    pub(crate) fn manifest_snapshot(&self) -> SessionManifest {
-        self.inner
-            .snapshot
-            .lock()
-            .map(|snapshot| snapshot.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
-    }
-
-    pub(crate) fn committed_session_sequence(&self) -> u64 {
-        self.inner
-            .committed_session_sequence
-            .load(Ordering::Acquire)
-    }
-
-    pub(crate) fn startup_storage_recoveries(&self) -> &[String] {
-        &self.inner.startup_storage_recoveries
-    }
-
-    pub(crate) fn shutdown(&self) -> Result<(), CodingSessionError> {
-        self.owner.release()
+fn queue_saturated_error(timeout: Duration) -> CodingSessionError {
+    CodingSessionError::SessionWriteFailure {
+        reason: SessionWriteFailureReason::QueueSaturated,
+        message: format!(
+            "session transaction writer queue remained saturated at bounded capacity {} for {} ms",
+            SESSION_TRANSACTION_WRITER_CAPACITY,
+            timeout.as_millis()
+        ),
     }
 }
+
+mod writer;
 
 impl Clone for SessionTransactionWriter {
     fn clone(&self) -> Self {
@@ -330,17 +172,14 @@ impl SessionTransactionWriterInner {
         // have been closed, then acquire a handle to an actor that is already
         // committed to shutdown.
         let registry = SESSION_WRITER_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut registry = registry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut registry = registry.lock_resource("session writer registry")?;
         if self.owners.fetch_sub(1, Ordering::AcqRel) != 1 {
             return Ok(());
         }
         #[cfg(test)]
         if let Some((entered, release)) = self
             .last_owner_release_pause
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .lock_resource("test session writer release pause")?
             .take()
         {
             let _ = entered.send(());
@@ -356,26 +195,21 @@ impl SessionTransactionWriterInner {
         result
     }
 
-    fn is_open(&self) -> bool {
-        self.sender
-            .lock()
-            .map(|sender| sender.is_some())
-            .unwrap_or(false)
+    fn is_open(&self) -> Result<bool, CodingSessionError> {
+        Ok(self
+            .sender
+            .lock_resource("session transaction writer sender")?
+            .is_some())
     }
 
     fn close_and_join(&self) -> Result<(), CodingSessionError> {
-        match self.sender.lock() {
-            Ok(mut sender) => {
-                sender.take();
-            }
-            Err(poisoned) => {
-                poisoned.into_inner().take();
-            }
-        }
-        let worker = match self.worker.lock() {
-            Ok(mut worker) => worker.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        self.sender
+            .lock_resource("session transaction writer sender")?
+            .take();
+        let worker = self
+            .worker
+            .lock_resource("session transaction writer worker")?
+            .take();
         if let Some(worker) = worker {
             worker.join().map_err(|_| CodingSessionError::Session {
                 message: "session transaction writer panicked during shutdown".into(),
@@ -392,12 +226,18 @@ impl Drop for SessionTransactionWriterInner {
                 sender.take();
             }
             Err(poisoned) => {
-                poisoned.into_inner().take();
+                // Drop cannot return the resource error; recover solely to
+                // release the sender and report the poisoned lock once.
+                recover_poisoned("session transaction writer sender", poisoned).take();
             }
         }
         let worker = match self.worker.get_mut() {
             Ok(worker) => worker.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
+            Err(poisoned) => {
+                // Drop cannot return the resource error; recover solely to
+                // join the worker and report the poisoned lock once.
+                recover_poisoned("session transaction writer worker", poisoned).take()
+            }
         };
         if let Some(worker) = worker {
             let _ = worker.join();
@@ -405,145 +245,12 @@ impl Drop for SessionTransactionWriterInner {
     }
 }
 
-fn writer_registry_key(handle: &SessionHandle) -> PathBuf {
-    handle
-        .session_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| handle.session_dir().to_path_buf())
-}
+#[cfg(test)]
+mod tests;
 
-fn execute_writer_command(
-    store: &SessionLogStore,
-    handle: &mut SessionHandle,
-    write_lease: &mut SessionWriteLease,
-    command: SessionTransactionWriterCommand,
-) -> Result<SessionCommitReceipt, CodingSessionError> {
-    match command {
-        SessionTransactionWriterCommand::InitializeSession { event } => {
-            if !matches!(&event.data, SessionEventData::SessionCreated { .. }) {
-                return Err(CodingSessionError::Session {
-                    message: "session writer initialize command requires SessionCreated".into(),
-                });
-            }
-            if !store.read_events(handle)?.is_empty() {
-                return Err(CodingSessionError::Session {
-                    message: "session writer cannot initialize a non-empty event log".into(),
-                });
-            }
-            let sequence = store.append_events_with_cursor(handle, &[event], write_lease)?;
-            Ok(SessionCommitReceipt {
-                committed_session_sequence: Some(sequence),
-            })
-        }
-        SessionTransactionWriterCommand::Checkpoint { events } => {
-            let committed_session_sequence = if events.is_empty() {
-                None
-            } else {
-                Some(store.append_events_with_cursor(handle, &events, write_lease)?)
-            };
-            Ok(SessionCommitReceipt {
-                committed_session_sequence,
-            })
-        }
-        SessionTransactionWriterCommand::Finalize {
-            events,
-            outbox_records,
-            updated_at,
-            active_leaf_id,
-        } => {
-            let committed_session_sequence =
-                store.append_events_and_outbox(handle, &events, &outbox_records, write_lease)?;
-            if active_leaf_id.is_some() {
-                store.update_manifest(
-                    handle,
-                    ManifestPatch::new()
-                        .updated_at(updated_at)
-                        .active_leaf_id(active_leaf_id),
-                )?;
-                refresh_writer_handle(store, handle)?;
-            }
-            Ok(SessionCommitReceipt {
-                committed_session_sequence: Some(committed_session_sequence),
-            })
-        }
-        SessionTransactionWriterCommand::CommitSessionMutation {
-            events,
-            outbox_records,
-            manifest_patch,
-            operation_id,
-        } => {
-            let committed_session_sequence = if events.is_empty() {
-                None
-            } else if outbox_records.is_empty() {
-                Some(store.append_events_with_cursor(handle, &events, write_lease)?)
-            } else {
-                Some(
-                    store
-                        .append_events_and_outbox(handle, &events, &outbox_records, write_lease)
-                        .map_err(|error| mutation_commit_error(operation_id.as_deref(), error))?,
-                )
-            };
-            store
-                .update_manifest(handle, manifest_patch)
-                .map_err(|error| mutation_commit_error(operation_id.as_deref(), error))?;
-            refresh_writer_handle(store, handle)
-                .map_err(|error| mutation_commit_error(operation_id.as_deref(), error))?;
-            Ok(SessionCommitReceipt {
-                committed_session_sequence,
-            })
-        }
-        SessionTransactionWriterCommand::CommitSessionNameIfUnset {
-            events,
-            manifest_patch,
-            operation_id,
-        } => {
-            let committed_session_sequence = if events.is_empty() {
-                None
-            } else {
-                Some(
-                    store
-                        .append_events_with_cursor(handle, &events, write_lease)
-                        .map_err(|error| mutation_commit_error(Some(&operation_id), error))?,
-                )
-            };
-            if handle.manifest().name.is_some() {
-                return Ok(SessionCommitReceipt {
-                    committed_session_sequence,
-                });
-            }
-            store
-                .update_manifest(handle, manifest_patch)
-                .map_err(|error| mutation_commit_error(Some(&operation_id), error))?;
-            refresh_writer_handle(store, handle)
-                .map_err(|error| mutation_commit_error(Some(&operation_id), error))?;
-            Ok(SessionCommitReceipt {
-                committed_session_sequence,
-            })
-        }
-    }
-}
+mod worker;
 
-fn refresh_writer_handle(
-    store: &SessionLogStore,
-    handle: &mut SessionHandle,
-) -> Result<(), CodingSessionError> {
-    let session_id = handle.manifest().session_id.clone();
-    *handle = store.open_session_id(&session_id)?;
-    Ok(())
-}
-
-fn mutation_commit_error(
-    operation_id: Option<&str>,
-    error: CodingSessionError,
-) -> CodingSessionError {
-    match operation_id {
-        Some(operation_id) => CodingSessionError::PartialCommit {
-            operation_id: operation_id.to_owned(),
-            message: error.to_string(),
-        },
-        None => error,
-    }
-}
+use worker::*;
 
 impl TransactionState {
     fn as_str(self) -> &'static str {
@@ -943,12 +650,12 @@ where
         Ok(())
     }
 
-    pub(crate) fn checkpoint(&mut self) -> Result<(), CodingSessionError> {
+    pub(crate) async fn checkpoint(&mut self) -> Result<(), CodingSessionError> {
         self.ensure_open()?;
-        self.flush_pending()
+        self.flush_pending().await
     }
 
-    pub(crate) fn commit_with_outbox(
+    pub(crate) async fn commit_with_outbox(
         &mut self,
         new_leaf_id: Option<String>,
         intent: DurableOutboxIntent,
@@ -958,20 +665,20 @@ where
             new_leaf_id: new_leaf_id.clone(),
         });
         let record = self.outbox_record(intent)?;
-        self.finalize_pending(new_leaf_id, vec![record])?;
+        self.finalize_pending(new_leaf_id, vec![record]).await?;
         self.state = TransactionState::Committed;
         Ok(())
     }
 
-    pub(crate) fn abort_with_outbox(
+    pub(crate) async fn abort_with_outbox(
         &mut self,
         reason: impl Into<String>,
         intent: DurableOutboxIntent,
     ) -> Result<(), CodingSessionError> {
-        self.abort_internal(reason.into(), Some(intent))
+        self.abort_internal(reason.into(), Some(intent)).await
     }
 
-    fn abort_internal(
+    async fn abort_internal(
         &mut self,
         reason: String,
         intent: Option<DurableOutboxIntent>,
@@ -983,21 +690,22 @@ where
             .map(|intent| self.outbox_record(intent).map(|record| vec![record]))
             .transpose()?
             .unwrap_or_default();
-        self.finalize_pending(None, outbox_records)?;
+        self.finalize_pending(None, outbox_records).await?;
         self.state = TransactionState::Aborted;
         Ok(())
     }
 
-    pub(crate) fn fail_with_outbox(
+    pub(crate) async fn fail_with_outbox(
         &mut self,
         error_code: impl Into<String>,
         message: impl Into<String>,
         intent: DurableOutboxIntent,
     ) -> Result<(), CodingSessionError> {
         self.fail_internal(error_code.into(), message.into(), Some(intent))
+            .await
     }
 
-    fn fail_internal(
+    async fn fail_internal(
         &mut self,
         error_code: String,
         message: String,
@@ -1017,7 +725,7 @@ where
             .map(|intent| self.outbox_record(intent).map(|record| vec![record]))
             .transpose()?
             .unwrap_or_default();
-        self.finalize_pending(None, outbox_records)?;
+        self.finalize_pending(None, outbox_records).await?;
         self.state = TransactionState::Failed;
         Ok(())
     }
@@ -1056,10 +764,11 @@ where
         })
     }
 
-    fn flush_pending(&mut self) -> Result<(), CodingSessionError> {
+    async fn flush_pending(&mut self) -> Result<(), CodingSessionError> {
         if let Err(error) = self
             .writer
             .append_checkpoint_events(self.pending_events.clone())
+            .await
         {
             if matches!(error, CodingSessionError::SessionWriteRejected { .. }) {
                 return Err(error);
@@ -1074,19 +783,21 @@ where
         Ok(())
     }
 
-    fn finalize_pending(
+    async fn finalize_pending(
         &mut self,
         active_leaf_id: Option<String>,
         outbox_records: Vec<DurableOutboxRecordCandidate>,
     ) -> Result<(), CodingSessionError> {
         let receipt = match self
             .writer
-            .execute(SessionTransactionWriterCommand::Finalize {
+            .execute_async(SessionTransactionWriterCommand::Finalize {
                 events: self.pending_events.clone(),
                 outbox_records,
                 updated_at: self.clock.now_rfc3339(),
                 active_leaf_id,
-            }) {
+            })
+            .await
+        {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.state = TransactionState::InDoubt;

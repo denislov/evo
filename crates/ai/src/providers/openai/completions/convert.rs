@@ -1,14 +1,15 @@
 use super::wire;
 use crate::compatibility::ThinkingFormat;
 use crate::model::Model;
-use crate::protocol::{ContentBlock, Context, Message, StreamOptions};
+use crate::protocol::{ContentBlock, Context, Message, StreamOptions, ToolKind};
+use crate::providers::common::unsupported_tool_error;
 use crate::providers::openai::common::{CompatFlags, resolve_completions_compat};
 
 pub fn build_request(
     model: &Model,
     ctx: &Context,
     opts: &Option<StreamOptions>,
-) -> wire::ChatCompletionRequest {
+) -> Result<wire::ChatCompletionRequest, String> {
     let compat = resolve_completions_compat(model);
     let mut messages = Vec::new();
 
@@ -57,20 +58,30 @@ pub fn build_request(
     });
     let tool_choice = opts.as_ref().and_then(|o| o.tool_choice.clone());
 
-    let tools = ctx.tools.as_ref().map(|tools| {
-        tools
-            .iter()
-            .map(|t| wire::ChatTool {
-                tool_type: "function".to_string(),
-                function: wire::FunctionDef {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    parameters: t.parameters.clone(),
-                    strict: compat.supports_strict_mode.then_some(true),
-                },
-            })
-            .collect()
-    });
+    let tools = ctx
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|t| match t.kind {
+                    ToolKind::Function => Ok(wire::ChatTool {
+                        tool_type: "function".to_string(),
+                        function: wire::FunctionDef {
+                            name: t.name.clone(),
+                            description: t.description.clone(),
+                            parameters: t.parameters.clone(),
+                            strict: compat.supports_strict_mode.then_some(true),
+                        },
+                    }),
+                    // Chat-completions has no server-side tool execution.
+                    ToolKind::WebSearch | ToolKind::Custom => {
+                        Err(unsupported_tool_error("openai-completions", t))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
 
     let stream_options = if compat.supports_usage_in_streaming {
         Some(wire::StreamOptions {
@@ -81,7 +92,7 @@ pub fn build_request(
     };
     let (thinking, reasoning_effort) = thinking_params(model, opts, &compat);
 
-    wire::ChatCompletionRequest {
+    Ok(wire::ChatCompletionRequest {
         model: model.id.clone(),
         messages,
         max_tokens,
@@ -93,7 +104,7 @@ pub fn build_request(
         reasoning_effort,
         stream: true,
         stream_options,
-    }
+    })
 }
 
 fn thinking_params(

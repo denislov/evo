@@ -130,6 +130,7 @@ fn coding_event_adapter_maps_session_write_failure_state() {
             operation_id: "op-write".into(),
             reason: "append result is uncertain".into(),
             status: CodingAgentSessionWriteFailureStatus::Uncertain,
+            failure_reason: None,
         },
     ));
 

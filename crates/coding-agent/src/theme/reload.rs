@@ -16,11 +16,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::mutex::{MutexExt, recover_poisoned};
+
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
 use super::ThemeJson;
-use crate::{bounded_io, limits};
+use crate::limits;
+use crate::platform::io::bounded as bounded_io;
 
 /// A reloaded theme ready to apply: the parsed [`ThemeJson`] and its name.
 #[derive(Debug, Clone)]
@@ -128,10 +131,9 @@ impl ThemeWatcher {
                 return;
             }
             let (pending_lock, pending_changed) = &*pending_for_watcher;
-            if let Ok(mut p) = pending_lock.lock() {
-                p.schedule(Instant::now(), debounce);
-                pending_changed.notify_one();
-            }
+            let mut p = pending_lock.lock_or_recover("theme reload debounce state");
+            p.schedule(Instant::now(), debounce);
+            pending_changed.notify_one();
         })
         .map_err(std::io::Error::other)?;
 
@@ -157,9 +159,8 @@ impl ThemeWatcher {
     fn stop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
         let (pending_lock, pending_changed) = &*self.pending;
-        if let Ok(mut p) = pending_lock.lock() {
-            p.clear();
-        }
+        let mut p = pending_lock.lock_or_recover("theme reload debounce state");
+        p.clear();
         pending_changed.notify_all();
         // Drop the fs watcher first so no new events are scheduled.
         self.watcher = None;
@@ -206,10 +207,7 @@ fn debounce_loop(
 ) {
     let (pending_lock, pending_changed) = &*pending;
     loop {
-        let mut pending_guard = match pending_lock.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
+        let mut pending_guard = pending_lock.lock_or_recover("theme reload debounce state");
         loop {
             if stop_flag.load(Ordering::Relaxed) {
                 return;
@@ -222,15 +220,19 @@ fn debounce_loop(
                 }
                 Some(deadline) => {
                     let wait = deadline.saturating_duration_since(now);
-                    let Ok((guard, _)) = pending_changed.wait_timeout(pending_guard, wait) else {
-                        return;
-                    };
+                    let (guard, _) = pending_changed
+                        .wait_timeout(pending_guard, wait)
+                        .unwrap_or_else(|poisoned| {
+                            recover_poisoned("theme reload debounce state", poisoned)
+                        });
                     pending_guard = guard;
                 }
                 None => {
-                    let Ok(guard) = pending_changed.wait(pending_guard) else {
-                        return;
-                    };
+                    let guard = pending_changed
+                        .wait(pending_guard)
+                        .unwrap_or_else(|poisoned| {
+                            recover_poisoned("theme reload debounce state", poisoned)
+                        });
                     pending_guard = guard;
                 }
             }

@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::limits::{
     MAX_FILE_REVIEW_BYTES, MAX_FILE_REVIEW_CONTENT_BYTES, MAX_FILE_REVIEW_DIFF_BYTES,
 };
-use crate::runtime::capability::{
+use crate::mutex::MutexExt;
+use crate::platform::fs::capability::{
     FilesystemCapability, FilesystemReviewTargetError, FilesystemTarget,
 };
 use crate::runtime::facade::{
@@ -115,7 +116,7 @@ impl CodingAgentSession {
             &self.runtime_host.operation_supervisor.control,
             QueryIntent::ChangedFileReview,
         );
-        let snapshot = self.snapshot();
+        let snapshot = self.snapshot()?;
         review_changed_file(
             self.runtime_host.project_root.as_path(),
             &snapshot.context.changes,
@@ -241,8 +242,8 @@ async fn read_bounded_review_file(
             .opened_file()
             .map_err(|_| review_error(ReviewErrorKind::Unavailable))?;
         let mut file = file
-            .lock()
-            .map_err(|_| review_error(ReviewErrorKind::Unavailable))?;
+            .lock_resource("file review opened file")
+            .map_err(CodingAgentPublicError::from)?;
         file.seek(SeekFrom::Start(0))
             .map_err(|_| review_error(ReviewErrorKind::Unavailable))?;
         let metadata = file

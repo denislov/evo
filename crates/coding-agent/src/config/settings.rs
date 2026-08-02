@@ -55,13 +55,6 @@ pub struct PartialRetry {
 
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct PartialWarnings {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub anthropic_extra_usage: Option<bool>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
 pub struct PartialTerminal {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<TuiMode>,
@@ -91,8 +84,6 @@ pub struct PartialSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_naming_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub transport: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub steering_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follow_up_mode: Option<String>,
@@ -111,8 +102,6 @@ pub struct PartialSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hide_thinking_block: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub collapse_changelog: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub quiet_startup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_skill_commands: Option<bool>,
@@ -125,8 +114,6 @@ pub struct PartialSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell_command_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub npm_command: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub http_proxy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_idle_timeout_ms: Option<u64>,
@@ -134,8 +121,6 @@ pub struct PartialSettings {
     pub websocket_connect_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled_models: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warnings: Option<PartialWarnings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal: Option<PartialTerminal>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,7 +175,9 @@ pub struct Settings {
     pub tree_filter_mode: String,
     pub shell_path: Option<String>,
     pub shell_command_prefix: Option<String>,
+    pub http_proxy: Option<String>,
     pub http_idle_timeout_ms: u64,
+    pub websocket_connect_timeout_ms: Option<u64>,
     pub enabled_models: Vec<String>,
     pub terminal: TerminalSettings,
     pub compaction: CompactionSettings,
@@ -240,18 +227,6 @@ fn merge_terminal(
     }
 }
 
-fn merge_warnings(
-    base: Option<PartialWarnings>,
-    over: Option<PartialWarnings>,
-) -> Option<PartialWarnings> {
-    match (base, over) {
-        (None, x) | (x, None) => x,
-        (Some(b), Some(o)) => Some(PartialWarnings {
-            anthropic_extra_usage: o.anthropic_extra_usage.or(b.anthropic_extra_usage),
-        }),
-    }
-}
-
 fn merge_vec(base: Option<Vec<String>>, over: Option<Vec<String>>) -> Option<Vec<String>> {
     match (base, over) {
         (None, x) | (x, None) => x,
@@ -269,7 +244,6 @@ impl PartialSettings {
             default_model: over.default_model.or(self.default_model),
             default_thinking_level: over.default_thinking_level.or(self.default_thinking_level),
             session_naming_model: over.session_naming_model.or(self.session_naming_model),
-            transport: over.transport.or(self.transport),
             steering_mode: over.steering_mode.or(self.steering_mode),
             follow_up_mode: over.follow_up_mode.or(self.follow_up_mode),
             session_dir: over.session_dir.or(self.session_dir),
@@ -279,21 +253,18 @@ impl PartialSettings {
             theme: over.theme.or(self.theme),
             no_context_files: over.no_context_files.or(self.no_context_files),
             hide_thinking_block: over.hide_thinking_block.or(self.hide_thinking_block),
-            collapse_changelog: over.collapse_changelog.or(self.collapse_changelog),
             quiet_startup: over.quiet_startup.or(self.quiet_startup),
             enable_skill_commands: over.enable_skill_commands.or(self.enable_skill_commands),
             double_escape_action: over.double_escape_action.or(self.double_escape_action),
             tree_filter_mode: over.tree_filter_mode.or(self.tree_filter_mode),
             shell_path: over.shell_path.or(self.shell_path),
             shell_command_prefix: over.shell_command_prefix.or(self.shell_command_prefix),
-            npm_command: merge_vec(self.npm_command, over.npm_command),
             http_proxy: over.http_proxy.or(self.http_proxy),
             http_idle_timeout_ms: over.http_idle_timeout_ms.or(self.http_idle_timeout_ms),
             websocket_connect_timeout_ms: over
                 .websocket_connect_timeout_ms
                 .or(self.websocket_connect_timeout_ms),
             enabled_models: merge_vec(self.enabled_models, over.enabled_models),
-            warnings: merge_warnings(self.warnings, over.warnings),
             terminal: merge_terminal(self.terminal, over.terminal),
             compaction: merge_compaction(self.compaction, over.compaction),
             retry: merge_retry(self.retry, over.retry),
@@ -332,7 +303,12 @@ impl PartialSettings {
                 .unwrap_or_else(|| "default".to_string()),
             shell_path: self.shell_path,
             shell_command_prefix: self.shell_command_prefix,
+            http_proxy: self.http_proxy.and_then(|proxy| {
+                let proxy = proxy.trim();
+                (!proxy.is_empty()).then(|| proxy.to_owned())
+            }),
             http_idle_timeout_ms: self.http_idle_timeout_ms.unwrap_or(300000),
+            websocket_connect_timeout_ms: self.websocket_connect_timeout_ms,
             enabled_models: self.enabled_models.unwrap_or_default(),
             terminal: TerminalSettings {
                 mode: t.mode.unwrap_or_default(),
@@ -462,7 +438,6 @@ pub fn load_partial(path: &Path, diags: &mut Vec<ConfigDiagnostic>) -> PartialSe
     };
     match toml::from_str::<PartialSettings>(&text) {
         Ok(mut parsed) => {
-            diagnose_unsupported_settings(&parsed, path, diags);
             validate_compaction_settings(&mut parsed, Some(path), false, diags);
             parsed
         }
@@ -510,41 +485,6 @@ fn validate_compaction_settings(
     }
 }
 
-fn diagnose_unsupported_settings(
-    settings: &PartialSettings,
-    path: &Path,
-    diags: &mut Vec<ConfigDiagnostic>,
-) {
-    let mut warn = |key: &str| {
-        diags.push(ConfigDiagnostic::warn(
-            format!("settings key `{key}` is recognized but not supported by the Rust runtime"),
-            Some(path.to_path_buf()),
-        ));
-    };
-    if settings.collapse_changelog.is_some() {
-        warn("collapse_changelog");
-    }
-    if settings.transport.is_some() {
-        warn("transport");
-    }
-    if settings.npm_command.is_some() {
-        warn("npm_command");
-    }
-    if settings.http_proxy.is_some() {
-        warn("http_proxy");
-    }
-    if settings.websocket_connect_timeout_ms.is_some() {
-        warn("websocket_connect_timeout_ms");
-    }
-    if settings
-        .warnings
-        .as_ref()
-        .is_some_and(|warnings| warnings.anthropic_extra_usage.is_some())
-    {
-        warn("warnings.anthropic_extra_usage");
-    }
-}
-
 pub fn load_settings(paths: &ConfigPaths, diags: &mut Vec<ConfigDiagnostic>) -> Settings {
     let global = load_partial(&paths.global_settings(), diags);
     let project = load_partial(&paths.project_settings(), diags);
@@ -561,4 +501,40 @@ pub(crate) fn load_global_settings(
     let mut global = load_partial(&paths.global_settings(), diags);
     validate_compaction_settings(&mut global, None, true, diags);
     global.resolve()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_settings_survive_parse_merge_and_resolve() {
+        let global: PartialSettings = toml::from_str(
+            "http_proxy = 'http://127.0.0.1:8080'\nwebsocket_connect_timeout_ms = 4500\n",
+        )
+        .expect("parse transport settings");
+        let project: PartialSettings = toml::from_str("websocket_connect_timeout_ms = 9000\n")
+            .expect("parse project transport settings");
+        let resolved = global.merge(project).resolve();
+        assert_eq!(
+            resolved.http_proxy.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
+        assert_eq!(resolved.websocket_connect_timeout_ms, Some(9000));
+    }
+
+    #[test]
+    fn removed_typescript_settings_are_rejected_by_the_schema() {
+        for legacy in [
+            "transport = 'sse'\n",
+            "npm_command = ['npm']\n",
+            "collapse_changelog = true\n",
+            "[warnings]\nanthropic_extra_usage = true\n",
+        ] {
+            assert!(
+                toml::from_str::<PartialSettings>(legacy).is_err(),
+                "legacy setting unexpectedly remained in schema: {legacy}"
+            );
+        }
+    }
 }

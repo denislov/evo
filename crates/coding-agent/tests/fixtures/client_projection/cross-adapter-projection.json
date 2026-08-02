@@ -1,0 +1,78 @@
+{
+  "cursor": 12,
+  "messages": [
+    {
+      "operation_id": "operation-1",
+      "turn_id": "turn-1",
+      "message_id": "message-1",
+      "text": "hello world",
+      "thinking": "inspect state",
+      "reasoning_duration_millis": null,
+      "status": "completed",
+      "started_sequence": 2,
+      "updated_sequence": 11,
+      "truncated": false
+    }
+  ],
+  "tools": [
+    {
+      "operation_id": "operation-1",
+      "turn_id": "turn-1",
+      "tool_call_id": "tool-1",
+      "name": "read",
+      "arguments": "{\"path\":\"src/lib.rs\"}",
+      "detail": "read complete",
+      "status": "completed",
+      "started_sequence": 5,
+      "updated_sequence": 7,
+      "truncated": false
+    }
+  ],
+  "context": {
+    "operations": [
+      {
+        "operationId": "operation-1",
+        "kind": "prompt",
+        "parentOperationId": null,
+        "rootOperationId": null,
+        "status": "completed",
+        "startedSequence": 1,
+        "updatedSequence": 12,
+        "diagnostics": [],
+        "failure": null
+      }
+    ],
+    "changes": [],
+    "delegations": [
+      {
+        "toolCallId": "delegate-1",
+        "childOperationId": "child-1",
+        "targetKind": "agent",
+        "targetId": "reviewer",
+        "task": "Review the change",
+        "status": "completed",
+        "updatedSequence": 10,
+        "summary": "Looks good",
+        "failure": null
+      }
+    ],
+    "usage": {
+      "input": 12,
+      "output": 4,
+      "cacheRead": 2,
+      "cacheWrite": 1,
+      "cost": 0.033,
+      "latestTurn": {
+        "turnId": "turn-1",
+        "input": 12,
+        "output": 4,
+        "cacheRead": 2,
+        "cacheWrite": 1,
+        "contextTokens": 19,
+        "cost": 0.033
+      },
+      "modelId": null,
+      "contextWindow": null
+    }
+  }
+}

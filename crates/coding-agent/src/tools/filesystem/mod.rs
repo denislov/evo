@@ -1,4 +1,3 @@
-mod cap_walk;
 mod diff;
 pub(crate) mod edit;
 pub(crate) mod find;

@@ -8,6 +8,9 @@ use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_kn
 
 use crate::app::bootstrap::{PromptInvocation, SessionRunOptions};
 use crate::app::prompt_runtime::PromptRuntimeOptions;
+use crate::application::capability::{OperationCapabilitySnapshot, tool_uses_filesystem};
+use crate::kernel::capability::{ActorId, ModelCapability, ToolCapabilitySet};
+use crate::kernel::error::CodingSessionError;
 use crate::operations::prompt::context::{
     DelegationRequest, DelegationToolExecutor, PromptTurnMode, PromptTurnOptions,
 };
@@ -15,10 +18,6 @@ use crate::profiles::{
     AgentProfile, DelegationConfirmationMode, DelegationPolicy, ProfileId, ProfileKind,
     ProfileRegistry,
 };
-use crate::runtime::capability::{
-    ActorId, ModelCapability, OperationCapabilitySnapshot, ToolCapabilitySet, tool_uses_filesystem,
-};
-use crate::runtime::error::CodingSessionError;
 use crate::session::event::PersistedDelegationRuntimeSeed;
 use crate::session::replay::ReplayPendingDelegationConfirmation;
 
@@ -130,6 +129,17 @@ pub(crate) fn capability_snapshot_for_delegated_profile(
     for tool_name in delegation_tool_names(&profile.delegation) {
         if parent.tools.allows(tool_name) && !released_tools.iter().any(|name| name == tool_name) {
             released_tools.push(tool_name.to_owned());
+        }
+    }
+    // Server-side tools follow the child automatically, but never wider than
+    // the parent: a delegate cannot reach the network its parent could not.
+    if !released_tools.is_empty() {
+        for tool_name in crate::tools::SERVER_TOOL_NAMES {
+            if parent.tools.allows(tool_name)
+                && !released_tools.iter().any(|name| name == tool_name)
+            {
+                released_tools.push(tool_name.to_owned());
+            }
         }
     }
     let releases_filesystem = released_tools.iter().any(|name| tool_uses_filesystem(name));
@@ -441,6 +451,10 @@ fn restored_builtin_tools(
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
+    // Server-side tools are intentionally absent here. They bind no local
+    // capability, so nothing constructs them from a cwd, and the delegate may
+    // run a different model than the seed was captured under. `RuntimeSnapshot`
+    // re-adds them from the delegate's own model instead.
     Ok(crate::tools::builtin_tools(cwd.to_path_buf())?
         .into_iter()
         .filter(|tool| names.contains(tool.name.as_str()))

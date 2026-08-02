@@ -1,9 +1,9 @@
 pub(crate) mod runner;
 
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::application::operation::control::OperationControl;
+use crate::kernel::error::CodingSessionError;
 use crate::profiles::ProfileRegistry;
-use crate::runtime::capability::OperationCapabilitySnapshot;
-use crate::runtime::facade::CodingSessionError;
-use crate::runtime::operation::control::OperationControl;
 use crate::services::event::EventService;
 use runner::{AgentTeamContext, AgentTeamOptions, AgentTeamOutcome, AgentTeamRunner};
 use tokio_util::sync::CancellationToken;
@@ -34,7 +34,7 @@ pub(crate) async fn run(
         Err(error) => Err(error),
     };
     if let Err(error) = &result {
-        context.ensure_failure_terminal_draft(error);
+        context.ensure_failure_terminal_draft(error)?;
     }
     result
 }

@@ -685,7 +685,7 @@ where
                         &mut prompt_context.session_bootstrap,
                     )?;
                     if let Some(session) = coding_session.as_ref() {
-                        let session_view = session.view();
+                        let session_view = session.view()?;
                         if client_connection.as_ref().is_some_and(|connection| {
                             connection.session_id != session_view.session_id
                         }) {
@@ -2175,13 +2175,13 @@ fn finish_prompt<T: Terminal>(
                         completion_notice,
                     );
                 } else {
-                    finish_coding_prompt(root, &result.session, result.outcome);
+                    finish_coding_prompt(root, &result.session, result.outcome)?;
                     if let Some(notice) = completion_notice {
                         root.transcript.push(TranscriptItem::system(notice));
                     }
                 }
             } else {
-                finish_coding_prompt(root, &result.session, result.outcome);
+                finish_coding_prompt(root, &result.session, result.outcome)?;
                 if let Some(notice) = completion_notice {
                     root.transcript.push(TranscriptItem::system(notice));
                 }
@@ -2190,7 +2190,7 @@ fn finish_prompt<T: Terminal>(
         }
         PromptTaskCompletion::Completed(PromptTaskResult::AgentInvocation(result)) => {
             root.set_default_agent_profile_id(
-                result.session.view().default_agent_profile_id.clone(),
+                result.session.view()?.default_agent_profile_id.clone(),
             );
             if let Ok(Some(hydration)) = result.session.current_session_snapshot() {
                 let hydrated = hydrated_session_from_snapshot(hydration);
@@ -2205,7 +2205,7 @@ fn finish_prompt<T: Terminal>(
         PromptTaskCompletion::Completed(PromptTaskResult::AgentTeam(result)) => {
             let _final_text = &result.outcome.final_text;
             root.set_default_agent_profile_id(
-                result.session.view().default_agent_profile_id.clone(),
+                result.session.view()?.default_agent_profile_id.clone(),
             );
             if let Ok(Some(hydration)) = result.session.current_session_snapshot() {
                 let hydrated = hydrated_session_from_snapshot(hydration);
@@ -2219,7 +2219,7 @@ fn finish_prompt<T: Terminal>(
         }
         PromptTaskCompletion::Completed(PromptTaskResult::DelegationApproval(result)) => {
             root.set_default_agent_profile_id(
-                result.session.view().default_agent_profile_id.clone(),
+                result.session.view()?.default_agent_profile_id.clone(),
             );
             if let Ok(Some(hydration)) = result.session.current_session_snapshot() {
                 let hydrated = hydrated_session_from_snapshot(hydration);
@@ -2242,7 +2242,7 @@ fn finish_prompt<T: Terminal>(
         }
         PromptTaskCompletion::Completed(PromptTaskResult::DelegationRejection(result)) => {
             root.set_default_agent_profile_id(
-                result.session.view().default_agent_profile_id.clone(),
+                result.session.view()?.default_agent_profile_id.clone(),
             );
             if let Ok(Some(hydration)) = result.session.current_session_snapshot() {
                 let hydrated = hydrated_session_from_snapshot(hydration);
@@ -2262,7 +2262,7 @@ fn finish_prompt<T: Terminal>(
                     .push(TranscriptItem::system(diagnostic.message.clone()));
             }
             root.set_default_agent_profile_id(
-                result.session.view().default_agent_profile_id.clone(),
+                result.session.view()?.default_agent_profile_id.clone(),
             );
             if let Ok(Some(hydration)) = result.session.current_session_snapshot() {
                 let hydrated = hydrated_session_from_snapshot(hydration);
@@ -2292,7 +2292,7 @@ fn finish_prompt<T: Terminal>(
                 root.transcript.push(TranscriptItem::system(notice));
             }
             root.set_default_agent_profile_id(
-                result.session.view().default_agent_profile_id.clone(),
+                result.session.view()?.default_agent_profile_id.clone(),
             );
             *coding_session = Some(result.session);
         }
@@ -2319,8 +2319,8 @@ fn finish_coding_prompt(
     root: &mut InteractiveRoot,
     session: &CodingAgentSession,
     outcome: PromptTurnOutcome,
-) {
-    root.set_default_agent_profile_id(session.view().default_agent_profile_id.clone());
+) -> Result<(), CliError> {
+    root.set_default_agent_profile_id(session.view()?.default_agent_profile_id.clone());
     root.clear_active_session();
     match outcome {
         PromptTurnOutcome::Success {
@@ -2348,6 +2348,7 @@ fn finish_coding_prompt(
         }
         root.set_active_session_choice(choice);
     }
+    Ok(())
 }
 
 fn set_terminal_progress<T: Terminal>(tui: &mut Tui<T>, active: bool) -> Result<(), CliError> {

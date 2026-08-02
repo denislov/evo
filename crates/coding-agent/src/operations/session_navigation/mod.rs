@@ -1,8 +1,8 @@
-use crate::runtime::facade::{
-    CodingAgentSessionHydration, CodingAgentSessionOptions, CodingAgentSessionTree,
-    CodingSessionError,
-};
+use crate::kernel::error::CodingSessionError;
 use crate::session::service::SessionService;
+use crate::session::view::{
+    CodingAgentSessionHydration, CodingAgentSessionOptions, CodingAgentSessionTree,
+};
 
 pub(crate) fn hydrate(
     options: CodingAgentSessionOptions,

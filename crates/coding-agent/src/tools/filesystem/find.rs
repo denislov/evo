@@ -1,8 +1,9 @@
-use crate::runtime::facade::FilesystemCapability;
+use crate::platform::fs::cap_walk::{CapWalkEntryKind, CapWalkRoot, walk_target};
+use crate::platform::fs::capability::FilesystemCapability;
+use crate::platform::io::output::{DEFAULT_MAX_BYTES, TruncationLimit, format_size, truncate_head};
 use crate::tools::FilesystemTarget;
-use crate::tools::filesystem::cap_walk::{CapWalkEntryKind, CapWalkRoot, walk_target};
+use crate::tools::args::bounded_arg;
 use crate::tools::filesystem_target_for_execution;
-use crate::tools::output::{DEFAULT_MAX_BYTES, TruncationLimit, format_size, truncate_head};
 use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
 use ai::api::conversation::ContentBlock;
 use globset::{GlobBuilder, GlobMatcher};
@@ -11,6 +12,7 @@ use std::sync::Arc;
 
 const DESCRIPTION: &str = "Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit first).";
 const DEFAULT_LIMIT: usize = 1000;
+const MAX_LIMIT: usize = 10_000;
 
 fn schema() -> serde_json::Value {
     serde_json::json!({
@@ -18,7 +20,7 @@ fn schema() -> serde_json::Value {
         "properties": {
             "pattern": { "type": "string", "description": "Glob pattern to match files, e.g. '*.rs', '**/*.json', or 'src/**/*.spec.ts'" },
             "path": { "type": "string", "description": "Directory to search in (default: current directory)" },
-            "limit": { "type": "number", "description": "Maximum number of results to return (default: 1000)" }
+            "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "description": "Maximum number of results to return (default: 1000)" }
         },
         "required": ["pattern"]
     })
@@ -31,16 +33,10 @@ fn text_block(text: String) -> Vec<ContentBlock> {
     }]
 }
 
-fn limit_arg(args: &serde_json::Value, default: usize) -> usize {
-    args.get("limit")
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
-                .or_else(|| value.as_f64().map(|n| n.max(1.0) as u64))
-        })
-        .map(|n| n.max(1) as usize)
-        .unwrap_or(default)
+fn limit_arg(args: &serde_json::Value) -> Result<usize, String> {
+    bounded_arg(args, "limit", DEFAULT_LIMIT, MAX_LIMIT)
+        .map(|limit| limit.max(1))
+        .map_err(|error| format!("find: {error}"))
 }
 
 fn compile_glob(pattern: &str) -> Result<GlobMatcher, String> {
@@ -85,7 +81,7 @@ async fn find_target(
         .get("pattern")
         .and_then(|v| v.as_str())
         .ok_or("find: missing or non-string 'pattern' argument")?;
-    let limit = limit_arg(&args, DEFAULT_LIMIT);
+    let limit = limit_arg(&args)?;
     let matcher = compile_glob(pattern)?;
     let match_path = pattern.contains('/');
     let walked = {
@@ -146,10 +142,14 @@ async fn find_target(
 
     let mut notices = Vec::new();
     if result_limit_reached {
-        notices.push(format!(
-            "{limit} results limit reached. Use limit={} for more, or refine pattern",
-            limit * 2
-        ));
+        let suggested = limit.saturating_mul(2).min(MAX_LIMIT);
+        notices.push(if suggested > limit {
+            format!(
+                "{limit} results limit reached. Use limit={suggested} for more, or refine pattern"
+            )
+        } else {
+            format!("Maximum {MAX_LIMIT} results reached. Refine pattern for a narrower result")
+        });
     }
     if truncation.truncated {
         notices.push(format!("{} limit reached", format_size(DEFAULT_MAX_BYTES)));

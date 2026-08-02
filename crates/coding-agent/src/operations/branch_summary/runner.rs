@@ -6,12 +6,12 @@ use ai::api::conversation::{AssistantMessage, ContentBlock};
 use ai::api::stream::StreamOptions;
 use tokio_util::sync::CancellationToken;
 
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::kernel::capability::ModelCapability;
+use crate::kernel::error::CodingSessionError;
 use crate::operations::prompt::context::{
     InternalPromptTurnOutcome, PromptTurnTransaction, RuntimeSnapshot,
 };
-use crate::runtime::capability::ModelCapability;
-use crate::runtime::capability::OperationCapabilitySnapshot;
-use crate::runtime::facade::CodingSessionError;
 use crate::services::runtime::{RuntimeService, scoped_provider_streamer_for_runtime};
 
 use crate::session::event::{DiagnosticLevel, PersistedContentBlock};

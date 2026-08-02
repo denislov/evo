@@ -4,6 +4,16 @@ use super::{
     authorize_delegation_requests_with_lineage, capability_snapshot_for_child_operation,
     required_non_empty_string, required_profile_id,
 };
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::application::operation::admission::OperationScheduler;
+use crate::application::operation::control::OperationControl;
+use crate::application::session_coordinator::{
+    SessionCoordinator, SessionWriterCommand, SessionWriterReply,
+};
+use crate::kernel::capability::SessionWriteCapability;
+use crate::kernel::error::CodingSessionError;
+use crate::kernel::operation::OperationKind;
+use crate::mutex::MutexExt;
 use crate::operations::agent_invocation::runner::{
     AgentInvocationContext, AgentInvocationOptions, AgentInvocationRunner,
 };
@@ -12,21 +22,14 @@ use crate::operations::team_invocation::runner::{
     AgentTeamContext, AgentTeamOptions, AgentTeamRunner,
 };
 use crate::profiles::{DelegationPolicy, ProfileId, ProfileKind, ProfileRegistry};
-use crate::runtime::capability::{OperationCapabilitySnapshot, SessionWriteCapability};
-use crate::runtime::facade::CodingSessionError;
-use crate::runtime::operation::admission::OperationScheduler;
-use crate::runtime::operation::control::{OperationControl, OperationKind};
-use crate::runtime::session_coordinator::{
-    SessionCoordinator, SessionWriterCommand, SessionWriterReply,
-};
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 use crate::services::runtime::RuntimeService;
 use crate::session::event::PersistedDelegationStatus;
 use agent_core::api::tool::ToolExecutionContext;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 /// How long a cancelled delegation child task gets to unwind through its
 /// RAII guards before the parent force-aborts it.
@@ -175,7 +178,9 @@ pub(crate) async fn execute_tool_request_with_pending(
             request,
             child_delegation_depth,
         } => {
-            event_service.emit_delegation_approved(&request);
+            event_service
+                .emit_delegation_approved(&request)
+                .map_err(|error| error.to_string())?;
             let child_request = request.clone();
             let child_lineage =
                 super::delegation_lineage_for_request(&delegation_lineage, &child_request);
@@ -248,11 +253,12 @@ pub(crate) async fn execute_tool_request_with_pending(
                     }
                     failed_execution(CodingSessionError::Cancelled)
                 }
-            };            match outcome.execution {
+            };
+            match outcome.execution {
                 Ok(execution) if !outcome.pending_confirmations.is_empty() => {
                     deferred_pending
-                        .lock()
-                        .expect("deferred delegation queue lock poisoned")
+                        .lock_resource("deferred delegation queue")
+                        .map_err(|error| error.to_string())?
                         .extend(outcome.pending_confirmations);
                     let mut result = DelegationToolResult::from_request(
                         &request,
@@ -368,7 +374,10 @@ pub(crate) async fn execute_agent(
         }
     };
     context = context.with_parent_capability_snapshot(child_snapshot);
-    event_service.emit_delegation_started(request, child_operation_id.clone());
+    if let Err(error) = event_service.emit_delegation_started(request, child_operation_id.clone()) {
+        drop(child_admission);
+        return failed_execution(error);
+    }
     let result = match AgentInvocationRunner::new() {
         Ok(runner) => {
             let runner_fut = runner.run_typed(&mut context, child_admission.cancellation_token());
@@ -390,7 +399,15 @@ pub(crate) async fn execute_agent(
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
-            event_service.emit_delegation_failed(request, child_operation_id, error.clone());
+            if let Err(event_error) =
+                event_service.emit_delegation_failed(request, child_operation_id, error.clone())
+            {
+                drop(child_admission);
+                return ApprovedDelegationExecutionOutcome {
+                    execution: Err(event_error),
+                    pending_confirmations,
+                };
+            }
             drop(child_admission);
             return ApprovedDelegationExecutionOutcome {
                 execution: Err(error),
@@ -399,12 +416,18 @@ pub(crate) async fn execute_agent(
         }
     };
     let final_text = outcome.final_text;
-    if pending_confirmations.is_empty() {
-        event_service.emit_delegation_completed(
+    if pending_confirmations.is_empty()
+        && let Err(error) = event_service.emit_delegation_completed(
             request,
             child_operation_id.clone(),
             final_text.clone(),
-        );
+        )
+    {
+        drop(child_admission);
+        return ApprovedDelegationExecutionOutcome {
+            execution: Err(error),
+            pending_confirmations,
+        };
     }
     drop(child_admission);
     ApprovedDelegationExecutionOutcome {
@@ -475,7 +498,10 @@ pub(crate) async fn execute_team(
         }
     };
     context = context.with_parent_capability_snapshot(child_snapshot);
-    event_service.emit_delegation_started(request, child_operation_id.clone());
+    if let Err(error) = event_service.emit_delegation_started(request, child_operation_id.clone()) {
+        drop(child_admission);
+        return failed_execution(error);
+    }
     let result = match AgentTeamRunner::new() {
         Ok(runner) => {
             let runner_fut = runner.run_typed(&mut context, child_admission.cancellation_token());
@@ -497,7 +523,15 @@ pub(crate) async fn execute_team(
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
-            event_service.emit_delegation_failed(request, child_operation_id, error.clone());
+            if let Err(event_error) =
+                event_service.emit_delegation_failed(request, child_operation_id, error.clone())
+            {
+                drop(child_admission);
+                return ApprovedDelegationExecutionOutcome {
+                    execution: Err(event_error),
+                    pending_confirmations,
+                };
+            }
             drop(child_admission);
             return ApprovedDelegationExecutionOutcome {
                 execution: Err(error),
@@ -506,12 +540,18 @@ pub(crate) async fn execute_team(
         }
     };
     let final_text = outcome.final_text;
-    if pending_confirmations.is_empty() {
-        event_service.emit_delegation_completed(
+    if pending_confirmations.is_empty()
+        && let Err(error) = event_service.emit_delegation_completed(
             request,
             child_operation_id.clone(),
             final_text.clone(),
-        );
+        )
+    {
+        drop(child_admission);
+        return ApprovedDelegationExecutionOutcome {
+            execution: Err(error),
+            pending_confirmations,
+        };
     }
     drop(child_admission);
     ApprovedDelegationExecutionOutcome {
@@ -538,19 +578,20 @@ pub(crate) async fn approve(
     SessionWriteCapability::require(parent_capability_snapshot.session_write.as_ref())?;
     let approval_operation_id = parent_capability_snapshot.operation_id.clone();
     let approval_generation = parent_capability_snapshot.generation;
-    let reply =
-        session_coordinator.execute_writer_command(SessionWriterCommand::approve_delegation(
+    let reply = session_coordinator
+        .execute_writer_command(SessionWriterCommand::approve_delegation(
             approval_operation_id.clone(),
             approval_generation,
             operation_id,
             tool_call_id,
             now,
-        ))?;
+        ))
+        .await?;
     let SessionWriterReply::DelegationApproved { pending } = reply else {
         unreachable!("delegation approval writer command returns its typed reply")
     };
     let mut pending = *pending;
-    event_service.emit_delegation_approved(&pending.request);
+    event_service.emit_delegation_approved(&pending.request)?;
     if let Some(runtime) = pending.prompt_options.runtime_mut() {
         runtime_service.install_provider_runtime(runtime);
     }
@@ -604,20 +645,21 @@ pub(crate) async fn approve(
             Some(error.to_string()),
         ),
     };
-    let reply =
-        session_coordinator.execute_writer_command(SessionWriterCommand::adopt_delegations(
+    let reply = session_coordinator
+        .execute_writer_command(SessionWriterCommand::adopt_delegations(
             approval_operation_id.clone(),
             approval_generation,
             outcome.pending_confirmations,
-        ))?;
+        ))
+        .await?;
     let SessionWriterReply::DelegationsAdopted { diagnostics } = reply else {
         unreachable!("delegation adoption writer command returns its typed reply")
     };
     for diagnostic in diagnostics {
-        event_service.emit_diagnostic(diagnostic.operation_id, diagnostic.message);
+        event_service.emit_diagnostic(diagnostic.operation_id, diagnostic.message)?;
     }
-    let reply = session_coordinator.execute_writer_command(
-        SessionWriterCommand::record_delegation_folded_update(
+    let reply = session_coordinator
+        .execute_writer_command(SessionWriterCommand::record_delegation_folded_update(
             approval_operation_id,
             approval_generation,
             pending.request.tool_call_id.clone(),
@@ -628,8 +670,8 @@ pub(crate) async fn approve(
             status,
             child_operation_id,
             summary,
-        ),
-    )?;
+        ))
+        .await?;
     let SessionWriterReply::DelegationFoldedUpdated = reply else {
         unreachable!("delegation folded writer command returns its typed reply")
     };

@@ -2,23 +2,26 @@ use ai::api::conversation::AssistantMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::bootstrap::PromptInvocation;
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::application::operation::admission::OperationScheduler;
+use crate::application::operation::control::OperationControl;
+use crate::kernel::capability::ActorId;
+use crate::kernel::control::PromptControlReceiver;
+use crate::kernel::error::CodingSessionError;
+use crate::kernel::operation::OperationKind;
 use crate::operations::delegation::{
-    DelegationAuthorizationDecision, DelegationLineageEntry,
+    DelegationAuthorizationDecision, DelegationLineageEntry, PendingDelegationConfirmationState,
     capability_snapshot_for_delegated_profile, delegation_lineage_for_request,
 };
 use crate::operations::prompt::context::{
     InternalPromptTurnOutcome, PromptTurnContext, PromptTurnIds, PromptTurnOptions,
 };
 use crate::operations::prompt::runner::PromptTurnRunner;
+use crate::platform::time::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
 use crate::profiles::{AgentProfile, ProfileId, ProfileKind, ProfileRegistry};
-use crate::runtime::capability::{ActorId, OperationCapabilitySnapshot};
-use crate::runtime::facade::{CodingSessionError, PendingDelegationConfirmationState};
-use crate::runtime::operation::admission::OperationScheduler;
-use crate::runtime::operation::control::{OperationControl, OperationKind, PromptControlReceiver};
-use crate::runtime::public_error::CodingAgentPublicDiagnostic;
+use crate::public_error::CodingAgentPublicDiagnostic;
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
-use crate::session::id::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
 
 #[derive(Debug, Clone)]
 pub struct AgentInvocationOptions {
@@ -121,7 +124,7 @@ impl AgentInvocationRunner {
         }
         .await;
         if let Err(error) = &result {
-            ctx.record_failure_terminal(error);
+            ctx.record_failure_terminal(error)?;
         }
         result
     }
@@ -153,7 +156,7 @@ pub(crate) struct AgentInvocationContext {
     prompt_outcome: Option<InternalPromptTurnOutcome>,
     parent_capability_snapshot: Option<OperationCapabilitySnapshot>,
     child_capability_snapshot: Option<OperationCapabilitySnapshot>,
-    child_admission: Option<crate::runtime::operation::permit::OperationPermit>,
+    child_admission: Option<crate::application::operation::permit::OperationPermit>,
     pending_delegation_confirmations: Vec<PendingDelegationConfirmationState>,
     failure_terminal_recorded: bool,
     defer_terminal_publication: bool,
@@ -209,12 +212,15 @@ impl AgentInvocationContext {
         self
     }
 
-    pub(crate) fn ensure_failure_terminal_draft(&self, error: &CodingSessionError) {
+    pub(crate) fn ensure_failure_terminal_draft(
+        &self,
+        error: &CodingSessionError,
+    ) -> Result<(), CodingSessionError> {
         if self
             .event_service
-            .has_deferred_terminal_draft(&self.operation_id)
+            .has_deferred_terminal_draft(&self.operation_id)?
         {
-            return;
+            return Ok(());
         }
         let draft = if *error == CodingSessionError::Cancelled {
             EventService::agent_invocation_aborted_draft(
@@ -232,7 +238,8 @@ impl AgentInvocationContext {
             )
         };
         self.event_service
-            .defer_terminal_draft(self.operation_id.clone(), draft);
+            .defer_terminal_draft(self.operation_id.clone(), draft)?;
+        Ok(())
     }
 
     pub(crate) fn take_pending_delegation_confirmations(
@@ -289,7 +296,7 @@ impl AgentInvocationContext {
             self.child_operation_id.clone(),
             self.options.profile_id.clone(),
             self.options.task.clone(),
-        );
+        )?;
         Ok(())
     }
 
@@ -434,7 +441,7 @@ impl AgentInvocationContext {
             self.event_service.emit_diagnostic(
                 Some(self.child_operation_id.clone()),
                 format!("delegation execution failed: {error}"),
-            );
+            )?;
         }
         let child_context =
             self.child_context
@@ -463,7 +470,7 @@ impl AgentInvocationContext {
                     request,
                     child_delegation_depth,
                 } => {
-                    self.event_service.emit_delegation_approved(request);
+                    self.event_service.emit_delegation_approved(request)?;
                     match request.target_kind {
                         ProfileKind::Agent => {
                             self.execute_approved_agent_delegation(
@@ -502,10 +509,11 @@ impl AgentInvocationContext {
                         },
                     );
                     self.event_service
-                        .emit_delegation_confirmation_required(request, reason);
+                        .emit_delegation_confirmation_required(request, reason)?;
                 }
                 DelegationAuthorizationDecision::Rejected { request, reason } => {
-                    self.event_service.emit_delegation_rejected(request, reason);
+                    self.event_service
+                        .emit_delegation_rejected(request, reason)?;
                 }
             }
         }
@@ -578,10 +586,10 @@ impl AgentInvocationContext {
                     self.event_service.emit_diagnostic(
                         Some(self.operation_id.clone()),
                         diagnostic.message.clone(),
-                    );
+                    )?;
                 }
                 self.event_service
-                    .emit_prompt_completed(self.child_operation_id.clone(), turn_id.clone());
+                    .emit_prompt_completed(self.child_operation_id.clone(), turn_id.clone())?;
                 let draft = EventService::agent_invocation_completed_draft(
                     self.operation_id.clone(),
                     self.child_operation_id.clone(),
@@ -590,10 +598,10 @@ impl AgentInvocationContext {
                 );
                 if self.defer_terminal_publication {
                     self.event_service
-                        .defer_terminal_draft(self.operation_id.clone(), draft);
+                        .defer_terminal_draft(self.operation_id.clone(), draft)?;
                 } else {
                     self.event_service
-                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation);
+                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation)?;
                 }
                 self.child_admission.take();
                 Ok(())
@@ -602,7 +610,7 @@ impl AgentInvocationContext {
                 let error = CodingSessionError::Cancelled;
                 self.failure_terminal_recorded = true;
                 self.event_service
-                    .emit_prompt_aborted(self.child_operation_id.clone(), reason.clone());
+                    .emit_prompt_aborted(self.child_operation_id.clone(), reason.clone())?;
                 let draft = EventService::agent_invocation_aborted_draft(
                     self.operation_id.clone(),
                     self.child_operation_id.clone(),
@@ -611,10 +619,10 @@ impl AgentInvocationContext {
                 );
                 if self.defer_terminal_publication {
                     self.event_service
-                        .defer_terminal_draft(self.operation_id.clone(), draft);
+                        .defer_terminal_draft(self.operation_id.clone(), draft)?;
                 } else {
                     self.event_service
-                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation);
+                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation)?;
                 }
                 self.child_admission.take();
                 Err(error)
@@ -623,7 +631,7 @@ impl AgentInvocationContext {
                 let error = error.clone();
                 self.failure_terminal_recorded = true;
                 self.event_service
-                    .emit_prompt_failed(self.child_operation_id.clone(), error.clone());
+                    .emit_prompt_failed(self.child_operation_id.clone(), error.clone())?;
                 let draft = EventService::agent_invocation_failed_draft(
                     self.operation_id.clone(),
                     self.child_operation_id.clone(),
@@ -632,10 +640,10 @@ impl AgentInvocationContext {
                 );
                 if self.defer_terminal_publication {
                     self.event_service
-                        .defer_terminal_draft(self.operation_id.clone(), draft);
+                        .defer_terminal_draft(self.operation_id.clone(), draft)?;
                 } else {
                     self.event_service
-                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation);
+                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation)?;
                 }
                 self.child_admission.take();
                 Err(error)
@@ -643,14 +651,17 @@ impl AgentInvocationContext {
         }
     }
 
-    fn record_failure_terminal(&mut self, error: &CodingSessionError) {
+    fn record_failure_terminal(
+        &mut self,
+        error: &CodingSessionError,
+    ) -> Result<(), CodingSessionError> {
         if self.child_admission.is_some() {
             if *error == CodingSessionError::Cancelled {
                 self.event_service
-                    .emit_prompt_aborted(self.child_operation_id.clone(), error.to_string());
+                    .emit_prompt_aborted(self.child_operation_id.clone(), error.to_string())?;
             } else {
                 self.event_service
-                    .emit_prompt_failed(self.child_operation_id.clone(), error.clone());
+                    .emit_prompt_failed(self.child_operation_id.clone(), error.clone())?;
             }
         }
         self.child_admission.take();
@@ -665,10 +676,10 @@ impl AgentInvocationContext {
                 );
                 if self.defer_terminal_publication {
                     self.event_service
-                        .defer_terminal_draft(self.operation_id.clone(), draft);
+                        .defer_terminal_draft(self.operation_id.clone(), draft)?;
                 } else {
                     self.event_service
-                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation);
+                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation)?;
                 }
             } else {
                 let draft = EventService::agent_invocation_failed_draft(
@@ -679,12 +690,13 @@ impl AgentInvocationContext {
                 );
                 if self.defer_terminal_publication {
                     self.event_service
-                        .defer_terminal_draft(self.operation_id.clone(), draft);
+                        .defer_terminal_draft(self.operation_id.clone(), draft)?;
                 } else {
                     self.event_service
-                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation);
+                        .emit_committed_terminal_draft(draft, OperationKind::AgentInvocation)?;
                 }
             }
         }
+        Ok(())
     }
 }

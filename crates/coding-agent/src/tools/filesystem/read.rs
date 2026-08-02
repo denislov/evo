@@ -1,29 +1,55 @@
-use crate::runtime::facade::FilesystemCapability;
-use crate::tools::FilesystemTarget;
-use crate::tools::filesystem_target_for_execution;
-use crate::tools::output::{
+use crate::kernel::limits::{
+    MAX_IMAGE_DECODE_ALLOC_BYTES, MAX_IMAGE_DECODE_DIMENSION, MAX_INPUT_IMAGE_ENCODED_TOTAL_BYTES,
+};
+use crate::mutex::MutexExt;
+use crate::platform::fs::capability::FilesystemCapability;
+use crate::platform::io::output::{
     DEFAULT_MAX_BYTES, default_truncation_limit, format_size, truncate_head,
 };
+use crate::tools::FilesystemTarget;
+use crate::tools::args::bounded_arg;
+use crate::tools::filesystem_target_for_execution;
 use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
 use ai::api::conversation::ContentBlock;
+use base64::Engine;
 use futures::future::{BoxFuture, FutureExt};
-use std::io::{Read, Seek, SeekFrom};
+use image::{ImageFormat, ImageReader, Limits};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
-const DESCRIPTION: &str = "Read the contents of a text file. Output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files; continue with offset until complete. Image files are not read in this mode.";
+const DESCRIPTION: &str = "Read a text or supported image file. Text output is truncated to 2000 lines or 50KB (whichever is hit first); use offset/limit for large text files. JPEG, PNG, GIF, and WebP files return base64 image content.";
 const MAX_READ_FILE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_LINE_ARGUMENT: usize = MAX_READ_FILE_BYTES as usize + 1;
 
-fn image_mime(path: &Path) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageKind {
+    mime_type: &'static str,
+    format: ImageFormat,
+}
+
+fn image_kind(path: &Path) -> Option<ImageKind> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())?
         .to_ascii_lowercase();
     match ext.as_str() {
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "png" => Some("image/png"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
+        "jpg" | "jpeg" => Some(ImageKind {
+            mime_type: "image/jpeg",
+            format: ImageFormat::Jpeg,
+        }),
+        "png" => Some(ImageKind {
+            mime_type: "image/png",
+            format: ImageFormat::Png,
+        }),
+        "gif" => Some(ImageKind {
+            mime_type: "image/gif",
+            format: ImageFormat::Gif,
+        }),
+        "webp" => Some(ImageKind {
+            mime_type: "image/webp",
+            format: ImageFormat::WebP,
+        }),
         _ => None,
     }
 }
@@ -33,8 +59,8 @@ fn schema() -> serde_json::Value {
         "type":"object",
         "properties":{
             "path":{"type":"string","description":"Path to the file to read (relative or absolute)"},
-            "offset":{"type":"number","description":"Line number to start reading from (1-indexed)"},
-            "limit":{"type":"number","description":"Maximum number of lines to read"}
+            "offset":{"type":"integer","minimum":1,"maximum":MAX_LINE_ARGUMENT,"description":"Line number to start reading from (1-indexed)"},
+            "limit":{"type":"integer","minimum":1,"maximum":MAX_LINE_ARGUMENT,"description":"Maximum number of lines to read"}
         },
         "required":["path"]
     })
@@ -67,8 +93,8 @@ impl ReadOperations for RealReadOperations {
             tokio::task::spawn_blocking(move || {
             let file = target.opened_file()?;
             let mut file = file
-                .lock()
-                .map_err(|_| "read: opened file lock is poisoned".to_owned())?;
+                .lock_resource("read opened file")
+                .map_err(|error| error.to_string())?;
             file.seek(SeekFrom::Start(0)).map_err(|error| {
                 format!(
                     "read: cannot seek opened file {}: {error}",
@@ -129,29 +155,38 @@ async fn read_target_with_operations(
         .and_then(|v| v.as_str())
         .ok_or("read: missing or non-string 'path' argument")?
         .to_string();
-    let offset = args
-        .get("offset")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
+    // Classification must happen before invoking ReadOperations so an image
+    // never enters the text decoding/windowing path after it has been read.
+    let image_kind = image_kind(target.display_path());
+    let (offset, limit) = if image_kind.is_some() {
+        (1, None)
+    } else {
+        let offset = bounded_arg(&args, "offset", 1, MAX_LINE_ARGUMENT)
+            .map(|offset| offset.max(1))
+            .map_err(|error| format!("read: {error}"))?;
+        let limit = args
+            .get("limit")
+            .map(|_| {
+                bounded_arg(&args, "limit", MAX_LINE_ARGUMENT, MAX_LINE_ARGUMENT)
+                    .map(|limit| limit.max(1))
+                    .map_err(|error| format!("read: {error}"))
+            })
+            .transpose()?;
+        (offset, limit)
+    };
     let raw = ops.read_file(target).await?;
-    if let Some(mime) = image_mime(target.display_path()) {
-        return Ok(text_block(format!(
-            "Read image file [{mime}]\n[Image content is not supported in headless mode yet; omitted.]"
-        )));
+    if let Some(kind) = image_kind {
+        return image_blocks(target.display_path(), &raw, kind);
     }
 
     let content = String::from_utf8_lossy(&raw).into_owned();
     let all: Vec<&str> = content.split('\n').collect();
     let total = all.len();
 
-    let (selected_lines, user_limited) = select_lines(&all, offset, limit)?;
+    let (selected_lines, user_limited) = select_lines(&all, Some(offset), limit)?;
     let selected = selected_lines.join("\n");
-    let start = offset.unwrap_or(1).saturating_sub(1);
-    let start_display = start + 1;
+    let start = offset.saturating_sub(1);
+    let start_display = start.saturating_add(1);
 
     let tr = truncate_head(&selected, default_truncation_limit());
     let out = if tr.first_line_exceeds_limit {
@@ -162,8 +197,10 @@ async fn read_target_with_operations(
             format_size(DEFAULT_MAX_BYTES)
         )
     } else if tr.truncated {
-        let end_display = start_display + tr.output_lines - 1;
-        let next = end_display + 1;
+        let end_display = start_display
+            .saturating_add(tr.output_lines)
+            .saturating_sub(1);
+        let next = end_display.saturating_add(1);
         if tr.truncated_by.as_deref() == Some("lines") {
             format!(
                 "{}\n\n[Showing lines {start_display}-{end_display} of {total}. Use offset={next} to continue.]",
@@ -177,9 +214,10 @@ async fn read_target_with_operations(
             )
         }
     } else if let Some(ul) = user_limited {
-        if start + ul < all.len() {
-            let remaining = all.len() - (start + ul);
-            let next = start + ul + 1;
+        let end = start.saturating_add(ul);
+        if end < all.len() {
+            let remaining = all.len() - end;
+            let next = end.saturating_add(1);
             format!(
                 "{}\n\n[{remaining} more lines in file. Use offset={next} to continue.]",
                 tr.content
@@ -192,6 +230,50 @@ async fn read_target_with_operations(
     };
 
     Ok(text_block(out))
+}
+
+fn image_blocks(path: &Path, raw: &[u8], kind: ImageKind) -> Result<Vec<ContentBlock>, String> {
+    let encoded_len = raw
+        .len()
+        .checked_add(2)
+        .and_then(|length| length.checked_div(3))
+        .and_then(|length| length.checked_mul(4))
+        .ok_or_else(|| "read: image size arithmetic overflow".to_owned())?;
+    if encoded_len > MAX_INPUT_IMAGE_ENCODED_TOTAL_BYTES {
+        return Err(format!(
+            "read: encoded image exceeds the {} byte safety limit",
+            MAX_INPUT_IMAGE_ENCODED_TOTAL_BYTES
+        ));
+    }
+
+    let mut reader = ImageReader::with_format(Cursor::new(raw), kind.format);
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DECODE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DECODE_DIMENSION);
+    limits.max_alloc = Some(MAX_IMAGE_DECODE_ALLOC_BYTES);
+    reader.limits(limits);
+    let image = reader.decode().map_err(|error| {
+        format!(
+            "read: cannot decode image {} within safety limits: {error}",
+            path.display()
+        )
+    })?;
+    let (width, height) = (image.width(), image.height());
+    let data = base64::engine::general_purpose::STANDARD.encode(raw);
+    Ok(vec![
+        ContentBlock::Text {
+            text: format!(
+                "Read image {} ({}, {width}x{height})",
+                path.display(),
+                kind.mime_type
+            ),
+            text_signature: None,
+        },
+        ContentBlock::Image {
+            data,
+            mime_type: kind.mime_type.into(),
+        },
+    ])
 }
 
 /// Select the requested line window without arithmetic overflow. A huge
@@ -254,6 +336,8 @@ pub fn read_tool_with_operations(
 mod tests {
     use super::*;
 
+    const ONE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
     fn lines() -> Vec<&'static str> {
         vec!["line1", "line2", "line3"]
     }
@@ -284,5 +368,36 @@ mod tests {
     fn offset_beyond_end_is_rejected() {
         assert!(select_lines(&lines(), Some(99), None).is_err());
         assert!(select_lines(&lines(), Some(0), None).is_ok());
+    }
+
+    #[test]
+    fn png_read_returns_validated_base64_image_content() {
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(ONE_PIXEL_PNG_BASE64)
+            .expect("decode png fixture");
+        let blocks = image_blocks(
+            Path::new("pixel.PNG"),
+            &raw,
+            image_kind(Path::new("pixel.PNG")).expect("supported extension"),
+        )
+        .expect("read valid image");
+        assert!(matches!(
+            blocks.as_slice(),
+            [ContentBlock::Text { text, .. }, ContentBlock::Image { data, mime_type }]
+                if text.contains("1x1")
+                    && data == ONE_PIXEL_PNG_BASE64
+                    && mime_type == "image/png"
+        ));
+    }
+
+    #[test]
+    fn invalid_image_payload_is_rejected_instead_of_forwarded() {
+        let error = image_blocks(
+            Path::new("not-an-image.webp"),
+            b"not an image",
+            image_kind(Path::new("not-an-image.webp")).expect("supported extension"),
+        )
+        .expect_err("invalid image must fail closed");
+        assert!(error.contains("cannot decode image"));
     }
 }

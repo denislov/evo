@@ -17,6 +17,7 @@ use agent_core::api::resources::{
 use ai::api::auth::ProviderAuthDiagnostic;
 use ai::api::client::AiClient;
 use ai::api::model::Model;
+use ai::api::transport::TransportConfig;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -156,16 +157,24 @@ pub fn resolve_application_context(
         loaded_resources.skills.clone(),
         loaded_resources.prompt_templates.clone(),
     );
-    let ai_client = options.ai_client.or_else(|| {
-        Some(AiClient::with_auth_resolver(Arc::new(
-            config::auth::AuthStoreProviderAuthResolver::new(
-                provider,
-                api_key.clone(),
-                auth_diagnostics.clone(),
-                config.auth.clone(),
-            ),
-        )))
-    });
+    let ai_client = match options.ai_client {
+        Some(client) => Some(client),
+        None => Some(
+            AiClient::try_with_auth_resolver_and_transport(
+                Arc::new(config::auth::AuthStoreProviderAuthResolver::new(
+                    provider,
+                    api_key.clone(),
+                    auth_diagnostics.clone(),
+                    config.auth.clone(),
+                )),
+                TransportConfig::new(
+                    config.settings.http_proxy.clone(),
+                    config.settings.websocket_connect_timeout_ms,
+                ),
+            )
+            .map_err(ApplicationError::InvalidInput)?,
+        ),
+    };
 
     Ok(ResolvedApplicationContext {
         cwd,

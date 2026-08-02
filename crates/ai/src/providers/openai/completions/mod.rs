@@ -21,11 +21,8 @@ pub struct OpenAICompletionsProvider {
 }
 
 impl OpenAICompletionsProvider {
-    pub fn new(api_key: Option<String>) -> Self {
-        Self {
-            client: crate::transport::client::authenticated_client(),
-            api_key,
-        }
+    pub(crate) fn with_client(api_key: Option<String>, client: reqwest::Client) -> Self {
+        Self { client, api_key }
     }
 
     fn resolve_key(&self) -> Option<String> {
@@ -58,7 +55,16 @@ impl ApiProvider for OpenAICompletionsProvider {
             });
         };
 
-        let req_body = build_request(model, &ctx, &opts);
+        let req_body = match build_request(model, &ctx, &opts) {
+            Ok(body) => body,
+            Err(error) => {
+                return crate::providers::common::request_rejected_stream(
+                    "openai-completions",
+                    model,
+                    error,
+                );
+            }
+        };
         let base_url = model.base_url.trim_end_matches('/');
         let url = if base_url.ends_with("/v1") {
             format!("{}/chat/completions", base_url)

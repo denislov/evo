@@ -20,11 +20,8 @@ pub struct GoogleGenerativeAiProvider {
 }
 
 impl GoogleGenerativeAiProvider {
-    pub fn new(api_key: Option<String>) -> Self {
-        Self {
-            client: crate::transport::client::authenticated_client(),
-            api_key,
-        }
+    pub(crate) fn with_client(api_key: Option<String>, client: reqwest::Client) -> Self {
+        Self { client, api_key }
     }
 
     fn resolve_key(&self) -> Option<String> {
@@ -53,7 +50,16 @@ impl ApiProvider for GoogleGenerativeAiProvider {
             });
         };
 
-        let req_body = build_request(model, &ctx, &opts);
+        let req_body = match build_request(model, &ctx, &opts) {
+            Ok(body) => body,
+            Err(error) => {
+                return crate::providers::common::request_rejected_stream(
+                    "google-generative-ai",
+                    model,
+                    error,
+                );
+            }
+        };
         let payload = match serde_json::to_value(&req_body) {
             Ok(payload) => payload,
             Err(error) => return serialization_error(model, error),

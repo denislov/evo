@@ -731,17 +731,17 @@ async fn typed_recovery_reasons_replace_the_projection_atomically() {
 async fn recovery_actions_are_identity_bound_and_stale_facts_fail_closed() {
     let temp = tempfile::tempdir().unwrap();
     let (_env, mut bridge, initial) = start_isolated_runtime(&temp).await;
-    let pending = CodingAgentRecoveryPending {
-        operation_id: "operation-recovery".into(),
-        recovery_id: "recovery-id".into(),
-        operation_kind: Some("prompt".into()),
-        record_version: 3,
-        descriptor_revision: 2,
-        capability_generation: Some(initial.session.cursor.capability_generation),
-        attempt_count: 1,
-        last_attempt_at: Some("2026-07-24T00:00:00Z".into()),
-        next_attempt_at: None,
-    };
+    let pending = CodingAgentRecoveryPending::from_parts(
+        "operation-recovery",
+        "recovery-id",
+        Some("prompt".into()),
+        3,
+        2,
+        Some(initial.session.cursor.capability_generation),
+        1,
+        Some("2026-07-24T00:00:00Z".into()),
+        None,
+    );
     let identity = DesktopRecoveryIdentity::from(&pending);
     let mut projected = initial;
     projected.pending_recoveries = vec![pending];

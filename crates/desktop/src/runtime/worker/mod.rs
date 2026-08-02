@@ -184,18 +184,20 @@ impl RuntimeState {
     pub(super) fn metadata_snapshot(
         &self,
         session_id: Option<&str>,
-    ) -> DesktopRuntimeMetadataSnapshot {
+    ) -> Result<DesktopRuntimeMetadataSnapshot, DesktopBridgeError> {
         let session_id = session_id.or(self.focused_session_id.as_deref());
-        match session_id.and_then(|session_id| self.workspaces.get(session_id)) {
-            Some(workspace) => DesktopRuntimeMetadataSnapshot {
-                project: workspace.context.snapshot().clone(),
-                session: Some(workspace.session.snapshot()),
+        Ok(
+            match session_id.and_then(|session_id| self.workspaces.get(session_id)) {
+                Some(workspace) => DesktopRuntimeMetadataSnapshot {
+                    project: workspace.context.snapshot().clone(),
+                    session: Some(workspace.session.snapshot()?),
+                },
+                None => DesktopRuntimeMetadataSnapshot {
+                    project: self.home.context.snapshot().clone(),
+                    session: None,
+                },
             },
-            None => DesktopRuntimeMetadataSnapshot {
-                project: self.home.context.snapshot().clone(),
-                session: None,
-            },
-        }
+        )
     }
 
     pub(super) fn snapshot(
@@ -210,7 +212,7 @@ impl RuntimeState {
                 })?;
         Ok(DesktopRuntimeHydratedSnapshot {
             project: workspace.context.snapshot().clone(),
-            session: workspace.session.snapshot(),
+            session: workspace.session.snapshot()?,
             transcript: workspace.session.transcript_snapshot()?,
             pending_recoveries: workspace.session.recovery_pending()?,
         })
@@ -256,7 +258,7 @@ impl RuntimeState {
                 })?;
         Ok(DesktopRuntimeRecoverySnapshot {
             project: workspace.context.snapshot().clone(),
-            session: workspace.session.snapshot(),
+            session: workspace.session.snapshot()?,
             pending_recoveries: workspace.session.recovery_pending()?,
         })
     }
@@ -297,7 +299,7 @@ impl RuntimeState {
         Ok(target)
     }
 
-    pub(super) fn retry_recovery(
+    pub(super) async fn retry_recovery(
         &mut self,
         session_id: &str,
         identity: DesktopRecoveryIdentity,
@@ -309,20 +311,22 @@ impl RuntimeState {
                 message: "desktop runtime has no idle session owner".into(),
             })?
             .session;
-        let result = session.retry_recovery(CodingAgentRecoveryRetryRequest {
-            operation_id: identity.operation_id,
-            recovery_id: identity.recovery_id,
-            expected_record_version: identity.record_version,
-            expected_descriptor_revision: identity.descriptor_revision,
-            expected_capability_generation: identity.capability_generation,
-            expected_attempt_count: identity.attempt_count,
-            schedule_with_backoff: false,
-        })?;
+        let result = session
+            .retry_recovery(CodingAgentRecoveryRetryRequest {
+                operation_id: identity.operation_id,
+                recovery_id: identity.recovery_id,
+                expected_record_version: identity.record_version,
+                expected_descriptor_revision: identity.descriptor_revision,
+                expected_capability_generation: identity.capability_generation,
+                expected_attempt_count: identity.attempt_count,
+                schedule_with_backoff: false,
+            })
+            .await?;
         let recovery_id = result.recovery_id;
         Ok((recovery_id, self.recovery_snapshot(session_id)?))
     }
 
-    pub(super) fn resolve_recovery(
+    pub(super) async fn resolve_recovery(
         &mut self,
         session_id: &str,
         identity: DesktopRecoveryIdentity,
@@ -339,16 +343,18 @@ impl RuntimeState {
                 message: "desktop runtime has no idle session owner".into(),
             })?
             .session;
-        let result = session.resolve_recovery(CodingAgentRecoveryResolutionRequest {
-            operation_id: identity.operation_id,
-            recovery_id: identity.recovery_id,
-            expected_record_version: identity.record_version,
-            expected_descriptor_revision: identity.descriptor_revision,
-            expected_capability_generation: identity.capability_generation,
-            expected_attempt_count: identity.attempt_count,
-            resolution,
-            reason: format!("native desktop operator {action} uncertain operation"),
-        })?;
+        let result = session
+            .resolve_recovery(CodingAgentRecoveryResolutionRequest {
+                operation_id: identity.operation_id,
+                recovery_id: identity.recovery_id,
+                expected_record_version: identity.record_version,
+                expected_descriptor_revision: identity.descriptor_revision,
+                expected_capability_generation: identity.capability_generation,
+                expected_attempt_count: identity.attempt_count,
+                resolution,
+                reason: format!("native desktop operator {action} uncertain operation"),
+            })
+            .await?;
         let recovery_id = result.recovery_id;
         Ok((recovery_id, self.recovery_snapshot(session_id)?))
     }
@@ -433,12 +439,8 @@ impl RuntimeState {
         let session = context.create_session_with_id(session_id.clone()).await?;
         let snapshot = DesktopRuntimeHydratedSnapshot {
             project,
-            session: session.snapshot(),
-            transcript: CodingAgentTranscriptSnapshot {
-                session_id: session_id.clone(),
-                active_leaf_id: None,
-                items: Vec::new(),
-            },
+            session: session.snapshot()?,
+            transcript: CodingAgentTranscriptSnapshot::new(session_id.clone(), None, Vec::new()),
             pending_recoveries: Vec::new(),
         };
         let workspace = RuntimeSessionWorkspace {
@@ -660,12 +662,13 @@ impl RuntimeState {
 
     pub(super) fn insert_idle_workspace(
         &mut self,
+        session_id: String,
         scope: CodingAgentWorkspaceScope,
         context: CodingAgentEmbeddingContext,
         session: CodingAgentSession,
     ) {
         self.workspaces.insert(
-            session.view().session_id.clone(),
+            session_id,
             RuntimeSessionWorkspace {
                 scope,
                 context,
@@ -920,6 +923,7 @@ pub(super) async fn run_runtime(
                             let operation_id = completed.operation_id.take();
                             let command_id = completed.command_id;
                             state.insert_idle_workspace(
+                                session_id.clone(),
                                 completed.scope,
                                 completed.context,
                                 session,

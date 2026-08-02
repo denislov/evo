@@ -3,9 +3,11 @@ use ai::api::stream::{AssistantMessageEvent, EventStream, StreamOptions};
 use futures::StreamExt;
 
 use crate::app::bootstrap::PromptInvocation;
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::application::operation::admission::OperationScheduler;
+use crate::kernel::capability::ModelCapability;
+use crate::mutex::report_infallible_resource_error;
 use crate::operations::prompt::context::{PromptTurnOptions, RuntimeSnapshot};
-use crate::runtime::capability::{ModelCapability, OperationCapabilitySnapshot};
-use crate::runtime::operation::admission::OperationScheduler;
 use crate::services::event::EventService;
 use crate::services::runtime::stream_model_for_scoped_runtime;
 use crate::session::service::SessionAutoNameWriter;
@@ -54,14 +56,27 @@ impl SessionNamingSeed {
         assistant_text: String,
         event_service: EventService,
     ) {
-        if !writer.is_unnamed() {
-            return;
+        match writer.is_unnamed() {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                report_infallible_resource_error(
+                    "automatic session naming diagnostic",
+                    event_service.emit_diagnostic(
+                        None::<String>,
+                        format!(
+                            "automatic session naming could not inspect session state: {error}"
+                        ),
+                    ),
+                );
+                return;
+            }
         }
         let operation_id = OperationScheduler::allocate_child_operation_id();
         let runtime = match naming_runtime(self.runtime) {
             Ok(runtime) => runtime,
             Err(message) => {
-                persist_failure(&writer, &event_service, &operation_id, message, None);
+                persist_failure(&writer, &event_service, &operation_id, message, None).await;
                 return;
             }
         };
@@ -89,7 +104,8 @@ impl SessionNamingSeed {
                     &operation_id,
                     format!("automatic session naming failed: {error}"),
                     None,
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -102,7 +118,8 @@ impl SessionNamingSeed {
                     &operation_id,
                     format!("automatic session naming failed: {}", error.message),
                     error.usage.map(|usage| (model_id, usage)),
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -125,14 +142,21 @@ impl SessionNamingSeed {
                     &operation_id,
                     message,
                     Some((model_id, usage)),
-                );
+                )
+                .await;
                 return;
             }
         };
-        if let Err(error) = writer.commit_generated_name(&operation_id, name, model_id, usage) {
-            event_service.emit_diagnostic(
-                Some(operation_id),
-                format!("automatic session naming could not persist its result: {error}"),
+        if let Err(error) = writer
+            .commit_generated_name(&operation_id, name, model_id, usage)
+            .await
+        {
+            report_infallible_resource_error(
+                "automatic session naming persistence diagnostic",
+                event_service.emit_diagnostic(
+                    Some(operation_id),
+                    format!("automatic session naming could not persist its result: {error}"),
+                ),
             );
         }
     }
@@ -264,18 +288,22 @@ fn validate_generated_name(value: &str) -> Result<String, String> {
     Ok(name.to_owned())
 }
 
-fn persist_failure(
+async fn persist_failure(
     writer: &SessionAutoNameWriter,
     event_service: &EventService,
     operation_id: &str,
     message: String,
     model_usage: Option<(String, Usage)>,
 ) {
-    let durable_result =
-        writer.commit_failure_diagnostic(operation_id, message.clone(), model_usage);
+    let durable_result = writer
+        .commit_failure_diagnostic(operation_id, message.clone(), model_usage)
+        .await;
     let message = match durable_result {
         Ok(()) => message,
         Err(error) => format!("{message}; diagnostic persistence failed: {error}"),
     };
-    event_service.emit_diagnostic(Some(operation_id.to_owned()), message);
+    report_infallible_resource_error(
+        "automatic session naming failure diagnostic",
+        event_service.emit_diagnostic(Some(operation_id.to_owned()), message),
+    );
 }

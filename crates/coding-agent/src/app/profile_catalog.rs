@@ -1,11 +1,11 @@
 use crate::operations::delegation::DelegationTargetInventory;
 
 use crate::profiles::{ProfileId, ProfileRegistry, ProfileSource, TeamSupervisor};
+use crate::public_error::safe_public_summary;
 use crate::runtime::facade::{
     CodingAgentPublicDiagnostic, CodingAgentPublicDiagnosticOrigin,
     CodingAgentPublicDiagnosticSeverity,
 };
-use crate::runtime::public_error::safe_public_summary;
 
 const MAX_PROFILE_ENTRIES: usize = 256;
 const MAX_PROFILE_LIST_ITEMS: usize = 128;

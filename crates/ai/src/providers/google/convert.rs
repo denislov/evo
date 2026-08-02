@@ -1,12 +1,13 @@
 use super::wire;
 use crate::model::Model;
-use crate::protocol::{ContentBlock, Context, Message, StreamOptions};
+use crate::protocol::{ContentBlock, Context, Message, StreamOptions, ToolKind};
+use crate::providers::common::unsupported_tool_error;
 
 pub fn build_request(
     _model: &Model,
     ctx: &Context,
     opts: &Option<StreamOptions>,
-) -> wire::GenerateContentRequest {
+) -> Result<wire::GenerateContentRequest, String> {
     let system_instruction = ctx.system_prompt.as_ref().map(|sp| wire::GeminiContent {
         role: "system".to_string(),
         parts: vec![wire::GeminiPart {
@@ -20,18 +21,31 @@ pub fn build_request(
     let contents: Vec<wire::GeminiContent> =
         ctx.messages.iter().filter_map(convert_message).collect();
 
-    let tools = ctx.tools.as_ref().map(|tools| {
-        vec![wire::GeminiTool {
-            function_declarations: tools
+    let tools = ctx
+        .tools
+        .as_ref()
+        .map(|tools| {
+            let declarations = tools
                 .iter()
-                .map(|t| wire::GeminiFunctionDeclaration {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    parameters: t.parameters.clone(),
+                .map(|t| match t.kind {
+                    ToolKind::Function => Ok(wire::GeminiFunctionDeclaration {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        parameters: t.parameters.clone(),
+                    }),
+                    // Gemini's grounding tools sit beside `functionDeclarations`
+                    // in a shape this converter does not emit, and nothing here
+                    // replays their results.
+                    ToolKind::WebSearch | ToolKind::Custom => {
+                        Err(unsupported_tool_error("google-generative-ai", t))
+                    }
                 })
-                .collect(),
-        }]
-    });
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok::<_, String>(vec![wire::GeminiTool {
+                function_declarations: declarations,
+            }])
+        })
+        .transpose()?;
 
     let tool_config =
         opts.as_ref()
@@ -51,7 +65,7 @@ pub fn build_request(
         })
     });
 
-    wire::GenerateContentRequest {
+    Ok(wire::GenerateContentRequest {
         system_instruction,
         contents,
         tools,
@@ -61,7 +75,7 @@ pub fn build_request(
             temperature,
             thinking_config,
         }),
-    }
+    })
 }
 
 fn convert_message(msg: &Message) -> Option<wire::GeminiContent> {

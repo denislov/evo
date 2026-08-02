@@ -1,18 +1,19 @@
 pub(crate) mod context;
 pub(crate) mod runner;
 
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::application::operation::control::OperationControl;
+use crate::kernel::capability::SessionWriteCapability;
+use crate::kernel::error::CodingSessionError;
 use crate::operations::delegation::{
     DelegationAuthorizationDecision, PendingDelegationConfirmationQueue,
     PendingDelegationConfirmationState, delegation_lineage_for_request,
 };
+use crate::platform::time::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
 use crate::profiles::{ProfileId, ProfileKind, ProfileRegistry};
-use crate::runtime::capability::{OperationCapabilitySnapshot, SessionWriteCapability};
-use crate::runtime::facade::CodingSessionError;
-use crate::runtime::operation::control::OperationControl;
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
 use crate::session::event::PersistedDelegationStatus;
-use crate::session::id::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
 use crate::session::service::{FinalizedSessionWrite, SessionPersistence, SessionService};
 use context::{
     CodingDiagnostic, InternalPromptTurnOutcome, PromptTurnContext, PromptTurnIds,
@@ -106,7 +107,7 @@ impl PromptOperation<'_> {
         let turn_id = context.turn_id().to_owned();
 
         self.event_service
-            .emit_prompt_started(operation_id, turn_id);
+            .emit_prompt_started(operation_id, turn_id)?;
         let turn_result: Result<InternalPromptTurnOutcome, CodingSessionError> =
             match PromptTurnRunner::new()?.run_typed(&mut context).await {
                 Ok(_) => {
@@ -140,15 +141,16 @@ impl PromptOperation<'_> {
                         self.event_service.emit_diagnostic(
                             Some(context.operation_id().to_owned()),
                             format!("delegation execution failed: {error}"),
-                        );
+                        )?;
                     }
-                    let deferred = context.take_deferred_pending_delegations();
+                    let deferred = context.take_deferred_pending_delegations()?;
                     crate::operations::delegation::confirmation::adopt_pending(
                         self.persistence,
                         self.pending_delegation_confirmations,
                         self.event_service,
                         deferred,
-                    )?;
+                    )
+                    .await?;
                 }
                 Err(error) => {
                     outcome = context.finish_failure(error);
@@ -162,7 +164,10 @@ impl PromptOperation<'_> {
             let _ = context.take_transaction();
             SessionService::failed_prompt_transaction(context.operation_id().to_owned(), &error)
         } else {
-            match self.finalize_prompt_transaction(&mut context, &outcome) {
+            match self
+                .finalize_prompt_transaction(&mut context, &outcome)
+                .await
+            {
                 Ok(finalized) => finalized,
                 Err(error) => {
                     outcome = context.finish_failure(error.clone());
@@ -180,12 +185,13 @@ impl PromptOperation<'_> {
 
         if !context.live_events_enabled() {
             self.event_service
-                .emit_events_before_prompt_outcome(context.coding_events());
+                .emit_events_before_prompt_outcome(context.coding_events())?;
         }
-        self.event_service.emit_session_write_events(&finalized);
-        self.event_service.emit_prompt_diagnostics(&outcome);
+        self.event_service.emit_session_write_events(&finalized)?;
+        self.event_service.emit_prompt_diagnostics(&outcome)?;
         self.authorization_service
-            .cancel_operation(context.operation_id(), "operation completed");
+            .cancel_operation(context.operation_id(), "operation completed")
+            .await?;
         Ok(outcome)
     }
 
@@ -217,7 +223,7 @@ impl PromptOperation<'_> {
                     request,
                     child_delegation_depth,
                 } => {
-                    self.event_service.emit_delegation_approved(request);
+                    self.event_service.emit_delegation_approved(request)?;
                     let outcome = match request.target_kind {
                         ProfileKind::Agent => {
                             crate::operations::delegation::execution::execute_agent(
@@ -255,7 +261,8 @@ impl PromptOperation<'_> {
                         self.pending_delegation_confirmations,
                         self.event_service,
                         outcome.pending_confirmations,
-                    )?;
+                    )
+                    .await?;
                     match outcome.execution {
                         Ok(execution) => {
                             context.record_delegation_folded_update(
@@ -301,10 +308,12 @@ impl PromptOperation<'_> {
                         self.event_service,
                         pending,
                         true,
-                    )?;
+                    )
+                    .await?;
                 }
                 DelegationAuthorizationDecision::Rejected { request, reason } => {
-                    self.event_service.emit_delegation_rejected(request, reason);
+                    self.event_service
+                        .emit_delegation_rejected(request, reason)?;
                     context.record_delegation_folded_update(
                         request,
                         PersistedDelegationStatus::Rejected,
@@ -324,11 +333,11 @@ impl PromptOperation<'_> {
         cancellation: Option<CancellationToken>,
     ) -> Result<PromptTurnContext, CodingSessionError> {
         let event_service = self.event_service.clone();
-        let prompt_control_receiver = self.operation_control.take_prompt_control_receiver();
+        let prompt_control_receiver = self.operation_control.take_prompt_control_receiver()?;
         match &mut self.persistence {
             SessionPersistence::Persistent(session_service) => {
                 let replay = session_service.replay()?;
-                session_service.arm_auto_name_for_prompt(&replay);
+                session_service.arm_auto_name_for_prompt(&replay)?;
                 let transaction = session_service.begin_prompt_transaction_with_snapshot(snapshot);
                 let operation_id = transaction.operation_id().to_owned();
                 let turn_id = transaction.turn_id().to_owned();
@@ -371,7 +380,7 @@ impl PromptOperation<'_> {
         }
     }
 
-    fn finalize_prompt_transaction(
+    async fn finalize_prompt_transaction(
         &mut self,
         context: &mut PromptTurnContext,
         outcome: &InternalPromptTurnOutcome,
@@ -387,7 +396,9 @@ impl PromptOperation<'_> {
                     }
                 })?;
                 SessionWriteCapability::require(snapshot.session_write.as_ref())?;
-                session_service.finalize_prompt_transaction(transaction, operation_id, outcome)
+                session_service
+                    .finalize_prompt_transaction(transaction, operation_id, outcome)
+                    .await
             }
             SessionPersistence::NonPersistent(state) => {
                 Ok(state.finalize_prompt_transaction(context, outcome))

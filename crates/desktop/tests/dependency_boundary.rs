@@ -5,7 +5,7 @@ use std::{
 };
 
 use syn::{
-    Attribute, File, Ident, Item, ItemUse, UseTree, Visibility,
+    Attribute, File, Ident, Item, ItemUse, UseTree,
     visit::{self, Visit},
 };
 
@@ -55,43 +55,6 @@ fn parse_rust(path: impl AsRef<Path>) -> File {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     syn::parse_file(&source)
         .unwrap_or_else(|error| panic!("failed to parse {} as Rust: {error}", path.display()))
-}
-
-fn public_surface(file: &File) -> BTreeSet<String> {
-    file.items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Const(item) if matches!(item.vis, Visibility::Public(_)) => {
-                Some(format!("const {}", item.ident))
-            }
-            Item::Enum(item) if matches!(item.vis, Visibility::Public(_)) => {
-                Some(format!("enum {}", item.ident))
-            }
-            Item::Fn(item) if matches!(item.vis, Visibility::Public(_)) => {
-                Some(format!("fn {}", item.sig.ident))
-            }
-            Item::Mod(item) if matches!(item.vis, Visibility::Public(_)) => {
-                Some(format!("mod {}", item.ident))
-            }
-            Item::Static(item) if matches!(item.vis, Visibility::Public(_)) => {
-                Some(format!("static {}", item.ident))
-            }
-            Item::Struct(item) if matches!(item.vis, Visibility::Public(_)) => {
-                Some(format!("struct {}", item.ident))
-            }
-            Item::Trait(item) if matches!(item.vis, Visibility::Public(_)) => {
-                Some(format!("trait {}", item.ident))
-            }
-            Item::Type(item) if matches!(item.vis, Visibility::Public(_)) => {
-                Some(format!("type {}", item.ident))
-            }
-            Item::Union(item) if matches!(item.vis, Visibility::Public(_)) => {
-                Some(format!("union {}", item.ident))
-            }
-            Item::Use(item) if matches!(item.vis, Visibility::Public(_)) => Some("use".into()),
-            _ => None,
-        })
-        .collect()
 }
 
 fn rust_files(root: impl AsRef<Path>) -> Vec<PathBuf> {

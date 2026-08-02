@@ -20,11 +20,15 @@ pub struct DeepSeekResponsesProvider {
 }
 
 impl DeepSeekResponsesProvider {
+    #[cfg(test)]
     pub fn new(api_key: Option<String>) -> Self {
-        Self {
-            client: crate::transport::client::authenticated_client(),
-            api_key,
-        }
+        let client = crate::transport::client::authenticated_client(&Default::default())
+            .expect("the default provider HTTP client should build");
+        Self::with_client(api_key, client)
+    }
+
+    pub(crate) fn with_client(api_key: Option<String>, client: reqwest::Client) -> Self {
+        Self { client, api_key }
     }
 
     fn resolve_key(&self, opts: Option<&StreamOptions>) -> Option<String> {

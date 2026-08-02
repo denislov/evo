@@ -706,3 +706,71 @@ async fn recorded_deepseek_web_search_fixture_is_replayable() {
         ContentBlock::Text { text, .. } if text == "api-docs.deepseek.com"
     ));
 }
+
+#[test]
+fn web_search_support_tracks_apis_that_can_declare_and_replay_it() {
+    use crate::providers::model_supports_web_search;
+
+    let deepseek_flash =
+        crate::model::get_model("deepseek", "deepseek-v4-flash").expect("catalog model exists");
+    assert_eq!(deepseek_flash.api, "deepseek-responses");
+    assert!(model_supports_web_search(&deepseek_flash));
+
+    // Same provider, different API family: declaration support follows the
+    // API, not the vendor.
+    let deepseek_pro =
+        crate::model::get_model("deepseek", "deepseek-v4-pro").expect("catalog model exists");
+    assert_eq!(deepseek_pro.api, "openai-completions");
+    assert!(!model_supports_web_search(&deepseek_pro));
+
+    let gemini = crate::model::get_model("google", "gemini-2.5-pro").expect("gemini in catalog");
+    assert!(!model_supports_web_search(&gemini));
+}
+
+#[tokio::test]
+async fn web_search_declared_to_an_unsupporting_api_fails_loudly() {
+    let model = crate::model::get_model("google", "gemini-2.5-pro").expect("gemini in catalog");
+    let context = Context {
+        system_prompt: None,
+        messages: vec![crate::protocol::Message::User {
+            content: vec![ContentBlock::Text {
+                text: "search the web".into(),
+                text_signature: None,
+            }],
+        }],
+        tools: Some(vec![crate::protocol::Tool::web_search()]),
+    };
+
+    // The tool must not be silently dropped from the outgoing request: a
+    // caller that declared web_search and got a plain answer back has no way
+    // to tell the search never happened.
+    let error = crate::providers::google::convert::build_request(&model, &context, &None)
+        .expect_err("google cannot express web_search");
+    assert!(error.contains("web_search"), "unexpected error: {error}");
+    assert!(
+        error.contains("google-generative-ai"),
+        "error should name the API: {error}"
+    );
+}
+
+#[test]
+fn function_tools_still_convert_on_every_provider() {
+    let context = Context {
+        system_prompt: None,
+        messages: Vec::new(),
+        tools: Some(vec![crate::protocol::Tool::function(
+            "read",
+            Some("Read a file".into()),
+            serde_json::json!({"type": "object", "properties": {}}),
+        )]),
+    };
+
+    let gemini = crate::model::get_model("google", "gemini-2.5-pro").expect("gemini in catalog");
+    assert!(crate::providers::google::convert::build_request(&gemini, &context, &None).is_ok());
+
+    let gpt = crate::model::get_model("openai", "gpt-4o").expect("gpt-4o in catalog");
+    assert!(
+        crate::providers::openai::completions::convert::build_request(&gpt, &context, &None)
+            .is_ok()
+    );
+}

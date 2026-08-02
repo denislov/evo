@@ -1015,8 +1015,6 @@ pub struct RpcCapabilities {
     pub clone_session: RpcCapabilityStatus,
     #[serde(rename = "branchSummary")]
     pub branch_summary: RpcCapabilityStatus,
-    #[serde(rename = "switchSession")]
-    pub switch_session: RpcCapabilityStatus,
     pub export: RpcCapabilityStatus,
     #[serde(rename = "selfHealingEdit")]
     pub self_healing_edit: RpcCapabilityStatus,
@@ -1101,9 +1099,6 @@ impl From<CodingAgentCapabilities> for RpcCapabilities {
             ),
             branch_summary: rpc_unsupported(
                 "RPC protocol 3.0 does not expose a branchSummary command",
-            ),
-            switch_session: rpc_unsupported(
-                "RPC protocol 3.0 does not expose a switchSession command",
             ),
             export: rpc_unsupported("RPC protocol 3.0 does not expose an export command"),
             self_healing_edit: capabilities.self_healing_edit.into(),

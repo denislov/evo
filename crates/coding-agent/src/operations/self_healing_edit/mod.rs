@@ -5,12 +5,11 @@ use self::runner::{
     SelfHealingEditContext, SelfHealingEditOptions, SelfHealingEditOutcome,
     SelfHealingEditRepairStrategy, SelfHealingEditReplacement, SelfHealingEditRunner,
 };
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::application::operation::control::OperationCancellationHandle;
+use crate::kernel::capability::{ModelCapability, SessionWriteCapability};
+use crate::kernel::error::CodingSessionError;
 use crate::operations::prompt::context::PromptTurnOptions;
-use crate::runtime::capability::{
-    ModelCapability, OperationCapabilitySnapshot, SessionWriteCapability,
-};
-use crate::runtime::facade::CodingSessionError;
-use crate::runtime::operation::control::OperationCancellationHandle;
 use crate::services::event::{EventService, SelfHealingEditEventObserver};
 use crate::session::service::{FinalizedSessionWrite, SessionService, default_cwd, session_cwd};
 use tokio_util::sync::CancellationToken;
@@ -45,7 +44,7 @@ pub(crate) async fn run(
         operation_id.clone(),
         event_path.clone(),
         replacement_count,
-    );
+    )?;
     SessionService::record_self_healing_edit_started(
         &mut transaction,
         path.clone(),
@@ -96,16 +95,18 @@ pub(crate) async fn run(
                         repair,
                     )?;
                 }
-                let finalized = session_service.fail_self_healing_edit_transaction(
-                    Some(transaction),
-                    operation_id.clone(),
-                    error.code(),
-                    error.to_string(),
-                )?;
+                let finalized = session_service
+                    .fail_self_healing_edit_transaction(
+                        Some(transaction),
+                        operation_id.clone(),
+                        error.code(),
+                        error.to_string(),
+                    )
+                    .await?;
                 event_service.defer_terminal_draft(
                     operation_id.clone(),
                     EventService::self_healing_edit_error_draft(operation_id, event_path, &error),
-                );
+                )?;
                 return Ok(SelfHealingEditExecution {
                     result: Err(error),
                     finalized,
@@ -120,11 +121,12 @@ pub(crate) async fn run(
             }
             SessionService::record_self_healing_edit_completed(&mut transaction, &outcome)?;
             let finalized = session_service
-                .commit_self_healing_edit_transaction(Some(transaction), operation_id.clone())?;
+                .commit_self_healing_edit_transaction(Some(transaction), operation_id.clone())
+                .await?;
             event_service.defer_terminal_draft(
                 operation_id.clone(),
                 EventService::self_healing_edit_completed_draft(operation_id, &outcome),
-            );
+            )?;
             Ok(SelfHealingEditExecution {
                 result: Ok(outcome),
                 finalized,
@@ -138,16 +140,18 @@ pub(crate) async fn run(
                     repair,
                 )?;
             }
-            let finalized = session_service.fail_self_healing_edit_transaction(
-                Some(transaction),
-                operation_id.clone(),
-                error.code(),
-                error.to_string(),
-            )?;
+            let finalized = session_service
+                .fail_self_healing_edit_transaction(
+                    Some(transaction),
+                    operation_id.clone(),
+                    error.code(),
+                    error.to_string(),
+                )
+                .await?;
             event_service.defer_terminal_draft(
                 operation_id.clone(),
                 EventService::self_healing_edit_error_draft(operation_id, event_path, &error),
-            );
+            )?;
             Ok(SelfHealingEditExecution {
                 result: Err(error),
                 finalized,

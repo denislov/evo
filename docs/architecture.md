@@ -212,67 +212,39 @@ Start
 
 ### 3.3 `coding-agent` — 产品层
 
-**定位**：架构中最大的 crate，是产品策略和适配器边界的承载层。它为上层（CLI/Desktop）提供会话生命周期管理、事件溯源、操作调度等产品级能力。
+**定位**：产品策略、会话事实和适配器边界的承载层。CLI/Desktop 只依赖公开 facade，
+不直接操作 repository、provider、tool 或 outbox。
 
+生产代码采用五层单向依赖；`tests/module_layering.rs` 解析 Rust AST，阻止反向引用和
+layer cycle：
+
+```text
+L4 api / adapters   app、runtime/facade、lib.rs 中的 api::*
+        |
+        v
+L3 application      application、operations、services、session、events、tools、
+                    runtime（facade 除外）、domain/projection、resources
+        |
+        v
+L2 domain           authorization、config、profiles、theme、workspace
+        |
+        v
+L1 platform         fs/process/io/time ports、mutex policy
+        |
+        v
+L0 kernel           ids、operation/control/capability values、errors、limits
 ```
-crates/coding-agent/src/
-├── lib.rs              # 私有模块 + 内联的分类公共 API（10 个子领域）
-├── app/                # 应用层：启动、引导、嵌入
-│   ├── auth.rs         # 认证控制器
-│   ├── bootstrap.rs    # 启动选项、提示调用
-│   ├── embedding.rs    # 嵌入上下文（供第三方客户端使用）
-│   ├── interactive.rs  # 交互式启动
-│   ├── invocation.rs   # 调用选项
-│   ├── profile_catalog.rs  # 配置文件目录
-│   ├── session.rs      # 会话查询与编目
-│   ├── settings.rs     # 设置控制器
-│   └── theme.rs        # 主题控制器
-├── authorization.rs    # 工具授权系统
-├── events/             # 18 个产品事件类型
-│   ├── agent.rs, session.rs, tool.rs, workflow.rs ...
-│   └── mod.rs          # ProductEvent trait 和通用序列化
-├── operations/         # 9 个操作定义
-│   ├── agent_invocation/   # 单代理调用
-│   ├── branch_summary/     # 分支摘要
-│   ├── compaction/         # 压缩
-│   ├── delegation/         # 委托
-│   ├── export/             # 会话导出
-│   ├── prompt/             # 提示执行
-│   ├── self_healing_edit/  # 自愈编辑
-│   ├── session_navigation/ # 会话导航
-│   └── team_invocation/    # 团队调用
-├── runtime/            # 运行时核心
-│   ├── facade/         # CodingAgentSession（中央会话类型）
-│   ├── client/         # 客户端连接与产品投映
-│   │   ├── connection.rs # 连接、提交、控制与公开 snapshot DTO
-│   │   └── projection.rs # 产品事件到客户端状态的 reducer
-│   ├── operation/      # operation 完整生命周期
-│   │   ├── contract.rs # 唯一 operation 枚举与 descriptor 契约
-│   │   ├── admission.rs # admission 解析与调度 policy
-│   │   ├── permit.rs   # admission permit / guard 生命周期
-│   │   ├── dispatch.rs # descriptor-driven 路由与统一 envelope
-│   │   └── finalize.rs # finalization decision
-│   ├── capability.rs   # 文件系统/Shell 能力
-│   ├── snapshot.rs     # 快照 coordinator
-│   └── session_coordinator.rs # session owner / writer 协调
-├── services/           # 有状态服务层
-│   ├── authorization.rs  # 授权服务
-│   ├── event.rs          # 事件服务（存储/分发）
-│   └── runtime.rs        # 运行时服务
-├── redaction.rs        # 无状态脱敏函数
-├── profiles/           # 代理/团队配置文件
-├── session/            # 会话仓库、清单、重放、事务、事件存储
-├── tools/              # 7 个内置 AgentTool 定义
-│   ├── filesystem/     # read/write/edit/find/ls
-│   └── shell.rs        # bash
-├── config/             # 配置管理
-│   ├── settings.rs     # 全局设置 (TOML)
-│   ├── auth.rs         # 认证配置 (auth.toml)
-│   ├── paths.rs        # 路径解析 (~/.evo/ 或 $EVO_DIR)
-│   └── storage.rs      # 配置存储
-├── theme/              # 主题系统
-└── limits.rs           # 全局限制
-```
+
+高层可以直接依赖任意更低层，但低层不能引用高层。`domain/projection` 名称表达的是
+事实投影用途；由于它跨多种 representation 做集成转换，依赖守卫将它归为 L3。
+有状态 service 通过 `SessionWriter`、`EventSink`、`CapabilityQuery` 等窄 port 协作，
+composition root 才装配具体实现。
+
+**API 边界**：crate root 唯一公共模块是 `coding_agent::api`，并按 `embedding`、
+`settings`、`authorization`、`runtime`、`error`、`review`、`operation`、`event`、
+`client`、`view` 分类。其他源码模块都是实现细节。会话仓储通过
+`SessionStorageHandle` 暴露明确的“打开事件日志”和“取得导出路径”操作，不向适配器
+泄漏可任意拼接的 session directory。
 
 **核心设计：事件溯源架构**
 
@@ -284,18 +256,22 @@ crates/coding-agent/src/
                                                       → UI 事件桥接
 ```
 
-**事件家族**（18 种事件类型）：
-- `agent`：代理生命周期
-- `session`：会话创建/关闭
-- `profile`：配置文件加载
-- `team`：团队操作
-- `message`：消息增删
-- `tool`：工具调用
-- `runtime`：运行时状态
-- `delegation`：委托协调
-- `workflow`：工作流
-- `diagnostic`：诊断/错误
-- `capability`：能力变更（文件系统/Shell 权限）
+公开的 `ProductEventKind` 顶层 family 为 Session、Agent、Team、Message、Tool、Runtime、
+Delegation、Workflow、Diagnostic、Capability。跨 representation 的转换集中在
+`domain/projection/`，并由覆盖全部 family 的 golden fixture 固定 wire round-trip。
+
+**取消语义**：取消是 cooperative request，不是任意位置的线程中断。prompt 的
+`abort` 必须经 operation-scoped control handle 提交；丢弃 operation task 只会分离
+join handle。异步阶段会观察 cancellation token，但文件 mutation 一旦把
+`MutationGuard` 转移到 blocking closure，write/truncate 与 `sync_all` 会在 fence 内
+完成，调用方 future 被取消也不会提前释放 fence。关闭流程因此必须停止新准入、请求
+shutdown、abort/join active operation、消费终态，再 drain session。
+
+**有界 hydration 契约**：普通打开从 active event log 尾部以 64 KiB 分块反向扫描，
+最多物化 10,000 个事件或 32 MiB，并在视图中返回 `omitted_items` 与 opaque
+continuation。该路径只修复 torn tail，不创建 writer、不读取 outbox、也不做全量
+startup replay；客户端 projection 仍保留相同数量/字节预算作为二次防线。只有显式
+`SessionExport` API 可以触发完整 replay，适配器不能把 UI bootstrap 当作完整归档。
 
 **公共 API 分类**（10 个子领域）：
 
@@ -629,13 +605,13 @@ crate::<private_module>   ←  仅 crate 内部访问
 - **`FileSystem` / `Shell`**：文件系统和 Shell 操作
 - **`ProviderAuthResolver`**：认证方案
 
-单元测试中可通过 `#[cfg(feature = "test-support")]` 注入模拟实现。
+单元测试通过 `#[cfg(test)]` 私有 fixture 或窄 port fake 注入模拟实现。
 
 ### 5.3 事件溯源（Event Sourcing）
 
 核心设计原则：所有产品级状态变更都记录为不可变的领域事件。
 
-- 事件类型：`CodingAgentProductEvent`（18 个家族）
+- 事件类型：`CodingAgentProductEvent`（10 个顶层 family）
 - 事件持久化：`EventService` → 文件系统
 - 状态重建：重放事件流到 `ClientProjection`
 - 协议版本管理：`PRODUCT_EVENT_PROTOCOL_VERSION`
@@ -733,7 +709,6 @@ version = "0.7.2"
 
 - **二进制 1**：`crates/cli/src/main.rs` → 名称 `coding-agent`
 - **二进制 2**：`crates/desktop/src/main.rs` → 桌面应用
-- **特性标志**：`test-support`（测试固定装置）
 - **Rust Edition**：2024
 
 ---
@@ -767,16 +742,17 @@ Desktop 的测试按 owner 与风险拆分：
 
 ### 8.2 Test-Support 机制
 
-通过条件编译特性 `test-support` 暴露测试辅助工具：
+`coding-agent` 的 fixture 只在 crate unit test 构建中编译，不通过 Cargo feature 或
+crate-root public module 暴露给下游：
 
 ```rust
-#[cfg(any(test, feature = "test-support"))]
-mod testing {
-    // 提供商固定装置、环境守卫、内存执行环境等
-}
+#[cfg(test)]
+pub(crate) mod test_support;
 ```
 
-生产代码无法访问这些测试工具，确保测试辅助不会泄漏到运行时。
+CLI/Desktop 使用自己的 adapter fixture；共享的产品投影输入则存放为 JSON fixture，
+而不是依赖 `coding-agent` 的私有测试实现。`agent-core`、`ai` 和 `tui` 仍可为各自测试
+目标保留独立 feature，这不构成 `coding-agent` 的公共契约。
 
 ### 8.3 运行测试
 
@@ -787,8 +763,8 @@ cargo test --workspace
 # 特定 crate 测试
 cargo test -p coding-agent
 
-# 包含 test-support 特性
-cargo test -p coding-agent --features test-support
+# 验证全部 feature/target 组合
+cargo test -p coding-agent --all-features --all-targets
 
 # 无头运行（CI 友好）
 cargo test --workspace --no-fail-fast
@@ -804,7 +780,7 @@ cargo test --workspace --no-fail-fast
 
 **理由**：
 - 清晰的关注点分离：传输层、运行时、产品逻辑、UI 各自独立
-- 可测试性：每一层可独立测试，通过 test-support 注入模拟
+- 可测试性：每一层可通过私有 fixture、窄 port fake 与 adapter fixture 独立测试
 - 可替换性：UI 适配器可能变更（TUI → GUI → Web），产品层不变
 - 第三方嵌入：`coding-agent` 通过 `api::embedding` 暴露稳定的嵌入 API
 

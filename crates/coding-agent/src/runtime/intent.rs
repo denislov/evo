@@ -1,6 +1,6 @@
-use super::operation::OperationClass;
-use super::operation::admission::OperationScheduler;
-use super::operation::control::OperationControl;
+use crate::application::operation::admission::OperationScheduler;
+use crate::application::operation::control::OperationControl;
+use crate::kernel::operation::OperationClass;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueryIntent {

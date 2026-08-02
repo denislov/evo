@@ -1,12 +1,13 @@
 use super::wire;
 use crate::model::{Model, ModelInput};
-use crate::protocol::{ContentBlock, Context, Message, StreamOptions, ThinkingConfig};
+use crate::protocol::{ContentBlock, Context, Message, StreamOptions, ThinkingConfig, ToolKind};
+use crate::providers::common::unsupported_tool_error;
 
 pub fn build_request(
     model: &Model,
     ctx: &Context,
     opts: &Option<StreamOptions>,
-) -> wire::ChatCompletionRequest {
+) -> Result<wire::ChatCompletionRequest, String> {
     let mut messages = Vec::new();
     if let Some(system_prompt) = &ctx.system_prompt {
         messages.push(wire::ChatMessage {
@@ -23,26 +24,36 @@ pub fn build_request(
             .filter_map(|m| convert_message(m, model)),
     );
 
-    let tools = ctx.tools.as_ref().map(|tools| {
-        tools
-            .iter()
-            .map(|tool| wire::ChatTool {
-                tool_type: "function".into(),
-                function: wire::FunctionDef {
-                    name: tool.name.clone(),
-                    description: tool.description.clone(),
-                    parameters: tool.parameters.clone(),
-                    strict: false,
-                },
-            })
-            .collect()
-    });
+    let tools = ctx
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| match tool.kind {
+                    ToolKind::Function => Ok(wire::ChatTool {
+                        tool_type: "function".into(),
+                        function: wire::FunctionDef {
+                            name: tool.name.clone(),
+                            description: tool.description.clone(),
+                            parameters: tool.parameters.clone(),
+                            strict: false,
+                        },
+                    }),
+                    // Chat-completions has no server-side tool execution.
+                    ToolKind::WebSearch | ToolKind::Custom => {
+                        Err(unsupported_tool_error("mistral-conversations", tool))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
 
     let thinking = opts.as_ref().and_then(|o| o.thinking.as_ref());
     let reasoning_effort = resolve_reasoning_effort(model, thinking);
     let prompt_mode = resolve_prompt_mode(model, thinking, reasoning_effort.as_deref());
 
-    wire::ChatCompletionRequest {
+    Ok(wire::ChatCompletionRequest {
         model: model.id.clone(),
         messages,
         stream: true,
@@ -55,7 +66,7 @@ pub fn build_request(
         tool_choice: opts.as_ref().and_then(|o| o.tool_choice.clone()),
         prompt_mode,
         reasoning_effort,
-    }
+    })
 }
 
 fn convert_message(msg: &Message, model: &Model) -> Option<wire::ChatMessage> {

@@ -870,7 +870,9 @@ async fn run_coding_prompt_task(
                                 identity,
                                 decision,
                             }) => {
-                                connection.decide_tool_authorization(&identity, decision)?;
+                                connection
+                                    .decide_tool_authorization(&identity, decision)
+                                    .await?;
                             }
                             Some(PromptTaskControl::Abort) => {}
                             None => {
@@ -958,7 +960,9 @@ async fn run_coding_agent_invocation_task(
                             identity,
                             decision,
                         }) => {
-                            connection.decide_tool_authorization(&identity, decision)?;
+                            connection
+                                .decide_tool_authorization(&identity, decision)
+                                .await?;
                         }
                         Some(PromptTaskControl::Abort) => {}
                         None => {
@@ -1025,7 +1029,9 @@ async fn run_coding_agent_team_task(
                             identity,
                             decision,
                         }) => {
-                            connection.decide_tool_authorization(&identity, decision)?;
+                            connection
+                                .decide_tool_authorization(&identity, decision)
+                                .await?;
                         }
                         Some(PromptTaskControl::Abort)
                         | Some(PromptTaskControl::Steer(_))
@@ -1091,7 +1097,9 @@ async fn run_coding_delegation_approval_task(
                             identity,
                             decision,
                         }) => {
-                            connection.decide_tool_authorization(&identity, decision)?;
+                            connection
+                                .decide_tool_authorization(&identity, decision)
+                                .await?;
                         }
                         Some(PromptTaskControl::Abort)
                         | Some(PromptTaskControl::Steer(_))
@@ -1294,7 +1302,7 @@ async fn run_coding_branch_summary_navigation_task(
                 .expect("branch summary navigation operation returned a different public outcome");
 
         if !branch_summary_allows_navigation(&outcome) {
-            return Ok((outcome, false));
+            return Ok((outcome, false, None));
         }
 
         let fork = CodingAgentOperation::ForkSession {
@@ -1306,20 +1314,24 @@ async fn run_coding_branch_summary_navigation_task(
             .into_session_forked()
             .expect("navigation fork operation returned a different public outcome");
 
-        Ok((outcome, true))
+        let replacement_session_id = session.view()?.session_id.clone();
+        Ok((outcome, true, Some(replacement_session_id)))
     }
     .await;
 
-    complete_owned_task(session, result, |session, (outcome, navigated)| {
-        let replacement_session_id = navigated.then(|| session.view().session_id.clone());
-        PromptTaskResult::Coding(CodingPromptTaskResult {
-            session,
-            outcome,
-            replacement_session_id,
-            completion_notice: navigated.then(|| "Navigated to selected point".to_string()),
-            hydrate_transcript: navigated,
-        })
-    })
+    complete_owned_task(
+        session,
+        result,
+        |session, (outcome, navigated, replacement_session_id)| {
+            PromptTaskResult::Coding(CodingPromptTaskResult {
+                session,
+                outcome,
+                replacement_session_id,
+                completion_notice: navigated.then(|| "Navigated to selected point".to_string()),
+                hydrate_transcript: navigated,
+            })
+        },
+    )
 }
 
 fn branch_summary_allows_navigation(outcome: &PromptTurnOutcome) -> bool {
@@ -1346,12 +1358,11 @@ async fn run_coding_fork_session_task(
             .into_session_forked()
             .expect("fork session operation returned a different public outcome");
 
-        Ok(())
+        Ok(session.view()?.session_id.clone())
     }
     .await;
 
-    complete_owned_task(session, result, |session, ()| {
-        let replacement_session_id = session.view().session_id.clone();
+    complete_owned_task(session, result, |session, replacement_session_id| {
         PromptTaskResult::ForkSession(ForkSessionTaskResult {
             session,
             replacement_session_id,

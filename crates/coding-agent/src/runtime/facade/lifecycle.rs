@@ -12,7 +12,11 @@ impl CodingAgentSession {
     pub(crate) async fn create_internal(
         options: CodingAgentSessionOptions,
     ) -> Result<Self, CodingSessionError> {
-        let session_service = SessionService::create(&options)?;
+        let service_options = options.clone();
+        let session_service =
+            tokio::task::spawn_blocking(move || SessionService::create(&service_options))
+                .await
+                .map_err(session_initialization_join_error)??;
         let project_root = session_project_root(&options, Some(&session_service));
         let profile_registry = profile_registry_for_options(&options, Some(&session_service))?;
         let runtime_service = runtime_service_for_options(&options);
@@ -34,7 +38,11 @@ impl CodingAgentSession {
     pub(crate) async fn open_internal(
         options: CodingAgentSessionOptions,
     ) -> Result<Self, CodingSessionError> {
-        let session_service = SessionService::open(&options)?;
+        let service_options = options.clone();
+        let session_service =
+            tokio::task::spawn_blocking(move || SessionService::open(&service_options))
+                .await
+                .map_err(session_initialization_join_error)??;
         let project_root = session_project_root(&options, Some(&session_service));
         let profile_registry = profile_registry_for_options(&options, Some(&session_service))?;
         let runtime_service = runtime_service_for_options(&options);
@@ -58,7 +66,11 @@ impl CodingAgentSession {
     pub(crate) async fn open_or_create_internal(
         options: CodingAgentSessionOptions,
     ) -> Result<Self, CodingSessionError> {
-        let session_service = SessionService::open_or_create(&options)?;
+        let service_options = options.clone();
+        let session_service =
+            tokio::task::spawn_blocking(move || SessionService::open_or_create(&service_options))
+                .await
+                .map_err(session_initialization_join_error)??;
         let project_root = session_project_root(&options, Some(&session_service));
         let profile_registry = profile_registry_for_options(&options, Some(&session_service))?;
         let runtime_service = runtime_service_for_options(&options);
@@ -153,7 +165,9 @@ impl CodingAgentSession {
         path: impl AsRef<Path>,
     ) -> Result<PathBuf, CodingSessionError> {
         let session_service = SessionService::open(&options)?;
-        let mut context = session_service.export_context(ExportOptions::html(path.as_ref()))?;
+        let mut context = session_service
+            .session_export(ExportOptions::html(path.as_ref()))?
+            .into_context();
         let outcome =
             crate::operations::export::runner::ExportRunner::new()?.run_typed(&mut context)?;
         outcome.path.ok_or_else(|| CodingSessionError::Session {
@@ -190,7 +204,7 @@ impl CodingAgentSession {
                         snapshot_coordinator.clone(),
                     ),
                 },
-                session_coordinator: crate::runtime::session_coordinator::SessionCoordinator {
+                session_coordinator: crate::application::session_coordinator::SessionCoordinator {
                     persistence: SessionPersistence::Persistent(session_service),
                     pending_delegation_confirmations: replay_state.pending_delegation_confirmations,
                     startup_recovery_markers: Mutex::new(replay_state.startup_recovery_markers),
@@ -207,16 +221,22 @@ impl CodingAgentSession {
                 project_root: crate::runtime::owners::ProjectRoot::new(project_root),
             },
         };
-        session.refresh_snapshot_projection();
+        session.refresh_snapshot_projection()?;
+        let opened_session_id = match &session.runtime_host.session_coordinator.persistence {
+            SessionPersistence::Persistent(session_service) => {
+                session_service.session_id().to_owned()
+            }
+            SessionPersistence::NonPersistent(state) => state.runtime_id.clone(),
+        };
         session
             .runtime_host
             .events
-            .emit_session_opened(session.view().session_id);
+            .emit_session_opened(opened_session_id)?;
         for record in startup_outbox_records {
             session
                 .runtime_host
                 .events
-                .emit_durable_outbox_record(&record);
+                .emit_durable_outbox_record(&record)?;
         }
         Ok(session)
     }
@@ -246,7 +266,7 @@ impl CodingAgentSession {
                         snapshot_coordinator.clone(),
                     ),
                 },
-                session_coordinator: crate::runtime::session_coordinator::SessionCoordinator {
+                session_coordinator: crate::application::session_coordinator::SessionCoordinator {
                     persistence: SessionPersistence::NonPersistent(state),
                     pending_delegation_confirmations: PendingDelegationConfirmationQueue::default(),
                     startup_recovery_markers: Mutex::new(Vec::new()),
@@ -263,8 +283,14 @@ impl CodingAgentSession {
                 project_root: crate::runtime::owners::ProjectRoot::new(project_root),
             },
         };
-        session.refresh_snapshot_projection();
+        session.refresh_snapshot_projection()?;
         Ok(session)
+    }
+}
+
+fn session_initialization_join_error(error: tokio::task::JoinError) -> CodingSessionError {
+    CodingSessionError::Session {
+        message: format!("session initialization worker failed: {error}"),
     }
 }
 

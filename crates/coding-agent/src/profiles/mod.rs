@@ -1,11 +1,13 @@
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use std::collections::BTreeMap;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::runtime::error::CodingSessionError;
-use crate::{bounded_io, limits};
+use crate::kernel::error::CodingSessionError;
+use crate::limits;
+use crate::platform::io::bounded as bounded_io;
+
+pub use crate::kernel::ids::ProfileId;
 
 const PROFILE_SCHEMA_VERSION: u32 = 1;
 const AGENT_PROFILE_DIR: &str = "agents";
@@ -13,65 +15,6 @@ const TEAM_PROFILE_DIR: &str = "teams";
 const PROFILE_FILE_EXTENSION: &str = "toml";
 const BUILT_IN_HELPER_AGENT_IDS: [&str; 3] = ["explore", "review", "check"];
 const BUILT_IN_READ_ONLY_TOOL_NAMES: [&str; 4] = ["read", "grep", "find", "ls"];
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProfileId(String);
-
-impl ProfileId {
-    pub fn new(id: impl Into<String>) -> Result<Self, String> {
-        let id = id.into();
-        if id.trim().is_empty() {
-            return Err("profile id must not be empty".into());
-        }
-        if id.trim() != id {
-            return Err(format!(
-                "profile id must not have surrounding whitespace: {id:?}"
-            ));
-        }
-        Ok(Self(id))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<&str> for ProfileId {
-    fn from(value: &str) -> Self {
-        Self::new(value).expect("profile id literal must be valid")
-    }
-}
-
-impl From<String> for ProfileId {
-    fn from(value: String) -> Self {
-        Self::new(value).expect("profile id string must be valid")
-    }
-}
-
-impl fmt::Display for ProfileId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl Serialize for ProfileId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for ProfileId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(de::Error::custom)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

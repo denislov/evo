@@ -5,7 +5,8 @@ use crate::authorization::ToolAuthorizationMode;
 use crate::runtime::facade::{
     CodingAgentPublicError, CodingAgentSession, CodingAgentSessionHydration,
     CodingAgentSessionOpenTarget, CodingAgentSessionOptions, CodingAgentSessionOverview,
-    CodingAgentSessionTranscriptItem, CodingAgentSessionTree, CodingSessionError, ProfileId,
+    CodingAgentSessionTranscriptItem, CodingAgentSessionTree, CodingAgentTranscriptContinuation,
+    CodingSessionError, ProfileId,
 };
 use agent_core::api::transcript::{SessionEntry, SessionTreeNode};
 use ai::api::client::AiClient;
@@ -356,6 +357,7 @@ pub struct CodingAgentSessionSnapshot {
     pub choice: CodingAgentSessionChoice,
     pub transcript: Vec<CodingAgentSessionTranscriptItem>,
     pub omitted_transcript_items: usize,
+    pub continuation: Option<CodingAgentTranscriptContinuation>,
     pub usage: CodingAgentSessionUsage,
 }
 
@@ -649,12 +651,14 @@ impl CodingAgentSession {
 pub(crate) fn session_snapshot_from_hydration(
     hydration: CodingAgentSessionHydration,
 ) -> CodingAgentSessionSnapshot {
-    let entry_count = hydration.transcript.len();
-    let omitted_transcript_items = entry_count.saturating_sub(MAX_SESSION_QUERY_TRANSCRIPT_ITEMS);
+    let retained_entry_count = hydration.transcript.len();
+    let locally_omitted = retained_entry_count.saturating_sub(MAX_SESSION_QUERY_TRANSCRIPT_ITEMS);
+    let entry_count = retained_entry_count.saturating_add(hydration.omitted_items);
+    let omitted_transcript_items = hydration.omitted_items.saturating_add(locally_omitted);
     let transcript = hydration
         .transcript
         .into_iter()
-        .skip(omitted_transcript_items)
+        .skip(locally_omitted)
         .collect();
     CodingAgentSessionSnapshot {
         choice: CodingAgentSessionChoice {
@@ -669,6 +673,7 @@ pub(crate) fn session_snapshot_from_hydration(
         },
         transcript,
         omitted_transcript_items,
+        continuation: hydration.continuation,
         usage: CodingAgentSessionUsage {
             input: hydration.usage.input,
             output: hydration.usage.output,
@@ -840,476 +845,17 @@ fn session_tree_content_has_text(content: &serde_json::Value) -> bool {
     }
 }
 
-fn session_tree_entry_display_text(
-    node: &SessionTreeNode,
-    tool_calls: &BTreeMap<String, SessionTreeToolCall>,
-) -> String {
-    let entry = &node.entry;
-    match entry.entry_type.as_str() {
-        "message" => session_tree_message_display_text(entry, tool_calls),
-        "bashExecution" => {
-            let command = entry
-                .field("command")
-                .and_then(|value| value.as_str())
-                .unwrap_or("?");
-            let output = entry
-                .field("output")
-                .and_then(|value| value.as_str())
-                .and_then(|output| output.lines().next())
-                .map(|output| normalized_preview(output, 40))
-                .unwrap_or_default();
-            normalized_preview(
-                &format!("[bash] {command} {output}"),
-                MAX_SESSION_TREE_PREVIEW_CHARS,
-            )
-        }
-        "toolResult" => {
-            let name = entry
-                .field("toolName")
-                .and_then(|value| value.as_str())
-                .unwrap_or("?");
-            let preview = entry
-                .field("content")
-                .and_then(|value| value.as_array())
-                .and_then(|content| content.first())
-                .and_then(|block| block.get("text"))
-                .and_then(|value| value.as_str())
-                .map(|text| normalized_preview(text, 40))
-                .unwrap_or_default();
-            format!("[toolResult] {name}: {preview}")
-        }
-        "compaction" => {
-            let summary = entry
-                .field("summary")
-                .and_then(|value| value.as_str())
-                .unwrap_or("compacted");
-            let tokens = entry
-                .field("tokensBefore")
-                .and_then(serde_json::Value::as_u64)
-                .map(|tokens| (tokens as f64 / 1000.0).round() as u64)
-                .unwrap_or(0);
-            if tokens > 0 {
-                format!("[compaction: {tokens}k tokens]")
-            } else {
-                format!(
-                    "[compaction] {}",
-                    normalized_preview(summary, MAX_SESSION_TREE_PREVIEW_CHARS)
-                )
-            }
-        }
-        "branch_summary" => {
-            let summary = entry
-                .field("summary")
-                .and_then(|value| value.as_str())
-                .unwrap_or("branch");
-            format!(
-                "[branch summary]: {}",
-                normalized_preview(summary, MAX_SESSION_TREE_PREVIEW_CHARS)
-            )
-        }
-        "custom_message" | "custom" => {
-            let custom_type = entry
-                .field("customType")
-                .and_then(|value| value.as_str())
-                .unwrap_or("?");
-            format!("[custom: {custom_type}]")
-        }
-        "session_info" => {
-            let name = entry
-                .field("name")
-                .and_then(|value| value.as_str())
-                .unwrap_or("?");
-            format!(
-                "[title: {}]",
-                normalized_preview(name, MAX_SESSION_TREE_PREVIEW_CHARS)
-            )
-        }
-        "model_change" => {
-            let model = entry
-                .field("modelId")
-                .and_then(|value| value.as_str())
-                .unwrap_or("?");
-            format!("[model: {model}]")
-        }
-        "thinking_level_change" => {
-            let level = entry
-                .field("thinkingLevel")
-                .and_then(|value| value.as_str())
-                .unwrap_or("?");
-            format!("[thinking: {level}]")
-        }
-        _ => normalized_preview(
-            &format!("[{}] {}", entry.entry_type, entry.id),
-            MAX_SESSION_TREE_PREVIEW_CHARS,
-        ),
-    }
-}
+mod display;
 
-fn session_tree_message_display_text(
-    entry: &SessionEntry,
-    tool_calls: &BTreeMap<String, SessionTreeToolCall>,
-) -> String {
-    let Some(message) = entry.field("message") else {
-        return entry.id.clone();
-    };
-    let Some(role) = message.get("role").and_then(|value| value.as_str()) else {
-        return entry.id.clone();
-    };
-    let preview = session_tree_message_text_preview(message);
-    match role {
-        "user" => format!("user: {preview}"),
-        "assistant" if !preview.is_empty() => format!("assistant: {preview}"),
-        "assistant"
-            if message.get("stopReason").and_then(|value| value.as_str()) == Some("aborted") =>
-        {
-            "assistant: (aborted)".to_owned()
-        }
-        "assistant" => message
-            .get("errorMessage")
-            .and_then(|value| value.as_str())
-            .map(|error| {
-                format!(
-                    "assistant: {}",
-                    normalized_preview(error, MAX_SESSION_TREE_PREVIEW_CHARS)
-                )
-            })
-            .unwrap_or_else(|| "assistant: (no content)".to_owned()),
-        "toolResult" => {
-            let tool_call = message
-                .get("toolCallId")
-                .and_then(|value| value.as_str())
-                .and_then(|id| tool_calls.get(id));
-            if let Some(tool_call) = tool_call {
-                format_session_tree_tool_call(&tool_call.name, &tool_call.arguments)
-            } else {
-                let name = message
-                    .get("toolName")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("tool");
-                format!("[{name}]")
-            }
-        }
-        _ => normalized_preview(
-            &format!("[{role}] {preview}"),
-            MAX_SESSION_TREE_PREVIEW_CHARS,
-        ),
-    }
-}
+use display::{normalized_preview, session_tree_entry_display_text};
 
-fn session_tree_message_text_preview(message: &serde_json::Value) -> String {
-    let Some(content) = message.get("content") else {
-        return String::new();
-    };
-    match content {
-        serde_json::Value::String(text) => normalized_preview(text, MAX_SESSION_TREE_PREVIEW_CHARS),
-        serde_json::Value::Array(blocks) => {
-            let mut text = String::new();
-            for block in blocks {
-                if block.get("type").and_then(|value| value.as_str()) == Some("text")
-                    && let Some(part) = block.get("text").and_then(|value| value.as_str())
-                {
-                    text.push_str(part);
-                    if text.chars().count() >= MAX_SESSION_TREE_PREVIEW_CHARS {
-                        break;
-                    }
-                }
-            }
-            normalized_preview(&text, MAX_SESSION_TREE_PREVIEW_CHARS)
-        }
-        _ => String::new(),
-    }
-}
+mod hydration;
 
-fn normalized_preview(text: &str, max_chars: usize) -> String {
-    let normalized = text.replace(['\n', '\t'], " ").trim().to_owned();
-    if normalized.chars().count() > max_chars {
-        normalized.chars().take(max_chars).collect()
-    } else {
-        normalized
-    }
-}
-
-fn format_session_tree_tool_call(name: &str, arguments: &serde_json::Value) -> String {
-    let argument = |key: &str| arguments.get(key).and_then(|value| value.as_str());
-    match name {
-        "read" => {
-            let path = shorten_session_tree_home(
-                argument("path")
-                    .or_else(|| argument("file_path"))
-                    .unwrap_or(""),
-            );
-            let mut display = path;
-            let offset = arguments.get("offset").and_then(serde_json::Value::as_i64);
-            let limit = arguments.get("limit").and_then(serde_json::Value::as_i64);
-            if offset.is_some() || limit.is_some() {
-                let start = offset.unwrap_or(1);
-                display.push(':');
-                display.push_str(&start.to_string());
-                if let Some(end) = limit.map(|limit| start + limit - 1) {
-                    display.push('-');
-                    display.push_str(&end.to_string());
-                }
-            }
-            normalized_preview(
-                &format!("[read: {display}]"),
-                MAX_SESSION_TREE_PREVIEW_CHARS,
-            )
-        }
-        "write" | "edit" => {
-            let path = shorten_session_tree_home(
-                argument("path")
-                    .or_else(|| argument("file_path"))
-                    .unwrap_or(""),
-            );
-            format!("[{name}: {path}]")
-        }
-        "bash" => {
-            let raw = argument("command").unwrap_or("");
-            let command = normalized_preview(raw, 50);
-            let suffix = if raw.chars().count() > 50 { "..." } else { "" };
-            format!("[bash: {command}{suffix}]")
-        }
-        "grep" | "find" => {
-            let pattern = argument("pattern").unwrap_or("");
-            let path = shorten_session_tree_home(argument("path").unwrap_or("."));
-            let separator = if name == "grep" { "/" } else { "" };
-            format!("[{name}: {separator}{pattern}{separator} in {path}]")
-        }
-        "ls" => {
-            let path = shorten_session_tree_home(argument("path").unwrap_or("."));
-            format!("[ls: {path}]")
-        }
-        _ => {
-            let arguments = arguments.to_string();
-            let preview = normalized_preview(&arguments, 40);
-            let suffix = if arguments.chars().count() > 40 {
-                "..."
-            } else {
-                ""
-            };
-            format!("[{name}: {preview}{suffix}]")
-        }
-    }
-}
-
-fn shorten_session_tree_home(path: &str) -> String {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_default();
-    if !home.is_empty() && path.starts_with(&home) {
-        format!("~{}", &path[home.len()..])
-    } else {
-        path.to_owned()
-    }
-}
-
-pub(crate) async fn open_headless_prompt_session(
-    options: &PromptRuntimeOptions,
-) -> Result<CodingAgentSession, CodingSessionError> {
-    let Some(session_options) = options.session.as_ref() else {
-        ensure_non_persistent_target(options.session_target.as_ref())?;
-        return CodingAgentSession::non_persistent_internal(with_ai_client(
-            CodingAgentSessionOptions::new(),
-            options.ai_client.as_ref(),
-        ))
-        .await;
-    };
-    if !matches!(session_options.mode, SessionMode::Enabled) {
-        ensure_non_persistent_target(options.session_target.as_ref())?;
-        return CodingAgentSession::non_persistent_internal(with_ai_client(
-            session_options_for_run(session_options),
-            options.ai_client.as_ref(),
-        ))
-        .await;
-    }
-
-    let session_root = headless_session_root(session_options)?;
-    let session_options = with_ai_client(
-        session_options_for_run(session_options).with_session_log_root(session_root),
-        options.ai_client.as_ref(),
-    );
-    open_persistent_session(session_options, options.session_target.as_ref()).await
-}
-
-pub(crate) fn runtime_session_root(
-    options: &SessionRunOptions,
-) -> Result<Option<PathBuf>, CodingSessionError> {
-    if matches!(options.mode, SessionMode::Enabled) {
-        headless_session_root(options).map(Some)
-    } else {
-        Ok(None)
-    }
-}
-
-fn target_looks_like_rust_native_session_dir(target: &str) -> bool {
-    let path = Path::new(target);
-    path.is_dir() && path.join("session.json").is_file() && path.join("events.jsonl").is_file()
-}
-
-fn target_looks_like_legacy_jsonl(target: &str) -> bool {
-    let path = Path::new(target);
-    path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") || path.is_file()
-}
-
-pub(crate) fn hydrate_interactive_session_target(
-    session_options: &Option<SessionRunOptions>,
-    target: Option<&ResolvedSessionTarget>,
-) -> Result<Option<CodingAgentSessionSnapshot>, ApplicationError> {
-    let Some(session_options) = enabled_session_options(session_options) else {
-        return Ok(None);
-    };
-    let Some(target) = target else {
-        return Ok(None);
-    };
-    let base_options = interactive_navigation_options(session_options)?;
-    let hydration = match target {
-        ResolvedSessionTarget::New | ResolvedSessionTarget::ForkTarget(_) => return Ok(None),
-        ResolvedSessionTarget::ContinueMostRecent => {
-            list_interactive_session_hydrations(&Some(session_options.clone()))?
-                .into_iter()
-                .next()
-        }
-        ResolvedSessionTarget::OpenOrCreateId(session_id) => {
-            match CodingAgentSession::hydrate(base_options.with_session_id(session_id.clone())) {
-                Ok(hydration) => Some(hydration),
-                Err(_) => return Ok(None),
-            }
-        }
-        ResolvedSessionTarget::OpenTarget(target) => {
-            let is_path = target_looks_like_rust_native_session_dir(target);
-            let options = if is_path {
-                base_options.with_session_path(target)
-            } else {
-                base_options.with_session_id(target.clone())
-            };
-            match CodingAgentSession::hydrate(options) {
-                Ok(hydration) => Some(hydration),
-                Err(error) if is_path => {
-                    return Err(ApplicationError::SessionFailure(error.to_string()));
-                }
-                Err(_) => return Ok(None),
-            }
-        }
-    };
-    Ok(hydration
-        .filter(|hydration| hydration_matches_cwd(hydration, &session_options.cwd))
-        .map(session_snapshot_from_hydration))
-}
-
-pub(crate) fn list_interactive_session_hydrations(
-    session_options: &Option<SessionRunOptions>,
-) -> Result<Vec<CodingAgentSessionHydration>, ApplicationError> {
-    let Some(session_options) = enabled_session_options(session_options) else {
-        return Ok(Vec::new());
-    };
-    let options = interactive_navigation_options(session_options)?;
-    Ok(CodingAgentSession::list_internal(options.clone())?
-        .into_iter()
-        .filter_map(|summary| {
-            CodingAgentSession::hydrate(options.clone().with_session_id(summary.session_id)).ok()
-        })
-        .filter(|hydration| hydration_matches_cwd(hydration, &session_options.cwd))
-        .collect())
-}
-
-fn enabled_session_options(
-    session_options: &Option<SessionRunOptions>,
-) -> Option<&SessionRunOptions> {
-    session_options
-        .as_ref()
-        .filter(|options| matches!(options.mode, SessionMode::Enabled))
-}
-
-fn interactive_navigation_options(
-    session_options: &SessionRunOptions,
-) -> Result<CodingAgentSessionOptions, CodingSessionError> {
-    Ok(session_options_for_run(session_options)
-        .with_session_log_root(headless_session_root(session_options)?))
-}
-
-fn session_options_for_run(options: &SessionRunOptions) -> CodingAgentSessionOptions {
-    match options.workspace.as_ref() {
-        Some(workspace) => {
-            CodingAgentSessionOptions::new().with_resolved_workspace(workspace.clone())
-        }
-        None => CodingAgentSessionOptions::new().with_cwd(options.cwd.clone()),
-    }
-}
-
-fn hydration_matches_cwd(hydration: &CodingAgentSessionHydration, cwd: &Path) -> bool {
-    let expected = normalized_path_string(cwd);
-    hydration.cwd.as_deref() == Some(expected.as_str())
-}
-
-fn normalized_path_string(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn ensure_non_persistent_target(
-    target: Option<&ResolvedSessionTarget>,
-) -> Result<(), CodingSessionError> {
-    match target {
-        None | Some(ResolvedSessionTarget::New) => Ok(()),
-        Some(_) => Err(CodingSessionError::UnsupportedCapability {
-            capability: "persistent session target in non-persistent headless mode".into(),
-        }),
-    }
-}
-
-async fn open_persistent_session(
-    options: CodingAgentSessionOptions,
-    target: Option<&ResolvedSessionTarget>,
-) -> Result<CodingAgentSession, CodingSessionError> {
-    match target.unwrap_or(&ResolvedSessionTarget::New) {
-        ResolvedSessionTarget::New => CodingAgentSession::create_internal(options).await,
-        ResolvedSessionTarget::OpenTarget(session_id) => {
-            CodingAgentSession::open_internal(options.with_session_id(session_id.clone())).await
-        }
-        ResolvedSessionTarget::OpenOrCreateId(session_id) => {
-            CodingAgentSession::open_or_create_internal(options.with_session_id(session_id.clone()))
-                .await
-        }
-        ResolvedSessionTarget::ContinueMostRecent => {
-            let session_id = CodingAgentSession::list_internal(options.clone())?
-                .into_iter()
-                .next()
-                .map(|summary| summary.session_id)
-                .ok_or_else(|| CodingSessionError::Session {
-                    message: "no previous session to continue".into(),
-                })?;
-            CodingAgentSession::open_internal(options.with_session_id(session_id)).await
-        }
-        ResolvedSessionTarget::ForkTarget(source) => {
-            let forked = CodingAgentSession::fork_session(
-                options.clone().with_session_id(source.clone()),
-                None,
-            )?;
-            CodingAgentSession::open_internal(options.with_session_id(forked.summary.session_id))
-                .await
-        }
-    }
-}
-
-fn headless_session_root(options: &SessionRunOptions) -> Result<PathBuf, CodingSessionError> {
-    match options.session_dir.as_ref() {
-        Some(root) => Ok(root.clone()),
-        None => resolve_session_dir(&options.cwd, None, None).map_err(|error| {
-            CodingSessionError::Session {
-                message: error.to_string(),
-            }
-        }),
-    }
-}
-
-fn with_ai_client(
-    options: CodingAgentSessionOptions,
-    ai_client: Option<&AiClient>,
-) -> CodingAgentSessionOptions {
-    match ai_client {
-        Some(ai_client) => options.with_ai_client(ai_client.clone()),
-        None => options,
-    }
-}
+use hydration::{
+    enabled_session_options, headless_session_root, interactive_navigation_options,
+    session_options_for_run, target_looks_like_legacy_jsonl,
+    target_looks_like_rust_native_session_dir,
+};
+pub(crate) use hydration::{
+    hydrate_interactive_session_target, open_headless_prompt_session, runtime_session_root,
+};

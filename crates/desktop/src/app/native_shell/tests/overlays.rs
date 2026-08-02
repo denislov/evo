@@ -306,17 +306,17 @@ fn native_shell_authorization_smoke_traps_focus_and_submits_a_typed_decision(
 #[gpui::test]
 fn native_shell_inspector_smoke_submits_recovery_and_file_review_commands(cx: &mut TestAppContext) {
     initialize_visual_test(cx);
-    let recovery = CodingAgentRecoveryPending {
-        operation_id: "operation-recovery".into(),
-        recovery_id: "recovery-visual-test".into(),
-        operation_kind: Some("prompt".into()),
-        record_version: 3,
-        descriptor_revision: 2,
-        capability_generation: Some(0),
-        attempt_count: 1,
-        last_attempt_at: Some("2026-07-27T00:00:00Z".into()),
-        next_attempt_at: None,
-    };
+    let recovery = CodingAgentRecoveryPending::from_parts(
+        "operation-recovery",
+        "recovery-visual-test",
+        Some("prompt".into()),
+        3,
+        2,
+        Some(0),
+        1,
+        Some("2026-07-27T00:00:00Z".into()),
+        None,
+    );
     let change = CodingAgentFileChangeSnapshot {
         path: "crates/desktop/src/app/native_shell.rs".into(),
         mutation_kind: "edit".into(),
@@ -438,17 +438,17 @@ fn native_shell_inspector_smoke_submits_recovery_and_file_review_commands(cx: &m
 #[gpui::test]
 fn diagnostic_row_exposes_authoritative_recovery_action(cx: &mut TestAppContext) {
     initialize_visual_test(cx);
-    let recovery = CodingAgentRecoveryPending {
-        operation_id: "operation-inline-recovery".into(),
-        recovery_id: "recovery-inline-diagnostic".into(),
-        operation_kind: Some("prompt".into()),
-        record_version: 4,
-        descriptor_revision: 2,
-        capability_generation: Some(0),
-        attempt_count: 1,
-        last_attempt_at: Some("2026-07-27T00:00:00Z".into()),
-        next_attempt_at: None,
-    };
+    let recovery = CodingAgentRecoveryPending::from_parts(
+        "operation-inline-recovery",
+        "recovery-inline-diagnostic",
+        Some("prompt".into()),
+        4,
+        2,
+        Some(0),
+        1,
+        Some("2026-07-27T00:00:00Z".into()),
+        None,
+    );
     let mut snapshot = visual_test_snapshot();
     snapshot.pending_recoveries.push(recovery);
     snapshot

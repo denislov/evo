@@ -532,7 +532,7 @@ async fn persisted_projectless_session_restores_its_managed_scratch_workspace() 
     let scratch = scratch_options.cwd().to_path_buf();
     let scratch_context = CodingAgentEmbeddingContext::load(scratch_options).unwrap();
     let mut session = scratch_context.create_session().await.unwrap();
-    let session_id = session.view().session_id;
+    let session_id = session.view().expect("session view").session_id;
     session.shutdown().await.unwrap();
     std::fs::remove_dir(&scratch).unwrap();
     let home_options =
@@ -583,7 +583,7 @@ async fn deleted_project_session_open_is_recoverably_rejected() {
     )
     .unwrap();
     let mut session = context.create_session().await.unwrap();
-    let session_id = session.view().session_id;
+    let session_id = session.view().expect("session view").session_id;
     session.shutdown().await.unwrap();
     std::fs::remove_dir(&project).unwrap();
     let home_options =
@@ -641,7 +641,7 @@ async fn legacy_session_scope_is_migrated_before_desktop_builds_its_context() {
     )
     .unwrap();
     let mut session = context.create_session().await.unwrap();
-    let session_id = session.view().session_id;
+    let session_id = session.view().expect("session view").session_id;
     session.shutdown().await.unwrap();
     let manifest_path = sessions.join(&session_id).join("session.json");
     let mut manifest: serde_json::Value =
@@ -835,7 +835,7 @@ async fn admission_failure_creates_no_session_owner_or_manifest() {
             ),
         ),
     ] {
-        let mut prompt_target = DesktopPromptTarget::new(
+        let prompt_target = DesktopPromptTarget::new(
             CodingAgentWorkspaceSelection::project(&target),
             model_id,
             "default",
@@ -908,7 +908,12 @@ async fn new_prompt_binds_model_profile_and_sanitized_thinking_before_persistenc
         "review"
     );
     assert_eq!(
-        owner.session.view().default_agent_profile_id.as_str(),
+        owner
+            .session
+            .view()
+            .expect("session view")
+            .default_agent_profile_id
+            .as_str(),
         "review"
     );
     state.close_idle_session(&session_id).await.unwrap();
@@ -1264,6 +1269,7 @@ async fn prompt_start_failure_reports_the_session_that_was_already_created() {
             .unwrap()
             .session
             .view()
+            .expect("session view")
             .session_id,
         snapshot.session.session.session_id
     );

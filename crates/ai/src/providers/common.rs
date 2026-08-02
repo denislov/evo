@@ -722,3 +722,37 @@ pub fn normalize_tool_call_id(id: &str, replacement: Option<char>) -> String {
         sanitized
     }
 }
+
+/// Terminal error stream for a request rejected before any network I/O.
+///
+/// Used when a `Context` cannot be expressed in the target API's request
+/// format — for example a `web_search` tool declared against an API with no
+/// server-side search. Failing loudly here keeps an unsupported declaration
+/// from being silently dropped from the outgoing tool list.
+pub(crate) fn request_rejected_stream(
+    api: &'static str,
+    model: &Model,
+    error: impl Into<String>,
+) -> EventStream {
+    let model_id = model.id.clone();
+    let provider = model.provider.clone();
+    let error = error.into();
+    Box::pin(stream! {
+        let mut message = AssistantMessage::empty(api, &model_id);
+        message.provider = Some(provider);
+        message.error_message = Some(error);
+        message.stop_reason = StopReason::Error;
+        yield AssistantMessageEvent::Error {
+            reason: StopReason::Error,
+            message,
+        };
+    })
+}
+
+/// Error text for a tool the target API cannot express.
+pub(crate) fn unsupported_tool_error(api: &str, tool: &crate::protocol::Tool) -> String {
+    format!(
+        "{api} cannot express the `{}` tool: {:?} tools are not supported by this API",
+        tool.name, tool.kind
+    )
+}

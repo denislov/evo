@@ -25,12 +25,13 @@ use ai::api::stream::{EventStream, StreamOptions};
 
 use crate::app::bootstrap::{SessionMode, build_agent_config_with_auth_diagnostics};
 
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::kernel::capability::ModelCapability;
+use crate::kernel::error::CodingSessionError;
 use crate::operations::delegation::delegation_tools;
 use crate::operations::prompt::context::{
     CodingDiagnostic, DelegationToolExecutor, RuntimeSnapshot,
 };
-use crate::runtime::capability::{ModelCapability, OperationCapabilitySnapshot};
-use crate::runtime::facade::CodingSessionError;
 use crate::services::authorization::{AuthorizationHookContext, ToolAuthorizationInventory};
 use crate::session::event::PersistedContentBlock;
 use crate::session::replay::{MessageStatus, SessionReplay, ToolCallStatus, TranscriptItem};

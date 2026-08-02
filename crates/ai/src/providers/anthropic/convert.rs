@@ -1,7 +1,7 @@
 use super::wire;
 use crate::model::Model;
-use crate::protocol::{ContentBlock, Context, Message, StreamOptions};
-use crate::providers::common::normalize_tool_call_id;
+use crate::protocol::{ContentBlock, Context, Message, StreamOptions, ToolKind};
+use crate::providers::common::{normalize_tool_call_id, unsupported_tool_error};
 
 /// Map evo stop-reason string to our StopReason enum.
 pub fn map_stop_reason(s: &str) -> crate::protocol::StopReason {
@@ -14,7 +14,11 @@ pub fn map_stop_reason(s: &str) -> crate::protocol::StopReason {
 }
 
 /// Convert a Context to an Anthropic Request.
-pub fn build_request(model: &Model, ctx: &Context, opts: &Option<StreamOptions>) -> wire::Request {
+pub fn build_request(
+    model: &Model,
+    ctx: &Context,
+    opts: &Option<StreamOptions>,
+) -> Result<wire::Request, String> {
     let compat = crate::compatibility::AnthropicMessagesCompat::from_model(model);
     let max_tokens = opts
         .as_ref()
@@ -40,22 +44,35 @@ pub fn build_request(model: &Model, ctx: &Context, opts: &Option<StreamOptions>)
     // and history is billed at the full input rate instead of cache_read.
     add_cache_control_to_last_user_message(&mut messages);
 
-    let tools = ctx.tools.as_ref().map(|tools| {
-        tools
-            .iter()
-            .map(|t| wire::ToolDef {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.parameters.clone(),
-                cache_control: compat
-                    .supports_cache_control_on_tools
-                    .unwrap_or(false)
-                    .then(|| wire::CacheControl {
-                        cache_type: "ephemeral".into(),
+    let tools = ctx
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|t| match t.kind {
+                    ToolKind::Function => Ok(wire::ToolDef {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        input_schema: t.parameters.clone(),
+                        cache_control: compat
+                            .supports_cache_control_on_tools
+                            .unwrap_or(false)
+                            .then(|| wire::CacheControl {
+                                cache_type: "ephemeral".into(),
+                            }),
                     }),
-            })
-            .collect()
-    });
+                    // Anthropic's server-side search and custom tools use wire
+                    // shapes this converter does not emit, and nothing here
+                    // replays their results. Reject rather than send a
+                    // malformed function declaration.
+                    ToolKind::WebSearch | ToolKind::Custom => {
+                        Err(unsupported_tool_error("anthropic-messages", t))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
 
     let temperature = if compat.supports_temperature == Some(false) {
         None
@@ -82,7 +99,7 @@ pub fn build_request(model: &Model, ctx: &Context, opts: &Option<StreamOptions>)
 
     let tool_choice = opts.as_ref().and_then(|o| o.tool_choice.clone());
 
-    wire::Request {
+    Ok(wire::Request {
         model: model.id.clone(),
         max_tokens,
         messages,
@@ -92,7 +109,7 @@ pub fn build_request(model: &Model, ctx: &Context, opts: &Option<StreamOptions>)
         thinking,
         tool_choice,
         stream: true,
-    }
+    })
 }
 
 /// Convert evo Messages to Anthropic request messages.

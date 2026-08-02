@@ -1,25 +1,24 @@
+use crate::kernel::error::CodingSessionError;
 use crate::operations::self_healing_edit::runner::{
     SelfHealingEditContext, SelfHealingEditOptions, SelfHealingEditOutcome,
     SelfHealingEditReplacement, SelfHealingEditRunner,
 };
-use crate::runtime::capability::FilesystemCapability;
-use crate::runtime::facade::CodingSessionError;
+use crate::platform::fs::capability::FilesystemCapability;
+use crate::platform::fs::edit_file::OpenedEditFile as PlatformOpenedEditFile;
+use crate::platform::fs::mutation::{FileMutation, MutationGuard};
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem::diff::{
     TextReplacement, apply_replacements_preserving_unchanged_lines, generate_diff_string,
     generate_unified_patch,
 };
 use crate::tools::filesystem_target_for_execution;
-use crate::tools::mutation_queue::with_file_mutation_queue;
 use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
 use ai::api::conversation::ContentBlock;
 use futures::future::{BoxFuture, FutureExt};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
 
 const DESCRIPTION: &str = "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. Merge nearby changes into one edit; do not include large unchanged regions.";
-const MAX_EDIT_FILE_BYTES: u64 = 5 * 1024 * 1024;
 
 struct Edit {
     old_text: String,
@@ -146,7 +145,12 @@ fn apply_edits(normalized: &str, edits: &[Edit], path: &str) -> Result<(String, 
         if !found {
             return Err(not_found(path, i, total));
         }
-        let occ = count_occurrences(&base, &e.old_text);
+        let search_text = if used_fuzzy {
+            normalize_for_fuzzy(&e.old_text)
+        } else {
+            e.old_text.clone()
+        };
+        let occ = count_occurrences(&base, &search_text);
         if occ > 1 {
             return Err(duplicate(path, i, total, occ));
         }
@@ -156,7 +160,7 @@ fn apply_edits(normalized: &str, edits: &[Edit], path: &str) -> Result<(String, 
     matched.sort_by_key(|m| m.1);
     for w in matched.windows(2) {
         let (a, b) = (&w[0], &w[1]);
-        if a.1 + a.2 > b.1 {
+        if a.1.saturating_add(a.2) > b.1 {
             return Err(format!(
                 "edits[{}] and edits[{}] overlap in {path}. Merge them into one edit or target disjoint regions.",
                 a.0, b.0
@@ -273,7 +277,11 @@ pub trait EditOperations: Send + Sync {
 
 pub trait OpenedEditFile: Send + Sync {
     fn read_file<'a>(&'a self) -> BoxFuture<'a, Result<Vec<u8>, String>>;
-    fn write_file<'a>(&'a self, content: &'a [u8]) -> BoxFuture<'a, Result<(), String>>;
+    fn write_file<'a>(
+        &'a self,
+        content: &'a [u8],
+        mutation: MutationGuard,
+    ) -> BoxFuture<'a, Result<(), String>>;
 }
 
 #[derive(Debug, Default)]
@@ -288,8 +296,7 @@ impl EditOperations for RealEditOperations {
         async move {
             let file = target.opened_file()?;
             Ok(Box::new(RealOpenedEditFile {
-                file,
-                display: target.display_path().to_path_buf(),
+                inner: PlatformOpenedEditFile::new(file, target.display_path().to_path_buf()),
             }) as Box<dyn OpenedEditFile>)
         }
         .boxed()
@@ -297,108 +304,20 @@ impl EditOperations for RealEditOperations {
 }
 
 struct RealOpenedEditFile {
-    file: Arc<Mutex<cap_std::fs::File>>,
-    display: std::path::PathBuf,
+    inner: PlatformOpenedEditFile,
 }
 
 impl OpenedEditFile for RealOpenedEditFile {
     fn read_file<'a>(&'a self) -> BoxFuture<'a, Result<Vec<u8>, String>> {
-        let file = self.file.clone();
-        let display = self.display.clone();
-        async move {
-            tokio::task::spawn_blocking(move || {
-                let mut file = file.lock().map_err(|_| {
-                    format!("edit: opened file lock poisoned: {}", display.display())
-                })?;
-                let metadata = file.metadata().map_err(|error| {
-                    format!(
-                        "edit: cannot stat opened file {}: {error}",
-                        display.display()
-                    )
-                })?;
-                if metadata.len() > MAX_EDIT_FILE_BYTES {
-                    return Err(format!(
-                        "edit: refusing to read {} because it exceeds the {} safety limit",
-                        display.display(),
-                        crate::tools::output::format_size(MAX_EDIT_FILE_BYTES as usize)
-                    ));
-                }
-                file.seek(SeekFrom::Start(0)).map_err(|error| {
-                    format!(
-                        "edit: cannot seek opened file {}: {error}",
-                        display.display()
-                    )
-                })?;
-                let mut raw = Vec::with_capacity(
-                    usize::try_from(metadata.len())
-                        .unwrap_or(MAX_EDIT_FILE_BYTES as usize)
-                        .min(MAX_EDIT_FILE_BYTES as usize),
-                );
-                std::io::Read::by_ref(&mut *file)
-                    .take(MAX_EDIT_FILE_BYTES + 1)
-                    .read_to_end(&mut raw)
-                    .map_err(|error| {
-                        format!(
-                            "edit: cannot read opened file {}: {error}",
-                            display.display()
-                        )
-                    })?;
-                if raw.len() > MAX_EDIT_FILE_BYTES as usize {
-                    return Err(format!(
-                        "edit: refusing to retain more than {} from {}",
-                        crate::tools::output::format_size(MAX_EDIT_FILE_BYTES as usize),
-                        display.display()
-                    ));
-                }
-                Ok(raw)
-            })
-            .await
-            .map_err(|error| format!("edit: blocking read task failed: {error}"))?
-        }
-        .boxed()
+        async move { self.inner.read_file().await }.boxed()
     }
 
-    fn write_file<'a>(&'a self, content: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
-        let file = self.file.clone();
-        let display = self.display.clone();
-        let content = content.to_vec();
-        async move {
-            tokio::task::spawn_blocking(move || {
-                let mut file = file.lock().map_err(|_| {
-                    format!("edit: opened file lock poisoned: {}", display.display())
-                })?;
-                file.seek(SeekFrom::Start(0)).map_err(|error| {
-                    format!(
-                        "edit: cannot seek opened file {}: {error}",
-                        display.display()
-                    )
-                })?;
-                file.set_len(0).map_err(|error| {
-                    format!(
-                        "edit: cannot truncate opened file {}: {error}",
-                        display.display()
-                    )
-                })?;
-                file.write_all(&content).map_err(|error| {
-                    format!(
-                        "edit: failed to write opened file {}: {error}",
-                        display.display()
-                    )
-                })?;
-                // The write goes through the opened handle (renaming would
-                // detach the bound file object), so it is not crash-atomic;
-                // at least force the bytes to disk before reporting success.
-                file.sync_all().map_err(|error| {
-                    format!(
-                        "edit: failed to sync opened file {}: {error}",
-                        display.display()
-                    )
-                })
-            })
-            .await
-            .map_err(|error| format!("edit: blocking write task failed: {error}"))?
-        }
-        .boxed()
+    fn write_file<'a>(
+        &'a self,
+        content: &'a [u8],
+        mutation: MutationGuard,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        async move { self.inner.write_file(content, mutation).await }.boxed()
     }
 }
 
@@ -439,6 +358,7 @@ fn coding_session_error_message(error: CodingSessionError) -> String {
         | CodingSessionError::Resource { message }
         | CodingSessionError::Session { message }
         | CodingSessionError::SessionWriteRejected { message }
+        | CodingSessionError::SessionWriteFailure { message, .. }
         | CodingSessionError::SelfHealingEditFailed { message, .. }
         | CodingSessionError::Provider { message }
         | CodingSessionError::Tool { message }
@@ -512,41 +432,44 @@ pub(crate) async fn edit_execute_with_target(
         .ok_or("edit: missing or non-string 'path' argument")?
         .to_string();
     let edits = parse_edits(&args)?;
-    let queue_path = target.display_path().to_path_buf();
+    let mutation = FileMutation::begin(target).await?;
     let target = target.clone();
-    let ops = ops.clone();
-    with_file_mutation_queue(&queue_path, move || async move {
-        let opened = ops.open_file(&target).await?;
-        let raw = opened.read_file().await?;
-        let content = String::from_utf8_lossy(&raw).into_owned();
-        let (bom, body) = strip_bom(&content);
-        let crlf = detect_crlf(body);
-        let normalized = normalize_to_lf(body);
-        let (base, new_content) = apply_edits(&normalized, &edits, &path)?;
-        let final_content = format!("{bom}{}", restore_crlf(&new_content, crlf));
-        if final_content.len() > crate::limits::MAX_EDIT_RESULT_BYTES {
-            return Err(format!(
-                "edit: result exceeds the {} safety limit",
-                crate::tools::output::format_size(crate::limits::MAX_EDIT_RESULT_BYTES)
-            ));
-        }
-        opened.write_file(final_content.as_bytes()).await?;
-        let diff = generate_diff_string(&base, &new_content, 4);
-        let patch = generate_unified_patch(&path, &base, &new_content);
-        let mut details = serde_json::json!({
-            "diff": diff.diff,
-            "patch": patch,
-        });
-        if let Some(first_changed_line) = diff.first_changed_line {
-            details["firstChangedLine"] = serde_json::json!(first_changed_line);
-        }
-        Ok(AgentToolOutput::new(vec![ContentBlock::Text {
-            text: format!("Successfully replaced {} block(s) in {path}.", edits.len()),
-            text_signature: None,
-        }])
-        .with_details(details))
-    })
-    .await
+    let opened = ops.open_file(&target).await?;
+    let raw = opened.read_file().await?;
+    let content = String::from_utf8(raw).map_err(|error| {
+        format!(
+            "edit: cannot edit {path} because the file is not valid UTF-8 (invalid byte at offset {}); use bash with an encoding-aware tool instead",
+            error.utf8_error().valid_up_to()
+        )
+    })?;
+    let (bom, body) = strip_bom(&content);
+    let crlf = detect_crlf(body);
+    let normalized = normalize_to_lf(body);
+    let (base, new_content) = apply_edits(&normalized, &edits, &path)?;
+    let final_content = format!("{bom}{}", restore_crlf(&new_content, crlf));
+    if final_content.len() > crate::limits::MAX_EDIT_RESULT_BYTES {
+        return Err(format!(
+            "edit: result exceeds the {} safety limit",
+            crate::platform::io::output::format_size(crate::limits::MAX_EDIT_RESULT_BYTES)
+        ));
+    }
+    opened
+        .write_file(final_content.as_bytes(), mutation)
+        .await?;
+    let diff = generate_diff_string(&base, &new_content, 4);
+    let patch = generate_unified_patch(&path, &base, &new_content);
+    let mut details = serde_json::json!({
+        "diff": diff.diff,
+        "patch": patch,
+    });
+    if let Some(first_changed_line) = diff.first_changed_line {
+        details["firstChangedLine"] = serde_json::json!(first_changed_line);
+    }
+    Ok(AgentToolOutput::new(vec![ContentBlock::Text {
+        text: format!("Successfully replaced {} block(s) in {path}.", edits.len()),
+        text_signature: None,
+    }])
+    .with_details(details))
 }
 
 pub fn edit_tool(filesystem: FilesystemCapability) -> AgentTool {
@@ -571,5 +494,72 @@ pub fn edit_tool_with_operations(
         parameters: schema(),
         execution_mode: None,
         execute,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{Edit, RealEditOperations, apply_edits, edit_execute_with_target};
+    use crate::platform::fs::capability::FilesystemCapability;
+
+    #[test]
+    fn fuzzy_uniqueness_counts_in_the_same_normalized_space_as_search() {
+        let cases = [
+            ("curly quotes", "“hello”   \n“hello”   \n", "“hello”\n"),
+            (
+                "non-breaking space",
+                "a\u{a0}b  \na\u{a0}b  \n",
+                "a\u{a0}b\n",
+            ),
+            ("NFKC", "Ａ  \nＡ  \n", "Ａ\n"),
+            ("trailing whitespace", "same  \nsame  \n", "same\n"),
+        ];
+        for (label, content, old_text) in cases {
+            let error = apply_edits(
+                content,
+                &[Edit {
+                    old_text: old_text.into(),
+                    new_text: "replacement\n".into(),
+                }],
+                "target.txt",
+            )
+            .expect_err(label);
+            assert!(
+                error.contains("Found 2 occurrences"),
+                "{label} should reject both normalized candidates: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn non_utf8_files_are_rejected_without_changing_any_byte() {
+        for (name, bytes) in [
+            ("latin1.txt", b"caf\xe9\n".as_slice()),
+            ("gbk.txt", [0xC4, 0xE3, 0xBA, 0xC3, b'\n'].as_slice()),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+            let target = filesystem
+                .prepare_target_for_tool("edit", name)
+                .await
+                .unwrap();
+            let error = edit_execute_with_target(
+                &target,
+                serde_json::json!({
+                    "path": name,
+                    "edits": [{"oldText": "text", "newText": "replacement"}],
+                }),
+                Arc::new(RealEditOperations),
+            )
+            .await
+            .expect_err("non-UTF-8 edit must fail");
+            assert!(error.contains("not valid UTF-8"));
+            assert!(error.contains("encoding-aware tool"));
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
     }
 }

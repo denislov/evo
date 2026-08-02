@@ -930,6 +930,7 @@ impl CodingProtocolEventAdapter {
                 operation_id,
                 reason,
                 status,
+                ..
             }) => vec![ProtocolEventPayload::SessionWriteFailed {
                 operation_id: operation_id.clone(),
                 status: match status {

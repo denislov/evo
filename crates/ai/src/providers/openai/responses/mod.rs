@@ -20,11 +20,8 @@ pub struct OpenAIResponsesProvider {
 }
 
 impl OpenAIResponsesProvider {
-    pub fn new(api_key: Option<String>) -> Self {
-        Self {
-            client: crate::transport::client::authenticated_client(),
-            api_key,
-        }
+    pub(crate) fn with_client(api_key: Option<String>, client: reqwest::Client) -> Self {
+        Self { client, api_key }
     }
 
     fn resolve_key(&self) -> Option<String> {

@@ -5,12 +5,12 @@ use ai::api::stream::StreamOptions;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::bootstrap::PromptInvocation;
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::kernel::capability::ModelCapability;
+use crate::kernel::error::CodingSessionError;
 use crate::operations::prompt::context::{
     InternalPromptTurnOutcome, PromptTurnOptions, PromptTurnTransaction, RuntimeSnapshot,
 };
-use crate::runtime::capability::ModelCapability;
-use crate::runtime::capability::OperationCapabilitySnapshot;
-use crate::runtime::facade::CodingSessionError;
 use crate::services::runtime::{RuntimeService, scoped_provider_streamer_for_runtime};
 
 use crate::session::replay::{SessionReplay, transcript_item_id};

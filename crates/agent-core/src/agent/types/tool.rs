@@ -259,13 +259,15 @@ impl AgentTool {
                 "tool description must be non-empty and at most 1024 characters/4096 bytes",
             ));
         }
-        if self.kind == ToolKind::Custom {
+        // Custom tools accept raw string input; provider-executed tools take no
+        // local input at all. Neither declares a JSON schema.
+        if matches!(self.kind, ToolKind::Custom | ToolKind::WebSearch) {
             return if self.parameters.is_null() {
                 Ok(())
             } else {
                 Err(AgentToolDefinitionError::new(
                     "parameters",
-                    "custom tools accept raw string input and must not declare a JSON schema",
+                    "custom and provider-executed tools must not declare a JSON schema",
                 ))
             };
         }
@@ -349,6 +351,38 @@ impl AgentTool {
         let mut tool = Self::new_text(name, description, serde_json::Value::Null, f);
         tool.kind = ToolKind::Custom;
         tool
+    }
+
+    /// Declare the provider-executed `web_search` tool.
+    ///
+    /// The harness never runs it. The provider performs the search server-side
+    /// and reports it as a [`ContentBlock::ProviderItem`] on the assistant
+    /// message instead of a tool call, so no local result is ever produced.
+    /// `execute` exists only to satisfy the field and rejects the invocation
+    /// that should never arrive.
+    pub fn web_search() -> Self {
+        Self {
+            kind: ToolKind::WebSearch,
+            name: "web_search".into(),
+            description: "Search the web. Executed by the model provider; results arrive with \
+                          the assistant message."
+                .into(),
+            parameters: serde_json::Value::Null,
+            execution_mode: None,
+            execute: Arc::new(|_context, _arguments, _on_update| {
+                Box::pin(async {
+                    Err("web_search is executed by the provider and cannot run locally".into())
+                })
+            }),
+        }
+    }
+
+    /// Whether the provider executes this tool rather than the harness.
+    ///
+    /// Server-side tools are declared to the provider but never dispatched
+    /// locally and never yield an [`AgentToolResult`].
+    pub fn is_provider_executed(&self) -> bool {
+        self.kind == ToolKind::WebSearch
     }
 }
 
@@ -839,6 +873,33 @@ mod tests {
                 .is_ok()
         );
         assert!(tool.validate_arguments(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn web_search_declaration_is_valid_but_never_locally_invocable() {
+        let tool = AgentTool::web_search();
+        assert!(tool.validate().is_ok());
+        assert!(tool.is_provider_executed());
+        // No argument shape is accepted: the provider owns execution, so a
+        // local call is always a protocol error rather than a schema mismatch.
+        assert!(tool.validate_arguments(&serde_json::json!({})).is_err());
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"query": "rust"}))
+                .is_err()
+        );
+        assert!(
+            tool.validate_arguments(&serde_json::Value::String("rust".into()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn web_search_must_not_declare_a_schema() {
+        let tool = AgentTool {
+            parameters: serde_json::json!({"type": "object"}),
+            ..AgentTool::web_search()
+        };
+        assert_eq!(tool.validate().unwrap_err().field(), "parameters");
     }
 
     #[test]

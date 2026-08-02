@@ -1,13 +1,40 @@
 use super::wire;
 use crate::model::Model;
-use crate::protocol::{ContentBlock, Context, Message, StreamOptions};
+use crate::protocol::{ContentBlock, Context, Message, StreamOptions, ToolKind};
+use crate::providers::common::unsupported_tool_error;
 
 pub fn build_request(
     model: &Model,
     ctx: &Context,
     opts: &Option<StreamOptions>,
-) -> wire::RequestBody {
-    wire::RequestBody {
+) -> Result<wire::RequestBody, String> {
+    // Codex shares the Responses stream parser, so a server-side tool's
+    // outcome would decode into a `ProviderItem` — but this converter has no
+    // replay path for one, so the item would be dropped on the next stateless
+    // turn. Reject the declaration instead of stranding the result.
+    let tools = ctx
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| match tool.kind {
+                    ToolKind::Function => Ok(wire::CodexTool {
+                        tool_type: "function".into(),
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        parameters: tool.parameters.clone(),
+                        strict: None,
+                    }),
+                    ToolKind::WebSearch | ToolKind::Custom => {
+                        Err(unsupported_tool_error("openai-codex-responses", tool))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+
+    Ok(wire::RequestBody {
         model: model.id.clone(),
         store: Some(false),
         stream: Some(true),
@@ -17,18 +44,7 @@ pub fn build_request(
                 .unwrap_or_else(|| "You are a helpful assistant.".into()),
         ),
         input: ctx.messages.iter().flat_map(convert_message).collect(),
-        tools: ctx.tools.as_ref().map(|tools| {
-            tools
-                .iter()
-                .map(|tool| wire::CodexTool {
-                    tool_type: "function".into(),
-                    name: tool.name.clone(),
-                    description: tool.description.clone(),
-                    parameters: tool.parameters.clone(),
-                    strict: None,
-                })
-                .collect()
-        }),
+        tools,
         tool_choice: opts
             .as_ref()
             .and_then(|options| options.tool_choice.as_ref())
@@ -52,7 +68,7 @@ pub fn build_request(
         }),
         include: vec!["reasoning.encrypted_content".into()],
         prompt_cache_key: opts.as_ref().and_then(|o| o.session_id.clone()),
-    }
+    })
 }
 
 fn convert_message(message: &Message) -> Vec<serde_json::Value> {

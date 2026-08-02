@@ -12,6 +12,7 @@ use crate::registry::{
 pub struct AiClient {
     registry: ProviderRegistry,
     auth_resolver: Arc<dyn ProviderAuthResolver>,
+    transport_client: reqwest::Client,
 }
 
 impl Default for AiClient {
@@ -26,10 +27,22 @@ impl AiClient {
     }
 
     pub fn with_auth_resolver(auth_resolver: Arc<dyn ProviderAuthResolver>) -> Self {
-        Self {
+        Self::try_with_auth_resolver_and_transport(
+            auth_resolver,
+            crate::transport::client::TransportConfig::default(),
+        )
+        .expect("the default rustls HTTP client configuration should build")
+    }
+
+    pub fn try_with_auth_resolver_and_transport(
+        auth_resolver: Arc<dyn ProviderAuthResolver>,
+        transport: crate::transport::client::TransportConfig,
+    ) -> Result<Self, String> {
+        Ok(Self {
             registry: ProviderRegistry::new(),
             auth_resolver,
-        }
+            transport_client: crate::transport::client::authenticated_client(&transport)?,
+        })
     }
 
     pub fn with_registry(
@@ -39,6 +52,10 @@ impl AiClient {
         Self {
             registry,
             auth_resolver,
+            transport_client: crate::transport::client::authenticated_client(
+                &crate::transport::client::TransportConfig::default(),
+            )
+            .expect("the default rustls HTTP client configuration should build"),
         }
     }
 
@@ -51,7 +68,7 @@ impl AiClient {
     }
 
     pub fn register_builtins(&self) {
-        providers::register_builtins_into(&self.registry);
+        providers::register_builtins_into(&self.registry, &self.transport_client);
     }
 
     pub fn unregister_provider(&self, api: &str) {
@@ -92,6 +109,8 @@ mod tests {
     use super::AiClient;
     use crate::protocol::{ContentBlock, Context};
     use crate::providers::faux::FauxProvider;
+    use crate::registry::EnvProviderAuthResolver;
+    use crate::transport::client::TransportConfig;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -118,5 +137,34 @@ mod tests {
             message.content.as_slice(),
             [ContentBlock::Text { text, .. }] if text == "complete"
         ));
+    }
+
+    #[test]
+    fn configured_proxy_and_connect_timeout_build_a_scoped_transport() {
+        let client = AiClient::try_with_auth_resolver_and_transport(
+            Arc::new(EnvProviderAuthResolver),
+            TransportConfig::new(Some("http://127.0.0.1:8888".into()), Some(4_321)),
+        )
+        .expect("valid proxy and timeout build a client");
+        client.register_builtins();
+        assert!(client.lookup_provider("openai-responses").is_some());
+    }
+
+    #[test]
+    fn invalid_transport_settings_fail_before_provider_registration() {
+        assert!(
+            AiClient::try_with_auth_resolver_and_transport(
+                Arc::new(EnvProviderAuthResolver),
+                TransportConfig::new(Some("://bad proxy".into()), Some(1_000)),
+            )
+            .is_err()
+        );
+        assert!(
+            AiClient::try_with_auth_resolver_and_transport(
+                Arc::new(EnvProviderAuthResolver),
+                TransportConfig::new(None, Some(0)),
+            )
+            .is_err()
+        );
     }
 }

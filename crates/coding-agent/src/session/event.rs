@@ -329,7 +329,7 @@ fn default_recovery_record_version() -> u64 {
 }
 
 fn default_operation_descriptor_revision() -> u16 {
-    crate::runtime::operation::contract::OPERATION_DESCRIPTOR_REVISION
+    crate::kernel::operation::OPERATION_DESCRIPTOR_REVISION
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

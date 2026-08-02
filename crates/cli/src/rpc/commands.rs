@@ -149,7 +149,7 @@ impl RpcState {
                                 "active RPC operation has no runtime shutdown authority".into(),
                             )
                         })?;
-                    shutdown_handle.request_shutdown();
+                    shutdown_handle.request_shutdown()?;
                     self.pending_shutdown_response = Some(id);
                     return Ok(());
                 }
@@ -443,7 +443,7 @@ impl RpcState {
                         id,
                         "get_state",
                         Some(
-                            serde_json::to_value(self.session_state())
+                            serde_json::to_value(self.session_state()?)
                                 .expect("rpc state serializes"),
                         ),
                     ),
@@ -730,7 +730,8 @@ impl RpcState {
                     .coding_session
                     .as_mut()
                     .ok_or_else(|| CliError::SessionFailure("no active session".into()))?
-                    .retry_recovery(request)?;
+                    .retry_recovery(request)
+                    .await?;
                 self.remember_idempotency_key(key, "recovery_retry", OperationKind::Prompt);
                 write_rpc_response(writer, RpcResponse::success(id, "recovery_retry", Some(serde_json::json!({"operationId": result.operation_id, "recoveryId": result.recovery_id, "attemptCount": result.attempt_count, "lastAttemptAt": result.last_attempt_at, "nextAttemptAt": result.next_attempt_at})))) .await
             }
@@ -773,7 +774,8 @@ impl RpcState {
                     .coding_session
                     .as_mut()
                     .ok_or_else(|| CliError::SessionFailure("no active session".into()))?
-                    .resolve_recovery(request)?;
+                    .resolve_recovery(request)
+                    .await?;
                 self.remember_idempotency_key(key, "recovery_resolve", OperationKind::Prompt);
                 write_rpc_response(
                     writer,
@@ -851,12 +853,12 @@ impl RpcState {
             let snapshot = session
                 .current_session_snapshot()?
                 .expect("forked runtime sessions are persistent");
-            let session_dir = session
-                .session_storage_path()?
-                .expect("forked runtime sessions have a storage path");
+            let storage = session
+                .session_storage()?
+                .expect("forked runtime sessions have durable storage");
             Ok::<_, CodingAgentPublicError>((
                 snapshot.choice.id,
-                session_dir,
+                storage,
                 snapshot.choice.active_leaf_id,
             ))
         }) {
@@ -882,13 +884,13 @@ impl RpcState {
         self.adapter_applied_sequence = ProductEventSequence::default();
         self.active_shutdown_handle = None;
 
-        let response_data = if let Some((session_id, session_dir, active_leaf_id)) = forked_state {
+        let response_data = if let Some((session_id, storage, active_leaf_id)) = forked_state {
             self.application.session_bootstrap = self
                 .application
                 .session_bootstrap
                 .clone()
                 .with_session_id(session_id.clone());
-            self.active_session_path = Some(session_dir);
+            self.active_session_storage = Some(storage);
             self.active_leaf_id = active_leaf_id;
             self.coding_session = forked;
             serde_json::json!({
@@ -902,7 +904,7 @@ impl RpcState {
                 .session_bootstrap
                 .clone()
                 .with_fresh_session();
-            self.active_session_path = None;
+            self.active_session_storage = None;
             self.active_leaf_id = None;
             self.coding_session = None;
             serde_json::json!({"cancelled": false})
@@ -1002,7 +1004,7 @@ impl RpcState {
                 }
             },
         };
-        self.ensure_session_event_pump(&session);
+        self.ensure_session_event_pump(&session)?;
         let event_flush = self
             .session_event_flush
             .as_ref()
@@ -1081,10 +1083,10 @@ impl RpcState {
         }
 
         let data = if let Some(session) = self.coding_session.as_ref() {
-            rpc_agent_profiles_data(session)
+            rpc_agent_profiles_data(session)?
         } else {
             match self.open_profile_listing_session().await {
-                Ok(session) => rpc_agent_profiles_data(&session),
+                Ok(session) => rpc_agent_profiles_data(&session)?,
                 Err(error) => {
                     write_rpc_response(writer, rpc_cli_error(id, "list_agent_profiles", &error))
                         .await?;
@@ -1225,7 +1227,7 @@ impl RpcState {
                 ToolAuthorizationDecision::AllowForOperation
             }
         };
-        match self.decide_tool_authorization(&identity, decision) {
+        match self.decide_tool_authorization(&identity, decision).await {
             Ok(()) => {
                 write_rpc_response(
                     writer,
@@ -1263,7 +1265,9 @@ impl RpcState {
     where
         W: AsyncWrite + Unpin,
     {
-        match self.decide_tool_authorization(&identity, ToolAuthorizationDecision::Deny { reason })
+        match self
+            .decide_tool_authorization(&identity, ToolAuthorizationDecision::Deny { reason })
+            .await
         {
             Ok(()) => {
                 write_rpc_response(
@@ -1293,11 +1297,15 @@ impl RpcState {
         }
         self.coding_session
             .as_ref()
-            .map(CodingAgentSession::pending_tool_authorizations)
             .ok_or_else(|| CliError::SessionFailure("no active coding session".into()))
+            .and_then(|session| {
+                session
+                    .pending_tool_authorizations()
+                    .map_err(CliError::from)
+            })
     }
 
-    fn decide_tool_authorization(
+    async fn decide_tool_authorization(
         &self,
         identity: &ToolAuthorizationIdentity,
         decision: ToolAuthorizationDecision,
@@ -1305,12 +1313,14 @@ impl RpcState {
         if let Some(connection) = self.client_connection.as_ref() {
             return connection
                 .decide_tool_authorization(identity, decision)
+                .await
                 .map_err(CliError::from);
         }
         self.coding_session
             .as_ref()
             .ok_or_else(|| CliError::SessionFailure("no active coding session".into()))?
             .decide_tool_authorization(identity, decision)
+            .await
             .map_err(CliError::from)
     }
 
@@ -1408,7 +1418,7 @@ impl RpcState {
         } else {
             reason
         };
-        self.ensure_session_event_pump(&session);
+        self.ensure_session_event_pump(&session)?;
         let event_flush = self
             .session_event_flush
             .as_ref()
@@ -1536,8 +1546,8 @@ fn rpc_self_healing_check_output_data(output: &SelfHealingEditCheckOutput) -> se
     })
 }
 
-fn rpc_agent_profiles_data(session: &CodingAgentSession) -> serde_json::Value {
-    let view = session.view();
+fn rpc_agent_profiles_data(session: &CodingAgentSession) -> Result<serde_json::Value, CliError> {
+    let view = session.view()?;
     let default_profile_id = view.default_agent_profile_id;
     let agents = session
         .agent_profiles()
@@ -1545,11 +1555,11 @@ fn rpc_agent_profiles_data(session: &CodingAgentSession) -> serde_json::Value {
         .map(|profile| rpc_agent_profile(&profile))
         .collect::<Vec<_>>();
 
-    serde_json::json!({
+    Ok(serde_json::json!({
         "defaultAgentProfileId": default_profile_id.as_str(),
         "agents": agents,
         "diagnostics": rpc_profile_diagnostics(session),
-    })
+    }))
 }
 
 fn rpc_team_profiles_data(session: &CodingAgentSession) -> serde_json::Value {

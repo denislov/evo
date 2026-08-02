@@ -1,20 +1,22 @@
-use crate::runtime::facade::FilesystemCapability;
+use crate::platform::fs::capability::FilesystemCapability;
+use crate::platform::io::output::{DEFAULT_MAX_BYTES, TruncationLimit, format_size, truncate_head};
 use crate::tools::FilesystemTarget;
+use crate::tools::args::bounded_arg;
 use crate::tools::filesystem_target_for_execution;
-use crate::tools::output::{DEFAULT_MAX_BYTES, TruncationLimit, format_size, truncate_head};
 use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
 use ai::api::conversation::ContentBlock;
 use std::sync::Arc;
 
 const DESCRIPTION: &str = "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first).";
 const DEFAULT_LIMIT: usize = 500;
+const MAX_LIMIT: usize = 5_000;
 
 fn schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
             "path": { "type": "string", "description": "Directory to list (default: current directory)" },
-            "limit": { "type": "number", "description": "Maximum number of entries to return (default: 500)" }
+            "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "description": "Maximum number of entries to return (default: 500)" }
         }
     })
 }
@@ -26,23 +28,17 @@ fn text_block(text: String) -> Vec<ContentBlock> {
     }]
 }
 
-fn limit_arg(args: &serde_json::Value, default: usize) -> usize {
-    args.get("limit")
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
-                .or_else(|| value.as_f64().map(|n| n.max(1.0) as u64))
-        })
-        .map(|n| n.max(1) as usize)
-        .unwrap_or(default)
+fn limit_arg(args: &serde_json::Value) -> Result<usize, String> {
+    bounded_arg(args, "limit", DEFAULT_LIMIT, MAX_LIMIT)
+        .map(|limit| limit.max(1))
+        .map_err(|error| format!("ls: {error}"))
 }
 
 async fn ls_target(
     target: &FilesystemTarget,
     args: serde_json::Value,
 ) -> Result<Vec<ContentBlock>, String> {
-    let limit = limit_arg(&args, DEFAULT_LIMIT);
+    let limit = limit_arg(&args)?;
     let target = target.clone();
     let mut entries = tokio::task::spawn_blocking(move || {
         let directory = target.opened_directory()?;
@@ -101,10 +97,12 @@ async fn ls_target(
 
     let mut notices = Vec::new();
     if entry_limit_reached {
-        notices.push(format!(
-            "{limit} entries limit reached. Use limit={} for more",
-            limit * 2
-        ));
+        let suggested = limit.saturating_mul(2).min(MAX_LIMIT);
+        notices.push(if suggested > limit {
+            format!("{limit} entries limit reached. Use limit={suggested} for more")
+        } else {
+            format!("Maximum {MAX_LIMIT} entries reached")
+        });
     }
     if truncation.truncated {
         notices.push(format!("{} limit reached", format_size(DEFAULT_MAX_BYTES)));

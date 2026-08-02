@@ -192,11 +192,7 @@ mod tests {
     };
 
     fn transcript(items: Vec<CodingAgentSessionTranscriptItem>) -> CodingAgentTranscriptSnapshot {
-        CodingAgentTranscriptSnapshot {
-            session_id: "session-1".into(),
-            active_leaf_id: Some("leaf-1".into()),
-            items,
-        }
+        CodingAgentTranscriptSnapshot::new("session-1", Some("leaf-1".into()), items)
     }
 
     fn user(index: usize) -> CodingAgentSessionTranscriptItem {

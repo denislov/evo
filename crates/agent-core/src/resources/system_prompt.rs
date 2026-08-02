@@ -217,10 +217,7 @@ mod tests {
 
     #[test]
     fn empty_arguments_use_the_default() {
-        assert_eq!(
-            substitute_args("${1:-fallback}", &args(&[""])),
-            "fallback"
-        );
+        assert_eq!(substitute_args("${1:-fallback}", &args(&[""])), "fallback");
     }
 
     #[test]

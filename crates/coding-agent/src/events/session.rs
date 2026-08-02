@@ -2,7 +2,7 @@ use super::emission::ProductEventDraft;
 use super::{
     CodingAgentProductEventDurability, CodingAgentProductEventKind,
     CodingAgentProductEventTerminalStatus, CodingAgentSessionProductEvent,
-    CodingAgentSessionWriteFailureStatus,
+    CodingAgentSessionWriteFailureReason, CodingAgentSessionWriteFailureStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +74,7 @@ pub(crate) enum SessionWriteEvent {
         operation_id: String,
         reason: String,
         status: CodingAgentSessionWriteFailureStatus,
+        failure_reason: Option<CodingAgentSessionWriteFailureReason>,
     },
 }
 
@@ -133,6 +134,7 @@ impl SessionWriteEvent {
                 operation_id,
                 reason,
                 status,
+                failure_reason,
             } => {
                 let durability = match status {
                     CodingAgentSessionWriteFailureStatus::Definite => {
@@ -153,6 +155,7 @@ impl SessionWriteEvent {
                             operation_id: operation_id.clone(),
                             reason,
                             status,
+                            failure_reason,
                         },
                     ),
                     operation_id: Some(operation_id),

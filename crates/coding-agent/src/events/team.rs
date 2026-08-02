@@ -3,9 +3,9 @@ use super::{
     CodingAgentProductEventDurability, CodingAgentProductEventError, CodingAgentProductEventKind,
     CodingAgentProductEventTerminalStatus, CodingAgentTeamProductEvent,
 };
+use crate::kernel::error::CodingSessionError;
+use crate::kernel::operation::OperationRootTerminalEvidence;
 use crate::profiles::ProfileId;
-use crate::runtime::facade::CodingSessionError;
-use crate::runtime::operation::contract::OperationRootTerminalEvidence;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TeamEvent {

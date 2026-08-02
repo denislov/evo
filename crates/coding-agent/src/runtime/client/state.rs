@@ -1,10 +1,11 @@
 use crate::authorization::ToolAuthorizationRequest;
 use crate::events::{ProductEvent, ProductEventSequence};
-use crate::runtime::capability::CapabilityGeneration;
+use crate::kernel::capability::CapabilityGeneration;
+use crate::kernel::operation::OperationKind;
 use crate::runtime::client::context::UiContextProjection;
-use crate::runtime::facade::context::{CodingAgentCapabilities, CodingAgentSessionView};
-use crate::runtime::operation::control::OperationKind;
+use crate::runtime::facade::context::CodingAgentCapabilities;
 use crate::runtime::version::ProtocolFamilyVersion;
+use crate::session::view::CodingAgentSessionView;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UiSnapshotCursor {

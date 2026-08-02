@@ -38,6 +38,37 @@
 `coding-agent` 负责配置解析、认证材料保护、操作准入、会话持久化、工具授权、
 事件顺序、恢复语义和运行时关闭。
 
+内部实现遵循由 `tests/module_layering.rs` 自动守卫的五层单向依赖：
+
+```text
+L4 api/adapters (app, runtime/facade, api::*)
+  -> L3 application (application, operations, services, session, events, tools, projection)
+  -> L2 domain (authorization, config, profiles, theme, workspace)
+  -> L1 platform (fs, process, io, time, mutex policy)
+  -> L0 kernel (ids, values, errors, limits)
+```
+
+高层可以使用更低层，低层不得反向引用。适配器不应把当前目录结构当作 API；唯一公开
+边界仍是上表中的 `api::*`。
+
+## Provider transport 设置
+
+`settings.toml` 支持以下 product-owned transport 设置：
+
+```toml
+http_proxy = "http://127.0.0.1:8080"
+websocket_connect_timeout_ms = 10000
+```
+
+`http_proxy` 会应用到同一 `AiClient` 注册的所有内建 provider。虽然第二个键保留了
+历史名称，它现在是内建 provider HTTP client 的 connect timeout，因此也约束未来的
+WebSocket handshake；值必须大于 0。配置在 provider 注册前完成，非法 proxy URL 或
+timeout 会让应用上下文解析显式失败，不会静默回退到无代理连接。
+
+Rust-native schema 不再接受 TS 版遗留键 `transport`、`npm_command`、
+`collapse_changelog` 和 `warnings.anthropic_extra_usage`。发现这些键时会按 unknown field
+报告配置错误；请直接删除，而不是迁移到新的同义字段。
+
 ## 选择启动入口
 
 ### 应用适配器：`CodingAgentApplicationStartup`
@@ -216,7 +247,7 @@ fn bootstrap_projection(
     session: &CodingAgentSession,
 ) -> Result<CodingAgentClientProjection, CodingAgentPublicError> {
     let bootstrap = CodingAgentClientBootstrap {
-        snapshot: session.snapshot(),
+        snapshot: session.snapshot()?,
         transcript: session.transcript_snapshot()?,
         pending_recoveries: session.recovery_pending()?,
     };
@@ -231,6 +262,14 @@ fn bootstrap_projection(
 - `Applied(changes)`：只刷新 `changes.areas()` 指定的界面区域；
 - `IgnoredDuplicate`：忽略重复事件；
 - `NeedsResync(issue)`：停止应用增量事件，获取新快照并替换投影。
+
+普通 session bootstrap 是有界视图，不是完整历史导出。repository 从 active event
+log 尾部按 64 KiB 分块反向扫描，最多物化 10,000 个事件或 32 MiB；
+`CodingAgentTranscriptSnapshot::omitted_items` 表示未物化的旧项，存在旧项时还会返回
+opaque `continuation`。适配器应把它展示为“可继续加载/历史已截断”的事实，不得自行
+推导文件偏移或 session sequence。客户端 projection 再执行一次相同的 item/byte
+预算，作为面对 wire 输入时的二次防线。只有显式 `SessionExport` 会完整 replay；
+不要用 bootstrap/transcript snapshot 实现归档或备份。
 
 事件成功应用后调用 `connection.acknowledge(event.sequence())`。ack 表示该逻辑客户端
 已经处理到某个 sequence，不是持久化确认，也不能在实际应用事件之前提前发送。
@@ -303,7 +342,7 @@ use coding_agent::api::authorization::ToolAuthorizationDecision;
 use coding_agent::api::client::CodingAgentClientConnection;
 use coding_agent::api::error::CodingAgentPublicError;
 
-fn decide_first_authorization(
+async fn decide_first_authorization(
     connection: &CodingAgentClientConnection,
 ) -> Result<(), CodingAgentPublicError> {
 let Some(request) = connection
@@ -317,7 +356,7 @@ else {
 connection.decide_tool_authorization(
     &request.identity(),
     ToolAuthorizationDecision::AllowOnce,
-)?;
+).await?;
 Ok(())
 }
 ```
@@ -328,6 +367,12 @@ capability generation 的关联保护。对 stale 或已经解决的请求按普
 
 运行时关闭或 capability generation 撤销会取消等待中的授权。UI 收到相应事件后应
 关闭确认浮层。
+
+Filesystem capability 绑定到授权时已打开的对象（或 parent directory + vacant leaf），
+不是只绑定一段可重新解析的路径。`write`/`edit` 在 mutation fence 内对该对象写入并
+`sync_all`。现有契约刻意不使用 rename-into-place：rename 会把目录项换成另一个对象，
+破坏已授权对象的 identity binding。它保证同进程 mutation 串行、取消期间 fence 不
+提前释放和返回前完成 sync，但不宣称掉电时具有 whole-file crash atomicity。
 
 ## 运行中控制
 
@@ -369,6 +414,13 @@ Ok(())
 `CodingAgentControlRejection` 是预期的竞态结果，例如操作已经结束、generation 已
 过期或控制类型不适用。将它作为命令拒绝反馈，不要当成 runtime crash。
 
+取消是 cooperative request。`abort` 会让异步 operation 在安全点观察 cancellation，
+不会任意中断正在运行的 blocking side effect；当 mutation guard 已转移给 blocking
+closure 时，即使调用方 future 被取消，write/truncate、sync 和 fence release 仍会
+按顺序完成。丢弃 `CodingAgentOperationTask` 也只会放弃等待结果，并不等于 abort。
+因此适配器必须显式提交 `abort`、继续 join active operation 并消费 terminal event，
+之后才能关闭或切换 session。
+
 ## 会话管理
 
 优先通过 startup 的 `CodingAgentSessionBootstrap` 打开会话：
@@ -383,7 +435,11 @@ Ok(())
 | 临时内存会话 | `clone().without_persistence().open()` |
 
 不要根据 session id 自行拼接目录。列表、快照、树和 HTML 导出使用
-`CodingAgentSessionQuery`，或使用 `CodingAgentEmbeddingContext` 的对应方法。
+`CodingAgentSessionQuery`，或使用 `CodingAgentEmbeddingContext` 的对应方法。确需把
+仓储交给日志/导出适配器时，使用 summary 或 `session.session_storage()` 返回的
+`SessionStorageHandle`：`open_event_log()` 打开日志，`export_path()` 取得明确的导出
+根，`session_id()` 取得身份。handle 的内部 directory 与 event-log filename 不属于
+公共数据模型。
 
 切换会话前：
 

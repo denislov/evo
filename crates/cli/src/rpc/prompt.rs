@@ -21,7 +21,7 @@ use coding_agent::api::error::CodingAgentPublicError;
 use coding_agent::api::event::CodingAgentProductEvent;
 use coding_agent::api::operation::{CodingAgentOperation, PromptTurnOutcome};
 use coding_agent::api::runtime::{CodingAgentSession, CodingAgentShutdownOutcome};
-use coding_agent::api::view::{ProfileId, ProfileKind};
+use coding_agent::api::view::{ProfileId, ProfileKind, SessionStorageHandle};
 use tokio::io::AsyncWrite;
 use tokio::sync::oneshot;
 
@@ -63,9 +63,9 @@ impl RpcState {
             return Ok(());
         }
 
-        let (mut session, session_root) = self.take_or_open_coding_session().await?;
+        let (mut session, session_storage) = self.take_or_open_coding_session().await?;
         self.ensure_client_connection(&session)?;
-        self.ensure_session_event_pump(&session);
+        self.ensure_session_event_pump(&session)?;
         let event_flush = self
             .session_event_flush
             .as_ref()
@@ -92,7 +92,7 @@ impl RpcState {
             flush_session_product_events(event_flush).await;
             let _ = done_tx.send(CodingOperationTaskResult {
                 session: Some(session),
-                session_root,
+                session_storage,
                 outcome: CodingOperationOutcome::Compact(outcome),
             });
         });
@@ -383,7 +383,7 @@ impl RpcState {
             }
         };
 
-        let (mut session, session_root) = self.take_or_open_coding_session().await?;
+        let (mut session, session_storage) = self.take_or_open_coding_session().await?;
 
         if !session
             .agent_profiles()
@@ -407,7 +407,7 @@ impl RpcState {
             .application
             .agent_invocation_operation(profile_id.clone(), task.clone());
         let connection = self.ensure_client_connection(&session)?;
-        self.ensure_session_event_pump(&session);
+        self.ensure_session_event_pump(&session)?;
         let event_flush = self
             .session_event_flush
             .as_ref()
@@ -422,7 +422,7 @@ impl RpcState {
             }
         };
         let operation_id = invocation.operation_id().to_owned();
-        invocation.bind_control_owner(&connection);
+        invocation.bind_control_owner(&connection)?;
 
         write_rpc_response(
             writer,
@@ -469,7 +469,7 @@ impl RpcState {
                     operation_id: completion_operation_id,
                     result: CodingOperationTaskResult {
                         session: None,
-                        session_root,
+                        session_storage,
                         outcome: CodingOperationOutcome::AgentInvocation(outcome),
                     },
                 })
@@ -539,7 +539,7 @@ impl RpcState {
             }
         };
 
-        let (mut session, session_root) = self.take_or_open_coding_session().await?;
+        let (mut session, session_storage) = self.take_or_open_coding_session().await?;
 
         if !session
             .team_profiles()
@@ -563,7 +563,7 @@ impl RpcState {
             .application
             .team_invocation_operation(team_id.clone(), task.clone());
         let connection = self.ensure_client_connection(&session)?;
-        self.ensure_session_event_pump(&session);
+        self.ensure_session_event_pump(&session)?;
         let event_flush = self
             .session_event_flush
             .as_ref()
@@ -578,7 +578,7 @@ impl RpcState {
             }
         };
         let operation_id = invocation.operation_id().to_owned();
-        invocation.bind_control_owner(&connection);
+        invocation.bind_control_owner(&connection)?;
 
         write_rpc_response(
             writer,
@@ -621,7 +621,7 @@ impl RpcState {
                     operation_id: completion_operation_id,
                     result: CodingOperationTaskResult {
                         session: None,
-                        session_root,
+                        session_storage,
                         outcome: CodingOperationOutcome::AgentTeam(outcome),
                     },
                 })
@@ -722,8 +722,8 @@ impl RpcState {
             ProfileKind::Agent => OperationKind::AgentInvocation,
             ProfileKind::Team => OperationKind::AgentTeam,
         };
-        let session_root = session_runtime_path(&session)?;
-        self.ensure_session_event_pump(&session);
+        let session_storage = session_runtime_storage(&session)?;
+        self.ensure_session_event_pump(&session)?;
         let event_flush = self
             .session_event_flush
             .as_ref()
@@ -766,7 +766,7 @@ impl RpcState {
 
             let _ = done_tx.send(CodingOperationTaskResult {
                 session: Some(session),
-                session_root,
+                session_storage,
                 outcome: CodingOperationOutcome::DelegationApproval(outcome),
             });
         });
@@ -790,7 +790,7 @@ impl RpcState {
     where
         W: AsyncWrite + Unpin,
     {
-        let (mut session, session_root) = self.take_or_open_coding_session().await?;
+        let (mut session, session_storage) = self.take_or_open_coding_session().await?;
         let draft_display = prompt.display_text().to_owned();
         let connection = self.ensure_client_connection(&session)?;
         let draft_id = CodingAgentDraftId("rpc-prompt".into());
@@ -799,7 +799,7 @@ impl RpcState {
             self.steering.clone(),
             self.follow_up.clone(),
         );
-        self.ensure_session_event_pump(&session);
+        self.ensure_session_event_pump(&session)?;
         let event_flush = self
             .session_event_flush
             .as_ref()
@@ -846,7 +846,7 @@ impl RpcState {
 
             let _ = done_tx.send(CodingOperationTaskResult {
                 session: Some(session),
-                session_root,
+                session_storage,
                 outcome: CodingOperationOutcome::Prompt(outcome),
             });
         });
@@ -988,14 +988,14 @@ impl RpcState {
             CodingOperationOutcome::Prompt(outcome) => {
                 if let Ok(outcome) = outcome {
                     self.active_leaf_id = prompt_outcome_leaf_id(outcome).map(ToString::to_string);
-                    self.active_session_path = result.session_root.clone();
+                    self.active_session_storage = result.session_storage.clone();
                 }
                 outcome.as_ref().map(|_| ()).map_err(Clone::clone)
             }
             CodingOperationOutcome::Compact(outcome) => {
                 if let Ok(outcome) = outcome {
                     self.active_leaf_id = prompt_outcome_leaf_id(outcome).map(ToString::to_string);
-                    self.active_session_path = result.session_root.clone();
+                    self.active_session_storage = result.session_storage.clone();
                 }
                 outcome.as_ref().map(|_| ()).map_err(Clone::clone)
             }
@@ -1163,13 +1163,13 @@ impl RpcState {
 
     pub(super) async fn take_or_open_coding_session(
         &mut self,
-    ) -> Result<(CodingAgentSession, Option<std::path::PathBuf>), CliError> {
+    ) -> Result<(CodingAgentSession, Option<SessionStorageHandle>), CliError> {
         let session = match self.coding_session.take() {
             Some(session) => session,
             None => self.application.session_bootstrap.open().await?,
         };
-        let session_path = session_runtime_path(&session)?;
-        Ok((session, session_path))
+        let storage = session_runtime_storage(&session)?;
+        Ok((session, storage))
     }
 
     pub(super) async fn emit_queue_update<W>(&self, writer: &mut W) -> Result<(), CliError>
@@ -1259,10 +1259,10 @@ fn push_live_product_event(
     LiveProductEventPush { protocol_events }
 }
 
-fn session_runtime_path(
+fn session_runtime_storage(
     session: &CodingAgentSession,
-) -> Result<Option<std::path::PathBuf>, CliError> {
-    session.session_storage_path().map_err(CliError::from)
+) -> Result<Option<SessionStorageHandle>, CliError> {
+    session.session_storage().map_err(CliError::from)
 }
 
 fn prompt_outcome_leaf_id(outcome: &PromptTurnOutcome) -> Option<&str> {

@@ -155,7 +155,7 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
     let task = task::spawn(std::future::pending::<PromptTaskOutput>());
     let scope = context.snapshot().workspace.as_ref().unwrap().scope.clone();
     let active = ActivePrompt {
-        session_id: session.view().session_id.clone(),
+        session_id: session.view().expect("session view").session_id.clone(),
         command_id: 30,
         operation_id: Some("stuck-operation".into()),
         scope,
@@ -170,7 +170,8 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
     let switch = dispatch_active_command(
         &active,
         DesktopRuntimeCommand::CreateSession { command_id: 31 },
-    );
+    )
+    .await;
     assert!(matches!(
         switch,
         DesktopRuntimeUpdate::CommandRejected {
@@ -200,7 +201,7 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
         ),
     ] {
         assert!(matches!(
-            dispatch_active_command(&active, command),
+            dispatch_active_command(&active, command).await,
             DesktopRuntimeUpdate::CommandRejected {
                 command,
                 ref code,
@@ -222,7 +223,8 @@ async fn shutdown_deadline_aborts_a_stuck_prompt_task() {
             },
             decision: ToolAuthorizationDecision::Deny { reason: None },
         },
-    );
+    )
+    .await;
     assert!(matches!(
         stale_authorization,
         DesktopRuntimeUpdate::CommandRejected {

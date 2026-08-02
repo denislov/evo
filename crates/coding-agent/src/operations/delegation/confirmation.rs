@@ -2,7 +2,7 @@ use super::{
     PendingDelegationConfirmation, PendingDelegationConfirmationQueue,
     PendingDelegationConfirmationState, delegation_runtime_seed_from_prompt_options,
 };
-use crate::runtime::facade::CodingSessionError;
+use crate::kernel::error::CodingSessionError;
 use crate::services::event::EventService;
 use crate::session::service::SessionPersistence;
 
@@ -25,19 +25,19 @@ pub(crate) fn active_pending(
         .ok_or_else(|| pending_delegation_confirmation_not_found(operation_id, tool_call_id))
 }
 
-pub(crate) fn adopt_pending(
+pub(crate) async fn adopt_pending(
     persistence: &mut SessionPersistence,
     queue: &mut PendingDelegationConfirmationQueue,
     event_service: &EventService,
     pending_confirmations: Vec<PendingDelegationConfirmationState>,
 ) -> Result<(), CodingSessionError> {
     for pending in pending_confirmations {
-        queue_pending(persistence, queue, event_service, pending, false)?;
+        queue_pending(persistence, queue, event_service, pending, false).await?;
     }
     Ok(())
 }
 
-pub(crate) fn queue_pending(
+pub(crate) async fn queue_pending(
     persistence: &mut SessionPersistence,
     queue: &mut PendingDelegationConfirmationQueue,
     event_service: &EventService,
@@ -51,12 +51,12 @@ pub(crate) fn queue_pending(
                     "duplicate pending delegation confirmation ignored: operation_id={}, tool_call_id={}",
                     pending.request.operation_id, pending.request.tool_call_id
                 ),
-            );
+            )?;
         return Ok(());
     }
-    record_delegation_confirmation_requested(persistence, &pending)?;
+    record_delegation_confirmation_requested(persistence, &pending).await?;
     if emit_confirmation_required {
-        event_service.emit_delegation_confirmation_required(&pending.request, &pending.reason);
+        event_service.emit_delegation_confirmation_required(&pending.request, &pending.reason)?;
     }
     queue.push(pending);
     Ok(())
@@ -73,7 +73,7 @@ fn pending_delegation_confirmation_not_found(
     }
 }
 
-fn record_delegation_confirmation_requested(
+async fn record_delegation_confirmation_requested(
     persistence: &mut SessionPersistence,
     pending: &PendingDelegationConfirmationState,
 ) -> Result<(), CodingSessionError> {
@@ -83,17 +83,19 @@ fn record_delegation_confirmation_requested(
         &pending.delegation_lineage,
     )?;
     if let SessionPersistence::Persistent(session_service) = persistence {
-        session_service.record_delegation_confirmation_requested(
-            pending.request.operation_id.clone(),
-            pending.request.turn_id.clone(),
-            pending.request.tool_call_id.clone(),
-            pending.request.requesting_profile_id.clone(),
-            pending.request.target_kind,
-            pending.request.target_id.clone(),
-            pending.request.task.clone(),
-            pending.reason.clone(),
-            runtime_seed,
-        )?;
+        session_service
+            .record_delegation_confirmation_requested(
+                pending.request.operation_id.clone(),
+                pending.request.turn_id.clone(),
+                pending.request.tool_call_id.clone(),
+                pending.request.requesting_profile_id.clone(),
+                pending.request.target_kind,
+                pending.request.target_id.clone(),
+                pending.request.task.clone(),
+                pending.reason.clone(),
+                runtime_seed,
+            )
+            .await?;
     }
     Ok(())
 }

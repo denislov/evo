@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use super::{
     CodingAgentSessionExport, export_from_replay, render_export_html, write_rendered_export_html,
 };
-use crate::runtime::error::CodingSessionError;
-use crate::runtime::facade::context::CodingAgentSessionSummary;
+use crate::kernel::error::CodingSessionError;
 use crate::session::replay::SessionReplay;
+use crate::session::view::CodingAgentSessionSummary;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExportOptions {

@@ -4,8 +4,8 @@ use super::{
     CodingAgentProductEventDurability, CodingAgentProductEventError, CodingAgentProductEventKind,
     CodingAgentProductEventProfileKind, CodingAgentProductEventTerminalStatus,
 };
+use crate::kernel::error::CodingSessionError;
 use crate::profiles::{ProfileId, ProfileKind};
-use crate::runtime::facade::CodingSessionError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DelegationEventContext {

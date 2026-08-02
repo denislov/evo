@@ -8,10 +8,10 @@ use coding_agent::api::embedding::CodingAgentModelCatalogEntry;
 use coding_agent::api::error::CodingAgentPublicError;
 use coding_agent::api::view::{CodingAgentCapabilities, CodingAgentSessionTranscriptItem};
 impl RpcState {
-    pub(super) fn session_state(&self) -> RpcSessionState {
-        let projection = self.session_projection();
+    pub(super) fn session_state(&self) -> Result<RpcSessionState, CodingAgentPublicError> {
+        let projection = self.session_projection()?;
 
-        RpcSessionState {
+        Ok(RpcSessionState {
             model: Some(rpc_model_projection(
                 &self.model,
                 self.application.model_thinking_level_map(),
@@ -22,9 +22,9 @@ impl RpcState {
             steering_mode: self.steering_mode,
             follow_up_mode: self.follow_up_mode,
             session_file: self
-                .active_session_path
+                .active_session_storage
                 .as_ref()
-                .map(|path| path.display().to_string()),
+                .map(|storage| storage.export_path().display().to_string()),
             session_id: projection.session_id,
             event_stream_id: projection.event_stream_id,
             client_id: self
@@ -46,14 +46,13 @@ impl RpcState {
             pending_message_count: projection.pending_message_count,
             pending_tool_authorizations: projection.pending_tool_authorizations,
             capabilities: projection.capabilities,
-        }
+        })
     }
 
-    fn session_projection(&self) -> RpcSessionProjection {
-        if let Some(connection) = self.client_connection.as_ref()
-            && let Ok(snapshot) = connection.state()
-        {
-            return RpcSessionProjection {
+    fn session_projection(&self) -> Result<RpcSessionProjection, CodingAgentPublicError> {
+        if let Some(connection) = self.client_connection.as_ref() {
+            let snapshot = connection.state()?;
+            return Ok(RpcSessionProjection {
                 session_id: snapshot.session.session_id,
                 event_stream_id: Some(snapshot.cursor.stream_id),
                 pending_message_count: snapshot.drafts.len(),
@@ -62,11 +61,11 @@ impl RpcState {
                 snapshot_sequence: snapshot.cursor.last_event_sequence,
                 capability_generation: snapshot.cursor.capability_generation,
                 snapshot_version: snapshot.version,
-            };
+            });
         }
         if let Some(session) = self.coding_session.as_ref() {
-            let snapshot = session.snapshot();
-            return RpcSessionProjection {
+            let snapshot = session.snapshot()?;
+            return Ok(RpcSessionProjection {
                 session_id: snapshot.session.session_id,
                 event_stream_id: Some(snapshot.cursor.stream_id),
                 pending_message_count: snapshot.drafts.len(),
@@ -75,39 +74,38 @@ impl RpcState {
                 snapshot_sequence: snapshot.cursor.last_event_sequence,
                 capability_generation: snapshot.cursor.capability_generation,
                 snapshot_version: snapshot.version,
-            };
+            });
         }
 
-        RpcSessionProjection {
+        Ok(RpcSessionProjection {
             session_id: self.fallback_session_id(),
             event_stream_id: None,
             pending_message_count: self.steering.len() + self.follow_up.len(),
             pending_tool_authorizations: Vec::new(),
-            capabilities: CodingAgentCapabilities::idle(self.active_session_path.is_some()).into(),
+            capabilities: CodingAgentCapabilities::idle(self.active_session_storage.is_some())
+                .into(),
             snapshot_sequence: 0,
             capability_generation: 1,
             snapshot_version: UI_SNAPSHOT_PROTOCOL_VERSION,
-        }
+        })
     }
 
     fn fallback_session_id(&self) -> String {
         self.active_leaf_id
             .clone()
             .or_else(|| {
-                self.active_session_path
+                self.active_session_storage
                     .as_ref()
-                    .and_then(|path| path.file_stem())
-                    .and_then(|stem| stem.to_str())
-                    .map(ToString::to_string)
+                    .map(|storage| storage.session_id().to_owned())
             })
             .unwrap_or_else(|| "in-memory".into())
     }
 
     pub(super) fn session_stats(&self) -> Result<RpcSessionStats, CodingAgentPublicError> {
         let session_file = self
-            .active_session_path
+            .active_session_storage
             .as_ref()
-            .map(|path| path.display().to_string());
+            .map(|storage| storage.export_path().display().to_string());
 
         if let Some(snapshot) = self
             .coding_session
@@ -151,7 +149,8 @@ impl RpcState {
         let usage = self
             .coding_session
             .as_ref()
-            .map(|session| session.snapshot().context.usage)
+            .map(|session| session.snapshot().map(|snapshot| snapshot.context.usage))
+            .transpose()?
             .unwrap_or_default();
 
         Ok(RpcSessionStats {

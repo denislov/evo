@@ -748,6 +748,7 @@ fn performance_projection() -> Result<DesktopProjection, String> {
     let items = (0..crate::ui::conversation::model::MAX_TRANSCRIPT_BLOCKS)
         .map(|index| CodingAgentSessionTranscriptItem::User {
             text: format!("message {index}: {payload}"),
+            started_at: None,
         })
         .collect();
     projection_with_transcript("desktop-native-performance", items)
@@ -757,6 +758,7 @@ fn visual_projection(state: VisualReplayState) -> Result<DesktopProjection, Stri
     let items = vec![
         CodingAgentSessionTranscriptItem::User {
             text: "请优化 desktop 的消息流体验，并保持键盘导航和中文输入稳定。".into(),
+            started_at: None,
         },
         CodingAgentSessionTranscriptItem::Tool {
             call_id: "visual-read-shell".into(),
@@ -787,14 +789,12 @@ fn visual_projection(state: VisualReplayState) -> Result<DesktopProjection, Stri
             images: Vec::new(),
             done: true,
             reasoning_duration_millis: Some(2_430),
+            model_id: None,
+            completed_at: None,
         },
     ];
     let session_id = "desktop-native-visual".to_owned();
-    let transcript = CodingAgentTranscriptSnapshot {
-        session_id: session_id.clone(),
-        active_leaf_id: None,
-        items,
-    };
+    let transcript = CodingAgentTranscriptSnapshot::new(session_id.clone(), None, items);
     let mut snapshot = hydrated_snapshot(session_id, transcript);
     snapshot.session.context.changes = vec![
         CodingAgentFileChangeSnapshot {
@@ -917,11 +917,7 @@ fn projection_with_transcript(
     items: Vec<CodingAgentSessionTranscriptItem>,
 ) -> Result<DesktopProjection, String> {
     let session_id = session_id.to_owned();
-    let transcript = CodingAgentTranscriptSnapshot {
-        session_id: session_id.clone(),
-        active_leaf_id: None,
-        items,
-    };
+    let transcript = CodingAgentTranscriptSnapshot::new(session_id.clone(), None, items);
     projection_from_transcript(session_id, transcript)
 }
 
@@ -1036,11 +1032,7 @@ fn hydrated_snapshot(
                 capability_generation: 0,
             },
             version: UI_SNAPSHOT_PROTOCOL_VERSION,
-            session: CodingAgentSessionView {
-                session_id,
-                name: None,
-                default_agent_profile_id: ProfileId::from("default"),
-            },
+            session: CodingAgentSessionView::new(session_id, None, ProfileId::from("default")),
             capabilities: CodingAgentCapabilities::idle(false),
             active_operation: None,
             drafts: Vec::new(),

@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
+use crate::application::capability::OperationCapabilitySnapshot;
+use crate::kernel::capability::SessionReadCapability;
+use crate::kernel::error::CodingSessionError;
 use crate::profiles::{ProfileId, ProfileKind};
-use crate::runtime::capability::{OperationCapabilitySnapshot, SessionReadCapability};
-use crate::runtime::error::CodingSessionError;
-use crate::runtime::facade::context::CodingAgentSessionSummary;
 use crate::session::event::{DiagnosticLevel, PersistedContentBlock, PersistedDelegationStatus};
 use crate::session::replay::{MessageStatus, SessionReplay, ToolCallStatus, TranscriptItem};
 use crate::session::service::SessionPersistence;
+use crate::session::view::CodingAgentSessionSummary;
 
 pub(crate) mod runner;
 
@@ -21,7 +22,7 @@ pub(crate) fn run(
             capability: "export requires a persistent Rust-native session".into(),
         });
     };
-    let mut context = session_service.export_context(options)?;
+    let mut context = session_service.session_export(options)?.into_context();
     runner::ExportRunner::new()?.run_typed(&mut context)
 }
 

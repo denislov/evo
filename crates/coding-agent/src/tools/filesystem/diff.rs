@@ -3,10 +3,7 @@ enum DiffPart {
     Equal(Vec<String>),
     Removed(Vec<String>),
     Added(Vec<String>),
-    TooLarge {
-        old_lines: usize,
-        new_lines: usize,
-    },
+    TooLarge { old_lines: usize, new_lines: usize },
 }
 
 /// Line-count ceiling for the O(n*m) LCS table. Above this the diff degrades
@@ -112,7 +109,10 @@ pub(crate) fn generate_diff_string(
 
     for (index, part) in parts.iter().enumerate() {
         match part {
-            DiffPart::TooLarge { old_lines, new_lines } => {
+            DiffPart::TooLarge {
+                old_lines,
+                new_lines,
+            } => {
                 output.push(format!(
                     "[Diff omitted: {old_lines} -> {new_lines} lines exceed the {MAX_DIFF_LINES}-line diff limit]"
                 ));
@@ -143,9 +143,9 @@ pub(crate) fn generate_diff_string(
                             old_line_num += 1;
                         }
                         DiffPart::Equal(_) => unreachable!(),
-                        DiffPart::TooLarge { .. } => unreachable!(
-                            "oversized diffs are handled before the line loop"
-                        ),
+                        DiffPart::TooLarge { .. } => {
+                            unreachable!("oversized diffs are handled before the line loop")
+                        }
                     }
                 }
                 last_was_change = true;
@@ -158,7 +158,7 @@ pub(crate) fn generate_diff_string(
                 let has_trailing_change = next_part_is_change;
 
                 if has_leading_change && has_trailing_change {
-                    if lines.len() <= context_lines * 2 {
+                    if lines.len() <= context_lines.saturating_mul(2) {
                         push_context_lines(
                             &mut output,
                             lines,
@@ -265,7 +265,10 @@ pub(crate) fn generate_unified_patch(path: &str, old_content: &str, new_content:
 
     for part in diff_parts(old_content, new_content) {
         match part {
-            DiffPart::TooLarge { old_lines, new_lines } => {
+            DiffPart::TooLarge {
+                old_lines,
+                new_lines,
+            } => {
                 output.push(format!(
                     "[Diff omitted: {old_lines} -> {new_lines} lines exceed the {MAX_DIFF_LINES}-line diff limit]"
                 ));
@@ -461,7 +464,10 @@ mod tests {
 
     #[test]
     fn oversized_diffs_degrade_to_a_summary() {
-        let big_old = (0..10_000).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let big_old = (0..10_000)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let big_new = format!("{big_old}\nextra");
         let diff = generate_diff_string(&big_old, &big_new, 4);
         assert!(diff.diff.contains("Diff omitted"), "{}", diff.diff);

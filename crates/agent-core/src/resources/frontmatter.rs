@@ -117,8 +117,7 @@ mod tests {
 
     #[test]
     fn crlf_input_is_normalized() {
-        let (meta, body, diagnostics) =
-            parse_frontmatter("---\r\nname: x\r\n---\r\nbody line");
+        let (meta, body, diagnostics) = parse_frontmatter("---\r\nname: x\r\n---\r\nbody line");
         assert!(diagnostics.is_empty());
         assert_eq!(meta["name"], "x");
         assert_eq!(body, "body line");

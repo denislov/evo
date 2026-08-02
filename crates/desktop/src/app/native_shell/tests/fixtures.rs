@@ -218,11 +218,11 @@ fn visual_test_snapshot_for(session_id: &str) -> desktop::runtime::DesktopRuntim
                 capability_generation: 0,
             },
             version: UI_SNAPSHOT_PROTOCOL_VERSION,
-            session: CodingAgentSessionView {
-                session_id: session_id.clone(),
-                name: None,
-                default_agent_profile_id: ProfileId::from("default"),
-            },
+            session: CodingAgentSessionView::new(
+                session_id.clone(),
+                None,
+                ProfileId::from("default"),
+            ),
             capabilities: CodingAgentCapabilities::idle(false),
             active_operation: None,
             drafts: Vec::new(),
@@ -230,11 +230,7 @@ fn visual_test_snapshot_for(session_id: &str) -> desktop::runtime::DesktopRuntim
             pending_authorizations: Vec::new(),
             context: CodingAgentContextSnapshot::default(),
         },
-        transcript: CodingAgentTranscriptSnapshot {
-            session_id,
-            active_leaf_id: None,
-            items: Vec::new(),
-        },
+        transcript: CodingAgentTranscriptSnapshot::new(session_id, None, Vec::new()),
         pending_recoveries: Vec::new(),
     }
 }

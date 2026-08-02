@@ -1,6 +1,6 @@
 use super::*;
-use crate::runtime::public_error::safe_public_summary;
-use crate::session::id::{Clock, SystemClock};
+use crate::platform::time::{Clock, SystemClock};
+use crate::public_error::safe_public_summary;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingAgentAgentProfileSummary {
@@ -31,20 +31,24 @@ pub struct CodingAgentTeamProfileSummary {
 impl CodingAgentSession {
     pub fn pending_tool_authorizations(
         &self,
-    ) -> Vec<crate::authorization::ToolAuthorizationRequest> {
-        self.runtime_host.authorization_service.pending()
+    ) -> Result<Vec<crate::authorization::ToolAuthorizationRequest>, CodingAgentPublicError> {
+        self.runtime_host
+            .authorization_service
+            .pending()
+            .map_err(CodingAgentPublicError::from)
     }
 
-    pub fn decide_tool_authorization(
+    pub async fn decide_tool_authorization(
         &self,
         identity: &crate::authorization::ToolAuthorizationIdentity,
         decision: crate::authorization::ToolAuthorizationDecision,
     ) -> Result<(), CodingAgentPublicError> {
         self.decide_tool_authorization_internal(identity, decision)
+            .await
             .map_err(CodingAgentPublicError::from)
     }
 
-    pub(crate) fn decide_tool_authorization_internal(
+    pub(crate) async fn decide_tool_authorization_internal(
         &self,
         identity: &crate::authorization::ToolAuthorizationIdentity,
         decision: crate::authorization::ToolAuthorizationDecision,
@@ -52,15 +56,23 @@ impl CodingAgentSession {
         self.runtime_host
             .authorization_service
             .decide(identity, decision)
+            .await
     }
 
-    pub(in crate::runtime) fn default_agent_profile_id(&self) -> ProfileId {
+    pub(crate) fn default_agent_profile_id(&self) -> ProfileId {
         crate::operations::prompt::default_agent_profile_id(
             &self.runtime_host.session_coordinator.persistence,
         )
     }
 
-    pub fn capabilities(&self) -> CodingAgentCapabilities {
+    pub fn capabilities(&self) -> Result<CodingAgentCapabilities, CodingAgentPublicError> {
+        self.capabilities_internal()
+            .map_err(CodingAgentPublicError::from)
+    }
+
+    pub(in crate::runtime) fn capabilities_internal(
+        &self,
+    ) -> Result<CodingAgentCapabilities, CodingSessionError> {
         IntentRouter::admit_query(
             &self.runtime_host.operation_supervisor.control,
             QueryIntent::Capabilities,
@@ -69,25 +81,27 @@ impl CodingAgentSession {
             self.runtime_host.session_coordinator.persistence,
             SessionPersistence::Persistent(_)
         );
-        CodingAgentCapabilities::from_runtime_state(
-            &self.runtime_host.operation_supervisor.control.activity(),
+        Ok(CodingAgentCapabilities::from_runtime_state(
+            &self.runtime_host.operation_supervisor.control.activity()?,
             persistent,
-        )
+        ))
     }
 
-    pub fn view(&self) -> CodingAgentSessionView {
+    pub fn view(&self) -> Result<CodingAgentSessionView, CodingAgentPublicError> {
         IntentRouter::admit_query(
             &self.runtime_host.operation_supervisor.control,
             QueryIntent::SessionView,
         );
         let _ = &self.runtime_host.runtime_service;
         match &self.runtime_host.session_coordinator.persistence {
-            SessionPersistence::Persistent(session_service) => session_service.view(),
-            SessionPersistence::NonPersistent(state) => CodingAgentSessionView {
+            SessionPersistence::Persistent(session_service) => {
+                session_service.view().map_err(CodingAgentPublicError::from)
+            }
+            SessionPersistence::NonPersistent(state) => Ok(CodingAgentSessionView {
                 session_id: state.runtime_id.clone(),
                 name: None,
                 default_agent_profile_id: state.default_agent_profile_id.clone(),
-            },
+            }),
         }
     }
 

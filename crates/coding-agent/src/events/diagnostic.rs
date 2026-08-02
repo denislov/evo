@@ -3,7 +3,7 @@ use super::{
     CodingAgentDiagnosticProductEvent, CodingAgentProductEventDurability,
     CodingAgentProductEventKind,
 };
-use crate::runtime::public_error::{
+use crate::public_error::{
     CodingAgentPublicDiagnostic, CodingAgentPublicDiagnosticOrigin,
     CodingAgentPublicDiagnosticSeverity,
 };

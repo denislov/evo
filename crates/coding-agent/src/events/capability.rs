@@ -3,7 +3,7 @@ use super::{
     CodingAgentCapabilityProductEvent, CodingAgentProductEventCapabilityRevocation,
     CodingAgentProductEventDurability, CodingAgentProductEventKind,
 };
-use crate::runtime::capability::CapabilityRevocationPolicy;
+use crate::kernel::capability::CapabilityRevocationPolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CapabilityEvent {
