@@ -31,6 +31,7 @@ pub(super) fn handle_slash_command(root: &mut InteractiveRoot, command: ParsedSl
             root.transcript.push(TranscriptItem::system(help_text()));
         }
         "model" => handle_model_command(root, &command.args),
+        "permission" => handle_permission_command(root, &command.args),
         "agents" => handle_agents_command(root),
         "agent" => handle_agent_command(root, &command.args),
         _ if command.name.starts_with("agent:") => {
@@ -746,6 +747,29 @@ fn handle_model_command(root: &mut InteractiveRoot, args: &str) {
         None => {
             root.transcript
                 .push(TranscriptItem::system(format!("Unknown model: {model_id}")));
+        }
+    }
+}
+
+fn handle_permission_command(root: &mut InteractiveRoot, args: &str) {
+    let args = args.trim();
+    if args.is_empty() {
+        root.transcript.push(TranscriptItem::system(format!(
+            "Permission mode: {} (plan = read-only, ask = prompt first, yolo = auto)",
+            root.permission_mode
+        )));
+        return;
+    }
+    match args.parse::<coding_agent::api::authorization::ToolAuthorizationMode>() {
+        Ok(mode) => {
+            root.set_permission_mode(mode);
+            root.transcript.push(TranscriptItem::system(format!(
+                "Permission mode set: {}",
+                root.permission_mode
+            )));
+        }
+        Err(error) => {
+            root.transcript.push(TranscriptItem::system(error));
         }
     }
 }

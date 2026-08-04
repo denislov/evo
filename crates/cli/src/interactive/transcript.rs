@@ -4,6 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Instant;
 
 static NEXT_TRANSCRIPT_CACHE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -16,6 +17,7 @@ pub enum TranscriptItem {
         id: String,
         markdown: String,
         thinking: String,
+        thinking_seconds: Option<f64>,
         done: bool,
     },
     Tool {
@@ -47,6 +49,7 @@ impl TranscriptItem {
             id: id.into(),
             markdown: markdown.into(),
             thinking: String::new(),
+            thinking_seconds: None,
             done,
         }
     }
@@ -487,6 +490,7 @@ pub struct Transcript {
     revision: u64,
     cache_id: u64,
     next_item_id: u64,
+    thinking_started_at: Option<Instant>,
 }
 
 impl Default for Transcript {
@@ -500,6 +504,7 @@ impl Default for Transcript {
             revision: 0,
             cache_id: NEXT_TRANSCRIPT_CACHE_ID.fetch_add(1, Ordering::Relaxed),
             next_item_id: 0,
+            thinking_started_at: None,
         }
     }
 }
@@ -515,6 +520,7 @@ impl Clone for Transcript {
             revision: self.revision,
             cache_id: NEXT_TRANSCRIPT_CACHE_ID.fetch_add(1, Ordering::Relaxed),
             next_item_id: self.next_item_id,
+            thinking_started_at: self.thinking_started_at,
         }
     }
 }
@@ -809,6 +815,7 @@ impl Transcript {
                     id: format!("compaction_{}", self.items.len()),
                     markdown: summary,
                     thinking: String::new(),
+                    thinking_seconds: None,
                     done: true,
                 }))
             }
@@ -890,6 +897,8 @@ impl Transcript {
             }
             markdown.push_str(text);
             *done = false;
+            // Body output marks the end of thinking.
+            self.seal_assistant_thinking(index);
             self.bump_item_revision(index);
             self.bump_content_revision();
             return TranscriptMutation::single(index);
@@ -899,6 +908,7 @@ impl Transcript {
             id: format!("assistant_{}", self.items.len()),
             markdown: text.to_string(),
             thinking: String::new(),
+            thinking_seconds: None,
             done: false,
         }))
     }
@@ -922,15 +932,20 @@ impl Transcript {
             }
             thinking.push_str(text);
             *done = false;
+            if self.thinking_started_at.is_none() {
+                self.thinking_started_at = Some(Instant::now());
+            }
             self.bump_item_revision(index);
             self.bump_content_revision();
             return TranscriptMutation::single(index);
         }
 
+        self.thinking_started_at = Some(Instant::now());
         TranscriptMutation::single(self.push_with_index(TranscriptItem::Assistant {
             id: format!("assistant_{}", self.items.len()),
             markdown: String::new(),
             thinking: text.to_string(),
+            thinking_seconds: None,
             done: false,
         }))
     }
@@ -945,6 +960,7 @@ impl Transcript {
                 unreachable!("rposition matched unfinished assistant");
             };
             *done = true;
+            self.seal_assistant_thinking(index);
             self.bump_item_revision(index);
             self.bump_content_revision();
             return TranscriptMutation::single(index);
@@ -965,9 +981,29 @@ impl Transcript {
             unreachable!("rposition matched unfinished assistant");
         };
         *done = true;
+        self.seal_assistant_thinking(index);
         self.bump_item_revision(index);
         self.bump_content_revision();
         TranscriptMutation::single(index)
+    }
+
+    /// Record how long the assistant thought once its output moves on
+    /// (body text, tool use, or completion). Only sealed once per block.
+    fn seal_assistant_thinking(&mut self, index: usize) {
+        let Some(started_at) = self.thinking_started_at.take() else {
+            return;
+        };
+        let TranscriptItem::Assistant {
+            thinking,
+            thinking_seconds,
+            ..
+        } = &mut self.items[index]
+        else {
+            return;
+        };
+        if !thinking.trim().is_empty() && thinking_seconds.is_none() {
+            *thinking_seconds = Some(started_at.elapsed().as_secs_f64());
+        }
     }
 
     fn finish_tool(&mut self, call_id: &str, result: String, is_error: bool) -> TranscriptMutation {

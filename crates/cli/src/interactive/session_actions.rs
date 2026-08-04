@@ -107,6 +107,7 @@ fn transcript_items_from_rust_native(
                     id,
                     markdown: text,
                     thinking,
+                    thinking_seconds: None,
                     done,
                 });
             }

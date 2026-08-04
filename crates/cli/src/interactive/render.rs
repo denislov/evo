@@ -1025,10 +1025,14 @@ fn render_block(
             .map(|line| fit_line(&paint_with(line, &styles.system, color), content_width))
             .collect(),
         TranscriptItem::Assistant {
-            markdown, thinking, ..
+            markdown,
+            thinking,
+            thinking_seconds,
+            ..
         } => render_assistant_message(
             markdown,
             thinking,
+            *thinking_seconds,
             content_width,
             color,
             markdown_theme,
@@ -1169,6 +1173,7 @@ fn render_user_message(
 fn render_assistant_message(
     markdown: &str,
     thinking: &str,
+    thinking_seconds: Option<f64>,
     width: usize,
     color: bool,
     markdown_theme: &MarkdownTheme,
@@ -1185,48 +1190,62 @@ fn render_assistant_message(
         if hide_thinking_block {
             // Hidden thinking still surfaces a static label (TS behavior),
             // so users know reasoning happened without dumping its content.
-            lines.push(fit_line(
-                &paint_with(hidden_thinking_label, &styles.thinking, color),
-                width,
-            ));
+            let label = match thinking_seconds {
+                Some(seconds) => format!("Thought for {seconds:.1}s"),
+                None => hidden_thinking_label.to_string(),
+            };
+            lines.push(fit_line(&paint_with(&label, &styles.thinking, color), width));
         } else {
             let thinking_lines = thinking.lines().collect::<Vec<_>>();
-            let (shown, omitted, label) = match display_state {
-                TranscriptDisplayState::Collapsed => (
-                    Vec::new(),
-                    thinking_lines.len(),
-                    format!("thinking · {} lines hidden", thinking_lines.len()),
-                ),
+            const MAX_THINKING_PREVIEW_ROWS: usize = 4;
+            let (shown, label) = match display_state {
+                TranscriptDisplayState::Collapsed => {
+                    let label = match thinking_seconds {
+                        Some(seconds) => format!("Thought for {seconds:.1}s"),
+                        None => format!("thinking · {} lines hidden", thinking_lines.len()),
+                    };
+                    (Vec::new(), label)
+                }
                 TranscriptDisplayState::Preview => {
-                    let start = thinking_lines.len().saturating_sub(3);
-                    (
-                        thinking_lines[start..].to_vec(),
-                        start,
-                        "thinking · preview".to_string(),
-                    )
+                    let label = match thinking_seconds {
+                        Some(seconds) => format!("Thought for {seconds:.1}s"),
+                        None => {
+                            let start =
+                                thinking_lines.len().saturating_sub(MAX_THINKING_PREVIEW_ROWS);
+                            if start > 0 {
+                                format!("thinking · preview · {start} earlier lines")
+                            } else {
+                                "thinking · preview".to_string()
+                            }
+                        }
+                    };
+                    let start = thinking_lines.len().saturating_sub(MAX_THINKING_PREVIEW_ROWS);
+                    (thinking_lines[start..].to_vec(), label)
                 }
                 TranscriptDisplayState::Expanded => {
-                    (thinking_lines.clone(), 0, "thinking · expanded".to_string())
+                    let label = match thinking_seconds {
+                        Some(seconds) => format!("Thought for {seconds:.1}s"),
+                        None => "thinking · expanded".to_string(),
+                    };
+                    (thinking_lines.clone(), label)
                 }
             };
             lines.push(fit_line(&paint_with(&label, &styles.system, color), width));
-            if omitted > 0 && display_state == TranscriptDisplayState::Preview {
-                lines.push(fit_line(
-                    &paint_with(
-                        &format!("  ... {omitted} earlier thinking lines"),
-                        &styles.system,
-                        color,
-                    ),
-                    width,
-                ));
-            }
             let think_width = width.saturating_sub(2).max(1);
+            let mut content_lines = Vec::new();
             for line in shown {
                 let painted = paint_with(line, &styles.thinking, color);
                 for wrapped in wrap_text_with_ansi(&painted, think_width) {
-                    lines.push(fit_line(&format!("  {wrapped}"), width));
+                    content_lines.push(fit_line(&format!("  {wrapped}"), width));
                 }
             }
+            if display_state == TranscriptDisplayState::Preview {
+                // Capped preview height: keep the trailing rows so long
+                // streaming thinking cannot grow the block past the cap.
+                let start = content_lines.len().saturating_sub(MAX_THINKING_PREVIEW_ROWS);
+                content_lines.drain(..start);
+            }
+            lines.extend(content_lines);
         }
         if has_body {
             lines.push(String::new());
@@ -1379,6 +1398,20 @@ fn render_tool_block(
             styles,
             result_limit,
             per_block_view,
+        );
+    }
+
+    // `web_search` is executed by the provider; its result carries a
+    // structured action summary instead of transcript text, so it
+    // self-renders search queries / opened pages instead of raw JSON.
+    if name == "web_search" {
+        return render_web_search_block(
+            result,
+            is_error,
+            width,
+            color,
+            styles,
+            result_limit,
         );
     }
 
@@ -1772,10 +1805,133 @@ fn render_edit_block(
     lines
 }
 
+/// Self-rendered `web_search` block. `web_search` runs inside the provider,
+/// so its result carries a structured action summary
+/// (`{"status": ..., "action": {"type": "search", "queries": [...]}}` or an
+/// `open_page` URL) rather than transcript text. Search queries and opened
+/// pages render as readable lines instead of raw JSON; legacy items without
+/// an action fall back to the generic result body.
+fn render_web_search_block(
+    result: Option<&str>,
+    is_error: bool,
+    width: usize,
+    color: bool,
+    styles: &TranscriptStyles,
+    max_result_lines: usize,
+) -> Vec<String> {
+    let status = match (result, is_error) {
+        (None, _) => ToolStatus::Running,
+        (Some(_), true) => ToolStatus::Error,
+        (Some(_), false) => ToolStatus::Done,
+    };
+    let action = if is_error {
+        None
+    } else {
+        result.and_then(parse_web_search_action)
+    };
+    let verb = match &action {
+        Some(WebSearchAction::OpenPage { .. }) => "open page",
+        _ => "search",
+    };
+    let mut lines = vec![fit_line(
+        &format!(
+            "{} {}",
+            paint_with(verb, &styles.tool_title, color),
+            paint_with(status.label(), &status.style(styles), color),
+        ),
+        width,
+    )];
+    let Some(action) = action else {
+        // Running, errored, or legacy: surface the raw summary text so the
+        // status/action payload stays visible instead of vanishing.
+        if let Some(result) = result {
+            lines.extend(render_tool_result_body(
+                "web_search",
+                result,
+                is_error,
+                max_result_lines,
+                color,
+                styles,
+                true,
+            ));
+        }
+        return lines;
+    };
+    match action {
+        WebSearchAction::Search { queries } => {
+            for query in queries.iter().take(max_result_lines) {
+                let painted = paint_with(query, &styles.tool_output, color);
+                for wrapped in wrap_text_with_ansi(&painted, width.saturating_sub(2).max(1)) {
+                    lines.push(fit_line(&format!("  {wrapped}"), width));
+                }
+            }
+            let omitted = queries.len().saturating_sub(max_result_lines);
+            if omitted > 0 {
+                lines.push(fit_line(
+                    &format!(
+                        "  {}",
+                        paint_with(
+                            &format!("... {omitted} more queries (disclose block)"),
+                            &styles.system,
+                            color,
+                        )
+                    ),
+                    width,
+                ));
+            }
+        }
+        WebSearchAction::OpenPage { url } => {
+            let painted = paint_with(&url, &styles.tool_output, color);
+            for wrapped in wrap_text_with_ansi(&painted, width.saturating_sub(2).max(1)) {
+                lines.push(fit_line(&format!("  {wrapped}"), width));
+            }
+        }
+    }
+    lines
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WebSearchAction {
+    Search { queries: Vec<String> },
+    OpenPage { url: String },
+}
+
+/// Parse the provider web-search action summary, stripping DeepSeek's
+/// `ws_call_id=` markers from queries and opened-page URLs (mirrors the
+/// desktop `web_search_summary`).
+fn parse_web_search_action(result: &str) -> Option<WebSearchAction> {
+    let value: serde_json::Value = serde_json::from_str(result).ok()?;
+    let action = value.get("action")?;
+    match action.get("type").and_then(serde_json::Value::as_str) {
+        Some("search") => {
+            let queries = action
+                .get("queries")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|query| !query.starts_with("ws_call_id="))
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            Some(WebSearchAction::Search { queries })
+        }
+        Some("open_page") => {
+            let url = action
+                .get("url")
+                .and_then(serde_json::Value::as_str)?
+                .split('#')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            Some(WebSearchAction::OpenPage { url })
+        }
+        _ => None,
+    }
+}
+
 /// Paint a single diff line with semantic colors: `+` added, `-` removed,
 /// ` ` context, and hunk headers (`@@`/`---`/`+++`) dimmed.
-fn paint_diff_line(line: &str, color: bool, styles: &TranscriptStyles, fallback: Style) -> String {
-    let (prefix, style) = if line.starts_with("+++") || line.starts_with("---") {
+fn paint_diff_line(line: &str, color: bool, styles: &TranscriptStyles, fallback: Style) -> String {    let (prefix, style) = if line.starts_with("+++") || line.starts_with("---") {
         (line, styles.tool_diff_context)
     } else if let Some(rest) = line.strip_prefix('+') {
         (rest, styles.tool_diff_added)
@@ -1845,6 +2001,44 @@ pub(super) fn fit_line(line: &str, width: usize) -> String {
     }
 }
 
+/// Wrap a modal surface in a visible box border so dialogs read as modal
+/// surfaces instead of plain transcript text. `lines` must already be sized
+/// to at most `width - 4` (the content column between the two border
+/// columns); short lines are padded so the right border column stays
+/// aligned. The returned lines are exactly `width` wide. Falls back to the
+/// raw lines when the width is too small for a border.
+pub(super) fn framed_modal_lines(
+    lines: Vec<String>,
+    width: usize,
+    style: &Style,
+    color: bool,
+) -> Vec<String> {
+    if width < 5 || lines.is_empty() {
+        return lines;
+    }
+    let content_width = width.saturating_sub(3);
+    let mut framed = Vec::with_capacity(lines.len() + 2);
+    framed.push(paint_with(
+        &format!("┌{}┐", "─".repeat(width.saturating_sub(2))),
+        style,
+        color,
+    ));
+    for line in lines {
+        framed.push(format!(
+            "{}{}{}",
+            paint_with("│ ", style, color),
+            pad_to_width(&line, content_width),
+            paint_with("│", style, color)
+        ));
+    }
+    framed.push(paint_with(
+        &format!("└{}┘", "─".repeat(width.saturating_sub(2))),
+        style,
+        color,
+    ));
+    framed
+}
+
 pub(super) fn running_status_text(frame: usize) -> String {
     let mut loader = Loader::new("running");
     for _ in 0..frame {
@@ -1888,6 +2082,7 @@ mod tests {
 
     use super::*;
     use crate::interactive::transcript::TranscriptViewState;
+    use crate::interactive::UiEvent;
     use coding_agent::api::settings::CodingAgentThemeSnapshot;
 
     #[test]
@@ -1902,6 +2097,33 @@ mod tests {
         // Backgrounds collapse to default (no bg fill) in fallback mode.
         assert_eq!(styles.user_bg.bg, Color::Default);
         assert_eq!(styles.tool_pending_bg.bg, Color::Default);
+    }
+
+    #[test]
+    fn framed_modal_lines_wraps_content_in_a_full_width_border() {
+        let framed = framed_modal_lines(
+            vec!["a".to_string(), "longer content".to_string()],
+            12,
+            &Style::default(),
+            false,
+        );
+        assert_eq!(framed.len(), 4);
+        assert_eq!(framed[0], "┌──────────┐");
+        assert_eq!(framed[1], "│ a        │");
+        assert_eq!(framed[2], "│ longer co│");
+        assert_eq!(framed[3], "└──────────┘");
+    }
+
+    #[test]
+    fn framed_modal_lines_falls_back_for_narrow_or_empty_input() {
+        let lines = vec!["x".to_string()];
+        assert_eq!(
+            framed_modal_lines(lines.clone(), 4, &Style::default(), false),
+            lines
+        );
+        assert!(
+            framed_modal_lines(Vec::new(), 12, &Style::default(), false).is_empty()
+        );
     }
 
     #[test]
@@ -2158,6 +2380,7 @@ mod tests {
             id: "a".to_string(),
             markdown: "the answer".to_string(),
             thinking: "need to check".to_string(),
+            thinking_seconds: None,
             done: true,
         });
 
@@ -2185,6 +2408,7 @@ mod tests {
             id: "a".to_string(),
             markdown: String::new(),
             thinking: "secret reasoning".to_string(),
+            thinking_seconds: None,
             done: true,
         });
 
@@ -2215,6 +2439,7 @@ mod tests {
             id: "a".to_string(),
             markdown: String::new(),
             thinking: long_thought.to_string(),
+            thinking_seconds: None,
             done: true,
         });
 
@@ -2282,6 +2507,7 @@ mod tests {
             id: "a".to_string(),
             markdown: "# Title\n\nsome *markdown* body with a lot of text in it".to_string(),
             thinking: "thinking line that is also somewhat long".to_string(),
+            thinking_seconds: None,
             done: true,
         });
         transcript.push(TranscriptItem::Tool {
@@ -2713,12 +2939,120 @@ mod tests {
     }
 
     #[test]
+    fn web_search_renders_queries_and_omits_ws_call_id_markers() {
+        let mut transcript = Transcript::new();
+        transcript.push(TranscriptItem::Tool {
+            call_id: "web-1".into(),
+            name: "web_search".into(),
+            args: serde_json::json!({
+                "type": "web_search_call",
+                "id": "web-1",
+                "status": "completed"
+            }),
+            result: Some(
+                r#"{"status":"completed","action":{"type":"search","queries":["DeepSeek API docs","ws_call_id=ignored"]}}"#
+                    .into(),
+            ),
+            is_error: false,
+        });
+        let rendered = render_transcript_lines(&transcript, &test_opts(60, false)).join("\n");
+        assert!(rendered.contains("search completed"), "{rendered}");
+        assert!(rendered.contains("DeepSeek API docs"), "{rendered}");
+        assert!(!rendered.contains("ws_call_id=ignored"), "{rendered}");
+        assert!(!rendered.contains("\"action\""), "{rendered}");
+    }
+
+    #[test]
+    fn web_search_renders_opened_page_urls() {
+        let mut transcript = Transcript::new();
+        transcript.push(TranscriptItem::Tool {
+            call_id: "web-2".into(),
+            name: "web_search".into(),
+            args: serde_json::json!({
+                "type": "web_search_call",
+                "id": "web-2",
+                "status": "completed"
+            }),
+            result: Some(
+                r#"{"status":"completed","action":{"type":"open_page","url":"https://example.com/docs#ws_call_id=xyz"}}"#
+                    .into(),
+            ),
+            is_error: false,
+        });
+        let rendered = render_transcript_lines(&transcript, &test_opts(60, false)).join("\n");
+        assert!(rendered.contains("open page completed"), "{rendered}");
+        assert!(rendered.contains("https://example.com/docs"), "{rendered}");
+        assert!(!rendered.contains("ws_call_id=xyz"), "{rendered}");
+    }
+
+    #[test]
+    fn web_search_legacy_summary_falls_back_to_raw_text() {
+        let mut transcript = Transcript::new();
+        transcript.push(TranscriptItem::Tool {
+            call_id: "web-3".into(),
+            name: "web_search".into(),
+            args: serde_json::json!({"type": "web_search_call", "id": "web-3"}),
+            result: Some("completed".into()),
+            is_error: false,
+        });
+        let rendered = render_transcript_lines(&transcript, &test_opts(60, false)).join("\n");
+        assert!(rendered.contains("search completed"), "{rendered}");
+        assert!(rendered.contains("  completed"), "{rendered}");
+    }
+
+    #[test]
+    fn thinking_preview_caps_height_while_streaming() {
+        let mut transcript = Transcript::new();
+        let mut view = TranscriptViewState::default();
+        let mut opts = test_opts(50, false);
+        let mut heights = Vec::new();
+        for _ in 0..8 {
+            transcript.apply_event(UiEvent::ThinkingDelta {
+                text: "line of thinking content\n".into(),
+            });
+            view.sync(&transcript);
+            opts.view = Some(view.snapshot());
+            heights.push(render_transcript_lines(&transcript, &opts).len());
+        }
+        assert!(
+            heights.windows(2).all(|window| window[1] >= window[0]),
+            "preview height must grow but never shrink while streaming: {heights:?}"
+        );
+        assert_eq!(heights.last().copied(), Some(5), "{heights:?}");
+        assert!(
+            heights[4..].windows(2).all(|window| window[0] == window[1]),
+            "preview height must settle once the cap is reached: {heights:?}"
+        );
+    }
+
+    #[test]
+    fn thinking_label_switches_to_thought_duration_once_sealed() {
+        let mut transcript = Transcript::new();
+        transcript.apply_event(UiEvent::ThinkingDelta {
+            text: "think one\nthink two\n".into(),
+        });
+        transcript.apply_event(UiEvent::AssistantDelta {
+            text: "answer".into(),
+        });
+        let mut view = TranscriptViewState::default();
+        view.sync(&transcript);
+        let mut opts = test_opts(50, false);
+        opts.view = Some(view.snapshot());
+
+        let rendered = render_transcript_lines(&transcript, &opts).join("\n");
+        assert!(rendered.contains("Thought for"), "{rendered}");
+        assert!(!rendered.contains("thinking · preview"), "{rendered}");
+        assert!(rendered.contains("think two"), "{rendered}");
+    }
+
+    #[test]
     fn assistant_disclosure_changes_thinking_without_hiding_answer() {
         let mut transcript = Transcript::new();
         transcript.push(TranscriptItem::Assistant {
             id: "assistant-1".into(),
             markdown: "final answer".into(),
             thinking: "think one\nthink two\nthink three\nthink four\nthink five".into(),
+            thinking_seconds: None,
             done: true,
         });
         let mut view = TranscriptViewState::default();

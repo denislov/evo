@@ -1,4 +1,5 @@
 use crate::error::CliError;
+use coding_agent::api::authorization::ToolAuthorizationMode;
 use coding_agent::api::embedding::{
     CodingAgentInvocationOptions, CodingAgentSessionSelection, CodingAgentThinkingLevel,
     CodingAgentToolExecutionMode,
@@ -54,6 +55,7 @@ pub struct CliArgs {
     pub session_dir: Option<String>,
     pub name: Option<String>,
     pub thinking: Option<CodingAgentThinkingLevel>,
+    pub permission_mode: Option<ToolAuthorizationMode>,
     pub tool_execution: Option<CodingAgentToolExecutionMode>,
     pub skills: Vec<String>,
     pub prompt_templates: Vec<String>,
@@ -100,6 +102,7 @@ impl Default for CliArgs {
             session_dir: None,
             name: None,
             thinking: None,
+            permission_mode: None,
             tool_execution: None,
             skills: Vec::new(),
             prompt_templates: Vec::new(),
@@ -154,6 +157,7 @@ impl CliArgs {
             session_dir: self.session_dir.clone(),
             session_name: self.name.clone(),
             thinking: self.thinking,
+            permission_mode: self.permission_mode,
             tool_execution: self.tool_execution,
             skill_paths: self.skills.clone(),
             prompt_template_paths: self.prompt_templates.clone(),
@@ -175,7 +179,7 @@ impl CliArgs {
 
 pub fn help_text() -> String {
     let help = format!(
-        "coding-agent {}\n\nUsage:\n  coding-agent -p <prompt>\n\nOptions:\n  -p, --print              Run one prompt and print the assistant response\n  --mode <mode>            Headless mode: print|json|rpc\n  --provider <id>          Provider preference for model selection\n  --model <id>             Model id from the built-in Rust model table\n  --models <list>          Comma-separated model rotation globs, optionally model:thinking\n  --list-models [search]   List models, optionally fuzzy-filtered by search text\n  --json                   Emit JSON for --list-models\n  --api-key <key>          API key passed to the selected provider\n  --system-prompt <text>   System prompt override\n  --append-system-prompt <text> Append to system prompt (repeatable)\n  --max-turns <n>          Optional cap on agent loop turns (default: unlimited, matches TS pi)\n  --thinking <level>       Thinking level: off|minimal|low|medium|high|xhigh\n                           DeepSeek effective effort: minimal/low/medium/high=high, xhigh=max\n  --tool-execution <mode>  Tool execution mode: parallel|sequential\n  --tools, -t <names>      Comma-separated builtin tool allowlist\n  --exclude-tools, -xt <names> Comma-separated builtin tool denylist\n  --no-tools               Disable all tools\n  --no-builtin-tools       Do not register builtin tools\n  --skills <dir>           Directory to load skills from (repeatable)\n  --prompt-templates <p>   Path to load prompt templates from (repeatable)\n  --no-context-files       Disable AGENTS.md / CLAUDE.md discovery\n  --no-skills              Disable skill discovery\n  --no-prompt-templates    Disable prompt template discovery\n  --no-themes              Disable theme discovery\n  --theme <path>            Load a theme file or directory (repeatable)\n  --skill <name>           Invoke a loaded skill by name\n  --prompt-template <name> Invoke a prompt template by name\n  --template-arg <value>   Argument for prompt template (repeatable)\n  --verbose                Emit verbose diagnostics\n  --offline                Avoid network-dependent behavior where supported\n  -h, --help               Show help\n  -v, --version            Show version\n\nSession Options:\n  -c, --continue           Continue the most recent session\n  -r, --resume             Resume the most recent session\n  --no-session             Disable session persistence\n  --session <path|id>      Open a specific session by path or id prefix\n  --session-id <id>        Open or create a session by exact id\n  --fork <path|id>         Fork an existing session\n  --session-dir <dir>      Directory to store session files\n  --name <name>            Name for the current session\n  -n <name>                Short form of --name\n",
+        "coding-agent {}\n\nUsage:\n  coding-agent -p <prompt>\n\nOptions:\n  -p, --print              Run one prompt and print the assistant response\n  --mode <mode>            Headless mode: print|json|rpc\n  --provider <id>          Provider preference for model selection\n  --model <id>             Model id from the built-in Rust model table\n  --models <list>          Comma-separated model rotation globs, optionally model:thinking\n  --list-models [search]   List models, optionally fuzzy-filtered by search text\n  --json                   Emit JSON for --list-models\n  --api-key <key>          API key passed to the selected provider\n  --system-prompt <text>   System prompt override\n  --append-system-prompt <text> Append to system prompt (repeatable)\n  --max-turns <n>          Optional cap on agent loop turns (default: unlimited, matches TS pi)\n  --thinking <level>       Thinking level: off|minimal|low|medium|high|xhigh\n                           DeepSeek effective effort: minimal/low/medium/high=high, xhigh=max\n  --permission-mode <mode> Permission mode: plan (read-only) | ask (prompt first) | yolo (auto)\n  --tool-execution <mode>  Tool execution mode: parallel|sequential\n  --tools, -t <names>      Comma-separated builtin tool allowlist\n  --exclude-tools, -xt <names> Comma-separated builtin tool denylist\n  --no-tools               Disable all tools\n  --no-builtin-tools       Do not register builtin tools\n  --skills <dir>           Directory to load skills from (repeatable)\n  --prompt-templates <p>   Path to load prompt templates from (repeatable)\n  --no-context-files       Disable AGENTS.md / CLAUDE.md discovery\n  --no-skills              Disable skill discovery\n  --no-prompt-templates    Disable prompt template discovery\n  --no-themes              Disable theme discovery\n  --theme <path>            Load a theme file or directory (repeatable)\n  --skill <name>           Invoke a loaded skill by name\n  --prompt-template <name> Invoke a prompt template by name\n  --template-arg <value>   Argument for prompt template (repeatable)\n  --verbose                Emit verbose diagnostics\n  --offline                Avoid network-dependent behavior where supported\n  -h, --help               Show help\n  -v, --version            Show version\n\nSession Options:\n  -c, --continue           Continue the most recent session\n  -r, --resume             Resume the most recent session\n  --no-session             Disable session persistence\n  --session <path|id>      Open a specific session by path or id prefix\n  --session-id <id>        Open or create a session by exact id\n  --fork <path|id>         Fork an existing session\n  --session-dir <dir>      Directory to store session files\n  --name <name>            Name for the current session\n  -n <name>                Short form of --name\n",
         env!("CARGO_PKG_VERSION")
     );
     help
@@ -283,6 +287,10 @@ where
             "--tool-execution" => {
                 let val = take_value(&raw, &mut i, "--tool-execution")?;
                 parsed.tool_execution = Some(val.parse().map_err(CliError::InvalidInput)?);
+            }
+            "--permission-mode" => {
+                let val = take_value(&raw, &mut i, "--permission-mode")?;
+                parsed.permission_mode = Some(val.parse().map_err(CliError::InvalidInput)?);
             }
             "--skills" => {
                 let val = take_value(&raw, &mut i, "--skills")?;

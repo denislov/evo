@@ -13,6 +13,7 @@ use crate::app::embedding::{
 };
 use crate::app::error::ApplicationError;
 use crate::app::invocation::CodingAgentInvocationOptions;
+use crate::authorization::ToolAuthorizationMode;
 use crate::app::operation_factory::CodingAgentOperationFactory;
 use crate::app::profile_catalog::CodingAgentProfileCatalog;
 use crate::app::prompt_input::{
@@ -174,6 +175,7 @@ pub struct CodingAgentApplicationStartup {
     pub session_bootstrap: CodingAgentSessionBootstrap,
     pub cwd: PathBuf,
     pub thinking_level: Option<CodingAgentThinkingLevel>,
+    pub permission_mode: ToolAuthorizationMode,
     pub profile_catalog: CodingAgentProfileCatalog,
     pub default_agent_profile_id: ProfileId,
     pub model_summary: CodingAgentModelCatalogEntry,
@@ -188,6 +190,7 @@ impl fmt::Debug for CodingAgentApplicationStartup {
             .debug_struct("CodingAgentApplicationStartup")
             .field("cwd", &self.cwd)
             .field("thinking_level", &self.thinking_level)
+            .field("permission_mode", &self.permission_mode)
             .field("default_agent_profile_id", &self.default_agent_profile_id)
             .field("model_summary", &self.model_summary)
             .field("diagnostic_count", &self.diagnostics.len())
@@ -571,6 +574,7 @@ fn build_interactive_startup(
         session_target,
         resolved.session_name.clone(),
         default_agent_profile_id.clone(),
+        invocation.permission_mode.unwrap_or_default(),
     );
     let thinking_level = invocation.thinking.or_else(|| {
         resolved
@@ -611,6 +615,7 @@ fn build_interactive_startup(
         session_bootstrap,
         cwd,
         thinking_level,
+        permission_mode: invocation.permission_mode.unwrap_or_default(),
         profile_catalog,
         default_agent_profile_id,
         model_summary,

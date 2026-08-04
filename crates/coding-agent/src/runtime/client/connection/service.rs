@@ -53,6 +53,26 @@ impl CodingAgentClientConnection {
         self.authorization_service.decide(identity, decision).await
     }
 
+    /// Switch the interactive permission policy (Plan / Ask / Yolo) for the
+    /// runtime session. Takes effect for subsequent tool invocations.
+    pub fn set_tool_authorization_mode(
+        &self,
+        mode: crate::authorization::ToolAuthorizationMode,
+    ) -> Result<(), CodingAgentPublicError> {
+        self.set_tool_authorization_mode_internal(mode)
+            .map_err(CodingAgentPublicError::from)
+    }
+
+    pub(crate) fn set_tool_authorization_mode_internal(
+        &self,
+        mode: crate::authorization::ToolAuthorizationMode,
+    ) -> Result<(), CodingSessionError> {
+        self.coordinator
+            .client_state(&self.handle())
+            .map_err(|error| registry_error(&self.client_id, error))?;
+        self.authorization_service.set_mode(mode)
+    }
+
     pub fn prompt_control(&self, operation_id: impl Into<String>) -> CodingAgentPromptControl {
         CodingAgentPromptControl {
             client_id: self.client_id.clone(),

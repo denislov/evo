@@ -15,6 +15,7 @@ use coding_agent::api::embedding::{
     CodingAgentProfileCatalog, CodingAgentResourceCommand, CodingAgentSessionQuery,
     CodingAgentThinkingLevel,
 };
+use coding_agent::api::authorization::ToolAuthorizationMode;
 use coding_agent::api::operation::{
     BranchSummaryReusePolicy, CodingAgentOperation, CodingAgentOperationFactory, PromptInvocation,
     SelfHealingEditModelRepairOptions, SelfHealingEditRequest,
@@ -84,6 +85,7 @@ pub(super) struct PromptContext {
     pub(super) resource_commands: Vec<CodingAgentResourceCommand>,
     pub(super) session_query: CodingAgentSessionQuery,
     pub(super) session_choices: Vec<SessionChoice>,
+    pub(super) permission_mode: ToolAuthorizationMode,
 }
 
 impl PromptContext {
@@ -109,6 +111,7 @@ impl PromptContext {
             resource_commands: startup.resource_commands,
             session_query: application.session_query,
             session_choices: startup.session_choices,
+            permission_mode: application.permission_mode,
         }
     }
 
@@ -270,7 +273,27 @@ pub(super) fn session_label(persistent: bool) -> String {
 
 pub(super) fn welcome_line() -> String {
     format!(
-        "evo {}\nReady · /help for commands",
+        "{logo}\n{}\nReady · /help for commands",
         env!("CARGO_PKG_VERSION"),
+        logo = r#"███████╗ ██╗   ██╗  ██████╗
+██╔════╝ ██║   ██║ ██╔═══██╗
+█████╗   ██║   ██║ ██║   ██║
+██╔══╝   ╚██╗ ██╔╝ ██║   ██║
+███████╗  ╚████╔╝  ╚██████╔╝
+╚══════╝   ╚═══╝    ╚═════╝"#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::welcome_line;
+
+    #[test]
+    fn welcome_line_features_the_evo_ascii_logo() {
+        let welcome = welcome_line();
+        assert!(welcome.contains("███████╗"), "{welcome}");
+        assert!(welcome.contains("╚══════╝"), "{welcome}");
+        assert!(welcome.contains(env!("CARGO_PKG_VERSION")), "{welcome}");
+        assert!(welcome.contains("/help for commands"), "{welcome}");
+    }
 }

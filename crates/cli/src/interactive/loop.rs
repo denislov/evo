@@ -349,6 +349,7 @@ fn initialize_started_tui<T: Terminal>(
         root.session_choices = prompt_context.session_choices.clone();
         root.model = Some(prompt_context.model_summary.clone());
         root.thinking_level = prompt_context.thinking_level.unwrap_or_default();
+        root.permission_mode = prompt_context.permission_mode;
         root.resource_commands = prompt_context.resource_commands.clone();
         root.profile_catalog = prompt_context.profile_catalog.clone();
         root.set_default_agent_profile_id(prompt_context.default_agent_profile_id.clone());
@@ -520,6 +521,10 @@ where
 
     loop {
         flush_render_if_ready(tui, root_id, &mut render_scheduler, clock.now())?;
+        schedule_render(
+            &mut render_scheduler,
+            apply_pending_permission_mode(tui, root_id, &mut client_connection)?,
+        );
         if !input_open && running.is_none() {
             flush_pending_render(tui, root_id, &mut render_scheduler, clock.now())?;
             detach_interactive_client(&mut client_connection);
@@ -1962,6 +1967,35 @@ fn apply_interactive_product_event<T: Terminal>(
 ) -> Result<RenderRequest, CliError> {
     apply_interactive_projection(tui, root_id, |root| {
         root.apply_shared_product_event(event);
+    })
+}
+
+/// Apply a permission-mode switch requested through `/permission` to the live
+/// runtime connection. Without a connection (before the first prompt finishes)
+/// the pending mode stays queued on the root and applies once connected.
+fn apply_pending_permission_mode<T: Terminal>(
+    tui: &mut Tui<T>,
+    root_id: usize,
+    connection: &mut Option<InteractiveClientConnection>,
+) -> Result<RenderRequest, CliError> {
+    let Some(current) = connection.as_ref() else {
+        return Ok(RenderRequest::NONE);
+    };
+    let Some(mode) = root_mut(tui, root_id)?.take_pending_permission_mode() else {
+        return Ok(RenderRequest::NONE);
+    };
+    apply_interactive_projection(tui, root_id, |root| {
+        match current.connection.set_tool_authorization_mode(mode) {
+            Ok(()) => {
+                root.transcript
+                    .push(TranscriptItem::system(format!("Permission mode set: {mode}")));
+            }
+            Err(error) => {
+                root.transcript.push(TranscriptItem::system(format!(
+                    "Failed to set permission mode: {error}"
+                )));
+            }
+        }
     })
 }
 

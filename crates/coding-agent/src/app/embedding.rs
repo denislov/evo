@@ -52,6 +52,7 @@ pub struct CodingAgentEmbeddingOptions {
     model_id: Option<String>,
     default_agent_profile_id: ProfileId,
     global_config_only: bool,
+    tool_authorization_mode: ToolAuthorizationMode,
 }
 
 impl CodingAgentEmbeddingOptions {
@@ -64,6 +65,7 @@ impl CodingAgentEmbeddingOptions {
             model_id: None,
             default_agent_profile_id: ProfileId::from("default"),
             global_config_only: false,
+            tool_authorization_mode: ToolAuthorizationMode::Ask,
         }
     }
 
@@ -92,6 +94,7 @@ impl CodingAgentEmbeddingOptions {
             model_id: None,
             default_agent_profile_id: ProfileId::from("default"),
             global_config_only,
+            tool_authorization_mode: ToolAuthorizationMode::Ask,
         })
     }
 
@@ -112,6 +115,11 @@ impl CodingAgentEmbeddingOptions {
 
     pub fn with_default_agent_profile_id(mut self, profile_id: impl Into<ProfileId>) -> Self {
         self.default_agent_profile_id = profile_id.into();
+        self
+    }
+
+    pub fn with_tool_authorization_mode(mut self, mode: ToolAuthorizationMode) -> Self {
+        self.tool_authorization_mode = mode;
         self
     }
 
@@ -686,6 +694,7 @@ impl CodingAgentEmbeddingContext {
             None,
             self.resolved.session_name.clone(),
             self.options.default_agent_profile_id.clone(),
+            self.options.tool_authorization_mode,
         )
     }
 
@@ -700,7 +709,7 @@ impl CodingAgentEmbeddingContext {
         };
         let mut options = options
             .with_default_agent_profile_id(self.options.default_agent_profile_id.clone())
-            .with_tool_authorization_mode(ToolAuthorizationMode::Interactive);
+            .with_tool_authorization_mode(self.options.tool_authorization_mode);
         if let Some(root) = self
             .resolved
             .session

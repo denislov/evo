@@ -88,6 +88,7 @@ pub struct CodingAgentInvocationOptions {
     pub session_dir: Option<String>,
     pub session_name: Option<String>,
     pub thinking: Option<CodingAgentThinkingLevel>,
+    pub permission_mode: Option<crate::authorization::ToolAuthorizationMode>,
     pub tool_execution: Option<CodingAgentToolExecutionMode>,
     pub skill_paths: Vec<String>,
     pub prompt_template_paths: Vec<String>,
@@ -121,6 +122,7 @@ impl Default for CodingAgentInvocationOptions {
             session_dir: None,
             session_name: None,
             thinking: None,
+            permission_mode: None,
             tool_execution: None,
             skill_paths: Vec::new(),
             prompt_template_paths: Vec::new(),
@@ -160,6 +162,7 @@ impl fmt::Debug for CodingAgentInvocationOptions {
             .field("has_session_dir", &self.session_dir.is_some())
             .field("has_session_name", &self.session_name.is_some())
             .field("thinking", &self.thinking)
+            .field("permission_mode", &self.permission_mode)
             .field("tool_execution", &self.tool_execution)
             .field("skill_path_count", &self.skill_paths.len())
             .field(

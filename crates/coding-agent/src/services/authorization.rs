@@ -107,6 +107,7 @@ enum PendingResolution {
 
 #[derive(Default)]
 struct AuthorizationState {
+    mode: ToolAuthorizationMode,
     pending: BTreeMap<String, PendingAuthorization>,
     grants: HashSet<OperationGrant>,
     revision: u64,
@@ -114,7 +115,6 @@ struct AuthorizationState {
 
 #[derive(Clone)]
 pub(crate) struct AuthorizationService {
-    mode: ToolAuthorizationMode,
     capabilities: Arc<dyn CapabilityQuery>,
     events: Arc<dyn EventSink>,
     state: Arc<Mutex<AuthorizationState>>,
@@ -151,16 +151,10 @@ impl Drop for AuthorizationWaiterGuard {
 
 impl std::fmt::Debug for AuthorizationService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.state.lock_or_recover("authorization state");
         f.debug_struct("AuthorizationService")
-            .field("mode", &self.mode)
-            .field(
-                "pending",
-                &self
-                    .state
-                    .lock_or_recover("authorization state")
-                    .pending
-                    .len(),
-            )
+            .field("mode", &state.mode)
+            .field("pending", &state.pending.len())
             .finish()
     }
 }
@@ -180,11 +174,21 @@ impl AuthorizationService {
         events: Arc<dyn EventSink>,
     ) -> Self {
         Self {
-            mode,
             capabilities,
             events,
-            state: Arc::new(Mutex::new(AuthorizationState::default())),
+            state: Arc::new(Mutex::new(AuthorizationState {
+                mode,
+                ..Default::default()
+            })),
         }
+    }
+
+    pub(crate) fn set_mode(
+        &self,
+        mode: ToolAuthorizationMode,
+    ) -> Result<(), CodingSessionError> {
+        self.state.lock_resource("authorization state")?.mode = mode;
+        Ok(())
     }
 
     pub(crate) fn pending(&self) -> Result<Vec<ToolAuthorizationRequest>, CodingSessionError> {
@@ -193,7 +197,10 @@ impl AuthorizationService {
     }
 
     pub(crate) fn uses_interactive_waiters(&self) -> bool {
-        self.mode == ToolAuthorizationMode::Interactive
+        self.state
+            .lock_or_recover("authorization state")
+            .mode
+            == ToolAuthorizationMode::Ask
     }
 
     pub(crate) async fn authorize_with_event_writer(
@@ -265,11 +272,22 @@ impl AuthorizationService {
             capability_generation: snapshot.generation.get(),
             requested_at: create_timestamp(),
         };
-        match self.mode {
-            ToolAuthorizationMode::AllowAll => return Ok(None),
-            ToolAuthorizationMode::Deny => {
+        let mode = self
+            .state
+            .lock_resource("authorization state")
+            .map_err(|error| error.to_string())?
+            .mode;
+        match mode {
+            ToolAuthorizationMode::Yolo => return Ok(None),
+            ToolAuthorizationMode::Plan => {
+                // Read-only planning: read-only tools run automatically,
+                // every mutating/shell/side-effecting tool is denied without
+                // prompting.
+                if matches!(risk, ToolAuthorizationRisk::ExternalRead) {
+                    return Ok(None);
+                }
                 discard_filesystem_binding(&context, &snapshot);
-                let reason = "tool invocation requires authorization";
+                let reason = "plan mode is read-only; mutating tools need Ask or Yolo";
                 persist_authorization_events(
                     event_writer.as_ref(),
                     &request,
@@ -287,7 +305,7 @@ impl AuthorizationService {
                     .map_err(|error| error.to_string())?;
                 return Ok(Some(blocked(reason)));
             }
-            ToolAuthorizationMode::Interactive => {}
+            ToolAuthorizationMode::Ask => {}
         }
         if let Err(error) =
             persist_authorization_events(event_writer.as_ref(), &request, true, None).await

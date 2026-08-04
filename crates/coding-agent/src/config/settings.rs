@@ -3,32 +3,6 @@ use crate::config::{ConfigDiagnostic, ConfigPaths};
 use agent_core::api::agent::MAX_COMPACTION_TOKEN_BUDGET;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::str::FromStr;
-
-/// Legacy `[terminal] mode` configuration value.
-///
-/// The interactive TUI is always fullscreen now; this enum only exists so
-/// existing settings files keep parsing. `Inline` is accepted (and ignored)
-/// for backward compatibility with older configs.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TuiMode {
-    #[default]
-    Inline,
-    Fullscreen,
-}
-
-impl FromStr for TuiMode {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "inline" => Ok(Self::Inline),
-            "fullscreen" => Ok(Self::Fullscreen),
-            other => Err(format!("unknown TUI mode: {other}")),
-        }
-    }
-}
 
 /// Which settings file to target when saving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,10 +35,6 @@ pub struct PartialRetry {
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PartialTerminal {
-    /// Legacy mode selector; accepted for config compatibility and otherwise
-    /// ignored (the interactive TUI always owns the full screen).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<TuiMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_images: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,7 +122,6 @@ pub struct RetrySettings {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminalSettings {
-    pub mode: TuiMode,
     pub show_images: bool,
     pub show_progress: bool,
     pub clear_on_shrink: bool,
@@ -223,7 +192,6 @@ fn merge_terminal(
     match (base, over) {
         (None, x) | (x, None) => x,
         (Some(b), Some(o)) => Some(PartialTerminal {
-            mode: o.mode.or(b.mode),
             show_images: o.show_images.or(b.show_images),
             show_progress: o.show_progress.or(b.show_progress),
             clear_on_shrink: o.clear_on_shrink.or(b.clear_on_shrink),
@@ -318,7 +286,6 @@ impl PartialSettings {
             websocket_connect_timeout_ms: self.websocket_connect_timeout_ms,
             enabled_models: self.enabled_models.unwrap_or_default(),
             terminal: TerminalSettings {
-                mode: t.mode.unwrap_or_default(),
                 show_images: t.show_images.unwrap_or(true),
                 show_progress: t.show_progress.unwrap_or(false),
                 clear_on_shrink: t.clear_on_shrink.unwrap_or(false),

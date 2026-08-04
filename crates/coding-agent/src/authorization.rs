@@ -1,11 +1,83 @@
+use std::fmt;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Interactive permission policy for risky tool invocations.
+///
+/// Three product modes, mirroring the Plan / Ask / Yolo permission ladder:
+/// `Plan` is read-only (mutating actions are denied without prompting),
+/// `Ask` prompts before every risky action, and `Yolo` auto-approves
+/// everything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolAuthorizationMode {
+    /// Read-only planning: read-only tools (reads, greps, listings) run
+    /// automatically; mutating, shell and side-effecting tools are denied
+    /// without prompting.
+    Plan,
+    /// Prompt before every risky action.
     #[default]
-    Deny,
-    Interactive,
-    AllowAll,
+    Ask,
+    /// Auto-approve every action; nothing is ever blocked or prompted.
+    Yolo,
+}
+
+impl fmt::Display for ToolAuthorizationMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Plan => formatter.write_str("plan"),
+            Self::Ask => formatter.write_str("ask"),
+            Self::Yolo => formatter.write_str("yolo"),
+        }
+    }
+}
+
+impl FromStr for ToolAuthorizationMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "plan" => Ok(Self::Plan),
+            "ask" => Ok(Self::Ask),
+            "yolo" => Ok(Self::Yolo),
+            other => Err(format!(
+                "unknown permission mode `{other}` (expected plan, ask, or yolo)"
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::ToolAuthorizationMode;
+
+    #[test]
+    fn default_mode_is_ask() {
+        assert_eq!(ToolAuthorizationMode::default(), ToolAuthorizationMode::Ask);
+    }
+
+    #[test]
+    fn modes_round_trip_through_display_and_parse() {
+        for mode in [ToolAuthorizationMode::Plan, ToolAuthorizationMode::Ask, ToolAuthorizationMode::Yolo] {
+            let text = mode.to_string();
+            assert_eq!(text.parse::<ToolAuthorizationMode>().unwrap(), mode, "{text}");
+        }
+    }
+
+    #[test]
+    fn modes_serialize_as_snake_case_and_parse_back() {
+        let yolo = serde_json::to_string(&ToolAuthorizationMode::Yolo).unwrap();
+        assert_eq!(yolo, r#""yolo""#);
+        let parsed: ToolAuthorizationMode = serde_json::from_str(r#""plan""#).unwrap();
+        assert_eq!(parsed, ToolAuthorizationMode::Plan);
+    }
+
+    #[test]
+    fn unknown_mode_errors_with_guidance() {
+        let error = "auto".parse::<ToolAuthorizationMode>().unwrap_err();
+        assert!(error.contains("plan, ask, or yolo"), "{error}");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

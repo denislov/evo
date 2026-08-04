@@ -124,7 +124,7 @@ async fn persistent_prompt_with_tool_authorization_completes_on_current_thread_r
     let mut session = CodingAgentSession::create_internal(
         CodingAgentSessionOptions::new()
             .with_ai_client(provider_guard.ai_client())
-            .with_tool_authorization_mode(ToolAuthorizationMode::Interactive)
+            .with_tool_authorization_mode(ToolAuthorizationMode::Ask)
             .with_session_id("sess_current_thread_authorization")
             .with_session_log_root(temp.path()),
     )
@@ -175,6 +175,169 @@ async fn persistent_prompt_with_tool_authorization_completes_on_current_thread_r
             .pending_tool_authorizations()
             .expect("final authorization snapshot")
             .is_empty()
+    );
+}
+
+/// Yolo mode auto-approves every risky tool: the side-effecting tool executes
+/// directly and no pending authorization request is ever published.
+#[tokio::test]
+async fn yolo_mode_auto_approves_side_effecting_tools() {
+    let api = "coding-session-yolo-mode";
+    let provider_guard = ProviderGuard::register(
+        api,
+        Arc::new(FauxProvider::with_call_queue(vec![
+            FauxProvider::single_call(
+                vec![FauxResponse {
+                    text_deltas: Vec::new(),
+                    thinking_deltas: Vec::new(),
+                    tool_calls: vec![FauxToolCall {
+                        id: "tool-call-yolo".into(),
+                        name: "authorized_side_effect".into(),
+                        deltas: vec!["{}".into()],
+                        final_arguments: serde_json::json!({}),
+                    }],
+                }],
+                StopReason::ToolUse,
+            ),
+            FauxProvider::text_call("tool ran without a prompt", StopReason::Stop),
+        ])),
+    );
+    let tool_executed = Arc::new(AtomicBool::new(false));
+    let tool_executed_for_call = tool_executed.clone();
+    let tool = AgentTool::new_text(
+        "authorized_side_effect",
+        "Exercise yolo authorization.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+            "x-evo-authorization-risk": "side_effect"
+        }),
+        move |_context, _arguments| {
+            let tool_executed = tool_executed_for_call.clone();
+            async move {
+                tool_executed.store(true, Ordering::Release);
+                Ok("tool result".to_owned())
+            }
+        },
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let mut session = CodingAgentSession::create_internal(
+        CodingAgentSessionOptions::new()
+            .with_ai_client(provider_guard.ai_client())
+            .with_tool_authorization_mode(ToolAuthorizationMode::Yolo)
+            .with_session_id("sess_yolo_mode")
+            .with_session_log_root(temp.path()),
+    )
+    .await
+    .unwrap();
+    let connection = session
+        .connect_internal(CodingAgentClientId::new("yolo-test"))
+        .unwrap();
+    let operation = CodingAgentOperation::Prompt(prompt_options_with_tools(
+        api,
+        "run the authorized tool",
+        vec![tool],
+    ));
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), session.run_internal(operation))
+        .await
+        .expect("yolo prompt should complete")
+        .expect("yolo prompt outcome");
+    assert!(matches!(outcome, CodingAgentOperationOutcome::Prompt(_)));
+    assert!(
+        tool_executed.load(Ordering::Acquire),
+        "yolo mode must execute the tool without prompting"
+    );
+    assert!(
+        connection
+            .pending_tool_authorizations()
+            .expect("final authorization snapshot")
+            .is_empty(),
+        "yolo mode must never publish a pending authorization"
+    );
+}
+
+/// Plan mode is read-only: a side-effecting tool is denied without prompting
+/// and the model receives the read-only reason instead of executing it.
+#[tokio::test]
+async fn plan_mode_denies_mutating_tools_without_prompting() {
+    let api = "coding-session-plan-mode";
+    let provider_guard = ProviderGuard::register(
+        api,
+        Arc::new(FauxProvider::with_call_queue(vec![
+            FauxProvider::single_call(
+                vec![FauxResponse {
+                    text_deltas: Vec::new(),
+                    thinking_deltas: Vec::new(),
+                    tool_calls: vec![FauxToolCall {
+                        id: "tool-call-plan".into(),
+                        name: "authorized_side_effect".into(),
+                        deltas: vec!["{}".into()],
+                        final_arguments: serde_json::json!({}),
+                    }],
+                }],
+                StopReason::ToolUse,
+            ),
+            FauxProvider::text_call(
+                "mutating tool was refused",
+                StopReason::Stop,
+            ),
+        ])),
+    );
+    let tool_executed = Arc::new(AtomicBool::new(false));
+    let tool_executed_for_call = tool_executed.clone();
+    let tool = AgentTool::new_text(
+        "authorized_side_effect",
+        "Exercise plan authorization.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+            "x-evo-authorization-risk": "side_effect"
+        }),
+        move |_context, _arguments| {
+            let tool_executed = tool_executed_for_call.clone();
+            async move {
+                tool_executed.store(true, Ordering::Release);
+                Ok("tool result".to_owned())
+            }
+        },
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let mut session = CodingAgentSession::create_internal(
+        CodingAgentSessionOptions::new()
+            .with_ai_client(provider_guard.ai_client())
+            .with_tool_authorization_mode(ToolAuthorizationMode::Plan)
+            .with_session_id("sess_plan_mode")
+            .with_session_log_root(temp.path()),
+    )
+    .await
+    .unwrap();
+    let connection = session
+        .connect_internal(CodingAgentClientId::new("plan-test"))
+        .unwrap();
+    let operation = CodingAgentOperation::Prompt(prompt_options_with_tools(
+        api,
+        "run the authorized tool",
+        vec![tool],
+    ));
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), session.run_internal(operation))
+        .await
+        .expect("plan prompt should complete")
+        .expect("plan prompt outcome");
+    assert!(matches!(outcome, CodingAgentOperationOutcome::Prompt(_)));
+    assert!(
+        !tool_executed.load(Ordering::Acquire),
+        "plan mode must deny mutating tools"
+    );
+    assert!(
+        connection
+            .pending_tool_authorizations()
+            .expect("final authorization snapshot")
+            .is_empty(),
+        "plan mode must deny without prompting"
     );
 }
 

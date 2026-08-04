@@ -33,7 +33,7 @@ use crate::interactive::profile_menu::{
 use crate::interactive::render::{
     TranscriptBlockRows, TranscriptRenderCache, TranscriptRenderOptions, TranscriptRowSnapshot,
     TranscriptStyles, WARNING, abbreviate_cwd, editor_border_line, fit_line, format_tokens,
-    markdown_theme_from_resolved, running_status_text,
+    framed_modal_lines, markdown_theme_from_resolved, running_status_text,
 };
 use crate::interactive::session_actions::{HydratedSession, SessionChoice};
 use crate::interactive::session_selector;
@@ -44,7 +44,7 @@ use crate::interactive::transient_overlay::TransientOverlayBridge;
 use crate::interactive::tree_selector::{TreeSelectorInput, TreeSelectorState};
 use crate::interactive::{Transcript, TranscriptItem, UiEvent};
 use coding_agent::api::authorization::{
-    ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizationRisk,
+    ToolAuthorizationDecision, ToolAuthorizationMode, ToolAuthorizationRequest, ToolAuthorizationRisk,
 };
 use coding_agent::api::client::{
     CodingAgentContextSnapshot, CodingAgentFileChangeSnapshot, CodingAgentOperationSnapshot,
@@ -400,6 +400,7 @@ pub(super) struct InteractiveLocalState {
     pub(super) pending_tree_label_change: Option<(String, Option<String>)>,
     pub(super) selected_model: Option<CodingAgentModelCatalogEntry>,
     pub(super) selected_thinking_level: Option<CodingAgentThinkingLevel>,
+    pub(super) pending_permission_mode: Option<ToolAuthorizationMode>,
     pub(super) selecting_model: bool,
     pub(super) model_selection_selected: usize,
     pub(super) selected_session: Option<SessionChoice>,
@@ -447,6 +448,10 @@ pub(super) struct InteractiveRoot {
     pub(super) model: Option<CodingAgentModelCatalogEntry>,
     /// Currently active thinking level (never consumed by `take_*`).
     pub(super) thinking_level: CodingAgentThinkingLevel,
+    /// Currently active permission policy for footer display. Distinct from
+    /// `local.pending_permission_mode`, which is consumed to apply pending
+    /// changes to the runtime session.
+    pub(super) permission_mode: ToolAuthorizationMode,
     pub(super) available_models: Vec<CodingAgentModelCatalogEntry>,
     pub(super) model_rotation: Vec<CodingAgentModelCatalogEntry>,
     pub(super) session_query: CodingAgentSessionQuery,
@@ -536,6 +541,7 @@ pub(super) struct InteractiveRenderState {
     stats: FooterStats,
     tool_output_expanded: bool,
     spinner_frame: usize,
+    permission_mode: ToolAuthorizationMode,
     slash_suggestion_selected: usize,
     slash_suggestions_dismissed_for: Option<String>,
     selecting_settings: bool,
@@ -633,6 +639,7 @@ impl InteractiveRoot {
                 pending_tree_label_change: None,
                 selected_model: None,
                 selected_thinking_level: None,
+                pending_permission_mode: None,
                 selecting_model: false,
                 model_selection_selected: 0,
                 selected_session: None,
@@ -675,6 +682,7 @@ impl InteractiveRoot {
             session_label,
             model: None,
             thinking_level: CodingAgentThinkingLevel::default(),
+            permission_mode: ToolAuthorizationMode::default(),
             available_models,
             model_rotation: Vec::new(),
             session_query: CodingAgentSessionQuery::disabled(),
@@ -739,7 +747,17 @@ impl InteractiveRoot {
         &mut self,
         terminal_width: usize,
     ) -> TransientOverlayProjection {
-        let modal_lines = self.render_modal_surface(terminal_width.max(1));
+        let modal_role = if self.local.context_detail.is_some() {
+            match shell_layout_mode(terminal_width) {
+                ShellLayoutMode::Wide => TransientOverlayRole::ContextRailDetail,
+                ShellLayoutMode::Medium => TransientOverlayRole::ContextDrawerDetail,
+                ShellLayoutMode::Narrow => TransientOverlayRole::ContextPageDetail,
+            }
+        } else {
+            TransientOverlayRole::ModalDialog
+        };
+        let modal_width = modal_overlay_width(modal_role, terminal_width);
+        let modal_lines = self.render_modal_surface(modal_width.max(1));
         let support_width = terminal_width.saturating_sub(4).clamp(1, 72);
         let mut support_lines = self.render_transient_prompts(support_width);
         let support_role = if support_lines.is_empty() {
@@ -754,15 +772,6 @@ impl InteractiveRoot {
         };
         let modal_visible = !modal_lines.is_empty();
         let support_visible = !support_lines.is_empty();
-        let modal_role = if self.local.context_detail.is_some() {
-            match shell_layout_mode(terminal_width) {
-                ShellLayoutMode::Wide => TransientOverlayRole::ContextRailDetail,
-                ShellLayoutMode::Medium => TransientOverlayRole::ContextDrawerDetail,
-                ShellLayoutMode::Narrow => TransientOverlayRole::ContextPageDetail,
-            }
-        } else {
-            TransientOverlayRole::ModalDialog
-        };
         self.local.modal_overlay.set_lines(modal_lines);
         self.local.support_overlay.set_lines(support_lines);
 
@@ -808,6 +817,17 @@ impl InteractiveRoot {
 
     pub(super) fn take_selected_thinking_level(&mut self) -> Option<CodingAgentThinkingLevel> {
         self.local.selected_thinking_level.take()
+    }
+
+    /// Record a permission-mode change for the status bar immediately and mark
+    /// it pending so the runtime session can be switched once connected.
+    pub(super) fn set_permission_mode(&mut self, mode: ToolAuthorizationMode) {
+        self.permission_mode = mode;
+        self.local.pending_permission_mode = Some(mode);
+    }
+
+    pub(super) fn take_pending_permission_mode(&mut self) -> Option<ToolAuthorizationMode> {
+        self.local.pending_permission_mode.take()
     }
 
     pub(super) fn set_default_agent_profile_id(&mut self, profile_id: ProfileId) {
@@ -1294,40 +1314,50 @@ impl InteractiveRoot {
             return Vec::new();
         };
         let color = color_enabled();
-        let mut lines = vec![fit_line(
+        let content_width = width.saturating_sub(3).max(1);
+        let mut inner = vec![fit_line(
             &paint_with(
                 &format!("Tool authorization (1/{})", self.tool_authorizations.len()),
                 &WARNING,
                 color,
             ),
-            width,
+            content_width,
         )];
-        lines.push(fit_line(
+        inner.push(fit_line(
             &format!(
                 "  tool: {}  risk: {}  operation: {}",
                 request.tool_name,
                 tool_authorization_risk_label(request.risk),
                 request.operation_id
             ),
-            width,
+            content_width,
         ));
-        lines.push(fit_line(&format!("  {}", request.preview.summary), width));
+        inner.push(fit_line(
+            &format!("  {}", request.preview.summary),
+            content_width,
+        ));
         if let Some(path) = request.preview.path.as_deref() {
-            lines.push(fit_line(&format!("  path: {path}"), width));
+            inner.push(fit_line(&format!("  path: {path}"), content_width));
         }
         if let Some(cwd) = request.preview.cwd.as_deref() {
-            lines.push(fit_line(&format!("  cwd: {cwd}"), width));
+            inner.push(fit_line(&format!("  cwd: {cwd}"), content_width));
         }
         if let Some(command) = request.preview.command.as_deref() {
             for (index, command_line) in command.lines().take(3).enumerate() {
                 let label = if index == 0 { "command" } else { "       " };
-                lines.push(fit_line(&format!("  {label}: {command_line}"), width));
+                inner.push(fit_line(
+                    &format!("  {label}: {command_line}"),
+                    content_width,
+                ));
             }
         }
         if let Some(content) = request.preview.content_preview.as_deref() {
-            lines.push(fit_line("  preview:", width));
+            inner.push(fit_line("  preview:", content_width));
             for content_line in content.lines().take(6) {
-                lines.push(fit_line(&format!("    {content_line}"), width));
+                inner.push(fit_line(
+                    &format!("    {content_line}"),
+                    content_width,
+                ));
             }
         }
         for (index, label) in ["Allow once", "Allow for operation", "Deny"]
@@ -1341,20 +1371,30 @@ impl InteractiveRoot {
             };
             let line = format!("{marker} {label}");
             if index == self.tool_authorization_selected {
-                lines.push(fit_line(&paint_with(&line, &USER, color), width));
+                inner.push(fit_line(&paint_with(&line, &USER, color), content_width));
             } else {
-                lines.push(fit_line(&line, width));
+                inner.push(fit_line(&line, content_width));
             }
         }
-        lines.push(fit_line(
+        inner.push(fit_line(
             &paint_with(
                 "Up/Down or Tab choose · Enter confirm · Esc deny · Ctrl+C abort operation",
                 &SYSTEM,
                 color,
             ),
-            width,
+            content_width,
         ));
-        lines
+
+        if width < 5 {
+            return inner
+                .into_iter()
+                .map(|line| fit_line(&line, width))
+                .collect();
+        }
+
+        // Visible warning-colored border so the authorization dialog reads as
+        // a modal surface instead of plain transcript text.
+        framed_modal_lines(inner, width, &WARNING, color)
     }
 
     pub(super) fn has_active_profile_menu(&self) -> bool {
@@ -1894,6 +1934,7 @@ impl InteractiveRoot {
             stats: self.stats,
             tool_output_expanded: self.tool_output_expanded,
             spinner_frame: self.spinner_frame,
+            permission_mode: self.permission_mode,
             slash_suggestion_selected: self.slash_suggestion_selected,
             slash_suggestions_dismissed_for: self.slash_suggestions_dismissed_for.clone(),
             selecting_settings: self.local.selecting_settings,
@@ -3622,6 +3663,16 @@ impl InteractiveRoot {
             color_enabled(),
         );
         let mut segments = vec![state];
+        let permission_token = match self.permission_mode {
+            ToolAuthorizationMode::Plan => CodingAgentThemeForeground::Warning,
+            ToolAuthorizationMode::Ask => CodingAgentThemeForeground::Accent,
+            ToolAuthorizationMode::Yolo => CodingAgentThemeForeground::Error,
+        };
+        segments.push(paint_with(
+            &format!("{}", self.permission_mode).to_uppercase(),
+            &self.semantic_style(permission_token, SYSTEM),
+            color_enabled(),
+        ));
         let context_usage = self
             .shared_projection
             .context()
@@ -3719,27 +3770,46 @@ impl InteractiveRoot {
     }
 
     fn render_modal_surface(&mut self, width: usize) -> Vec<String> {
-        let mut lines = Vec::new();
+        let content_width = width.saturating_sub(3).max(1);
         if self.local.selecting_tree {
             if let Some(ref selector) = self.local.tree_selector {
-                lines.extend(selector.render(width));
+                return self.framed_modal(selector.render(content_width), width);
             }
-        } else if !self.tool_authorizations.is_empty() {
-            lines.extend(self.render_tool_authorization(width));
-        } else if self.delegation_confirmation_menu.is_some() {
-            lines.extend(self.render_delegation_confirmation_menu(width));
-        } else if self.profile_menu.is_some() {
-            lines.extend(self.render_profile_menu(width));
-        } else if self.local.selecting_model {
-            lines.extend(self.render_model_selector(width));
-        } else if self.local.selecting_session {
-            lines.extend(self.render_session_selector(width));
-        } else if self.local.selecting_settings {
-            lines.extend(self.render_settings_menu(width));
-        } else if self.local.context_detail.is_some() {
-            lines.extend(self.render_context_detail(width));
+            return Vec::new();
         }
-        lines
+        if !self.tool_authorizations.is_empty() {
+            return self.render_tool_authorization(width);
+        }
+        if self.delegation_confirmation_menu.is_some() {
+            let lines = self.render_delegation_confirmation_menu(content_width);
+            return self.framed_modal(lines, width);
+        }
+        if self.profile_menu.is_some() {
+            let lines = self.render_profile_menu(content_width);
+            return self.framed_modal(lines, width);
+        }
+        if self.local.selecting_model {
+            let lines = self.render_model_selector(content_width);
+            return self.framed_modal(lines, width);
+        }
+        if self.local.selecting_session {
+            let lines = self.render_session_selector(content_width);
+            return self.framed_modal(lines, width);
+        }
+        if self.local.selecting_settings {
+            let lines = self.render_settings_menu(content_width);
+            return self.framed_modal(lines, width);
+        }
+        if self.local.context_detail.is_some() {
+            let lines = self.render_context_detail(content_width);
+            return self.framed_modal(lines, width);
+        }
+        Vec::new()
+    }
+
+    fn framed_modal(&self, lines: Vec<String>, width: usize) -> Vec<String> {
+        let border_style = self.semantic_style(CodingAgentThemeForeground::Border, SYSTEM);
+        framed_modal_lines(lines, width, &border_style, color_enabled())
     }
 
     fn render_context_detail(&mut self, width: usize) -> Vec<String> {
@@ -3820,6 +3890,12 @@ impl InteractiveRoot {
         if !changed {
             return false;
         }
+        // Keep the viewport anchored: when scrolled, the previously visible
+        // rows stay put and the expanded rows push the content below them
+        // downward; when pinned to the tail the new rows simply extend the
+        // tail. Scrolling the expanded block to the viewport top (what
+        // ensure_selected_transcript_visible does for navigation) would jump
+        // the transcript to the top and hide everything before the block.
         if let Some(previous_rows) = previous_rows {
             let current_rows = self.transcript_total_rows();
             self.transcript.preserve_scrolled_view_after_row_change(
@@ -3828,7 +3904,6 @@ impl InteractiveRoot {
                 current_rows,
             );
         }
-        self.ensure_selected_transcript_visible();
         true
     }
 
@@ -3862,7 +3937,6 @@ impl InteractiveRoot {
                 current_rows,
             );
         }
-        self.ensure_selected_transcript_visible();
         true
     }
 
@@ -4152,6 +4226,24 @@ fn shell_layout_mode(width: usize) -> ShellLayoutMode {
     } else {
         ShellLayoutMode::Narrow
     }
+}
+
+/// The rendered column width of the modal overlay for a given role, matching
+/// the overlay geometry in `transient_overlay_options` and the tui overlay
+/// width resolution so modal content (including its border) is sized to the
+/// visible surface instead of the full terminal.
+fn modal_overlay_width(role: TransientOverlayRole, terminal_width: usize) -> usize {
+    let available = match role {
+        TransientOverlayRole::ModalDialog => terminal_width.saturating_sub(4),
+        _ => terminal_width,
+    };
+    let requested = match role {
+        TransientOverlayRole::ModalDialog => 72,
+        TransientOverlayRole::ContextRailDetail => 38,
+        TransientOverlayRole::ContextDrawerDetail => available.saturating_mul(40) / 100,
+        _ => available,
+    };
+    requested.min(available).max(1)
 }
 
 fn visible_context_tabs(width: usize, active: ContextTab) -> Vec<(ContextTab, &'static str)> {

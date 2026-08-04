@@ -3,6 +3,74 @@
 use super::{Transcript, TranscriptItem, UiEvent};
 
 #[test]
+fn thinking_duration_is_recorded_when_body_output_begins() {
+    let mut transcript = Transcript::new();
+    transcript.apply_event(UiEvent::ThinkingDelta {
+        text: "first thoughts".to_string(),
+    });
+    transcript.apply_event(UiEvent::ThinkingDelta {
+        text: " more thinking".to_string(),
+    });
+    transcript.apply_event(UiEvent::AssistantDelta {
+        text: "the answer".to_string(),
+    });
+
+    let TranscriptItem::Assistant {
+        thinking_seconds, ..
+    } = transcript.items().last().unwrap()
+    else {
+        panic!("expected assistant item");
+    };
+    assert!(
+        thinking_seconds.is_some_and(|seconds| seconds >= 0.0),
+        "thinking duration must be recorded once body output begins"
+    );
+
+    // Completing afterwards must not overwrite the recorded duration.
+    transcript.apply_event(UiEvent::AssistantDone);
+    let TranscriptItem::Assistant {
+        thinking_seconds, ..
+    } = transcript.items().last().unwrap()
+    else {
+        panic!("expected assistant item");
+    };
+    assert!(thinking_seconds.is_some());
+}
+
+#[test]
+fn thinking_duration_is_sealed_by_tool_use_and_absent_without_thinking() {
+    let mut transcript = Transcript::new();
+    transcript.apply_event(UiEvent::ThinkingDelta {
+        text: "deep thought".to_string(),
+    });
+    transcript.apply_event(UiEvent::ToolStarted {
+        call_id: "call-1".to_string(),
+        name: "read".to_string(),
+        args: serde_json::json!({"path": "a.rs"}),
+    });
+    let TranscriptItem::Assistant {
+        thinking_seconds, ..
+    } = transcript.items()[0]
+    else {
+        panic!("expected assistant item");
+    };
+    assert!(thinking_seconds.is_some());
+
+    let mut plain = Transcript::new();
+    plain.apply_event(UiEvent::AssistantDelta {
+        text: "no reasoning here".to_string(),
+    });
+    plain.apply_event(UiEvent::AssistantDone);
+    let TranscriptItem::Assistant {
+        thinking_seconds, ..
+    } = plain.items()[0]
+    else {
+        panic!("expected assistant item");
+    };
+    assert!(thinking_seconds.is_none());
+}
+
+#[test]
 fn transcript_scrolls_within_bounds() {
     let mut transcript = Transcript::new();
     for i in 0..20 {
@@ -63,6 +131,7 @@ fn tool_event_closes_current_assistant_before_next_assistant_delta() {
                 id: "assistant_0".to_string(),
                 markdown: "I will inspect the file.".to_string(),
                 thinking: String::new(),
+                thinking_seconds: None,
                 done: true,
             },
             TranscriptItem::Tool {
@@ -76,6 +145,7 @@ fn tool_event_closes_current_assistant_before_next_assistant_delta() {
                 id: "assistant_2".to_string(),
                 markdown: "The file contains a Rust module.".to_string(),
                 thinking: String::new(),
+                thinking_seconds: None,
                 done: false,
             },
         ]
@@ -101,12 +171,14 @@ fn turn_started_closes_current_assistant_without_creating_empty_message() {
                 id: "assistant_0".to_string(),
                 markdown: "first turn".to_string(),
                 thinking: String::new(),
+                thinking_seconds: None,
                 done: true,
             },
             TranscriptItem::Assistant {
                 id: "assistant_1".to_string(),
                 markdown: "second turn".to_string(),
                 thinking: String::new(),
+                thinking_seconds: None,
                 done: false,
             },
         ]
@@ -131,6 +203,7 @@ fn agent_error_closes_current_assistant_before_error_item() {
                 id: "assistant_0".to_string(),
                 markdown: "partial answer".to_string(),
                 thinking: String::new(),
+                thinking_seconds: None,
                 done: true,
             },
             TranscriptItem::Error {

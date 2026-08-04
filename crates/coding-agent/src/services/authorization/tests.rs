@@ -209,7 +209,7 @@ fn service(
     let capabilities = Arc::new(FakeCapabilityQuery::new(generation));
     let events = Arc::new(FakeEventSink::default());
     let service = AuthorizationService::with_ports(
-        ToolAuthorizationMode::Interactive,
+        ToolAuthorizationMode::Ask,
         capabilities.clone(),
         events.clone(),
     );
@@ -350,4 +350,42 @@ async fn authorization_generation_transition_table() {
         assert_eq!(writer.labels(), vec![expected_event]);
         assert_eq!(capabilities.pending_snapshots(), vec![Vec::new()]);
     }
+}
+
+#[test]
+fn runtime_mode_switch_updates_the_interactive_waiter_policy() {
+    let (service, _, _) = service(3);
+    assert!(service.uses_interactive_waiters());
+
+    service
+        .set_mode(ToolAuthorizationMode::Yolo)
+        .expect("yolo switch should succeed");
+    assert!(!service.uses_interactive_waiters());
+
+    service
+        .set_mode(ToolAuthorizationMode::Plan)
+        .expect("plan switch should succeed");
+    assert!(!service.uses_interactive_waiters());
+
+    service
+        .set_mode(ToolAuthorizationMode::Ask)
+        .expect("ask switch should succeed");
+    assert!(service.uses_interactive_waiters());
+}
+
+#[test]
+fn mode_switch_shares_across_service_clones() {
+    let (service, _, _) = service(3);
+    service
+        .clone()
+        .set_mode(ToolAuthorizationMode::Plan)
+        .expect("mode switch should succeed");
+    assert_eq!(
+        service
+            .state
+            .lock_or_recover("authorization state")
+            .mode,
+        ToolAuthorizationMode::Plan
+    );
+    assert!(!service.uses_interactive_waiters());
 }

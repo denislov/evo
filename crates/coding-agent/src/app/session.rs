@@ -71,6 +71,7 @@ pub struct CodingAgentSessionBootstrap {
     target: Option<ResolvedSessionTarget>,
     initial_session_name: Option<String>,
     default_agent_profile_id: ProfileId,
+    permission_mode: ToolAuthorizationMode,
 }
 
 impl fmt::Debug for CodingAgentSessionBootstrap {
@@ -96,12 +97,14 @@ impl CodingAgentSessionBootstrap {
         target: Option<ResolvedSessionTarget>,
         initial_session_name: Option<String>,
         default_agent_profile_id: ProfileId,
+        permission_mode: ToolAuthorizationMode,
     ) -> Self {
         Self {
             session_options,
             target,
             initial_session_name,
             default_agent_profile_id,
+            permission_mode,
         }
     }
 
@@ -203,7 +206,7 @@ impl CodingAgentSessionBootstrap {
             return CodingAgentSession::non_persistent_internal(
                 CodingAgentSessionOptions::new()
                     .with_default_agent_profile_id(self.default_agent_profile_id.clone())
-                    .with_tool_authorization_mode(ToolAuthorizationMode::Interactive),
+                    .with_tool_authorization_mode(self.permission_mode),
             )
             .await;
         };
@@ -211,7 +214,7 @@ impl CodingAgentSessionBootstrap {
             return CodingAgentSession::non_persistent_internal(
                 session_options_for_run(session_options)
                     .with_default_agent_profile_id(self.default_agent_profile_id.clone())
-                    .with_tool_authorization_mode(ToolAuthorizationMode::Interactive),
+                    .with_tool_authorization_mode(self.permission_mode),
             )
             .await;
         }
@@ -220,7 +223,7 @@ impl CodingAgentSessionBootstrap {
         let mut options = session_options_for_run(session_options)
             .with_session_log_root(session_root)
             .with_default_agent_profile_id(self.default_agent_profile_id.clone())
-            .with_tool_authorization_mode(ToolAuthorizationMode::Interactive);
+            .with_tool_authorization_mode(self.permission_mode);
         if let Some(name) = self.initial_session_name.as_deref() {
             options = options.with_session_name(name);
         }

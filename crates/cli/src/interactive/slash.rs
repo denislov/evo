@@ -29,6 +29,10 @@ pub(super) fn builtin_slash_commands() -> Vec<BuiltinSlashCommand> {
             description: "Select model".into(),
         },
         BuiltinSlashCommand {
+            name: "permission".into(),
+            description: "Set permission mode: plan | ask | yolo".into(),
+        },
+        BuiltinSlashCommand {
             name: "agents".into(),
             description: "List agent profiles".into(),
         },
