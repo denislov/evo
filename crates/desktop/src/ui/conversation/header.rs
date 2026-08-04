@@ -18,9 +18,7 @@ use crate::app::native_shell::{
 };
 use crate::application::commands::DesktopCommandIntent;
 use crate::ui::components::{
-    controls::{
-        DesktopCriticalButton, DesktopCriticalTone, DesktopIcon, DesktopIconButton, DesktopSelector,
-    },
+    controls::{DesktopCriticalButton, DesktopCriticalTone, DesktopIcon, DesktopIconButton},
     style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
 use crate::ui::shell::drawer::CenterDrawerKind;
@@ -54,9 +52,8 @@ const fn header_runtime_status_label(status: SemanticStatus, compact: bool) -> &
 pub(crate) enum ConversationHeaderEvent {
     ToggleSessions,
     ToggleInspector,
-    SelectModel(Arc<str>),
-    SelectSessionProfile(Arc<str>),
-    SelectThinking(DesktopThinkingLevel),
+    ChooseProjectDirectory,
+    ClearProjectDirectory,
     Reload,
     Abort,
 }
@@ -95,12 +92,7 @@ pub(crate) struct ConversationHeaderThinkingOption {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConversationHeaderViewModel {
-    pub(crate) idle: bool,
-    pub(crate) status: SemanticStatus,
-    pub(crate) composer_running: bool,
-    pub(crate) abort_pending: bool,
-    pub(crate) reload_pending: bool,
+pub(crate) struct ConversationControlsViewModel {
     pub(crate) selector_disabled: bool,
     pub(crate) profile_selector_disabled: bool,
     pub(crate) model: Arc<str>,
@@ -114,6 +106,18 @@ pub(crate) struct ConversationHeaderViewModel {
     pub(crate) model_groups: Arc<[ConversationHeaderModelGroup]>,
     pub(crate) unavailable_current_model: Option<ConversationHeaderModelWarning>,
     pub(crate) profile_options: Arc<[ConversationHeaderSelectorOption]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConversationHeaderViewModel {
+    pub(crate) idle: bool,
+    pub(crate) status: SemanticStatus,
+    pub(crate) composer_running: bool,
+    pub(crate) abort_pending: bool,
+    pub(crate) reload_pending: bool,
+    pub(crate) reload_disabled: bool,
+    pub(crate) project_directory_editable: bool,
+    pub(crate) project_directory_selected: bool,
     pub(crate) session_name: Arc<str>,
     pub(crate) project_name: Arc<str>,
     pub(crate) keyboard_focus_visible: bool,
@@ -128,6 +132,75 @@ pub(crate) fn view_model(
     app: &NativeDesktopState,
     ui: &ShellUiState,
 ) -> ConversationHeaderViewModel {
+    let workspace = app.workspaces.active();
+    let snapshot = workspace
+        .projection
+        .as_ref()
+        .map(|projection| projection.snapshot());
+    let project = &workspace.project;
+    let composer_running = snapshot.is_some_and(|snapshot| snapshot.active_operation.is_some());
+    let awaiting_prompt_start = workspace.composer.submitted().is_some() && !composer_running;
+    let reload_pending = app
+        .commands
+        .contains(app.workspaces.active_key(), &DesktopCommandIntent::Reload);
+    let selection_pending = app
+        .commands
+        .contains_where(app.workspaces.active_key(), |intent| {
+            matches!(intent, DesktopCommandIntent::Selection(_))
+        });
+    let project_name = project
+        .cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| desktop::ui::shell::truncate_label(name, 18))
+        .unwrap_or_else(|| "Project".into());
+    let session_name = snapshot.map_or_else(
+        || "New task".to_owned(),
+        |snapshot| {
+            app.catalog
+                .project_groups()
+                .into_iter()
+                .flat_map(|group| group.sessions)
+                .find(|session| session.session_id == snapshot.session.session_id)
+                .and_then(|session| session.name)
+                .or_else(|| snapshot.session.name.clone())
+                .filter(|name| !name.trim().is_empty())
+                .map(|name| desktop::ui::shell::truncate_label(&name, 32))
+                .unwrap_or_else(|| "Untitled".into())
+        },
+    );
+
+    ConversationHeaderViewModel {
+        idle: workspace.projection.is_none(),
+        status: semantic_status(workspace.projection.as_ref()),
+        composer_running,
+        abort_pending: app
+            .commands
+            .contains_where(app.workspaces.active_key(), |intent| {
+                matches!(intent, DesktopCommandIntent::Abort { .. })
+            }),
+        reload_pending,
+        reload_disabled: composer_running
+            || awaiting_prompt_start
+            || reload_pending
+            || selection_pending,
+        project_directory_editable: workspace.project_directory_editable(),
+        project_directory_selected: workspace.project_directory().is_some(),
+        session_name: Arc::from(session_name),
+        project_name: Arc::from(project_name),
+        keyboard_focus_visible: ui.keyboard_focus_visible(),
+        panel_visibility: PanelVisibility {
+            sessions: app.preferences.sessions_panel_visible,
+            context: app.preferences.context_panel_visible,
+        },
+        sessions_drawer_open: ui.active_drawer == Some(CenterDrawerKind::Sessions),
+        inspector_drawer_open: ui.active_drawer == Some(CenterDrawerKind::Inspector),
+        sessions_panel_width: app.preferences.sessions_panel_width,
+        context_panel_width: app.preferences.context_panel_width,
+    }
+}
+
+pub(crate) fn controls_view_model(app: &NativeDesktopState) -> ConversationControlsViewModel {
     let workspace = app.workspaces.active();
     let snapshot = workspace
         .projection
@@ -184,38 +257,8 @@ pub(crate) fn view_model(
             selectable: profile.kind == ProfileKind::Agent,
         })
         .collect::<Vec<_>>();
-    let project_name = project
-        .cwd
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| desktop::ui::shell::truncate_label(name, 18))
-        .unwrap_or_else(|| "Project".into());
-    let session_name = snapshot.map_or_else(
-        || "New task".to_owned(),
-        |snapshot| {
-            app.catalog
-                .project_groups()
-                .into_iter()
-                .flat_map(|group| group.sessions)
-                .find(|session| session.session_id == snapshot.session.session_id)
-                .and_then(|session| session.name)
-                .or_else(|| snapshot.session.name.clone())
-                .filter(|name| !name.trim().is_empty())
-                .map(|name| desktop::ui::shell::truncate_label(&name, 32))
-                .unwrap_or_else(|| "Untitled".into())
-        },
-    );
 
-    ConversationHeaderViewModel {
-        idle: workspace.projection.is_none(),
-        status: semantic_status(workspace.projection.as_ref()),
-        composer_running,
-        abort_pending: app
-            .commands
-            .contains_where(app.workspaces.active_key(), |intent| {
-                matches!(intent, DesktopCommandIntent::Abort { .. })
-            }),
-        reload_pending,
+    ConversationControlsViewModel {
         selector_disabled: composer_running
             || awaiting_prompt_start
             || reload_pending
@@ -225,8 +268,8 @@ pub(crate) fn view_model(
             || awaiting_prompt_start
             || reload_pending
             || selection_pending,
-        model: Arc::from(desktop::ui::shell::truncate_label(model, 10)),
-        profile: Arc::from(desktop::ui::shell::truncate_label(profile, 9)),
+        model: Arc::from(desktop::ui::shell::truncate_label(model, 18)),
+        profile: Arc::from(desktop::ui::shell::truncate_label(profile, 14)),
         thinking: Arc::from(
             if workspace.thinking_selection == DesktopThinkingLevel::Default {
                 "Auto".to_owned()
@@ -242,17 +285,6 @@ pub(crate) fn view_model(
         model_groups: model_groups.into(),
         unavailable_current_model,
         profile_options: profile_options.into(),
-        session_name: Arc::from(session_name),
-        project_name: Arc::from(project_name),
-        keyboard_focus_visible: ui.keyboard_focus_visible(),
-        panel_visibility: PanelVisibility {
-            sessions: app.preferences.sessions_panel_visible,
-            context: app.preferences.context_panel_visible,
-        },
-        sessions_drawer_open: ui.active_drawer == Some(CenterDrawerKind::Sessions),
-        inspector_drawer_open: ui.active_drawer == Some(CenterDrawerKind::Inspector),
-        sessions_panel_width: app.preferences.sessions_panel_width,
-        context_panel_width: app.preferences.context_panel_width,
     }
 }
 
@@ -415,47 +447,17 @@ impl Render for ConversationHeader {
         let viewport_width = u32::from(viewport.width);
         let expanded_chrome =
             layout.center.width >= 900 || (view_model.idle && viewport_width >= 1_100);
-        let (model_label, profile_label) = if expanded_chrome {
-            (
-                format!("Model · {}", view_model.model),
-                format!("Profile · {}", view_model.profile),
-            )
-        } else {
-            (
-                format!("M · {}", view_model.model),
-                format!("P · {}", view_model.profile),
-            )
-        };
         let show_session_title = expanded_chrome || (view_model.idle && viewport_width >= 900);
         let compact_actions = viewport_width < 900;
         let status_slot_width = header_runtime_status_slot_width(viewport_width);
-        let model_accessible_label =
-            format!("Select model; current {}", view_model.current_model_id);
-        let profile_accessible_label = format!(
-            "Select session profile; current {}",
-            view_model.current_profile_id
-        );
         let focused = self.focus.is_focused(window) && view_model.keyboard_focus_visible;
         let focus_accent = conversation_focus_accent(focused, theme);
 
-        let model_target = cx.entity().downgrade();
-        let profile_target = cx.entity().downgrade();
-        let thinking_target = cx.entity().downgrade();
         let reload_target = cx.entity().downgrade();
-        let model_groups = Arc::clone(&view_model.model_groups);
-        let unavailable_current_model = view_model.unavailable_current_model.clone();
-        let model_option_count = model_groups
-            .iter()
-            .map(|group| group.options.len())
-            .sum::<usize>();
-        let profile_options = Arc::clone(&view_model.profile_options);
-        let thinking_options = Arc::clone(&view_model.thinking_options);
-        let thinking_selection = view_model.thinking_selection;
-        let thinking_hint = view_model.thinking_hint.clone();
-        let current_model_id = Arc::clone(&view_model.current_model_id);
-        let current_profile_id = Arc::clone(&view_model.current_profile_id);
-        let selector_disabled = view_model.selector_disabled;
-        let profile_selector_disabled = view_model.profile_selector_disabled;
+        let choose_project_target = cx.entity().downgrade();
+        let clear_project_target = cx.entity().downgrade();
+        let project_directory_editable = view_model.project_directory_editable;
+        let project_directory_selected = view_model.project_directory_selected;
 
         div()
             .id("conversation-header")
@@ -498,40 +500,32 @@ impl Render for ConversationHeader {
                             cx.emit(ConversationHeaderEvent::ToggleSessions);
                         })),
                     )
-                    .when(show_session_title, |identity| identity.child(
-                        div()
-                            .debug_selector(|| "desktop-header-session-title".into())
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .text_color(rgb(if focused {
-                                theme.accent.value()
-                            } else {
-                                theme.text.value()
-                            }))
-                            .child(
-                                div()
-                                    .text_token(DesignText::Title)
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(view_model.session_name.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .text_token(DesignText::Metadata)
-                                    .text_color(rgb(if view_model.thinking_hint.is_some() {
-                                        theme.warning.value()
-                                    } else {
-                                        theme.subtle_text.value()
-                                    }))
-                                    .child(
-                                        view_model
-                                            .thinking_hint
-                                            .as_deref()
-                                            .unwrap_or(&view_model.project_name)
-                                            .to_string(),
-                                    ),
-                            ),
-                    )),
+                    .when(show_session_title, |identity| {
+                        identity.child(
+                            div()
+                                .debug_selector(|| "desktop-header-session-title".into())
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .text_color(rgb(if focused {
+                                    theme.accent.value()
+                                } else {
+                                    theme.text.value()
+                                }))
+                                .child(
+                                    div()
+                                        .text_token(DesignText::Title)
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(view_model.session_name.to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .text_token(DesignText::Metadata)
+                                        .text_color(rgb(theme.subtle_text.value()))
+                                        .child(view_model.project_name.to_string()),
+                                ),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -555,9 +549,7 @@ impl Render for ConversationHeader {
                                 slot.child(
                                     div()
                                         .id("header-runtime-status")
-                                        .debug_selector(|| {
-                                            "desktop-header-runtime-status".into()
-                                        })
+                                        .debug_selector(|| "desktop-header-runtime-status".into())
                                         .role(Role::Status)
                                         .aria_label(status.label())
                                         .flex()
@@ -576,180 +568,6 @@ impl Render for ConversationHeader {
                                         )),
                                 )
                             }),
-                    )
-                    .child(
-                        DesktopSelector::new(
-                            "header-model-selector",
-                            model_label,
-                            model_accessible_label,
-                        )
-                        .disabled(selector_disabled)
-                        .build()
-                        .debug_selector(|| "desktop-header-model-selector".into())
-                        .dropdown_menu(move |menu, _, _| {
-                            let mut menu = menu
-                                .min_w(px(320.))
-                                .max_w(px(480.))
-                                .max_h(px(320.))
-                                .scrollable(model_option_count > 8);
-
-                            if let Some(warning) = unavailable_current_model.as_ref() {
-                                menu = menu
-                                    .item(PopupMenuItem::label("Current model unavailable"))
-                                    .item(PopupMenuItem::label(format!(
-                                        "{} · {} · {}",
-                                        desktop::ui::shell::truncate_label(&warning.name, 32),
-                                        desktop::ui::shell::truncate_label(&warning.id, 36),
-                                        warning.reason
-                                    )))
-                                    .separator();
-                            }
-
-                            if model_groups.is_empty() {
-                                return menu
-                                    .item(PopupMenuItem::label("No configured text models"))
-                                    .item(PopupMenuItem::label(
-                                        "Add keys to auth.toml or env, then Reload local resources.",
-                                    ));
-                            }
-
-                            for (group_index, group) in model_groups.iter().enumerate() {
-                                if group_index > 0 {
-                                    menu = menu.separator();
-                                }
-                                menu = menu.item(PopupMenuItem::label(group.provider.to_string()));
-
-                                for option in group.options.iter() {
-                                    let target = model_target.clone();
-                                    let id = Arc::clone(&option.id);
-                                    let accessible_name = Arc::clone(&option.name);
-                                    let display_name = Arc::clone(&option.display_name);
-                                    let metadata = Arc::<str>::from(format!(
-                                        "Model ID · {}",
-                                        desktop::ui::shell::truncate_label(&option.id, 54)
-                                    ));
-                                    let row_id = Arc::clone(&option.id);
-                                    menu = menu.item(
-                                        PopupMenuItem::element(move |_, _| {
-                                            div()
-                                                .id(format!("header-model-menu-row-{row_id}"))
-                                                .w_full()
-                                                .min_w_0()
-                                                .flex()
-                                                .flex_col()
-                                                .aria_label(format!(
-                                                    "{}; model id {}",
-                                                    accessible_name, row_id
-                                                ))
-                                                .child(
-                                                    div()
-                                                        .min_w_0()
-                                                        .text_token(DesignText::Body)
-                                                        .child(display_name.to_string()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .min_w_0()
-                                                        .text_token(DesignText::Metadata)
-                                                        .text_color(rgb(theme.subtle_text.value()))
-                                                        .child(metadata.to_string()),
-                                                )
-                                        })
-                                            .checked(option.id == current_model_id)
-                                            .on_click(move |_, _, cx| {
-                                                if let Some(target) = target.upgrade() {
-                                                    let id = Arc::clone(&id);
-                                                    target.update(cx, |_, cx| {
-                                                        cx.emit(ConversationHeaderEvent::SelectModel(
-                                                            id,
-                                                        ));
-                                                    });
-                                                }
-                                            }),
-                                    );
-                                }
-                            }
-                            if !thinking_options.is_empty() {
-                                menu = menu
-                                    .separator()
-                                    .item(PopupMenuItem::label("Thinking"));
-                                for option in thinking_options.iter() {
-                                    let target = thinking_target.clone();
-                                    let level = option.selection;
-                                    menu = menu.item(
-                                        PopupMenuItem::new(option.label)
-                                            .checked(level == thinking_selection)
-                                            .on_click(move |_, _, cx| {
-                                                if let Some(target) = target.upgrade() {
-                                                    target.update(cx, |_, cx| {
-                                                        cx.emit(
-                                                            ConversationHeaderEvent::SelectThinking(
-                                                                level,
-                                                            ),
-                                                        );
-                                                    });
-                                                }
-                                            }),
-                                    );
-                                }
-                            }
-                            menu
-                            }),
-                    )
-                    .when_some(thinking_hint, |actions, hint| {
-                        actions.child(
-                            div()
-                                .id("header-thinking-hint")
-                                .debug_selector(|| "desktop-header-thinking-hint".into())
-                                .role(Role::Status)
-                                .aria_label(hint.to_string())
-                                .max_w(px(148.))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_token(DesignText::Metadata)
-                                .text_color(rgb(theme.warning.value()))
-                                .child("Thinking · Auto"),
-                        )
-                    })
-                    .child(
-                        DesktopSelector::new(
-                            "header-profile-selector",
-                            profile_label,
-                            profile_accessible_label,
-                        )
-                        .disabled(profile_selector_disabled)
-                        .build()
-                        .debug_selector(|| "desktop-header-profile-selector".into())
-                        .dropdown_menu(move |menu, _, _| {
-                            profile_options.iter().fold(
-                                menu.min_w(px(240.))
-                                    .max_w(px(420.))
-                                    .max_h(px(320.))
-                                    .scrollable(profile_options.len() > 8),
-                                |menu, option| {
-                                    let target = profile_target.clone();
-                                    let id = Arc::clone(&option.id);
-                                    menu.item(
-                                        PopupMenuItem::new(option.label.to_string())
-                                            .checked(option.id == current_profile_id)
-                                            .disabled(!option.selectable)
-                                            .on_click(move |_, _, cx| {
-                                                if let Some(target) = target.upgrade() {
-                                                    let id = Arc::clone(&id);
-                                                    target.update(cx, |_, cx| {
-                                                        cx.emit(
-                                                            ConversationHeaderEvent::SelectSessionProfile(
-                                                                id,
-                                                            ),
-                                                        );
-                                                    });
-                                                }
-                                            }),
-                                    )
-                                },
-                            )
-                        }),
                     )
                     .child(
                         DesktopIconButton::new(
@@ -802,13 +620,48 @@ impl Render for ConversationHeader {
                         .debug_selector(|| "desktop-header-overflow".into())
                         .dropdown_menu(move |menu, _, _| {
                             let reload_target = reload_target.clone();
+                            let mut menu = menu;
+                            if project_directory_editable {
+                                let choose_project_target = choose_project_target.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new("Choose project directory…").on_click(
+                                        move |_, _, cx| {
+                                            if let Some(target) = choose_project_target.upgrade() {
+                                                target.update(cx, |_, cx| {
+                                                    cx.emit(
+                                                        ConversationHeaderEvent::ChooseProjectDirectory,
+                                                    );
+                                                });
+                                            }
+                                        },
+                                    ),
+                                );
+                                if project_directory_selected {
+                                    let clear_project_target = clear_project_target.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new("Use no project").on_click(
+                                            move |_, _, cx| {
+                                                if let Some(target) = clear_project_target.upgrade()
+                                                {
+                                                    target.update(cx, |_, cx| {
+                                                        cx.emit(
+                                                            ConversationHeaderEvent::ClearProjectDirectory,
+                                                        );
+                                                    });
+                                                }
+                                            },
+                                        ),
+                                    );
+                                }
+                                menu = menu.separator();
+                            }
                             menu.item(
                                 PopupMenuItem::new(if view_model.reload_pending {
                                     "Reloading local resources…"
                                 } else {
                                     "Reload local resources"
                                 })
-                                .disabled(view_model.selector_disabled)
+                                .disabled(view_model.reload_disabled)
                                 .on_click(move |_, _, cx| {
                                     if let Some(target) = reload_target.upgrade() {
                                         target.update(cx, |_, cx| {

@@ -639,10 +639,7 @@ impl NativeShell {
                     .flat_map(|group| group.sessions)
                     .find(|session| session.session_id == session_id)
                     .and_then(|session| session.name);
-                self.ui.pending_delete_session = Some(SessionDeleteConfirm {
-                    session_id,
-                    name,
-                });
+                self.ui.pending_delete_session = Some(SessionDeleteConfirm { session_id, name });
                 self.activate_modal(DesktopModalKind::ConfirmDeleteSession, window, cx);
             }
             UiIntent::ConfirmDeleteSession => {

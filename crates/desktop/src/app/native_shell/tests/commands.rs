@@ -122,14 +122,14 @@ fn model_switch_fallback_commits_auto_and_uses_a_header_local_hint(cx: &mut Test
     });
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("desktop-header-model-selector").is_some(),
-        "the model selector remains available once thinking is folded into it"
+        cx.debug_bounds("desktop-composer-model-selector").is_some(),
+        "the model selector remains available in the Composer"
     );
-    assert!(cx.debug_bounds("desktop-header-thinking-hint").is_some());
+    assert!(cx.debug_bounds("desktop-composer-thinking-hint").is_some());
 }
 
 #[gpui::test]
-fn header_model_selector_submits_the_session_thinking_level_with_the_prompt(
+fn composer_thinking_selector_submits_the_session_thinking_level_with_the_prompt(
     cx: &mut TestAppContext,
 ) {
     initialize_visual_test(cx);
@@ -147,15 +147,13 @@ fn header_model_selector_submits_the_session_thinking_level_with_the_prompt(
         DesktopThinkingLevel::Default
     );
     let selector = cx
-        .debug_bounds("desktop-header-model-selector")
-        .expect("the Header owns the model selector with session thinking folded in");
-    assert!(cx.debug_bounds("desktop-composer-thinking").is_none());
+        .debug_bounds("desktop-composer-thinking-selector")
+        .expect("the Composer exposes an independent Thinking selector");
 
     cx.simulate_click(selector.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    // Clickable items in the merged dropdown: 4 models, then the folded-in
-    // thinking group Auto/Off/Minimal/Low/Medium/High/XHigh.
-    choose_popup_item(cx, 9);
+    // Auto/Off/Minimal/Low/Medium/High/XHigh.
+    choose_popup_item(cx, 5);
 
     assert_eq!(
         shell.read_with(cx, |shell, _| shell
@@ -245,106 +243,6 @@ fn composer_picker_attaches_bounded_paths_and_forwards_them_with_the_prompt(
 }
 
 #[gpui::test]
-fn project_directory_menu_chooses_replaces_cancels_and_clears(cx: &mut TestAppContext) {
-    initialize_visual_test(cx);
-    let first_root = tempfile::tempdir().expect("first picker fixture is created");
-    let first = first_root.path().join("第一个项目");
-    fs::create_dir(&first).expect("first project directory is created");
-    let second_root = tempfile::tempdir().expect("second picker fixture is created");
-    let second = second_root.path().join("替换后的项目");
-    fs::create_dir(&second).expect("second project directory is created");
-    let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
-    let (shell, cx) = add_idle_visual_shell_with_runtime(cx, runtime);
-    cx.run_until_parked();
-    runtime_harness.drain_command_kinds();
-
-    for selected in [&first, &second] {
-        let selector = cx
-            .debug_bounds("desktop-hit-project-directory")
-            .expect("Home exposes the project directory selector");
-        cx.simulate_click(selector.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        choose_popup_item(cx, 0);
-        assert!(cx.did_prompt_for_paths());
-        let selected = selected.clone();
-        cx.simulate_path_prompt_response(|options| {
-            assert!(!options.files);
-            assert!(options.directories);
-            assert!(!options.multiple);
-            assert_eq!(
-                options.prompt.as_deref(),
-                Some("Choose a project directory")
-            );
-            Some(vec![selected])
-        });
-        cx.run_until_parked();
-    }
-
-    assert_eq!(
-        shell.read_with(cx, |shell, _| {
-            shell
-                .app
-                .workspaces
-                .active()
-                .draft_workspace_selection
-                .clone()
-        }),
-        CodingAgentWorkspaceSelection::project(second.clone())
-    );
-
-    let selector = cx
-        .debug_bounds("desktop-hit-project-directory")
-        .expect("selected project remains replaceable");
-    cx.simulate_click(selector.center(), gpui::Modifiers::default());
-    cx.run_until_parked();
-    choose_popup_item(cx, 0);
-    cx.simulate_path_prompt_response(|_| None);
-    cx.run_until_parked();
-    assert_eq!(
-        shell.read_with(cx, |shell, _| {
-            shell
-                .app
-                .workspaces
-                .active()
-                .draft_workspace_selection
-                .clone()
-        }),
-        CodingAgentWorkspaceSelection::project(second)
-    );
-
-    let selector = cx
-        .debug_bounds("desktop-hit-project-directory")
-        .expect("selected project exposes the clear option");
-    cx.simulate_click(selector.center(), gpui::Modifiers::default());
-    cx.run_until_parked();
-    choose_popup_item(cx, 1);
-    assert!(matches!(
-        shell.read_with(cx, |shell, _| {
-            shell
-                .app
-                .workspaces
-                .active()
-                .draft_workspace_selection
-                .clone()
-        }),
-        CodingAgentWorkspaceSelection::Projectless { .. }
-    ));
-    assert_eq!(
-        shell.read_with(cx, |shell, _| {
-            composer_pane::view_model(shell.app.workspaces.active())
-                .project_directory
-                .value
-        }),
-        Arc::<str>::from("无项目")
-    );
-    assert_eq!(
-        runtime_harness.drain_command_kinds(),
-        [],
-        "project selection remains client-local until prompt admission"
-    );
-}
-
-#[gpui::test]
 fn project_directory_picker_failures_are_bounded_and_do_not_replace_selection(
     cx: &mut TestAppContext,
 ) {
@@ -415,7 +313,7 @@ fn prompt_admission_clones_project_selection_and_blocks_late_mutation(cx: &mut T
             .edit("freeze this project target");
         shell.submit_composer(cx);
         assert!(!set_project_directory_for_test(shell, replacement_path));
-        assert!(!shell.clear_project_directory(cx));
+        assert!(!shell.app.workspaces.active().project_directory_editable());
     });
 
     assert_eq!(
@@ -539,16 +437,11 @@ fn accepted_first_prompt_locks_scope_and_new_conversation_resets_projectless(
             "the admission snapshot is not a completed durable transcript"
         );
         assert!(shell.app.workspaces.active().composer.rejection().is_none());
-        let directory = composer_pane::view_model(shell.app.workspaces.active()).project_directory;
         assert_eq!(
-            directory.value.as_ref(),
-            selected_path.display().to_string()
+            shell.app.workspaces.active().project_directory(),
+            Some(selected_path.as_path())
         );
-        assert_eq!(
-            directory.state,
-            crate::ui::components::controls::DesktopProjectDirectoryState::Locked
-        );
-        assert!(!shell.clear_project_directory(cx));
+        assert!(!shell.app.workspaces.active().project_directory_editable());
     });
 
     let new_conversation = cx
@@ -562,12 +455,7 @@ fn accepted_first_prompt_locks_scope_and_new_conversation_resets_projectless(
             shell.app.workspaces.active().draft_workspace_selection,
             CodingAgentWorkspaceSelection::Projectless { .. }
         ));
-        assert_eq!(
-            composer_pane::view_model(shell.app.workspaces.active())
-                .project_directory
-                .value,
-            Arc::<str>::from("无项目")
-        );
+        assert!(shell.app.workspaces.active().project_directory().is_none());
     });
 }
 

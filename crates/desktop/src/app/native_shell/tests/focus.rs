@@ -105,7 +105,7 @@ fn shell_header_and_toast_host_stay_bounded_at_all_viewports(cx: &mut TestAppCon
         if width == 700. {
             assert!(
                 title.is_none(),
-                "narrow chrome reserves space for selectors"
+                "narrow chrome prioritizes its action cluster"
             );
         }
         assert!(runtime_slot.left() >= actions.left() && runtime_slot.right() <= actions.right());
@@ -137,10 +137,17 @@ fn shell_header_and_toast_host_stay_bounded_at_all_viewports(cx: &mut TestAppCon
         assert!(toast_host.right() <= px(width));
         assert!(toast_host.bottom() <= px(900.));
         assert!(
-            cx.debug_bounds("desktop-header-model-selector").is_some(),
-            "the model selector (with session thinking folded in) remains available in the Header"
+            cx.debug_bounds("desktop-composer-model-selector").is_some(),
+            "the model selector remains available in the Composer"
         );
-        assert!(cx.debug_bounds("desktop-composer-thinking").is_none());
+        assert!(
+            cx.debug_bounds("desktop-composer-thinking-selector")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("desktop-composer-profile-selector")
+                .is_some()
+        );
     }
 }
 
@@ -155,8 +162,6 @@ fn idle_and_running_header_status_keep_every_other_control_stationary(cx: &mut T
     let stable_selectors = [
         "desktop-header-identity",
         "desktop-header-actions",
-        "desktop-header-model-selector",
-        "desktop-header-profile-selector",
         "desktop-hit-toggle-inspector",
         "desktop-header-overflow",
     ];
@@ -391,8 +396,8 @@ fn responsive_drawers_preserve_conversation_geometry_scroll_and_owner_focus(
     );
 
     let model_selector = cx
-        .debug_bounds("desktop-header-model-selector")
-        .expect("the model selector stays exposed while Inspector is open");
+        .debug_bounds("desktop-composer-model-selector")
+        .expect("the Composer model selector stays exposed while Inspector is open");
     cx.simulate_click(model_selector.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     let down = gpui::Keystroke::parse("down").expect("down is a valid popup keystroke");
@@ -402,8 +407,8 @@ fn responsive_drawers_preserve_conversation_geometry_scroll_and_owner_focus(
     cx.run_until_parked();
     assert_eq!(
         shell.read_with(cx, |shell, _| shell.ui.active_drawer),
-        Some(CenterDrawerKind::Inspector),
-        "selector interaction must not implicitly close the non-modal drawer"
+        None,
+        "Composer interaction dismisses a center-body drawer before opening its selector"
     );
 
     cx.simulate_click(center_body.center(), gpui::Modifiers::default());
@@ -536,31 +541,26 @@ fn assert_profile_selector_locked_with_inspector_drawer(
     assert_minimum_hit_target(cx, "desktop-hit-close-inspector");
 
     let profile_selector = cx
-        .debug_bounds("desktop-header-profile-selector")
-        .expect("the Profile selector stays exposed while Inspector is open");
-    assert!(profile_selector.bottom() <= inspector_drawer.top());
-    cx.simulate_click(profile_selector.center(), gpui::Modifiers::default());
-    cx.run_until_parked();
-    assert!(
-        runtime_harness.drain_selections().is_empty(),
-        "a session's profile selector is locked and must not submit selections"
-    );
-    assert_eq!(
-        shell.read_with(cx, |shell, _| shell.ui.active_drawer),
-        Some(CenterDrawerKind::Inspector),
-        "the locked Profile selector must not implicitly close the non-modal drawer"
-    );
+        .debug_bounds("desktop-composer-profile-selector")
+        .expect("the Composer keeps the Profile selector mounted behind the drawer host");
 
     let close = cx
         .debug_bounds("desktop-hit-close-inspector")
         .expect("the drawer exposes its auxiliary close control");
     cx.simulate_click(close.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_drawer), None);
+    assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_drawer), None,);
     assert_eq!(
         shell.read_with(cx, |shell, _| shell.ui.focus.active()),
         FocusTarget::Composer,
         "the auxiliary close control restores the pre-drawer focus owner"
+    );
+
+    cx.simulate_click(profile_selector.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        runtime_harness.drain_selections().is_empty(),
+        "a session's profile selector is locked and must not submit selections"
     );
 }
 

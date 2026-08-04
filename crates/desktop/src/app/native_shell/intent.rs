@@ -115,14 +115,9 @@ impl From<&ConversationHeaderEvent> for UiIntent {
         match event {
             ConversationHeaderEvent::ToggleSessions => Self::ToggleSessions,
             ConversationHeaderEvent::ToggleInspector => Self::ToggleInspector,
+            ConversationHeaderEvent::ChooseProjectDirectory => Self::ChooseProjectDirectory,
+            ConversationHeaderEvent::ClearProjectDirectory => Self::ClearProjectDirectory,
             ConversationHeaderEvent::Reload => Self::Reload,
-            ConversationHeaderEvent::SelectModel(model_id) => {
-                Self::SelectModel(Arc::clone(model_id))
-            }
-            ConversationHeaderEvent::SelectSessionProfile(profile_id) => {
-                Self::SelectSessionProfile(Arc::clone(profile_id))
-            }
-            ConversationHeaderEvent::SelectThinking(level) => Self::SelectThinking(*level),
             ConversationHeaderEvent::Abort => Self::Abort,
         }
     }
@@ -148,9 +143,7 @@ impl From<&SessionsPaneEvent> for UiIntent {
                 name: name.clone(),
             },
             SessionsPaneEvent::CloseSession(session_id) => Self::CloseSession(session_id.clone()),
-            SessionsPaneEvent::DeleteSession(session_id) => {
-                Self::DeleteSession(session_id.clone())
-            }
+            SessionsPaneEvent::DeleteSession(session_id) => Self::DeleteSession(session_id.clone()),
             SessionsPaneEvent::OpenSearch => Self::OpenSearch,
             SessionsPaneEvent::Dismiss => Self::DismissDrawer,
         }
@@ -164,8 +157,11 @@ impl From<&ComposerPaneEvent> for UiIntent {
             ComposerPaneEvent::Focused => Self::ComposerFocused,
             ComposerPaneEvent::AddAttachments => Self::AddAttachments,
             ComposerPaneEvent::RemoveAttachment(index) => Self::RemoveAttachment(*index),
-            ComposerPaneEvent::ChooseProjectDirectory => Self::ChooseProjectDirectory,
-            ComposerPaneEvent::ClearProjectDirectory => Self::ClearProjectDirectory,
+            ComposerPaneEvent::SelectModel(model_id) => Self::SelectModel(Arc::clone(model_id)),
+            ComposerPaneEvent::SelectSessionProfile(profile_id) => {
+                Self::SelectSessionProfile(Arc::clone(profile_id))
+            }
+            ComposerPaneEvent::SelectThinking(level) => Self::SelectThinking(*level),
             ComposerPaneEvent::Send => Self::SendComposer,
             ComposerPaneEvent::Insert => Self::InsertComposer,
         }
@@ -242,7 +238,7 @@ mod tests {
             UiIntent::NewConversationForProject(PathBuf::from("/work/project-a"))
         );
         assert_eq!(
-            UiIntent::from(&ConversationHeaderEvent::SelectModel(Arc::from("model-a"))),
+            UiIntent::from(&ComposerPaneEvent::SelectModel(Arc::from("model-a"))),
             UiIntent::SelectModel(Arc::from("model-a"))
         );
         assert_eq!(

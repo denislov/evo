@@ -1,3 +1,4 @@
+use desktop::preferences::DesktopThinkingLevel;
 use desktop::runtime::MAX_PROMPT_ATTACHMENTS;
 use desktop::ui::conversation::ComposerAdmission;
 use desktop::ui::shell::{
@@ -9,7 +10,7 @@ use gpui::{
 };
 use gpui_component::{
     input::{Input, InputEvent, InputState},
-    menu::PopupMenuItem,
+    menu::{DropdownMenu as _, PopupMenuItem},
 };
 use std::{
     cell::Cell,
@@ -17,14 +18,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::app::native_shell::SessionWorkspace;
+use crate::app::native_shell::{NativeDesktopState, SessionWorkspace};
 use crate::ui::components::{
     controls::{
-        DesktopControlSize, DesktopControlWeight, DesktopIcon, DesktopIconButton,
-        DesktopProjectDirectoryControl, DesktopProjectDirectoryState,
+        DesktopControlSize, DesktopControlWeight, DesktopIcon, DesktopIconButton, DesktopSelector,
     },
     style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
 };
+use crate::ui::conversation::header::{self, ConversationControlsViewModel};
 
 pub(crate) const COMPOSER_PLACEHOLDER: &str = "What do you want to build or improve?";
 
@@ -34,8 +35,9 @@ pub(crate) enum ComposerPaneEvent {
     Focused,
     AddAttachments,
     RemoveAttachment(usize),
-    ChooseProjectDirectory,
-    ClearProjectDirectory,
+    SelectModel(Arc<str>),
+    SelectSessionProfile(Arc<str>),
+    SelectThinking(DesktopThinkingLevel),
     Send,
     Insert,
 }
@@ -56,14 +58,15 @@ pub(crate) struct ComposerPaneViewModel {
     pub(crate) composer_running: bool,
     pub(crate) awaiting_prompt_start: bool,
     pub(crate) authorization_pending: bool,
-    pub(crate) project_directory: ComposerProjectDirectoryViewModel,
     pub(crate) attachments: Arc<[ComposerAttachmentViewModel]>,
     pub(crate) attachments_enabled: bool,
     pub(crate) attachment_disabled_reason: Option<Arc<str>>,
     pub(crate) rejection: Option<Arc<str>>,
+    pub(crate) controls: ConversationControlsViewModel,
 }
 
-pub(crate) fn view_model(workspace: &SessionWorkspace) -> ComposerPaneViewModel {
+pub(crate) fn view_model(app: &NativeDesktopState) -> ComposerPaneViewModel {
+    let workspace = app.workspaces.active();
     let snapshot = workspace
         .projection
         .as_ref()
@@ -75,29 +78,12 @@ pub(crate) fn view_model(workspace: &SessionWorkspace) -> ComposerPaneViewModel 
     );
     let awaiting_prompt_start = workspace.composer.submitted().is_some() && !composer_running;
     let attachment_disabled_reason = attachment_disabled_reason(workspace);
-    let project_directory_state = if workspace.projection.is_some() {
-        DesktopProjectDirectoryState::Locked
-    } else if !workspace.project_directory_editable() || composer_pending || awaiting_prompt_start {
-        DesktopProjectDirectoryState::Pending
-    } else {
-        DesktopProjectDirectoryState::Editable
-    };
-    let project_directory_path = workspace.project_directory();
     ComposerPaneViewModel {
         composer_pending,
         composer_running,
         awaiting_prompt_start,
         authorization_pending: snapshot
             .is_some_and(|snapshot| !snapshot.pending_authorizations.is_empty()),
-        project_directory: ComposerProjectDirectoryViewModel {
-            value: Arc::from(
-                project_directory_path
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "无项目".into()),
-            ),
-            state: project_directory_state,
-            is_projectless: project_directory_path.is_none(),
-        },
         attachments: workspace
             .composer_attachments
             .iter()
@@ -115,6 +101,7 @@ pub(crate) fn view_model(workspace: &SessionWorkspace) -> ComposerPaneViewModel 
             && workspace.composer_attachments.len() < MAX_PROMPT_ATTACHMENTS,
         attachment_disabled_reason: attachment_disabled_reason.map(Arc::from),
         rejection: workspace.composer.rejection().map(Arc::from),
+        controls: header::controls_view_model(app),
     }
 }
 
@@ -134,33 +121,6 @@ pub(crate) fn attachment_disabled_reason(workspace: &SessionWorkspace) -> Option
         return Some("Attachments are unavailable while a prompt is starting.");
     }
     None
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ComposerProjectDirectoryViewModel {
-    pub(crate) value: Arc<str>,
-    pub(crate) state: DesktopProjectDirectoryState,
-    pub(crate) is_projectless: bool,
-}
-
-impl ComposerProjectDirectoryViewModel {
-    fn accessible_label(&self) -> String {
-        match self.state {
-            DesktopProjectDirectoryState::Editable if self.value.as_ref() == "无项目" => {
-                "项目目录：无项目。按 Enter 或 Space 选择目录。".into()
-            }
-            DesktopProjectDirectoryState::Editable => {
-                format!("项目目录：{}。按 Enter 或 Space 选择其他目录。", self.value)
-            }
-            DesktopProjectDirectoryState::Locked => format!(
-                "项目目录：{}。项目目录在对话创建后固定。请新建对话以选择其他项目。",
-                self.value
-            ),
-            DesktopProjectDirectoryState::Pending => {
-                format!("项目目录：{}。正在提交，暂时不能更改。", self.value)
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +250,201 @@ impl ComposerPane {
 
 impl EventEmitter<ComposerPaneEvent> for ComposerPane {}
 
+fn composer_model_selector(
+    controls: &ConversationControlsViewModel,
+    theme: SemanticTheme,
+    cx: &gpui::Context<ComposerPane>,
+) -> impl IntoElement {
+    let target = cx.entity().downgrade();
+    let model_groups = Arc::clone(&controls.model_groups);
+    let unavailable_current_model = controls.unavailable_current_model.clone();
+    let current_model_id = Arc::clone(&controls.current_model_id);
+    let model_option_count = model_groups
+        .iter()
+        .map(|group| group.options.len())
+        .sum::<usize>();
+
+    DesktopSelector::new(
+        "composer-model-selector",
+        controls.model.to_string(),
+        format!("Select model; current {}", controls.current_model_id),
+    )
+    .disabled(controls.selector_disabled)
+    .build()
+    .outline()
+    .debug_selector(|| "desktop-composer-model-selector".into())
+    .dropdown_menu(move |menu, _, _| {
+        let mut menu = menu
+            .min_w(px(320.))
+            .max_w(px(480.))
+            .max_h(px(320.))
+            .scrollable(model_option_count > 8);
+
+        if let Some(warning) = unavailable_current_model.as_ref() {
+            menu = menu
+                .item(PopupMenuItem::label("Current model unavailable"))
+                .item(PopupMenuItem::label(format!(
+                    "{} · {} · {}",
+                    desktop::ui::shell::truncate_label(&warning.name, 32),
+                    desktop::ui::shell::truncate_label(&warning.id, 36),
+                    warning.reason
+                )))
+                .separator();
+        }
+
+        if model_groups.is_empty() {
+            return menu
+                .item(PopupMenuItem::label("No configured text models"))
+                .item(PopupMenuItem::label(
+                    "Add keys to auth.toml or env, then Reload local resources.",
+                ));
+        }
+
+        for (group_index, group) in model_groups.iter().enumerate() {
+            if group_index > 0 {
+                menu = menu.separator();
+            }
+            menu = menu.item(PopupMenuItem::label(group.provider.to_string()));
+            for option in group.options.iter() {
+                let target = target.clone();
+                let id = Arc::clone(&option.id);
+                let accessible_name = Arc::clone(&option.name);
+                let display_name = Arc::clone(&option.display_name);
+                let metadata = Arc::<str>::from(format!(
+                    "Model ID · {}",
+                    desktop::ui::shell::truncate_label(&option.id, 54)
+                ));
+                let row_id = Arc::clone(&option.id);
+                menu = menu.item(
+                    PopupMenuItem::element(move |_, _| {
+                        div()
+                            .id(format!("composer-model-menu-row-{row_id}"))
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .aria_label(format!("{}; model id {}", accessible_name, row_id))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_token(DesignText::Body)
+                                    .child(display_name.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_token(DesignText::Metadata)
+                                    .text_color(rgb(theme.subtle_text.value()))
+                                    .child(metadata.to_string()),
+                            )
+                    })
+                    .checked(option.id == current_model_id)
+                    .on_click(move |_, _, cx| {
+                        if let Some(target) = target.upgrade() {
+                            let id = Arc::clone(&id);
+                            target.update(cx, |_, cx| {
+                                cx.emit(ComposerPaneEvent::SelectModel(id));
+                            });
+                        }
+                    }),
+                );
+            }
+        }
+        menu
+    })
+}
+
+fn composer_thinking_selector(
+    controls: &ConversationControlsViewModel,
+    cx: &gpui::Context<ComposerPane>,
+) -> impl IntoElement {
+    let target = cx.entity().downgrade();
+    let thinking_options = Arc::clone(&controls.thinking_options);
+    let thinking_selection = controls.thinking_selection;
+    let unavailable = thinking_options.is_empty();
+    DesktopSelector::new(
+        "composer-thinking-selector",
+        controls.thinking.to_string(),
+        if unavailable {
+            "Thinking controls are unavailable for the current model".to_owned()
+        } else {
+            format!("Select thinking level; current {}", controls.thinking)
+        },
+    )
+    .disabled(controls.selector_disabled || unavailable)
+    .build()
+    .outline()
+    .debug_selector(|| "desktop-composer-thinking-selector".into())
+    .dropdown_menu(move |menu, _, _| {
+        thinking_options
+            .iter()
+            .fold(menu.min_w(px(180.)), |menu, option| {
+                let target = target.clone();
+                let level = option.selection;
+                menu.item(
+                    PopupMenuItem::new(option.label)
+                        .checked(level == thinking_selection)
+                        .on_click(move |_, _, cx| {
+                            if let Some(target) = target.upgrade() {
+                                target.update(cx, |_, cx| {
+                                    cx.emit(ComposerPaneEvent::SelectThinking(level));
+                                });
+                            }
+                        }),
+                )
+            })
+    })
+}
+
+fn composer_profile_selector(
+    controls: &ConversationControlsViewModel,
+    cx: &gpui::Context<ComposerPane>,
+) -> impl IntoElement {
+    let target = cx.entity().downgrade();
+    let profile_options = Arc::clone(&controls.profile_options);
+    let current_profile_id = Arc::clone(&controls.current_profile_id);
+    DesktopSelector::new(
+        "composer-profile-selector",
+        format!(
+            "Profile · {}",
+            desktop::ui::shell::truncate_label(&controls.profile, 16)
+        ),
+        format!(
+            "Select session profile; current {}",
+            controls.current_profile_id
+        ),
+    )
+    .disabled(controls.profile_selector_disabled)
+    .build()
+    .outline()
+    .debug_selector(|| "desktop-composer-profile-selector".into())
+    .dropdown_menu(move |menu, _, _| {
+        profile_options.iter().fold(
+            menu.min_w(px(240.))
+                .max_w(px(420.))
+                .max_h(px(320.))
+                .scrollable(profile_options.len() > 8),
+            |menu, option| {
+                let target = target.clone();
+                let id = Arc::clone(&option.id);
+                menu.item(
+                    PopupMenuItem::new(option.label.to_string())
+                        .checked(option.id == current_profile_id)
+                        .disabled(!option.selectable)
+                        .on_click(move |_, _, cx| {
+                            if let Some(target) = target.upgrade() {
+                                let id = Arc::clone(&id);
+                                target.update(cx, |_, cx| {
+                                    cx.emit(ComposerPaneEvent::SelectSessionProfile(id));
+                                });
+                            }
+                        }),
+                )
+            },
+        )
+    })
+}
+
 impl Render for ComposerPane {
     fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let Some(view_model) = self.view_model.clone() else {
@@ -303,13 +458,17 @@ impl Render for ComposerPane {
         let composer_running = view_model.composer_running;
         let awaiting_prompt_start = view_model.awaiting_prompt_start;
         let authorization_pending = view_model.authorization_pending;
-        let project_directory = view_model.project_directory;
         let attachments = view_model.attachments;
         let attachments_enabled = view_model.attachments_enabled;
         let attachment_disabled_reason = view_model.attachment_disabled_reason;
         let rejection = view_model.rejection;
+        let controls = view_model.controls;
         let composer_disabled = composer_pending || awaiting_prompt_start;
         let theme = SemanticTheme::current(cx);
+        let model_selector = composer_model_selector(&controls, theme, cx);
+        let thinking_selector = composer_thinking_selector(&controls, cx);
+        let profile_selector = composer_profile_selector(&controls, cx);
+        let thinking_hint = controls.thinking_hint.clone();
         let submit_accessible_label = if composer_running {
             "Send after the active operation · Enter; insert into it now · Ctrl/Cmd+Enter"
         } else {
@@ -324,8 +483,6 @@ impl Render for ComposerPane {
         } else {
             None
         };
-        let event_target_for_project_choose = cx.entity().downgrade();
-        let event_target_for_project_clear = cx.entity().downgrade();
         let attachment_button_label = attachment_disabled_reason.as_deref().map_or_else(
             || "Add files or images".to_owned(),
             |reason| format!("Attachments unavailable: {reason}"),
@@ -334,8 +491,6 @@ impl Render for ComposerPane {
             .as_deref()
             .map(|notice| (notice, theme.danger))
             .or_else(|| state_notice.map(|notice| (notice, theme.muted_text)));
-        let project_directory_accessible_label = project_directory.accessible_label();
-
         div()
             .id("composer-panel")
             .role(Role::Form)
@@ -413,43 +568,47 @@ impl Render for ComposerPane {
                                 .flex()
                                 .flex_wrap()
                                 .gap_token(DesignSpace::Xs)
-                                .children(attachments.iter().enumerate().map(|(index, attachment)| {
-                                    let path = attachment.path.clone();
-                                    div()
-                                        .id(format!("composer-attachment-{index}"))
-                                        .role(Role::ListItem)
-                                        .aria_label(format!("Attached file: {path}"))
-                                        .max_w(px(280.))
-                                        .flex()
-                                        .items_center()
-                                        .gap_token(DesignSpace::Xs)
-                                        .px_token(DesignSpace::Sm)
-                                        .py_token(DesignSpace::Xs)
-                                        .rounded_token(DesignRadius::Md)
-                                        .border_1()
-                                        .border_color(rgb(theme.divider.value()))
-                                        .bg(rgb(theme.surface.value()))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .text_token(DesignText::Metadata)
-                                                .text_color(rgb(theme.text.value()))
-                                                .truncate()
-                                                .child(attachment.label.to_string()),
-                                        )
-                                        .child(
-                                            DesktopIconButton::new(
-                                                format!("remove-composer-attachment-{index}"),
-                                                DesktopIcon::Close,
-                                                format!("Remove {}", attachment.label),
+                                .children(attachments.iter().enumerate().map(
+                                    |(index, attachment)| {
+                                        let path = attachment.path.clone();
+                                        div()
+                                            .id(format!("composer-attachment-{index}"))
+                                            .role(Role::ListItem)
+                                            .aria_label(format!("Attached file: {path}"))
+                                            .max_w(px(280.))
+                                            .flex()
+                                            .items_center()
+                                            .gap_token(DesignSpace::Xs)
+                                            .px_token(DesignSpace::Sm)
+                                            .py_token(DesignSpace::Xs)
+                                            .rounded_token(DesignRadius::Md)
+                                            .border_1()
+                                            .border_color(rgb(theme.divider.value()))
+                                            .bg(rgb(theme.surface.value()))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .text_token(DesignText::Metadata)
+                                                    .text_color(rgb(theme.text.value()))
+                                                    .truncate()
+                                                    .child(attachment.label.to_string()),
                                             )
-                                            .disabled(composer_disabled)
-                                            .build()
-                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                cx.emit(ComposerPaneEvent::RemoveAttachment(index));
-                                            })),
-                                        )
-                                })),
+                                            .child(
+                                                DesktopIconButton::new(
+                                                    format!("remove-composer-attachment-{index}"),
+                                                    DesktopIcon::Close,
+                                                    format!("Remove {}", attachment.label),
+                                                )
+                                                .disabled(composer_disabled)
+                                                .build()
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.emit(ComposerPaneEvent::RemoveAttachment(
+                                                        index,
+                                                    ));
+                                                })),
+                                            )
+                                    },
+                                )),
                         )
                     })
                     .child(
@@ -463,10 +622,10 @@ impl Render for ComposerPane {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .flex_1()
                                     .min_w_0()
-                                    .overflow_hidden()
                                     .gap_token(DesignSpace::Xs)
                                     .child(
                                         DesktopIconButton::new(
@@ -480,51 +639,41 @@ impl Render for ComposerPane {
                                         .debug_selector(|| {
                                             "desktop-hit-add-composer-attachments".into()
                                         })
-                                        .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.emit(ComposerPaneEvent::AddAttachments);
-                                        })),
+                                        .on_click(
+                                            cx.listener(|_, _, _, cx| {
+                                                cx.emit(ComposerPaneEvent::AddAttachments);
+                                            }),
+                                        ),
                                     )
                                     .child(
-                                        DesktopProjectDirectoryControl::new(
-                                            "composer-project-directory",
-                                            project_directory.value,
-                                            project_directory_accessible_label,
-                                            project_directory.state,
-                                        )
-                                        .build_with_menu(move |menu, _, _| {
-                                            let choose_target =
-                                                event_target_for_project_choose.clone();
-                                            let clear_target =
-                                                event_target_for_project_clear.clone();
-                                            menu.item(
-                                                PopupMenuItem::new("选择项目目录…").on_click(
-                                                    move |_, _, cx| {
-                                                        if let Some(target) = choose_target.upgrade()
-                                                        {
-                                                            target.update(cx, |_, cx| {
-                                                                cx.emit(
-                                                                    ComposerPaneEvent::ChooseProjectDirectory,
-                                                                );
-                                                            });
-                                                        }
-                                                    },
-                                                ),
-                                            )
-                                            .item(
-                                                PopupMenuItem::new("无项目")
-                                                    .checked(project_directory.is_projectless)
-                                                    .on_click(move |_, _, cx| {
-                                                        if let Some(target) = clear_target.upgrade() {
-                                                            target.update(cx, |_, cx| {
-                                                                cx.emit(
-                                                                    ComposerPaneEvent::ClearProjectDirectory,
-                                                                );
-                                                            });
-                                                        }
-                                                    }),
-                                            )
-                                        }),
+                                        div()
+                                            .debug_selector(|| "desktop-composer-controls".into())
+                                            .flex()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .gap_token(DesignSpace::Xs)
+                                            .child(model_selector)
+                                            .child(thinking_selector)
+                                            .child(profile_selector),
                                     )
+                                    .when_some(thinking_hint, |left, hint| {
+                                        left.child(
+                                            div()
+                                                .id("composer-thinking-hint")
+                                                .debug_selector(|| {
+                                                    "desktop-composer-thinking-hint".into()
+                                                })
+                                                .role(Role::Status)
+                                                .aria_label(hint.to_string())
+                                                .max_w(px(148.))
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_token(DesignText::Metadata)
+                                                .text_color(rgb(theme.warning.value()))
+                                                .child("Auto adjusted"),
+                                        )
+                                    })
                                     .when_some(attachment_disabled_reason, |left, reason| {
                                         left.child(
                                             div()
@@ -554,9 +703,11 @@ impl Render for ComposerPane {
                                         .busy(composer_disabled)
                                         .build()
                                         .debug_selector(|| "desktop-hit-submit-composer".into())
-                                        .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.emit(ComposerPaneEvent::Send);
-                                        })),
+                                        .on_click(
+                                            cx.listener(|_, _, _, cx| {
+                                                cx.emit(ComposerPaneEvent::Send);
+                                            }),
+                                        ),
                                     ),
                             ),
                     ),
@@ -583,43 +734,6 @@ mod tests {
         assert_eq!(enter_event(true, false), Some(ComposerPaneEvent::Insert));
         assert_eq!(enter_event(false, true), None);
         assert_eq!(enter_event(true, true), None);
-    }
-
-    #[test]
-    fn project_directory_accessibility_preserves_full_value_and_state() {
-        let full_path = Arc::<str>::from("/工作区/一个很长的项目目录/evo");
-        let editable = ComposerProjectDirectoryViewModel {
-            value: Arc::clone(&full_path),
-            state: DesktopProjectDirectoryState::Editable,
-            is_projectless: false,
-        };
-        let locked = ComposerProjectDirectoryViewModel {
-            value: Arc::clone(&full_path),
-            state: DesktopProjectDirectoryState::Locked,
-            is_projectless: false,
-        };
-        let pending = ComposerProjectDirectoryViewModel {
-            value: Arc::clone(&full_path),
-            state: DesktopProjectDirectoryState::Pending,
-            is_projectless: false,
-        };
-
-        assert!(editable.accessible_label().contains(full_path.as_ref()));
-        assert!(editable.accessible_label().contains("Enter 或 Space"));
-        assert!(locked.accessible_label().contains(full_path.as_ref()));
-        assert!(locked.accessible_label().contains("对话创建后固定"));
-        assert!(pending.accessible_label().contains(full_path.as_ref()));
-        assert!(pending.accessible_label().contains("正在提交"));
-
-        let projectless = ComposerProjectDirectoryViewModel {
-            value: Arc::from("无项目"),
-            state: DesktopProjectDirectoryState::Editable,
-            is_projectless: true,
-        };
-        assert_eq!(
-            projectless.accessible_label(),
-            "项目目录：无项目。按 Enter 或 Space 选择目录。"
-        );
     }
 
     #[test]

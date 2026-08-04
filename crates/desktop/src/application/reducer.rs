@@ -1280,6 +1280,7 @@ fn runtime_base_changes(update: &DesktopRuntimeUpdate) -> UiChangeSet {
     }
     let mut changes = UiChangeSet::one(UiRegion::Root);
     changes.insert(UiRegion::ConversationHeader);
+    changes.insert(UiRegion::Composer);
     changes.insert(UiRegion::Modal);
     changes.insert(UiRegion::Toast);
     changes
@@ -1760,7 +1761,15 @@ fn reduce_paths_picked(
                 return foreground_notice_transition(port, owner);
             }
             if port.set_project_directory(owner, path) {
-                foreground_changes(port, owner, &[UiRegion::Root, UiRegion::Composer])
+                foreground_changes(
+                    port,
+                    owner,
+                    &[
+                        UiRegion::Root,
+                        UiRegion::ConversationHeader,
+                        UiRegion::Composer,
+                    ],
+                )
             } else {
                 Transition::default()
             }

@@ -932,8 +932,9 @@ fn native_shell_primary_controls_keep_minimum_hit_targets(cx: &mut TestAppContex
             "desktop-hit-toggle-sessions",
             "desktop-hit-toggle-inspector",
             "desktop-hit-submit-composer",
-            "desktop-header-model-selector",
-            "desktop-header-profile-selector",
+            "desktop-composer-model-selector",
+            "desktop-composer-thinking-selector",
+            "desktop-composer-profile-selector",
         ] {
             assert_minimum_hit_target(cx, selector);
         }
@@ -1075,7 +1076,10 @@ fn session_actions_confirm_delete_before_submitting_the_command(cx: &mut TestApp
         cx.debug_bounds("desktop-delete-session-dialog").is_some(),
         "delete requires a confirmation dialog"
     );
-    assert_eq!(runtime_harness.drain_session_deletes(), Vec::<String>::new());
+    assert_eq!(
+        runtime_harness.drain_session_deletes(),
+        Vec::<String>::new()
+    );
 
     let cancel = cx
         .debug_bounds("desktop-cancel-delete-session")
@@ -1083,7 +1087,10 @@ fn session_actions_confirm_delete_before_submitting_the_command(cx: &mut TestApp
     cx.simulate_click(cancel.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert!(cx.debug_bounds("desktop-delete-session-dialog").is_none());
-    assert_eq!(runtime_harness.drain_session_deletes(), Vec::<String>::new());
+    assert_eq!(
+        runtime_harness.drain_session_deletes(),
+        Vec::<String>::new()
+    );
 
     open_delete_menu(cx);
     choose_popup_item(cx, 2);
@@ -1111,9 +1118,8 @@ fn idle_model_selector_groups_configured_text_models_and_submits_the_exact_id(
     runtime_harness.drain_command_kinds();
 
     let view_model = shell.read_with(cx, |shell, _| {
-        conversation_header::view_model(&shell.app, &shell.ui)
+        conversation_header::controls_view_model(&shell.app)
     });
-    assert!(view_model.idle);
     assert!(shell.read_with(cx, |shell, _| {
         shell.app.workspaces.active().projection.is_none()
     }));
@@ -1137,8 +1143,8 @@ fn idle_model_selector_groups_configured_text_models_and_submits_the_exact_id(
     assert!(view_model.unavailable_current_model.is_none());
 
     let selector = cx
-        .debug_bounds("desktop-header-model-selector")
-        .expect("the model selector is visible");
+        .debug_bounds("desktop-composer-model-selector")
+        .expect("the Composer model selector is visible");
     cx.simulate_click(selector.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     choose_popup_item(cx, 2);
@@ -1165,9 +1171,8 @@ fn idle_profile_selector_uses_project_choices_and_submits_without_a_session(
     runtime_harness.drain_command_kinds();
 
     let view_model = shell.read_with(cx, |shell, _| {
-        conversation_header::view_model(&shell.app, &shell.ui)
+        conversation_header::controls_view_model(&shell.app)
     });
-    assert!(view_model.idle);
     assert_eq!(view_model.current_profile_id.as_ref(), "default");
     assert_eq!(
         view_model
@@ -1182,8 +1187,8 @@ fn idle_profile_selector_uses_project_choices_and_submits_without_a_session(
     assert!(!view_model.profile_options[2].selectable);
 
     let selector = cx
-        .debug_bounds("desktop-header-profile-selector")
-        .expect("the idle header exposes the profile selector");
+        .debug_bounds("desktop-composer-profile-selector")
+        .expect("the idle Composer exposes the profile selector");
     cx.simulate_click(selector.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     choose_popup_item(cx, 1);
@@ -1318,18 +1323,15 @@ fn composer_auto_grows_from_one_line_to_its_bounded_maximum(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn project_directory_control_is_scoped_locked_pending_and_narrow_safe(cx: &mut TestAppContext) {
+fn project_directory_state_is_scoped_while_the_composer_omits_its_path_chip(
+    cx: &mut TestAppContext,
+) {
     initialize_visual_test(cx);
     let (idle_shell, cx) = add_idle_visual_shell(cx);
 
-    let idle_directory = idle_shell.read_with(cx, |shell, _| {
-        composer_pane::view_model(shell.app.workspaces.active()).project_directory
-    });
-    assert_eq!(idle_directory.value.as_ref(), "无项目");
-    assert_eq!(
-        idle_directory.state,
-        crate::ui::components::controls::DesktopProjectDirectoryState::Editable
-    );
+    assert!(idle_shell.read_with(cx, |shell, _| {
+        shell.app.workspaces.active().project_directory().is_none()
+    }));
 
     for width in [1_300., 700.] {
         cx.simulate_resize(size(px(width), px(800.)));
@@ -1337,18 +1339,19 @@ fn project_directory_control_is_scoped_locked_pending_and_narrow_safe(cx: &mut T
         let attachment = cx
             .debug_bounds("desktop-hit-add-composer-attachments")
             .expect("attachment action remains in the Composer bottom-left");
-        let project = cx
-            .debug_bounds("desktop-project-directory-control")
-            .expect("project directory control remains in the Composer bottom-left");
+        let model = cx
+            .debug_bounds("desktop-composer-model-selector")
+            .expect("Model follows the attachment action without a project chip");
         let submit = cx
             .debug_bounds("desktop-hit-submit-composer")
             .expect("submit action remains in the Composer bottom-right");
-        assert!(attachment.right() <= project.left());
-        assert!(project.right() <= submit.left());
-        assert!(f32::from(project.size.width) <= 280.);
-        assert_eq!(f32::from(project.size.height), 36.);
+        assert!(attachment.right() <= model.left());
+        assert!(model.right() <= submit.left());
+        assert!(
+            cx.debug_bounds("desktop-project-directory-control")
+                .is_none()
+        );
         assert_minimum_hit_target(cx, "desktop-hit-add-composer-attachments");
-        assert_minimum_hit_target(cx, "desktop-hit-project-directory");
         assert_minimum_hit_target(cx, "desktop-hit-submit-composer");
     }
 
@@ -1362,26 +1365,20 @@ fn project_directory_control_is_scoped_locked_pending_and_narrow_safe(cx: &mut T
         DesktopRuntimeBridge::disconnected_for_test(),
         session_projection,
     );
-    let session_directory = session_shell.read_with(cx, |shell, _| {
-        composer_pane::view_model(shell.app.workspaces.active()).project_directory
-    });
     assert_eq!(
-        session_directory.value.as_ref(),
-        long_path.display().to_string()
-    );
-    assert_eq!(
-        session_directory.state,
-        crate::ui::components::controls::DesktopProjectDirectoryState::Locked
+        session_shell.read_with(cx, |shell, _| shell
+            .app
+            .workspaces
+            .active()
+            .project_directory()
+            .map(PathBuf::from)),
+        Some(long_path)
     );
     cx.simulate_resize(size(px(700.), px(800.)));
     settle_visual_measurements(cx);
     assert!(
-        f32::from(
-            cx.debug_bounds("desktop-project-directory-control")
-                .expect("locked long-path pill remains visible")
-                .size
-                .width
-        ) <= 280.
+        cx.debug_bounds("desktop-project-directory-control")
+            .is_none()
     );
 
     let (pending_shell, cx) = add_idle_visual_shell(cx);
@@ -1401,14 +1398,13 @@ fn project_directory_control_is_scoped_locked_pending_and_narrow_safe(cx: &mut T
             .expect("Home draft enters pending admission");
         shell.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
     });
-    assert_eq!(
-        pending_shell.read_with(cx, |shell, _| {
-            composer_pane::view_model(shell.app.workspaces.active())
-                .project_directory
-                .state
-        }),
-        crate::ui::components::controls::DesktopProjectDirectoryState::Pending
+    assert!(
+        cx.debug_bounds("desktop-project-directory-control")
+            .is_none()
     );
+    assert!(pending_shell.read_with(cx, |shell, _| {
+        !shell.app.workspaces.active().project_directory_editable()
+    }));
 }
 
 #[gpui::test]

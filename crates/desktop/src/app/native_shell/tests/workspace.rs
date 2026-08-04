@@ -442,7 +442,7 @@ fn idle_shell_constructs_all_bounded_view_models_without_session_facts(cx: &mut 
                 .active_session_id
                 .is_empty()
         );
-        assert!(!composer_pane::view_model(shell.app.workspaces.active()).composer_running);
+        assert!(!composer_pane::view_model(&shell.app).composer_running);
         let inspector =
             inspector_pane::view_model(&shell.app, &shell.ui, shell.global_skills.len());
         assert_eq!(inspector.active_operation, "—");
@@ -457,9 +457,9 @@ fn idle_shell_constructs_all_bounded_view_models_without_session_facts(cx: &mut 
             conversation_pane::view_model(shell.app.workspaces.active(), &shell.ui).visible_count,
             0
         );
-        let header = conversation_header::view_model(&shell.app, &shell.ui);
-        assert_eq!(header.profile.as_ref(), "Default");
-        assert_eq!(header.current_profile_id.as_ref(), "default");
+        let controls = conversation_header::controls_view_model(&shell.app);
+        assert_eq!(controls.profile.as_ref(), "Default");
+        assert_eq!(controls.current_profile_id.as_ref(), "default");
         assert_eq!(
             skills_pane::view_model(&shell.global_skills).skills.len(),
             1
@@ -515,8 +515,8 @@ fn feature_presenters_are_pure_and_repeatable(cx: &mut TestAppContext) {
             sessions_pane::view_model(&shell.app, &shell.ui)
         );
         assert_eq!(
-            composer_pane::view_model(shell.app.workspaces.active()),
-            composer_pane::view_model(shell.app.workspaces.active())
+            composer_pane::view_model(&shell.app),
+            composer_pane::view_model(&shell.app)
         );
         assert_eq!(
             conversation_header::view_model(&shell.app, &shell.ui),
@@ -587,7 +587,10 @@ fn home_hero_scales_across_idle_viewports_and_yields_height_to_the_composer(
         assert!(description.top() >= headline.bottom());
         assert!(description.bottom() <= hero.bottom());
         assert!(home.bottom() <= composer.top() + px(1.));
-        assert!(composer.bottom() <= body.bottom() + px(1.));
+        assert!(
+            composer.bottom() <= body.bottom() + px(1.),
+            "Composer must remain within the center body at {width}x{height}: body={body:?}, composer={composer:?}"
+        );
         assert!(f32::from(composer.size.height) >= COMPOSER_MIN_HEIGHT as f32);
     }
 }

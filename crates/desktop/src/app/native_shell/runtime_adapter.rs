@@ -286,7 +286,7 @@ impl NativeShell {
             });
         }
         if changes.contains(UiRegion::Composer) {
-            let view_model = composer_pane::view_model(self.app.workspaces.active());
+            let view_model = composer_pane::view_model(&self.app);
             self.views.composer_pane.update(cx, |pane, cx| {
                 pane.set_view_model(view_model);
                 cx.notify();

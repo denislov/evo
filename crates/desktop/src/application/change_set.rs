@@ -63,9 +63,20 @@ impl UiChangeSet {
                 || delta.lifecycle
         });
         let mut changes = Self::default();
+        if replaced
+            || authorizations
+            || delta.is_some_and(|delta| {
+                delta.context.contains(ContextDirtyFlags::OPERATIONS)
+                    || delta.lifecycle
+                    || delta.session
+                    || delta.profiles
+                    || delta.capabilities
+            })
+        {
+            changes.insert(UiRegion::Composer);
+        }
         if replaced || authorizations {
             changes.insert(UiRegion::Root);
-            changes.insert(UiRegion::Composer);
         }
         if conversation {
             changes.insert(UiRegion::Conversation);

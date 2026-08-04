@@ -584,10 +584,8 @@ pub(super) fn open(cx: &mut App, request: NativeReplayRequest) -> Result<(), Str
             });
         }
         if let Some(position) = match visual_state {
-            Some(VisualReplayState::ModelMenu) => Some(point(px(730.), px(18.))),
-            // Session thinking folded into the model dropdown: the
-            // thinking-menu fixture captures the same merged menu.
-            Some(VisualReplayState::ThinkingMenu) => Some(point(px(730.), px(18.))),
+            Some(VisualReplayState::ModelMenu) => Some(point(px(610.), px(821.))),
+            Some(VisualReplayState::ThinkingMenu) => Some(point(px(700.), px(821.))),
             _ => None,
         } {
             window.on_next_frame(move |window, cx| {

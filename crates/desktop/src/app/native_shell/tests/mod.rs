@@ -1,5 +1,5 @@
 use super::*;
-use std::{cell::RefCell, collections::HashSet, fs, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use crate::application::catalog::ProjectCatalogState;
 use crate::runtime::{DesktopPromptTarget, DesktopRuntimeOwnerTarget};

@@ -30,13 +30,12 @@
 //! `NativeShell`; they take resolved display values only.
 
 use gpui::{
-    Context, ElementId, IntoElement, ParentElement as _, Role, SharedString, Styled as _, Window,
-    div, prelude::*, px, rgb,
+    ElementId, IntoElement, ParentElement as _, Role, SharedString, Styled as _, div, prelude::*,
+    px, rgb,
 };
 use gpui_component::{
     Disableable as _, IconName, Selectable as _,
     button::{Button, ButtonVariants as _},
-    menu::{DropdownMenu as _, PopupMenu},
 };
 
 use desktop::ui::shell::SemanticTheme;
@@ -69,8 +68,6 @@ pub(crate) enum DesktopIcon {
     Refresh,
     Close,
     Plus,
-    /// Workspace scope shown in the Composer project selector.
-    ProjectDirectory,
     /// Project tree disclosure state.
     ProjectDirectoryOpen,
     ProjectDirectoryClosed,
@@ -98,117 +95,11 @@ impl DesktopIcon {
             Self::Refresh => IconName::Redo2,
             Self::Close => IconName::Close,
             Self::Plus => IconName::Plus,
-            Self::ProjectDirectory => IconName::Folder,
             Self::ProjectDirectoryOpen => IconName::FolderOpen,
             Self::ProjectDirectoryClosed => IconName::FolderClosed,
             Self::Submit => IconName::ArrowUp,
             Self::Busy => IconName::LoaderCircle,
         }
-    }
-}
-
-/// Visual state of the Composer project-directory control.
-///
-/// The state is textual as well as structural, so pending and locked remain
-/// distinguishable when colour is unavailable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DesktopProjectDirectoryState {
-    Editable,
-    Locked,
-    Pending,
-}
-
-impl DesktopProjectDirectoryState {
-    const fn is_editable(self) -> bool {
-        matches!(self, Self::Editable)
-    }
-
-    fn visible_value(self, value: &str) -> String {
-        match self {
-            Self::Editable => desktop::ui::shell::truncate_label(value, 30),
-            Self::Locked => format!("{} · Fixed", desktop::ui::shell::truncate_label(value, 22)),
-            Self::Pending => {
-                format!(
-                    "{} · Pending",
-                    desktop::ui::shell::truncate_label(value, 20)
-                )
-            }
-        }
-    }
-}
-
-/// Compact project-directory selector/pill used in the Composer bottom row.
-///
-/// This control owns only display semantics. DSK-650 attaches the directory
-/// picker event without moving project state or picker authority into this
-/// primitive.
-pub(crate) struct DesktopProjectDirectoryControl {
-    id: ElementId,
-    value: SharedString,
-    accessible_label: SharedString,
-    state: DesktopProjectDirectoryState,
-}
-
-impl DesktopProjectDirectoryControl {
-    pub(crate) fn new(
-        id: impl Into<ElementId>,
-        value: impl Into<SharedString>,
-        accessible_label: impl Into<SharedString>,
-        state: DesktopProjectDirectoryState,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            value: value.into(),
-            accessible_label: accessible_label.into(),
-            state,
-        }
-    }
-
-    fn button(&self) -> Button {
-        let button_id = (self.id.clone(), "button");
-        let visible_value = self.state.visible_value(self.value.as_ref());
-        let button = Button::new(button_id)
-            .icon(DesktopIcon::ProjectDirectory.name())
-            .label(visible_value)
-            .tooltip(self.accessible_label.clone())
-            .compact()
-            .dropdown_caret(self.state.is_editable())
-            .disabled(!self.state.is_editable())
-            .loading(self.state == DesktopProjectDirectoryState::Pending)
-            .h(px(DesktopControlSize::Standard.pixels()))
-            .max_w(px(280.))
-            .overflow_hidden();
-        let button = if self.state.is_editable() {
-            button.ghost()
-        } else {
-            button.outline()
-        };
-        button.debug_selector(|| "desktop-hit-project-directory".into())
-    }
-
-    fn wrap(self, trigger: gpui::AnyElement) -> gpui::AnyElement {
-        div()
-            .id(self.id)
-            .debug_selector(|| "desktop-project-directory-control".into())
-            .role(Role::Group)
-            .aria_label(self.accessible_label)
-            .min_w_0()
-            .max_w(px(280.))
-            .overflow_hidden()
-            .child(trigger)
-            .into_any_element()
-    }
-
-    pub(crate) fn build_with_menu(
-        self,
-        menu: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
-    ) -> gpui::AnyElement {
-        let trigger = if self.state.is_editable() {
-            self.button().dropdown_menu(menu).into_any_element()
-        } else {
-            self.button().into_any_element()
-        };
-        self.wrap(trigger)
     }
 }
 
@@ -664,7 +555,6 @@ mod tests {
             DesktopIcon::Refresh,
             DesktopIcon::Close,
             DesktopIcon::Plus,
-            DesktopIcon::ProjectDirectory,
             DesktopIcon::ProjectDirectoryOpen,
             DesktopIcon::ProjectDirectoryClosed,
             DesktopIcon::Submit,
@@ -717,21 +607,6 @@ mod tests {
         assert!(!resting.busy);
         assert!(reduced_motion_busy.busy);
         assert!(reduced_motion_busy.reduced_motion);
-    }
-
-    #[test]
-    fn project_directory_control_keeps_state_textual_and_unicode_bounded() {
-        let long_path = "/工作区/非常长的项目目录/包含中文和-emoji-🙂/evo";
-        let editable = DesktopProjectDirectoryState::Editable.visible_value(long_path);
-        let locked = DesktopProjectDirectoryState::Locked.visible_value(long_path);
-        let pending = DesktopProjectDirectoryState::Pending.visible_value(long_path);
-
-        assert!(editable.ends_with('…'));
-        assert!(locked.ends_with(" · Fixed"));
-        assert!(pending.ends_with(" · Pending"));
-        assert!(DesktopProjectDirectoryState::Editable.is_editable());
-        assert!(!DesktopProjectDirectoryState::Locked.is_editable());
-        assert!(!DesktopProjectDirectoryState::Pending.is_editable());
     }
 
     #[test]

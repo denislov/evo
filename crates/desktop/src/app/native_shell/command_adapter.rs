@@ -248,7 +248,7 @@ impl NativeShell {
         }
         let projectless_selection = self.app.workspace_defaults.projectless_selection.clone();
         self.app.workspaces.active_mut().draft_workspace_selection = projectless_selection;
-        self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::ConversationHeader), cx);
         cx.notify();
         true
     }
@@ -432,6 +432,7 @@ impl NativeShell {
         }
         self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
         self.refresh_views(UiChangeSet::one(UiRegion::ConversationHeader), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
         cx.notify();
     }
 
@@ -493,6 +494,7 @@ impl NativeShell {
         }
         self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
         self.refresh_views(UiChangeSet::one(UiRegion::ConversationHeader), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
         cx.notify();
     }
 
@@ -682,6 +684,7 @@ impl NativeShell {
         }
         self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
         self.refresh_views(UiChangeSet::one(UiRegion::ConversationHeader), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
         cx.notify();
     }
 
@@ -740,6 +743,7 @@ impl NativeShell {
             ));
         self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
         self.refresh_views(UiChangeSet::one(UiRegion::ConversationHeader), cx);
+        self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
         self.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
         cx.notify();
     }
