@@ -73,7 +73,10 @@ pub(crate) fn run(options: crate::DesktopApplicationOptions) {
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             crate::actions::bind_keys(cx);
-            Theme::change(ThemeMode::Dark, None, cx);
+            // The desktop shell is intentionally light-first. The conversation
+            // workspace relies on a warm neutral canvas and quiet borders so
+            // long transcripts read like a document instead of a dashboard.
+            Theme::change(ThemeMode::Light, None, cx);
 
             #[cfg(feature = "desktop-devtools")]
             if devtools::open_requested(cx) {

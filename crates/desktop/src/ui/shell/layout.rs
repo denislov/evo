@@ -14,8 +14,8 @@ pub const SESSION_PANEL_MAX_WIDTH: u32 = 420;
 pub const CONTEXT_PANEL_MIN_WIDTH: u32 = 280;
 pub const CONTEXT_PANEL_MAX_WIDTH: u32 = 520;
 pub const MIN_CONVERSATION_WIDTH: u32 = 520;
-pub const CENTER_HEADER_HEIGHT: u32 = 48;
-pub const COMPOSER_MIN_HEIGHT: u32 = 88;
+pub const CENTER_HEADER_HEIGHT: u32 = 64;
+pub const COMPOSER_MIN_HEIGHT: u32 = 104;
 pub const COMPOSER_MAX_HEIGHT: u32 = 236;
 pub const USER_MESSAGE_MAX_WIDTH: u32 = 920;
 pub const ASSISTANT_MESSAGE_MAX_WIDTH: u32 = 960;
@@ -68,9 +68,9 @@ pub const DESKTOP_DESIGN_TOKENS: DesktopDesignTokens = DesktopDesignTokens {
         xl: 24,
     },
     radius: DesktopRadiusScale {
-        sm: 4,
-        md: 6,
-        lg: 8,
+        sm: 6,
+        md: 10,
+        lg: 14,
     },
     typography: DesktopTypographyScale {
         metadata_size: 12,
@@ -84,7 +84,7 @@ pub const DESKTOP_DESIGN_TOKENS: DesktopDesignTokens = DesktopDesignTokens {
 
 /// Vertical space owned by the virtual transcript row outside the measured card.
 #[cfg(test)]
-pub const CONVERSATION_ROW_VERTICAL_PADDING_PX: u32 = DESKTOP_DESIGN_TOKENS.spacing.xs * 2;
+pub const CONVERSATION_ROW_VERTICAL_PADDING_PX: u32 = DESKTOP_DESIGN_TOKENS.spacing.md * 2;
 pub const DESKTOP_OVERLAY_SCRIM_RGBA: u32 = 0x0b0e_14dd;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,6 +367,34 @@ pub struct SemanticTheme {
 }
 
 impl SemanticTheme {
+    /// Warm, paper-like light palette used by the desktop conversation shell.
+    /// It deliberately avoids pure white for the transcript canvas; elevated
+    /// controls and the Composer can then remain legible without heavy borders.
+    pub const WARM_LIGHT: Self = Self {
+        canvas: SemanticColor::rgb(0xf7f7f5),
+        surface: SemanticColor::rgb(0xf0f1ef),
+        elevated: SemanticColor::rgb(0xffffff),
+        hover: SemanticColor::rgb(0xeeeeeb),
+        selection: SemanticColor::rgb(0xe7f1ff),
+        user_surface: SemanticColor::rgb(0xeef3f8),
+        assistant_surface: SemanticColor::rgb(0xf7f7f5),
+        thinking_surface: SemanticColor::rgb(0xf2f0f6),
+        tool_surface: SemanticColor::rgb(0xf3f4f2),
+        diagnostic_surface: SemanticColor::rgb(0xffeeee),
+        summary_surface: SemanticColor::rgb(0xf0f1ef),
+        border: SemanticColor::rgb(0xd6d9d5),
+        divider: SemanticColor::rgb(0xe3e5e1),
+        text: SemanticColor::rgb(0x202226),
+        muted_text: SemanticColor::rgb(0x565d66),
+        subtle_text: SemanticColor::rgb(0x6b7280),
+        accent: SemanticColor::rgb(0x2563b8),
+        success: SemanticColor::rgb(0x117a40),
+        warning: SemanticColor::rgb(0x9a5b00),
+        danger: SemanticColor::rgb(0xc63b32),
+        focus_ring: SemanticColor::rgb(0x2563b8),
+        reasoning: SemanticColor::rgb(0x68528f),
+    };
+
     pub const GEEK_DARK: Self = Self {
         canvas: SemanticColor::rgb(0x0b0e14),
         surface: SemanticColor::rgb(0x11161f),
@@ -425,16 +453,14 @@ impl SemanticTheme {
         }
     }
 
-    /// The theme for the current window: derived from the global
-    /// gpui-component theme when it is dark, otherwise the baked-in
-    /// `GEEK_DARK` baseline. Rendering never hardcodes a palette; it reads
-    /// this single access point. A future light palette only needs to extend
-    /// the dark guard here (and adjust the contrast floor) to light up
-    /// everywhere at once.
+    /// The theme for the current window. Dark mode continues to derive from
+    /// gpui-component while light mode uses the product-owned warm palette so
+    /// every desktop surface shares the same neutral hierarchy.
     pub fn current(cx: &App) -> Self {
         match cx.try_global::<Theme>() {
             Some(theme) if theme.is_dark() => Self::from_theme(theme),
-            _ => Self::GEEK_DARK,
+            Some(_) => Self::WARM_LIGHT,
+            None => Self::GEEK_DARK,
         }
     }
 
@@ -580,8 +606,8 @@ mod tests {
     fn center_header_and_body_partition_the_full_center_column() {
         let layout = ShellLayout::resolve(320, 100, PanelVisibility::default());
         assert_eq!(layout.center, Rect::new(0, 0, 320, 100));
-        assert_eq!(layout.center_header, Rect::new(0, 0, 320, 48));
-        assert_eq!(layout.center_body, Rect::new(0, 48, 320, 52));
+        assert_eq!(layout.center_header, Rect::new(0, 0, 320, 64));
+        assert_eq!(layout.center_body, Rect::new(0, 64, 320, 36));
 
         let short = ShellLayout::resolve(320, 32, PanelVisibility::default());
         assert_eq!(short.center_header, Rect::new(0, 0, 320, 32));
@@ -708,6 +734,7 @@ mod tests {
     #[test]
     fn semantic_theme_meets_text_contrast_floor() {
         assert!(SemanticTheme::GEEK_DARK.has_readable_contrast());
+        assert!(SemanticTheme::WARM_LIGHT.has_readable_contrast());
     }
 
     /// Production rendering derives its palette from the gpui-component dark
@@ -746,13 +773,13 @@ mod tests {
         assert_eq!(theme, SemanticTheme::GEEK_DARK);
     }
 
-    /// A light global theme is not derived (the palette is dark-only for now);
-    /// rendering stays on the baseline until a light theme is designed.
+    /// Light mode uses the product-owned warm palette rather than inheriting
+    /// component colors whose surface hierarchy can vary by platform.
     #[gpui::test]
-    fn current_falls_back_when_the_global_theme_is_light(cx: &mut gpui::TestAppContext) {
+    fn current_uses_warm_palette_when_the_global_theme_is_light(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
         let theme = cx.update(|cx| SemanticTheme::current(cx));
-        assert_eq!(theme, SemanticTheme::GEEK_DARK);
+        assert_eq!(theme, SemanticTheme::WARM_LIGHT);
     }
 
     #[test]
@@ -813,9 +840,9 @@ mod tests {
         );
         assert_eq!(
             [tokens.radius.sm, tokens.radius.md, tokens.radius.lg],
-            [4, 6, 8]
+            [6, 10, 14]
         );
-        assert!(tokens.radius.lg <= 8);
+        assert!(tokens.radius.lg <= 14);
         assert_eq!(
             [
                 tokens.typography.metadata_size,
@@ -827,7 +854,7 @@ mod tests {
         assert!(tokens.typography.metadata_line_height > tokens.typography.metadata_size);
         assert!(tokens.typography.body_line_height > tokens.typography.body_size);
         assert!(tokens.typography.title_line_height > tokens.typography.title_size);
-        assert_eq!(CONVERSATION_ROW_VERTICAL_PADDING_PX, 8);
+        assert_eq!(CONVERSATION_ROW_VERTICAL_PADDING_PX, 24);
         assert_eq!(DESKTOP_OVERLAY_SCRIM_RGBA, 0x0b0e_14dd);
     }
 

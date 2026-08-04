@@ -350,10 +350,9 @@ impl Render for ComposerPane {
             .max_w(px(CONVERSATION_CONTENT_MAX_WIDTH as f32))
             .mx_auto()
             .flex_shrink_0()
-            .px_token(DesignSpace::Lg)
-            .py_token(DesignSpace::Md)
-            .border_t_1()
-            .border_color(rgb(theme.divider.value()))
+            .px_token(DesignSpace::Xl)
+            .pt_token(DesignSpace::Sm)
+            .pb_token(DesignSpace::Lg)
             .bg(rgb(theme.canvas.value()))
             .flex()
             .flex_col()
@@ -367,7 +366,8 @@ impl Render for ComposerPane {
                     .border_1()
                     .border_color(rgb(theme.border.value()))
                     .bg(rgb(theme.elevated.value()))
-                    .p_token(DesignSpace::Sm)
+                    .shadow_sm()
+                    .p_token(DesignSpace::Md)
                     .gap_token(DesignSpace::Xs)
                     .when_some(composer_notice, |surface, (notice, color)| {
                         surface.child(
@@ -390,7 +390,7 @@ impl Render for ComposerPane {
                     .child(
                         div()
                             .debug_selector(|| "desktop-composer-content".into())
-                            .min_h(px(48.))
+                            .min_h(px(56.))
                             .w_full()
                             .child(
                                 div()

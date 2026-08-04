@@ -462,12 +462,13 @@ impl Render for ConversationHeader {
             .debug_selector(|| "desktop-conversation-header".into())
             .track_focus(&self.focus)
             .h(px(CENTER_HEADER_HEIGHT as f32))
-            .px_token(DesignSpace::Lg)
+            .px_token(DesignSpace::Xl)
             .flex()
             .items_center()
-            .gap_token(DesignSpace::Md)
+            .gap_token(DesignSpace::Lg)
             .border_b_1()
             .border_color(rgb(focus_accent.value()))
+            .bg(rgb(theme.elevated.value()))
             .child(
                 div()
                     .debug_selector(|| "desktop-header-identity".into())
@@ -511,7 +512,7 @@ impl Render for ConversationHeader {
                             .child(
                                 div()
                                     .text_token(DesignText::Title)
-                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(view_model.session_name.to_string()),
                             )
                             .child(

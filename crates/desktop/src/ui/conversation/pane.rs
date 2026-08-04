@@ -517,7 +517,7 @@ impl Render for ConversationPane {
                                 .when(selected, |row| row.aria_active_descendant())
                                 .w_full()
                                 .min_w_0()
-                                .py_token(DesignSpace::Xs)
+                                .py_token(DesignSpace::Md)
                                 .flex()
                                 .items_start()
                                 .child(
@@ -567,6 +567,15 @@ impl Render for ConversationPane {
                                             card.px_token(DesignSpace::Lg)
                                                 .py_token(DesignSpace::Xs)
                                                 .gap_token(DesignSpace::Xs)
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .left_0()
+                                                        .top_0()
+                                                        .bottom_0()
+                                                        .w(px(1.))
+                                                        .bg(rgb(theme.divider.value())),
+                                                )
                                         })
                                         .when(!is_tool, |card| {
                                             card.px_token(DesignSpace::Lg)
@@ -899,10 +908,12 @@ impl Render for ConversationPane {
                                                         .debug_selector(|| {
                                                             "desktop-reasoning-toggle-header".into()
                                                         })
-                                                        .rounded_token(DesignRadius::Md)
-                                                        .bg(rgb(theme.elevated.value()))
-                                                        .px_token(DesignSpace::Md)
+                                                        .ml_token(DesignSpace::Sm)
+                                                        .pl_token(DesignSpace::Lg)
+                                                        .pr_token(DesignSpace::Sm)
                                                         .py_token(DesignSpace::Sm)
+                                                        .border_l_1()
+                                                        .border_color(rgb(theme.divider.value()))
                                                         .flex()
                                                         .items_center()
                                                         .justify_between()
@@ -970,10 +981,12 @@ impl Render for ConversationPane {
                                             |card| {
                                             card.child(
                                                 div()
-                                                    .rounded_token(DesignRadius::Md)
-                                                    .bg(rgb(theme.elevated.value()))
-                                                    .px_token(DesignSpace::Md)
+                                                    .ml_token(DesignSpace::Sm)
+                                                    .pl_token(DesignSpace::Lg)
+                                                    .pr_token(DesignSpace::Sm)
                                                     .py_token(DesignSpace::Sm)
+                                                    .border_l_1()
+                                                    .border_color(rgb(theme.divider.value()))
                                                     .flex()
                                                     .flex_col()
                                                     .gap_token(DesignSpace::Xs)

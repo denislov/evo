@@ -491,9 +491,15 @@ fn idle_shell_constructs_all_bounded_view_models_without_session_facts(cx: &mut 
             .debug_bounds("desktop-center-body")
             .expect("center body remains mounted on Home");
         assert_eq!(f32::from(header.size.width), expected_center_width);
-        assert_eq!(f32::from(header.size.height), 48.);
+        assert_eq!(
+            f32::from(header.size.height),
+            crate::ui::shell::CENTER_HEADER_HEIGHT as f32
+        );
         assert_eq!(f32::from(body.size.width), expected_center_width);
-        assert_eq!(f32::from(body.origin.y - header.origin.y), 48.);
+        assert_eq!(
+            f32::from(body.origin.y - header.origin.y),
+            crate::ui::shell::CENTER_HEADER_HEIGHT as f32
+        );
         assert!(cx.debug_bounds("desktop-evo-wordmark").is_some());
         assert!(cx.debug_bounds("desktop-composer-panel").is_some());
     }
