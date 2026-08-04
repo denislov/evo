@@ -16,6 +16,6 @@ pub use image::{
     is_image_line, render_image,
 };
 pub use lifecycle::{
-    NegotiationResult, ProcessTerminal, Terminal, TerminalMode, TerminalSize,
-    is_apple_terminal_session, normalize_apple_terminal_input,
+    NegotiationResult, ProcessTerminal, Terminal, TerminalSize, is_apple_terminal_session,
+    normalize_apple_terminal_input,
 };

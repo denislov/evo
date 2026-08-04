@@ -13,10 +13,6 @@ const TERMINAL_PROGRESS_CLEAR_SEQUENCE: &str = "\x1b]9;4;0;\x07";
 const MOUSE_CAPTURE_ENABLE_SEQUENCE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 const MOUSE_CAPTURE_DISABLE_SEQUENCE: &str = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
-fn mouse_capture_enable_sequence(mode: TerminalMode) -> Option<&'static str> {
-    (mode == TerminalMode::Fullscreen).then_some(MOUSE_CAPTURE_ENABLE_SEQUENCE)
-}
-
 #[cfg(windows)]
 mod win32 {
     #![allow(
@@ -70,13 +66,6 @@ pub struct TerminalSize {
     pub rows: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum TerminalMode {
-    #[default]
-    Inline,
-    Fullscreen,
-}
-
 pub trait Terminal {
     fn size(&self) -> TerminalSize;
     fn write(&mut self, data: &str) -> std::io::Result<()>;
@@ -91,10 +80,6 @@ pub trait Terminal {
 
     fn start(&mut self) -> std::io::Result<()> {
         Ok(())
-    }
-
-    fn start_mode(&mut self, _mode: TerminalMode) -> std::io::Result<()> {
-        self.start()
     }
 
     fn stop(&mut self) -> std::io::Result<()> {
@@ -463,10 +448,6 @@ impl Terminal for ProcessTerminal {
     }
 
     fn start(&mut self) -> std::io::Result<()> {
-        self.start_mode(TerminalMode::Inline)
-    }
-
-    fn start_mode(&mut self, mode: TerminalMode) -> std::io::Result<()> {
         #[cfg(windows)]
         self.save_windows_stdin_mode();
 
@@ -478,14 +459,12 @@ impl Terminal for ProcessTerminal {
         // Enable ENABLE_VIRTUAL_TERMINAL_INPUT on Windows (run AFTER
         // enable_raw_mode since that resets console mode flags).
         self.enable_windows_vt_input();
-        if mode == TerminalMode::Fullscreen {
-            self.write("\x1b[?1049h")?;
-            self.alternate_screen_active = true;
-        }
-        if let Some(sequence) = mouse_capture_enable_sequence(mode) {
-            self.mouse_capture_active = true;
-            self.write(sequence)?;
-        }
+        // The interactive TUI always owns the full screen: enter the
+        // alternate screen and capture the mouse.
+        self.write("\x1b[?1049h")?;
+        self.alternate_screen_active = true;
+        self.mouse_capture_active = true;
+        self.write(MOUSE_CAPTURE_ENABLE_SEQUENCE)?;
         // Enable bracketed paste
         self.write("\x1b[?2004h")?;
         // Query Kitty keyboard protocol (flags 7: disambiguate + event types + alternate keys)
@@ -702,15 +681,6 @@ mod tests {
         assert!(!term.keyboard_protocol_pushed);
         assert!(!term.alternate_screen_active);
         assert!(!term.mouse_capture_active);
-    }
-
-    #[test]
-    fn mouse_capture_is_enabled_only_for_fullscreen_mode() {
-        assert_eq!(
-            mouse_capture_enable_sequence(TerminalMode::Fullscreen),
-            Some(MOUSE_CAPTURE_ENABLE_SEQUENCE)
-        );
-        assert_eq!(mouse_capture_enable_sequence(TerminalMode::Inline), None);
     }
 
     #[test]

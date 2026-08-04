@@ -68,9 +68,8 @@ pub mod api {
     /// Bounded product runtime and adapter-presentation settings.
     pub mod settings {
         pub use crate::app::settings::{
-            CodingAgentDoubleEscapeAction, CodingAgentPresentationMode,
-            CodingAgentPresentationSettingsSnapshot, CodingAgentQueueMode,
-            CodingAgentRuntimeSettingsSnapshot, CodingAgentSettingsCommand,
+            CodingAgentDoubleEscapeAction, CodingAgentPresentationSettingsSnapshot,
+            CodingAgentQueueMode, CodingAgentRuntimeSettingsSnapshot, CodingAgentSettingsCommand,
             CodingAgentSettingsController, CodingAgentSettingsMutationOutcome,
             CodingAgentSettingsSnapshot, CodingAgentTreeFilterMode, global_settings_snapshot,
         };

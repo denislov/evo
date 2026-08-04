@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 use tui::api::component::{Component, OverlayAnchor, OverlayMargin, OverlayOptions, SizeValue};
 use tui::api::input::{InputEvent, StdinBuffer, is_key_release};
 use tui::api::render::{RenderScheduler, Tui, TuiError};
-use tui::api::terminal::{
-    Terminal, TerminalMode, TerminalSize, detect_terminal_capabilities_from_env,
-};
+use tui::api::terminal::{Terminal, TerminalSize, detect_terminal_capabilities_from_env};
 
 use crate::interactive::app::{PromptContext, session_label};
 use crate::interactive::error::CliError;
@@ -37,7 +35,6 @@ use coding_agent::api::operation::{
     SelfHealingEditModelRepairOptions, SelfHealingEditRequest,
 };
 use coding_agent::api::runtime::{CodingAgentSession, CodingAgentSessionBootstrap};
-use coding_agent::api::settings::CodingAgentPresentationMode;
 use coding_agent::api::settings::CodingAgentThemeSnapshot;
 
 const NORMAL_RENDER_INTERVAL: Duration = Duration::from_millis(16);
@@ -273,13 +270,6 @@ impl InteractiveClock for SystemInteractiveClock {
     }
 }
 
-fn terminal_mode_from_presentation(mode: CodingAgentPresentationMode) -> TerminalMode {
-    match mode {
-        CodingAgentPresentationMode::Inline => TerminalMode::Inline,
-        CodingAgentPresentationMode::Fullscreen => TerminalMode::Fullscreen,
-    }
-}
-
 pub(super) async fn run_interactive_loop_with_input<T, F>(
     startup: CodingAgentInteractiveStartup,
     terminal: T,
@@ -296,8 +286,7 @@ where
 
     print_startup_banner(&prompt_context);
 
-    let terminal_mode = terminal_mode_from_presentation(prompt_context.terminal_mode);
-    let mut tui = Tui::start(terminal, terminal_mode).map_err(tui_error)?;
+    let mut tui = Tui::start(terminal).map_err(tui_error)?;
     let root_id = initialize_started_tui(&mut tui, &prompt_context)?;
     let mut input = make_input();
 
@@ -337,7 +326,6 @@ fn initialize_started_tui<T: Terminal>(
 ) -> Result<usize, CliError> {
     let cwd = prompt_context.cwd.clone();
     let session_label = session_label(prompt_context.session_bootstrap.is_persistent());
-    let fullscreen_viewport = tui.terminal_mode() == TerminalMode::Fullscreen;
     let root_id = tui.add_child_with_id(Box::new(
         InteractiveRoot::new_with_theme_models_and_settings(
             cwd,
@@ -352,7 +340,6 @@ fn initialize_started_tui<T: Terminal>(
     ));
     {
         let root = root_mut(tui, root_id)?;
-        root.set_fullscreen_viewport(fullscreen_viewport);
         root.set_terminal_capabilities(detect_terminal_capabilities_from_env(
             std::env::vars(),
             || false,
@@ -370,9 +357,7 @@ fn initialize_started_tui<T: Terminal>(
             root.apply_hydrated_session(hydrated, None);
         }
     }
-    if fullscreen_viewport {
-        install_transient_overlays(tui, root_id)?;
-    }
+    install_transient_overlays(tui, root_id)?;
     tui.set_clear_on_shrink(
         prompt_context
             .settings_snapshot()

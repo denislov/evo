@@ -517,12 +517,14 @@ mod message_model_attribution_tests {
             },
         );
         let replay = fold_events(&[started, updated, completed]);
-        let [TranscriptItem::ToolCall {
-            name,
-            summary,
-            status,
-            ..
-        }] = replay.transcript.as_slice()
+        let [
+            TranscriptItem::ToolCall {
+                name,
+                summary,
+                status,
+                ..
+            },
+        ] = replay.transcript.as_slice()
         else {
             panic!("expected one tool call, got {:?}", replay.transcript);
         };

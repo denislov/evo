@@ -11,7 +11,7 @@
 ### 核心能力
 
 - **多 AI 提供商**：Anthropic (Claude)、OpenAI (GPT/Codex)、Google (Gemini)、Mistral、Azure OpenAI
-- **多界面形态**：交互式 TUI（全屏/内联）、无头打印模式、JSON 模式、RPC 模式（JSONL stdio）、原生桌面应用（gpui）
+- **多界面形态**：交互式 TUI（全屏）、无头打印模式、JSON 模式、RPC 模式（JSONL stdio）、原生桌面应用（gpui）
 - **代码操作工具**：read、write、edit、grep、find、ls、bash 执行
 - **代理系统**：Agent/Team 配置文件、委托、压缩（对话摘要）、思考级别控制
 - **会话管理**：持久会话日志、事件溯源架构、快照/重放
@@ -35,7 +35,7 @@
 │  ┌──────────────┐  ┌──────────────────┐  ┌────────────────┐  │
 │  │  CLI (cli)   │  │ Desktop (desktop) │  │ 未来第三方客户端  │  │
 │  │ • TUI 全屏   │  │ • gpui GUI       │  │                │  │
-│  │ • TUI 内联   │  │ • 原生 Shell      │  │                │  │
+│  │ • 无头模式   │  │ • 原生 Shell      │  │                │  │
 │  │ • 无头模式   │  │ • 外部编辑器       │  │                │  │
 │  │ • RPC 模式   │  │                   │  │                │  │
 │  └──────┬───────┘  └────────┬─────────┘  └───────┬────────┘  │
@@ -322,7 +322,7 @@ crates/cli/src/
 | 模式 | 说明 | 入口 |
 |---|---|---|
 | `CliMode::Rpc` | JSONL stdio 协议，供外部工具调用 | `rpc::run_rpc_mode_stdio()` |
-| `CliMode::Interactive`（默认）| 全屏或内联 TUI | `interactive::run_interactive_mode()` |
+| `CliMode::Interactive`（默认）| 全屏 TUI | `interactive::run_interactive_mode()` |
 | `CliMode::Print` | 无头模式，打印纯文本结果 | `cli::headless::run()` |
 | `CliMode::Json` | 无头模式，输出 JSON 结果 | `cli::headless::run()` |
 | `CliMode::ListModels` | 列出可用模型 | `cli::list_models::list_models_output()` |

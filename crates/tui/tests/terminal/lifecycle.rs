@@ -1,6 +1,6 @@
 //! Terminal start/stop and capability lifecycle behavior.
 
-use tui::api::terminal::{Terminal, TerminalMode};
+use tui::api::terminal::Terminal;
 use tui::api::testing::{TerminalOp, VirtualTerminal};
 
 #[test]
@@ -15,7 +15,7 @@ fn virtual_terminal_records_lifecycle_operations() {
     assert_eq!(
         terminal.ops(),
         &[
-            TerminalOp::Start(TerminalMode::Inline),
+            TerminalOp::Start,
             TerminalOp::SetTitle("evo".to_string()),
             TerminalOp::SetProgress(true),
             TerminalOp::SetProgress(false),

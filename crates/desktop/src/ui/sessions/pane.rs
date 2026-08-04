@@ -592,7 +592,8 @@ impl Render for SessionsPane {
                                             let name = rename_name.clone();
                                             let close_event_target = session_actions_target.clone();
                                             let close_target = close_target.clone();
-                                            let delete_event_target = session_actions_target.clone();
+                                            let delete_event_target =
+                                                session_actions_target.clone();
                                             let delete_target = delete_target.clone();
                                             menu.item(
                                                 PopupMenuItem::new("Rename session").on_click(
@@ -612,23 +613,21 @@ impl Render for SessionsPane {
                                                     },
                                                 ),
                                             )
-                                            .item(
-                                                PopupMenuItem::new("Close session").on_click(
-                                                    move |_, _, cx| {
-                                                        if let Some(event_target) =
-                                                            close_event_target.upgrade()
-                                                        {
-                                                            event_target.update(cx, |_, cx| {
-                                                                cx.emit(
-                                                                    SessionsPaneEvent::CloseSession(
-                                                                        close_target.clone(),
-                                                                    ),
-                                                                );
-                                                            });
-                                                        }
-                                                    },
-                                                ),
-                                            )
+                                            .item(PopupMenuItem::new("Close session").on_click(
+                                                move |_, _, cx| {
+                                                    if let Some(event_target) =
+                                                        close_event_target.upgrade()
+                                                    {
+                                                        event_target.update(cx, |_, cx| {
+                                                            cx.emit(
+                                                                SessionsPaneEvent::CloseSession(
+                                                                    close_target.clone(),
+                                                                ),
+                                                            );
+                                                        });
+                                                    }
+                                                },
+                                            ))
                                             .item(
                                                 PopupMenuItem::new("Delete session").on_click(
                                                     move |_, _, cx| {
@@ -637,10 +636,10 @@ impl Render for SessionsPane {
                                                         {
                                                             event_target.update(cx, |_, cx| {
                                                                 cx.emit(
-                                                                    SessionsPaneEvent::DeleteSession(
-                                                                        delete_target.clone(),
-                                                                    ),
-                                                                );
+                                                                SessionsPaneEvent::DeleteSession(
+                                                                    delete_target.clone(),
+                                                                ),
+                                                            );
                                                             });
                                                         }
                                                     },

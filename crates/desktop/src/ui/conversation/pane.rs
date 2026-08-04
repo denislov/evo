@@ -2399,7 +2399,10 @@ mod tests {
         );
         // Legacy items without an action fall back to no summary.
         assert_eq!(tool_summary("web_search", "{}", "completed"), "");
-        assert_eq!(strip_ws_call_id("https://x/y#ws_call_id=abc"), "https://x/y");
+        assert_eq!(
+            strip_ws_call_id("https://x/y#ws_call_id=abc"),
+            "https://x/y"
+        );
     }
 
     #[test]

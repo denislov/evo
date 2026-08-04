@@ -2,10 +2,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use coding_agent::api::embedding::CodingAgentAuthSnapshot;
-use coding_agent::api::settings::{CodingAgentPresentationMode, CodingAgentSettingsSnapshot};
+use coding_agent::api::settings::CodingAgentSettingsSnapshot;
 use tui::api::input::{InputEvent, parse_key};
 use tui::api::render::{RenderScheduler, Tui};
-use tui::api::terminal::TerminalMode;
 use tui::api::testing::{TerminalOp, VirtualTerminal};
 use tui::api::theme::dark_theme;
 
@@ -40,18 +39,6 @@ fn terminal_progress_transitions_through_the_owned_terminal() {
             TerminalOp::SetProgress(true),
             TerminalOp::SetProgress(false)
         ]
-    );
-}
-
-#[test]
-fn presentation_mode_maps_to_the_owned_terminal_lifecycle_mode() {
-    assert_eq!(
-        terminal_mode_from_presentation(CodingAgentPresentationMode::Inline),
-        TerminalMode::Inline
-    );
-    assert_eq!(
-        terminal_mode_from_presentation(CodingAgentPresentationMode::Fullscreen),
-        TerminalMode::Fullscreen
     );
 }
 
@@ -135,9 +122,6 @@ fn fullscreen_slash_assistance_stays_aligned_across_resizes() {
     }
 
     let (mut tui, root_id) = test_tui();
-    root_mut(&mut tui, root_id)
-        .unwrap()
-        .set_fullscreen_viewport(true);
     install_transient_overlays(&mut tui, root_id).unwrap();
     for key in ["/", "h", "e"] {
         tui.dispatch_input(&InputEvent::Key(parse_key(key).unwrap()));
@@ -175,7 +159,7 @@ fn fullscreen_file_assistance_is_above_and_aligned_with_the_composer() {
     let cwd = tempfile::tempdir().unwrap();
     std::fs::write(cwd.path().join("fixture.rs"), "fn main() {}\n").unwrap();
     let mut tui = Tui::new(VirtualTerminal::new(80, 24));
-    let mut root = InteractiveRoot::new_with_theme_models_and_settings(
+    let root = InteractiveRoot::new_with_theme_models_and_settings(
         cwd.path().to_path_buf(),
         "test-model".to_string(),
         "session".to_string(),
@@ -184,7 +168,6 @@ fn fullscreen_file_assistance_is_above_and_aligned_with_the_composer() {
         CodingAgentSettingsSnapshot::default(),
         CodingAgentAuthSnapshot::default(),
     );
-    root.set_fullscreen_viewport(true);
     let root_id = tui.add_child_with_id(Box::new(root));
     tui.set_focus(Some(root_id));
     install_transient_overlays(&mut tui, root_id).unwrap();

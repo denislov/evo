@@ -4,7 +4,6 @@ use std::str::FromStr;
 use agent_core::api::tool::ToolExecutionMode;
 
 use crate::app::embedding::CodingAgentThinkingLevel;
-use crate::app::settings::CodingAgentPresentationMode;
 use crate::runtime::facade::PromptTurnMode;
 
 /// Product-semantic session selection requested by an application adapter.
@@ -104,7 +103,6 @@ pub struct CodingAgentInvocationOptions {
     pub exclude_tools: Vec<String>,
     pub no_tools: bool,
     pub no_builtin_tools: bool,
-    pub presentation_mode: Option<CodingAgentPresentationMode>,
 }
 
 impl Default for CodingAgentInvocationOptions {
@@ -138,7 +136,6 @@ impl Default for CodingAgentInvocationOptions {
             exclude_tools: Vec::new(),
             no_tools: false,
             no_builtin_tools: false,
-            presentation_mode: None,
         }
     }
 }
@@ -181,7 +178,6 @@ impl fmt::Debug for CodingAgentInvocationOptions {
             .field("tool_deny_count", &self.exclude_tools.len())
             .field("no_tools", &self.no_tools)
             .field("no_builtin_tools", &self.no_builtin_tools)
-            .field("presentation_mode", &self.presentation_mode)
             .finish_non_exhaustive()
     }
 }

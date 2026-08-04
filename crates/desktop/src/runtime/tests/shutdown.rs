@@ -379,10 +379,7 @@ async fn deleting_an_open_idle_session_removes_its_directory_and_repoints_focus(
     };
     let second_session = second.session.session.session_id;
     assert!(
-        temp.path()
-            .join("sessions")
-            .join(&second_session)
-            .exists(),
+        temp.path().join("sessions").join(&second_session).exists(),
         "the session directory must exist before deletion"
     );
 
@@ -397,18 +394,11 @@ async fn deleting_an_open_idle_session_removes_its_directory_and_repoints_focus(
         }) if session_id == second_session
     ));
     assert!(
-        !temp
-            .path()
-            .join("sessions")
-            .join(&second_session)
-            .exists(),
+        !temp.path().join("sessions").join(&second_session).exists(),
         "deleting a session must remove its durable directory"
     );
     assert!(
-        temp.path()
-            .join("sessions")
-            .join(&first_session)
-            .exists(),
+        temp.path().join("sessions").join(&first_session).exists(),
         "the surviving session directory must remain intact"
     );
 
@@ -458,10 +448,7 @@ async fn deleting_a_session_with_an_active_prompt_is_rejected_as_busy() {
         }) if code == "busy"
     ));
     assert!(
-        temp.path()
-            .join("sessions")
-            .join(&session_id)
-            .exists(),
+        temp.path().join("sessions").join(&session_id).exists(),
         "a rejected delete must preserve the durable session"
     );
     bridge.shutdown().await.unwrap();

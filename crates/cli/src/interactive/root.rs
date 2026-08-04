@@ -10,9 +10,8 @@ use tui::api::input::{
     MouseButton, MouseEvent, MouseEventKind, matches_key,
 };
 use tui::api::render::{
-    Constraint, ERROR, FocusRing, Frame, HitMap, HitRegion, Layout, Point, Rect, STATUS_IDLE,
-    STATUS_RUNNING, SYSTEM, Style, USER, color_enabled, paint_with, truncate_to_width,
-    truncate_to_width_with_ellipsis, visible_width,
+    Constraint, FocusRing, Frame, HitMap, HitRegion, Layout, Point, Rect, STATUS_IDLE,
+    STATUS_RUNNING, SYSTEM, Style, USER, color_enabled, paint_with, visible_width,
 };
 use tui::api::terminal::TerminalCapabilities;
 use tui::api::theme::{MarkdownTheme, TuiTheme};
@@ -25,7 +24,6 @@ use crate::interactive::delegation_confirmation_menu::{
     DelegationConfirmationMenuState,
 };
 use crate::interactive::event_bridge::{MAX_CHILD_CONVERSATIONS, UiProjection};
-use crate::interactive::git_branch::GitBranchProvider;
 use crate::interactive::input;
 use crate::interactive::keybindings;
 use crate::interactive::model_selector;
@@ -68,7 +66,6 @@ use coding_agent::api::settings::{
 use coding_agent::api::view::{CapabilityStatus, CodingAgentCapabilities, ProfileId};
 
 const MAX_TOOL_RESULT_LINES: usize = 3;
-const EXPANDED_TOOL_RESULT_LINES: usize = 20;
 const WIDE_LAYOUT_MIN_WIDTH: usize = 100;
 const MEDIUM_LAYOUT_MIN_WIDTH: usize = 64;
 const TIPS_MIN_HEIGHT: usize = 18;
@@ -433,7 +430,6 @@ pub(super) struct InteractiveRoot {
     pub(super) status: InteractiveStatus,
     pub(super) viewport_width: usize,
     pub(super) viewport_height: usize,
-    fullscreen_viewport: bool,
     terminal_capabilities: TerminalCapabilities,
     shared_projection: UiProjection,
     child_conversations: HashMap<String, ChildConversationState>,
@@ -459,7 +455,6 @@ pub(super) struct InteractiveRoot {
     pub(super) active_leaf_id: Option<String>,
     pub(super) settings: CodingAgentSettingsSnapshot,
     pub(super) auth_snapshot: CodingAgentAuthSnapshot,
-    pub(super) git_branch: GitBranchProvider,
     pub(super) stats: FooterStats,
     pub(super) tool_output_expanded: bool,
     pub(super) spinner_frame: usize,
@@ -590,6 +585,10 @@ impl InteractiveRoot {
             *page_down_command.lock().unwrap() = Some(TranscriptScrollCommand::PageDown);
         }));
         editor.set_focused(true);
+        editor.set_autocomplete_provider(Box::new(CombinedAutocompleteProvider::new(
+            Vec::new(),
+            &cwd,
+        )));
 
         let mut transcript = Transcript::new();
         transcript.push(TranscriptItem::system(welcome_line()));
@@ -658,7 +657,6 @@ impl InteractiveRoot {
             status: InteractiveStatus::Idle,
             viewport_width: 80,
             viewport_height: 24,
-            fullscreen_viewport: false,
             terminal_capabilities: TerminalCapabilities {
                 images: None,
                 true_color: false,
@@ -672,7 +670,6 @@ impl InteractiveRoot {
             main_tool_authorizations: None,
             conversation_viewport_width: 1,
             conversation_viewport_height: 1,
-            git_branch: GitBranchProvider::new(&cwd),
             cwd,
             model_id,
             session_label,
@@ -1590,7 +1587,6 @@ impl InteractiveRoot {
         );
         self.local.render_cache.clear();
         self.auth_snapshot = prompt_context.auth_controller.snapshot();
-        self.git_branch.set_cwd(&self.cwd);
         self.resource_commands = prompt_context.resource_commands.clone();
         self.profile_catalog = prompt_context.profile_catalog.clone();
         self.set_default_agent_profile_id(prompt_context.default_agent_profile_id.clone());
@@ -1707,12 +1703,12 @@ impl InteractiveRoot {
             }
         }
         if let Some(previous_rows) = previous_rows {
-            let anchor_start_row = self.fullscreen_viewport.then(|| {
+            let anchor_start_row = Some(
                 previous_rows
                     .total_rows()
                     .saturating_sub(previous_scroll_offset)
-                    .saturating_sub(self.conversation_viewport_height.max(1))
-            });
+                    .saturating_sub(self.conversation_viewport_height.max(1)),
+            );
             let row_delta_below_anchor = self.transcript_row_delta_since(
                 previous_rows,
                 mutation.changed_indices(),
@@ -1877,188 +1873,6 @@ impl InteractiveRoot {
         self.active_leaf_id = None;
     }
 
-    pub(super) fn footer(&self, width: usize) -> Vec<String> {
-        let color = color_enabled();
-        let width = width.max(1);
-
-        // Line 1: status (Rust-specific; preserves the spinner indicator that
-        // the TypeScript footer surfaces via a separate status container).
-        let (status_str, status_style) = match self.status {
-            InteractiveStatus::Idle => ("idle".to_string(), STATUS_IDLE),
-            InteractiveStatus::Running => (running_status_text(self.spinner_frame), STATUS_RUNNING),
-        };
-        let status_text = format!("status: {status_str}");
-        let status_line = fit_line(&paint_with(&status_text, &status_style, color), width);
-
-        // Line 2: pwd line — `cwd (branch) • session-name`, dimmed. Mirrors the
-        // TypeScript footer's first render line.
-        let mut pwd = abbreviate_cwd(&self.cwd);
-        if let Some(branch) = self.git_branch.branch() {
-            pwd = format!("{pwd} ({branch})");
-        }
-        let session_name = self.session_label.trim();
-        if !session_name.is_empty() && session_name != "session" {
-            pwd = format!("{pwd} • {session_name}");
-        }
-        let pwd_line = paint_with(
-            &truncate_to_width_with_ellipsis(&pwd, width),
-            &SYSTEM,
-            color,
-        );
-
-        // Line 3: cumulative stats (left) + model info (right-aligned).
-        vec![status_line, pwd_line, self.render_stats_line(width, color)]
-    }
-
-    /// The currently active model for footer display (context window,
-    /// reasoning, provider). Distinct from `selected_model`, which is consumed
-    /// by `take_selected_model` to apply a pending change to the agent.
-    fn current_model(&self) -> Option<&CodingAgentModelCatalogEntry> {
-        self.model.as_ref()
-    }
-
-    /// Number of distinct providers among the available models plus the active
-    /// model's provider, mirroring the TypeScript `getAvailableProviderCount`.
-    fn available_provider_count(&self) -> usize {
-        let mut providers: Vec<&str> = self
-            .available_models
-            .iter()
-            .map(|m| m.provider.as_str())
-            .collect();
-        if let Some(model) = &self.model {
-            providers.push(model.provider.as_str());
-        }
-        providers.sort_unstable();
-        providers.dedup();
-        providers.len()
-    }
-
-    /// Whether the active model's provider is authenticated via an OAuth
-    /// subscription token, mirroring `modelRegistry.isUsingOAuth(model)`.
-    fn using_subscription(&self) -> bool {
-        self.current_model()
-            .map(|m| self.auth_snapshot.uses_oauth(&m.provider))
-            .unwrap_or(false)
-    }
-
-    /// `(context_window, auto_indicator)` for the active model.
-    fn context_window_and_indicator(&self) -> (u32, &'static str) {
-        let window = self.current_model().map(|m| m.context_window).unwrap_or(0);
-        let auto = if self.settings.runtime.auto_compaction {
-            " (auto)"
-        } else {
-            ""
-        };
-        (window, auto)
-    }
-
-    /// Stats line: token/cost/context on the left, model info right-aligned.
-    /// Mirrors the TypeScript footer's second render line, including the
-    /// right-align padding and graceful right-side truncation on narrow widths.
-    fn render_stats_line(&self, width: usize, color: bool) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if self.stats.input > 0 {
-            parts.push(format!("↑{}", format_tokens(self.stats.input)));
-        }
-        if self.stats.output > 0 {
-            parts.push(format!("↓{}", format_tokens(self.stats.output)));
-        }
-        if self.stats.cache_read > 0 {
-            parts.push(format!("R{}", format_tokens(self.stats.cache_read)));
-        }
-        if self.stats.cache_write > 0 {
-            parts.push(format!("W{}", format_tokens(self.stats.cache_write)));
-        }
-
-        let using_sub = self.using_subscription();
-        if self.stats.cost > 0.0 || using_sub {
-            parts.push(format!(
-                "${:.3}{}",
-                self.stats.cost,
-                if using_sub { " (sub)" } else { "" }
-            ));
-        }
-
-        // Context usage: `percent/contextWindow (auto)`, or `?` when unknown
-        // (right after compaction, before the next LLM response).
-        let (context_window, auto_indicator) = self.context_window_and_indicator();
-        let (percent_value, context_display) = match (self.stats.context_tokens, context_window) {
-            (Some(tokens), window) if window > 0 => {
-                let pct = (tokens as f64 / window as f64) * 100.0;
-                (
-                    pct,
-                    format!("{:.1}%/{}{}", pct, format_tokens(window), auto_indicator),
-                )
-            }
-            _ => (
-                0.0,
-                format!("?/{}{}", format_tokens(context_window), auto_indicator),
-            ),
-        };
-        let context_style = if percent_value > 90.0 {
-            ERROR
-        } else if percent_value > 70.0 {
-            WARNING
-        } else {
-            Style::default()
-        };
-        parts.push(paint_with(&context_display, &context_style, color));
-
-        let mut stats_left = paint_with(&parts.join(" "), &SYSTEM, color);
-        if visible_width(&stats_left) > width {
-            stats_left = truncate_to_width_with_ellipsis(&stats_left, width);
-        }
-        let stats_left_width = visible_width(&stats_left);
-
-        // Right side: optional `(provider)` prefix + model name + thinking.
-        let model_name = self
-            .current_model()
-            .map(|m| m.id.as_str())
-            .unwrap_or("no-model")
-            .to_string();
-        let mut right_side = if self.current_model().map(|m| m.reasoning).unwrap_or(false) {
-            let level = self.thinking_level;
-            if level == CodingAgentThinkingLevel::Off {
-                format!("{model_name} • thinking off")
-            } else {
-                format!("{model_name} • {level}")
-            }
-        } else {
-            model_name
-        };
-        let min_padding = 2;
-        if self.available_provider_count() > 1 && self.current_model().is_some() {
-            let prefixed = format!(
-                "({}) {right_side}",
-                self.current_model()
-                    .map(|m| m.provider.as_str())
-                    .unwrap_or(""),
-            );
-            if stats_left_width + min_padding + visible_width(&prefixed) <= width {
-                right_side = prefixed;
-            }
-        }
-
-        let right_width = visible_width(&right_side);
-        if stats_left_width + min_padding + right_width <= width {
-            let padding = " ".repeat(width - stats_left_width - right_width);
-            let remainder = format!("{padding}{right_side}");
-            format!("{}{}", stats_left, paint_with(&remainder, &SYSTEM, color))
-        } else {
-            let available_for_right = width.saturating_sub(stats_left_width + min_padding);
-            if available_for_right > 0 {
-                let truncated_right = truncate_to_width(&right_side, available_for_right);
-                let padding = " ".repeat(
-                    width.saturating_sub(stats_left_width + visible_width(&truncated_right)),
-                );
-                let remainder = format!("{padding}{truncated_right}");
-                format!("{}{}", stats_left, paint_with(&remainder, &SYSTEM, color))
-            } else {
-                stats_left
-            }
-        }
-    }
-
     pub(super) fn render_state(&self) -> InteractiveRenderState {
         InteractiveRenderState {
             editor_text: self.local.editor.text().to_string(),
@@ -2070,14 +1884,8 @@ impl InteractiveRoot {
             transcript_has_new_output_below: self.transcript.has_new_output_below(),
             focused_region: self.local.focus_ring.current(),
             context_tab: self.local.context_tab,
-            context_projection: self
-                .fullscreen_viewport
-                .then(|| self.shared_projection.context().clone()),
-            capabilities: if self.fullscreen_viewport {
-                self.shared_projection.capabilities().cloned()
-            } else {
-                None
-            },
+            context_projection: Some(self.shared_projection.context().clone()),
+            capabilities: self.shared_projection.capabilities().cloned(),
             context_selection: self.local.context_selection,
             context_scroll: self.local.context_scroll,
             context_detail: self.local.context_detail.clone(),
@@ -2169,8 +1977,7 @@ impl InteractiveRoot {
     }
 
     fn render_slash_suggestions(&mut self, width: usize) -> Vec<String> {
-        if (self.fullscreen_viewport
-            && shell_layout_mode(self.viewport_width) == ShellLayoutMode::Narrow
+        if (shell_layout_mode(self.viewport_width) == ShellLayoutMode::Narrow
             && self.local.context_open)
             || self.local.selecting_model
             || self.local.selecting_settings
@@ -2353,14 +2160,12 @@ impl InteractiveRoot {
             hide_thinking_block: self.settings.presentation.hide_thinking_block,
             hidden_thinking_label: "Thinking...",
             styles: TranscriptStyles::from_theme(self.resolved_theme.as_ref()),
-            view: self
-                .fullscreen_viewport
-                .then(|| self.local.transcript_view.snapshot()),
-            selected_block: (self.fullscreen_viewport
-                && self.local.focus_ring.current() == Some(InteractiveRegion::Conversation))
+            view: Some(self.local.transcript_view.snapshot()),
+            selected_block: (self.local.focus_ring.current()
+                == Some(InteractiveRegion::Conversation))
             .then(|| self.local.transcript_view.selected())
             .flatten(),
-            selection_gutter: self.fullscreen_viewport,
+            selection_gutter: true,
             show_images: self.settings.presentation.show_images,
             image_width_cells: self.settings.presentation.image_width_cells,
             terminal_capabilities: self.terminal_capabilities,
@@ -2423,11 +2228,7 @@ impl InteractiveRoot {
 
     fn render_editor_box(&mut self, width: usize) -> Vec<String> {
         let editor_width = width.saturating_sub(2);
-        let editor_lines = if self.fullscreen_viewport {
-            self.local.editor.render_input(editor_width)
-        } else {
-            self.local.editor.render(editor_width)
-        };
+        let editor_lines = self.local.editor.render_input(editor_width);
         let border = editor_border_line(width, &self.editor_border_style(), color_enabled());
         let mut lines = Vec::with_capacity(editor_lines.len() + 2);
         lines.push(border.clone());
@@ -2439,24 +2240,6 @@ impl InteractiveRoot {
         lines
     }
 
-    fn transcript_lines(&mut self, max_tool_result_lines: usize) -> Vec<String> {
-        self.sync_transcript_view();
-        let opts = self.transcript_render_options(self.viewport_width, max_tool_result_lines);
-        self.local
-            .render_cache
-            .render_lines(&self.transcript, &opts)
-    }
-
-    pub(super) fn set_fullscreen_viewport(&mut self, enabled: bool) {
-        self.fullscreen_viewport = enabled;
-        if enabled {
-            self.local.editor.set_autocomplete_provider(Box::new(
-                CombinedAutocompleteProvider::new(Vec::new(), &self.cwd),
-            ));
-        }
-        self.refresh_shell_focus();
-    }
-
     pub(super) fn set_terminal_capabilities(&mut self, capabilities: TerminalCapabilities) {
         if self.terminal_capabilities != capabilities {
             self.terminal_capabilities = capabilities;
@@ -2465,9 +2248,7 @@ impl InteractiveRoot {
     }
 
     fn sync_transcript_view(&mut self) {
-        if self.fullscreen_viewport {
-            self.local.transcript_view.sync(&self.transcript);
-        }
+        self.local.transcript_view.sync(&self.transcript);
     }
 
     pub(super) fn toggle_all_transcript_blocks(&mut self) -> bool {
@@ -2487,13 +2268,10 @@ impl InteractiveRoot {
     }
 
     pub(super) fn uses_per_block_transcript_view(&self) -> bool {
-        self.fullscreen_viewport
+        true
     }
 
     pub(super) fn handle_shell_input(&mut self, event: &InputEvent) -> bool {
-        if !self.fullscreen_viewport {
-            return false;
-        }
         if self.local.selecting_model
             || self.local.selecting_session
             || self.local.selecting_settings
@@ -2760,14 +2538,6 @@ impl InteractiveRoot {
     }
 
     fn refresh_shell_focus(&mut self) {
-        if !self.fullscreen_viewport {
-            self.local
-                .focus_ring
-                .set_items([InteractiveRegion::Composer]);
-            self.local.focus_ring.focus(InteractiveRegion::Composer);
-            self.apply_region_focus();
-            return;
-        }
         if self.active_child_operation_id.is_some() {
             self.local
                 .focus_ring
@@ -3808,6 +3578,13 @@ impl InteractiveRoot {
         lines
     }
 
+    /// The currently active model for display (context window, reasoning,
+    /// provider). Distinct from `selected_model`, which is consumed by
+    /// `take_selected_model` to apply a pending change to the agent.
+    fn current_model(&self) -> Option<&CodingAgentModelCatalogEntry> {
+        self.model.as_ref()
+    }
+
     fn render_status_bar(&self, width: usize) -> String {
         let active_kind = self
             .shared_projection
@@ -3995,17 +3772,6 @@ impl InteractiveRoot {
         }
     }
 
-    fn render_transient_surface(&mut self, width: usize) -> Vec<String> {
-        let mut lines = self.render_transient_prompts(width);
-        let modal = self.render_modal_surface(width);
-        if modal.is_empty() {
-            lines.extend(self.render_completion_surface(width));
-        } else {
-            lines.extend(modal);
-        }
-        lines
-    }
-
     fn transcript_row_snapshot(&mut self, max_tool_result_lines: usize) -> TranscriptRowSnapshot {
         self.sync_transcript_view();
         let opts =
@@ -4035,11 +3801,7 @@ impl InteractiveRoot {
     }
 
     fn transcript_render_width(&self) -> usize {
-        if self.fullscreen_viewport {
-            self.conversation_viewport_width.max(1)
-        } else {
-            self.viewport_width.max(1)
-        }
+        self.conversation_viewport_width.max(1)
     }
 
     fn transcript_total_rows(&mut self) -> usize {
@@ -4245,22 +4007,7 @@ impl Component for InteractiveRoot {
         if width == 0 {
             return Vec::new();
         }
-        if self.fullscreen_viewport {
-            return self.render_fullscreen_shell(width);
-        }
-
-        self.local.mouse_hits.clear();
-
-        let max_tool_result_lines = if self.tool_output_expanded {
-            EXPANDED_TOOL_RESULT_LINES
-        } else {
-            MAX_TOOL_RESULT_LINES
-        };
-        let mut lines = self.transcript_lines(max_tool_result_lines);
-        lines.extend(self.render_editor_box(width));
-        lines.extend(self.render_transient_surface(width));
-        lines.extend(self.footer(width));
-        lines
+        self.render_fullscreen_shell(width)
     }
 
     fn handle_input(&mut self, event: &InputEvent) {
@@ -4270,10 +4017,9 @@ impl Component for InteractiveRoot {
     fn set_viewport_size(&mut self, width: usize, height: usize) {
         let previous_mode = shell_layout_mode(self.viewport_width);
         let next_mode = shell_layout_mode(width.max(1));
-        let context_owned_before_resize = self.fullscreen_viewport
-            && (self.local.context_open
-                || self.local.focus_ring.current() == Some(InteractiveRegion::Context)
-                || self.local.context_detail.is_some());
+        let context_owned_before_resize = self.local.context_open
+            || self.local.focus_ring.current() == Some(InteractiveRegion::Context)
+            || self.local.context_detail.is_some();
         self.viewport_width = width.max(1);
         self.viewport_height = height.max(1);
         if next_mode != ShellLayoutMode::Wide && context_owned_before_resize {

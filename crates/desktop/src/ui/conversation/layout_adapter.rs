@@ -71,7 +71,9 @@ impl NativeShell {
                 }
                 Some(DesktopModalKind::FullMessage) => self.ui.full_message_focus.focus(window, cx),
                 Some(DesktopModalKind::Search) => self.ui.search_focus.focus(window, cx),
-                Some(DesktopModalKind::ConfirmDeleteSession) => self.ui.modal_focus.focus(window, cx),
+                Some(DesktopModalKind::ConfirmDeleteSession) => {
+                    self.ui.modal_focus.focus(window, cx)
+                }
                 None => self.focus_composer_input(window, cx),
             },
         }

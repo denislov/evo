@@ -6,7 +6,6 @@ mod error;
 pub mod event_bridge;
 #[cfg(test)]
 mod event_bridge_tests;
-mod git_branch;
 mod input;
 pub mod key_hints;
 pub(crate) mod keybindings;

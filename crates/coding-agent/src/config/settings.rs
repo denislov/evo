@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::str::FromStr;
 
+/// Legacy `[terminal] mode` configuration value.
+///
+/// The interactive TUI is always fullscreen now; this enum only exists so
+/// existing settings files keep parsing. `Inline` is accepted (and ignored)
+/// for backward compatibility with older configs.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TuiMode {
@@ -56,6 +61,8 @@ pub struct PartialRetry {
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PartialTerminal {
+    /// Legacy mode selector; accepted for config compatibility and otherwise
+    /// ignored (the interactive TUI always owns the full screen).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<TuiMode>,
     #[serde(skip_serializing_if = "Option::is_none")]

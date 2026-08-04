@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::app::embedding::CodingAgentThinkingLevel;
 use crate::app::operation_factory::CodingAgentOperationFactory;
 use crate::config::settings::{
-    PartialCompaction, PartialSettings, PartialTerminal, Settings, TuiMode, load_global_settings,
+    PartialCompaction, PartialSettings, PartialTerminal, Settings, load_global_settings,
     try_merge_and_save_settings,
 };
 use crate::config::{SettingsScope, resolve_paths};
@@ -68,25 +68,6 @@ impl CodingAgentDoubleEscapeAction {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum CodingAgentPresentationMode {
-    #[default]
-    Inline,
-    Fullscreen,
-}
-
-impl std::str::FromStr for CodingAgentPresentationMode {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "inline" => Ok(Self::Inline),
-            "fullscreen" => Ok(Self::Fullscreen),
-            other => Err(format!("unknown terminal mode: {other}")),
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CodingAgentTreeFilterMode {
     #[default]
     Default,
@@ -128,7 +109,6 @@ impl Default for CodingAgentRuntimeSettingsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodingAgentPresentationSettingsSnapshot {
     pub theme: Option<String>,
-    pub mode: CodingAgentPresentationMode,
     pub show_images: bool,
     pub show_progress: bool,
     pub clear_on_shrink: bool,
@@ -143,7 +123,6 @@ impl Default for CodingAgentPresentationSettingsSnapshot {
     fn default() -> Self {
         Self {
             theme: None,
-            mode: CodingAgentPresentationMode::Inline,
             show_images: true,
             show_progress: false,
             clear_on_shrink: false,
@@ -272,10 +251,6 @@ fn snapshot_from_settings(settings: &Settings) -> CodingAgentSettingsSnapshot {
                 .theme
                 .as_deref()
                 .map(|theme| theme.chars().take(MAX_THEME_NAME_CHARS).collect()),
-            mode: match settings.terminal.mode {
-                TuiMode::Inline => CodingAgentPresentationMode::Inline,
-                TuiMode::Fullscreen => CodingAgentPresentationMode::Fullscreen,
-            },
             show_images: settings.terminal.show_images,
             show_progress: settings.terminal.show_progress,
             clear_on_shrink: settings.terminal.clear_on_shrink,

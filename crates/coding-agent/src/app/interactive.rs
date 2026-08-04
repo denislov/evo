@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use agent_core::api::transcript::create_session_id;
 
 use crate::api::error::{CodingAgentPublicDiagnostic, CodingAgentPublicError};
-use crate::api::settings::CodingAgentPresentationMode;
 use crate::app::auth::CodingAgentAuthController;
 use crate::app::bootstrap::{ApplicationRunOptions, PromptInvocation, SessionMode};
 use crate::app::embedding::{
@@ -156,7 +155,6 @@ pub struct CodingAgentInteractiveStartup {
     pub context_file_paths: Vec<PathBuf>,
     pub theme_controller: CodingAgentThemeController,
     pub theme: CodingAgentThemeSnapshot,
-    pub terminal_mode: CodingAgentPresentationMode,
     pub model_choices: Vec<CodingAgentModelCatalogEntry>,
     pub model_rotation: Vec<CodingAgentModelCatalogEntry>,
     pub resource_commands: Vec<CodingAgentResourceCommand>,
@@ -206,7 +204,6 @@ impl fmt::Debug for CodingAgentInteractiveStartup {
             .field("default_agent_profile_id", &self.default_agent_profile_id)
             .field("context_file_count", &self.context_file_paths.len())
             .field("theme", &self.theme)
-            .field("terminal_mode", &self.terminal_mode)
             .field("model_summary", &self.model_summary)
             .field("model_choice_count", &self.model_choices.len())
             .field("model_rotation_count", &self.model_rotation.len())
@@ -606,9 +603,6 @@ fn build_interactive_startup(
         resolved.config.settings.theme.as_deref(),
         resolved.loaded_resources.selected_theme.as_ref(),
     );
-    let terminal_mode = invocation
-        .presentation_mode
-        .unwrap_or_else(|| settings_controller.snapshot().presentation.mode);
 
     let application = CodingAgentApplicationStartup {
         operation_factory,
@@ -635,7 +629,6 @@ fn build_interactive_startup(
             .collect(),
         theme_controller,
         theme,
-        terminal_mode,
         model_choices,
         model_rotation,
         resource_commands,

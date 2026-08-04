@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use tui::api::component::{CURSOR_MARKER, Component, Image, OverlayOptions, Text};
 use tui::api::render::{RenderStrategy, Tui, TuiError};
 use tui::api::terminal::{
-    ImageDimensions, ImageProtocol, Terminal, TerminalCapabilities, TerminalMode, TerminalSize,
+    ImageDimensions, ImageProtocol, Terminal, TerminalCapabilities, TerminalSize,
 };
 use tui::api::testing::{TerminalOp, VirtualTerminal};
 
@@ -119,7 +119,7 @@ impl Terminal for FaultTerminal {
         self.operation(None)
     }
 
-    fn start_mode(&mut self, _mode: TerminalMode) -> std::io::Result<()> {
+    fn start(&mut self) -> std::io::Result<()> {
         self.operation(None)
     }
 
@@ -181,8 +181,7 @@ impl Terminal for LifecycleTerminal {
         Ok(())
     }
 
-    fn start_mode(&mut self, mode: TerminalMode) -> std::io::Result<()> {
-        assert_eq!(mode, TerminalMode::Fullscreen);
+    fn start(&mut self) -> std::io::Result<()> {
         self.events.lock().unwrap().push("start");
         if self.fail_start {
             return Err(std::io::Error::other("injected start failure"));
@@ -196,41 +195,10 @@ impl Terminal for LifecycleTerminal {
     }
 }
 
-fn assert_no_global_clear(terminal: &VirtualTerminal) {
-    assert!(!terminal.ops().contains(&TerminalOp::ClearScreen));
-    assert!(!terminal.ops().contains(&TerminalOp::ClearFromCursor));
-    let written = terminal.written_output();
-    assert!(!written.contains("\x1b[2J"));
-    assert!(!written.contains("\x1b[3J"));
-    assert!(!written.contains("\x1b[H"));
-}
-
-#[test]
-fn first_render_appends_inline_without_clearing_or_homing() {
-    let terminal = VirtualTerminal::new(20, 5);
-    let mut tui = Tui::new(terminal);
-    tui.add_child(Box::new(Text::new("hello")));
-
-    let outcome = tui.render_once().unwrap();
-
-    assert_eq!(outcome.strategy, RenderStrategy::FullRedraw);
-    assert_eq!(outcome.line_count, 1);
-    assert_eq!(tui.full_redraws(), 1);
-    assert!(tui.terminal().ops().contains(&TerminalOp::HideCursor));
-    assert_no_global_clear(tui.terminal());
-    assert!(tui.terminal().written_output().contains("\x1b[?2026h"));
-    assert!(
-        tui.terminal()
-            .written_output()
-            .contains("hello\x1b[0m\x1b]8;;\x07")
-    );
-    assert!(tui.terminal().written_output().contains("\x1b[?2026l"));
-}
-
 #[test]
 fn fullscreen_render_owns_exact_frame_and_bottom_aligns_existing_layout() {
     let terminal = VirtualTerminal::new(20, 5);
-    let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+    let mut tui = Tui::start(terminal).unwrap();
     tui.add_child(Box::new(RawComponent::new(&["one", "two"])));
 
     let outcome = tui.render_once().unwrap();
@@ -238,12 +206,7 @@ fn fullscreen_render_owns_exact_frame_and_bottom_aligns_existing_layout() {
     assert_eq!(outcome.strategy, RenderStrategy::FullRedraw);
     assert_eq!(outcome.line_count, 5);
     assert_eq!(tui.rendered_lines(), &["", "", "", "one", "two"]);
-    assert_eq!(tui.terminal_mode(), TerminalMode::Fullscreen);
-    assert!(
-        tui.terminal()
-            .ops()
-            .contains(&TerminalOp::Start(TerminalMode::Fullscreen))
-    );
+    assert!(tui.terminal().ops().contains(&TerminalOp::Start));
     assert!(tui.terminal().ops().contains(&TerminalOp::ClearScreen));
 
     tui.stop().unwrap();
@@ -253,7 +216,7 @@ fn fullscreen_render_owns_exact_frame_and_bottom_aligns_existing_layout() {
 #[test]
 fn fullscreen_resize_rebuilds_bounded_frame_without_scrolling() {
     let terminal = VirtualTerminal::new(20, 5);
-    let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+    let mut tui = Tui::start(terminal).unwrap();
     tui.add_child(Box::new(RawComponent::new(&[
         "one", "two", "three", "four", "five", "six",
     ])));
@@ -282,7 +245,7 @@ fn tui_start_failure_stops_partially_started_terminal() {
         fail_start: true,
     };
 
-    let result = Tui::start(terminal, TerminalMode::Fullscreen);
+    let result = Tui::start(terminal);
 
     assert!(matches!(result, Err(TuiError::Io(_))));
     assert_eq!(&*events.lock().unwrap(), &["start", "stop"]);
@@ -297,7 +260,7 @@ fn tui_drop_restores_terminal_during_panic_unwind() {
     };
 
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+        let _tui = Tui::start(terminal).unwrap();
         panic!("injected panic");
     }));
 
@@ -312,7 +275,7 @@ fn tui_drop_restores_terminal_after_runtime_render_error() {
         events: Arc::clone(&events),
         fail_start: false,
     };
-    let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+    let mut tui = Tui::start(terminal).unwrap();
     tui.add_child(Box::new(RawComponent::new(&[
         "this line exceeds the terminal width",
     ])));
@@ -339,7 +302,7 @@ fn synchronized_full_redraw_ends_after_each_injected_io_failure() {
         let terminal = FaultTerminal {
             state: Arc::clone(&state),
         };
-        let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+        let mut tui = Tui::start(terminal).unwrap();
         tui.add_child(Box::new(RawComponent::new(&["one", "two"])));
 
         let _ = tui.render_once();
@@ -368,7 +331,7 @@ fn synchronized_full_redraw_ends_before_resuming_terminal_panic() {
     let terminal = FaultTerminal {
         state: Arc::clone(&state),
     };
-    let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+    let mut tui = Tui::start(terminal).unwrap();
     tui.add_child(Box::new(RawComponent::new(&["panic frame"])));
 
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tui.render_once()));
@@ -394,7 +357,7 @@ fn synchronized_differential_redraw_balances_each_injected_io_failure() {
         let terminal = FaultTerminal {
             state: Arc::clone(&state),
         };
-        let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+        let mut tui = Tui::start(terminal).unwrap();
         tui.add_child(Box::new(RawComponent::new(&["header", "before"])));
         tui.render_once().unwrap();
         tui.clear_children();
@@ -437,7 +400,7 @@ fn overlay_redraw_balances_sync_after_each_injected_io_failure() {
         let terminal = FaultTerminal {
             state: Arc::clone(&state),
         };
-        let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+        let mut tui = Tui::start(terminal).unwrap();
         tui.add_child(Box::new(RawComponent::new(&["base"])));
         tui.render_once().unwrap();
         tui.show_overlay(
@@ -485,7 +448,7 @@ fn resize_redraw_balances_sync_after_each_injected_io_failure() {
         let terminal = FaultTerminal {
             state: Arc::clone(&state),
         };
-        let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+        let mut tui = Tui::start(terminal).unwrap();
         tui.add_child(Box::new(RawComponent::new(&["one", "two", "three"])));
         tui.render_once().unwrap();
         {
@@ -529,7 +492,7 @@ fn failed_stop_is_retried_by_drop_after_progress_was_active() {
     let terminal = FaultTerminal {
         state: Arc::clone(&state),
     };
-    let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+    let mut tui = Tui::start(terminal).unwrap();
     tui.terminal_mut().set_progress(true).unwrap();
     {
         let mut state = state.lock().unwrap();
@@ -575,12 +538,13 @@ fn line_too_wide_errors_before_writing() {
             max_width,
             ..
         } => {
-            assert_eq!(line_index, 0);
+            assert_eq!(line_index, 4);
             assert_eq!(width, 8);
             assert_eq!(max_width, 4);
         }
         other => panic!("expected LineTooWide, got {other:?}"),
     }
+    eprintln!("DBG ops: {:?}", tui.terminal().ops());
     assert!(tui.terminal().ops().is_empty());
 }
 
@@ -619,12 +583,12 @@ fn differential_render_returns_to_column_zero_before_clearing() {
         .iter()
         .position(|op| *op == TerminalOp::MoveToColumn(0))
         .expect("expected differential render to return to column zero");
-    let clear_line = ops
+    let clear_from_cursor = ops
         .iter()
-        .position(|op| *op == TerminalOp::ClearLine)
-        .expect("expected differential render to clear the changed owned line");
-    assert!(move_to_column < clear_line);
-    assert_no_global_clear(tui.terminal());
+        .position(|op| *op == TerminalOp::ClearFromCursor)
+        .expect("expected differential render to clear from the changed row");
+    assert!(move_to_column < clear_from_cursor);
+    assert!(!ops.contains(&TerminalOp::ClearScreen));
 }
 
 #[test]
@@ -675,7 +639,7 @@ fn unchanged_render_still_repositions_hardware_cursor() {
 }
 
 #[test]
-fn second_render_updates_from_first_changed_line_without_full_clear() {
+fn second_render_updates_from_first_changed_line() {
     let terminal = VirtualTerminal::new(20, 5);
     let mut tui = Tui::new(terminal);
     tui.add_child(Box::new(RawComponent::new(&[
@@ -691,42 +655,14 @@ fn second_render_updates_from_first_changed_line_without_full_clear() {
     assert_eq!(
         outcome.strategy,
         RenderStrategy::Differential {
-            first_changed_line: 1,
-            last_changed_line: 1
+            first_changed_line: 3,
+            last_changed_line: 3
         }
     );
-    assert_no_global_clear(tui.terminal());
+    assert!(!tui.terminal().ops().contains(&TerminalOp::ClearScreen));
     assert!(tui.terminal().ops().contains(&TerminalOp::MoveBy(-1)));
-    assert!(tui.terminal().ops().contains(&TerminalOp::ClearLine));
+    assert!(tui.terminal().ops().contains(&TerminalOp::ClearFromCursor));
     assert!(tui.terminal().written_output().contains("done"));
-}
-
-#[test]
-fn differential_render_writes_growth_beyond_terminal_height() {
-    let terminal = VirtualTerminal::new(20, 4);
-    let mut tui = Tui::new(terminal);
-    tui.add_child(Box::new(RawComponent::new(&["welcome", "> ", "footer"])));
-    tui.render_once().unwrap();
-    tui.terminal_mut().clear_ops();
-
-    tui.clear_children();
-    tui.add_child(Box::new(RawComponent::new(&[
-        "welcome", "one", "two", "three", "four", "five", "six", "> ", "footer",
-    ])));
-    let outcome = tui.render_once().unwrap();
-
-    assert_eq!(
-        outcome.strategy,
-        RenderStrategy::Differential {
-            first_changed_line: 1,
-            last_changed_line: 8
-        }
-    );
-    assert_no_global_clear(tui.terminal());
-    let written = tui.terminal().written_output();
-    assert!(written.contains("one"), "{written:?}");
-    assert!(written.contains("six"), "{written:?}");
-    assert!(written.contains("footer"), "{written:?}");
 }
 
 #[test]
@@ -746,13 +682,13 @@ fn differential_render_only_rewrites_changed_range() {
     assert_eq!(
         outcome.strategy,
         RenderStrategy::Differential {
-            first_changed_line: 1,
-            last_changed_line: 1
+            first_changed_line: 3,
+            last_changed_line: 3
         }
     );
     let written = tui.terminal().written_output();
     assert!(written.contains("done"), "{written:?}");
-    assert!(!written.contains("footer"), "{written:?}");
+    assert!(!written.contains("header"), "{written:?}");
 }
 
 #[test]
@@ -789,7 +725,7 @@ fn failed_kitty_image_deletion_is_retried_on_the_next_frame() {
     let terminal = FaultTerminal {
         state: Arc::clone(&state),
     };
-    let mut tui = Tui::start(terminal, TerminalMode::Fullscreen).unwrap();
+    let mut tui = Tui::start(terminal).unwrap();
     tui.add_child(Box::new(RawComponent::new(&["\x1b_Gi=42;payload\x1b\\"])));
     tui.render_once().unwrap();
     tui.clear_children();
@@ -834,14 +770,14 @@ fn image_component_reserves_its_protocol_reported_rows_before_following_content(
 
     tui.render_once().unwrap();
 
-    assert_eq!(tui.rendered_lines().len(), 6);
-    assert!(tui.rendered_lines()[0].contains("c=10,r=5,i=7"));
-    assert!(tui.rendered_lines()[1..5].iter().all(String::is_empty));
-    assert!(tui.rendered_lines()[5].contains("after image"));
+    assert_eq!(tui.rendered_lines().len(), 10);
+    assert!(tui.rendered_lines()[4].contains("c=10,r=5,i=7"));
+    assert!(tui.rendered_lines()[5..9].iter().all(String::is_empty));
+    assert!(tui.rendered_lines()[9].contains("after image"));
 }
 
 #[test]
-fn width_change_triggers_scoped_redraw_without_global_clear() {
+fn width_change_triggers_full_frame_redraw() {
     let terminal = VirtualTerminal::new(20, 5);
     let mut tui = Tui::new(terminal);
     tui.add_child(Box::new(Text::new("hello")));
@@ -852,13 +788,12 @@ fn width_change_triggers_scoped_redraw_without_global_clear() {
     let outcome = tui.render_once().unwrap();
 
     assert_eq!(outcome.strategy, RenderStrategy::FullRedraw);
-    assert_no_global_clear(tui.terminal());
-    assert!(tui.terminal().ops().contains(&TerminalOp::ClearLine));
+    assert!(tui.terminal().ops().contains(&TerminalOp::ClearScreen));
     assert!(tui.terminal().written_output().contains("hello"));
 }
 
 #[test]
-fn shrink_with_clear_on_shrink_clears_only_owned_rows() {
+fn shrink_with_clear_on_shrink_repaints_the_changed_frame() {
     let terminal = VirtualTerminal::new(20, 5);
     let mut tui = Tui::new(terminal);
     tui.set_clear_on_shrink(true);
@@ -870,15 +805,15 @@ fn shrink_with_clear_on_shrink_clears_only_owned_rows() {
     tui.add_child(Box::new(RawComponent::new(&["one"])));
     let outcome = tui.render_once().unwrap();
 
-    assert_eq!(outcome.strategy, RenderStrategy::FullRedraw);
-    assert_no_global_clear(tui.terminal());
-    let cleared_rows = tui
-        .terminal()
-        .ops()
-        .iter()
-        .filter(|op| **op == TerminalOp::ClearLine)
-        .count();
-    assert_eq!(cleared_rows, 3);
+    assert_eq!(
+        outcome.strategy,
+        RenderStrategy::Differential {
+            first_changed_line: 2,
+            last_changed_line: 4
+        }
+    );
+    assert!(!tui.terminal().ops().contains(&TerminalOp::ClearScreen));
+    assert!(tui.terminal().ops().contains(&TerminalOp::ClearFromCursor));
     assert!(tui.terminal().written_output().contains("one"));
     assert!(!tui.terminal().written_output().contains("two"));
 }

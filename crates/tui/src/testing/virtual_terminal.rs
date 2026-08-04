@@ -3,11 +3,11 @@ use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::render::visible_width;
-use crate::terminal::{Terminal, TerminalMode, TerminalSize};
+use crate::terminal::{Terminal, TerminalSize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalOp {
-    Start(TerminalMode),
+    Start,
     Stop,
     DrainInput { max_ms: u64, idle_ms: u64 },
     SetTitle(String),
@@ -213,11 +213,7 @@ impl Terminal for VirtualTerminal {
     }
 
     fn start(&mut self) -> std::io::Result<()> {
-        self.start_mode(TerminalMode::Inline)
-    }
-
-    fn start_mode(&mut self, mode: TerminalMode) -> std::io::Result<()> {
-        self.ops.push(TerminalOp::Start(mode));
+        self.ops.push(TerminalOp::Start);
         Ok(())
     }
 

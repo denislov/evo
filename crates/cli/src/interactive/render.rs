@@ -283,59 +283,6 @@ impl TranscriptRenderCache {
         self.reset_stats();
     }
 
-    pub(super) fn render_lines(
-        &mut self,
-        transcript: &Transcript,
-        opts: &TranscriptRenderOptions<'_>,
-    ) -> Vec<String> {
-        let mut lines = Vec::new();
-        let profile_hash = render_profile_hash(opts);
-        let row_profile_hash = render_row_profile_hash(opts, profile_hash);
-        let mut metadata = TranscriptRowMetadata::new(transcript.content_revision());
-        let mut used_keys = HashSet::new();
-
-        for (render_key, item) in transcript.render_entries() {
-            let (display_state, tool_argument_state, selected, selection_gutter) =
-                block_view(render_key, item, opts);
-            let block_key = block_cache_key(
-                render_key,
-                profile_hash,
-                display_state,
-                tool_argument_state,
-                selected,
-                selection_gutter,
-            );
-            used_keys.insert(block_key.clone());
-            let block = self.render_block(
-                &block_key,
-                item,
-                opts,
-                display_state,
-                tool_argument_state,
-                selected,
-                selection_gutter,
-            );
-            let entry = row_metadata_entry(
-                render_key,
-                item,
-                block.line_count,
-                metadata.has_visible_rows,
-                metadata.total_rows,
-            );
-            if entry.separator_before {
-                lines.push(String::new());
-            }
-            lines.extend(block.lines);
-            metadata.total_rows += entry.contribution_line_count;
-            metadata.has_visible_rows |= entry.has_visible_rows;
-            metadata.entries.push(entry);
-        }
-
-        self.retain_used_blocks(&used_keys);
-        self.record_row_metadata(transcript, row_profile_hash, metadata);
-        lines
-    }
-
     pub(super) fn render_viewport(
         &mut self,
         transcript: &Transcript,
