@@ -266,6 +266,10 @@ impl NativeShell {
                     self.close_full_conversation_message(window, cx);
                 }
                 DesktopModalKind::Search => self.dismiss_modal(window, cx),
+                DesktopModalKind::ConfirmDeleteSession => {
+                    self.ui.pending_delete_session = None;
+                    self.dismiss_modal(window, cx);
+                }
             }
             return;
         }

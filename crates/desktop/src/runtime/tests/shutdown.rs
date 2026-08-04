@@ -364,3 +364,105 @@ async fn abort_race_is_typed_and_window_close_is_non_blocking() {
     .expect("dropping the desktop window bridge must return promptly")
     .unwrap();
 }
+
+#[tokio::test]
+async fn deleting_an_open_idle_session_removes_its_directory_and_repoints_focus() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, mut bridge, first) = start_isolated_runtime(&temp).await;
+    let first_session = first.session.session.session_id;
+    runtime_commands(&bridge).try_create_session(131).unwrap();
+    let Some(DesktopRuntimeUpdate::SessionChanged {
+        snapshot: second, ..
+    }) = bridge.next_update().await
+    else {
+        panic!("second session should be created");
+    };
+    let second_session = second.session.session.session_id;
+    assert!(
+        temp.path()
+            .join("sessions")
+            .join(&second_session)
+            .exists(),
+        "the session directory must exist before deletion"
+    );
+
+    runtime_commands(&bridge)
+        .try_delete_session(132, &second_session)
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::SessionDeleted {
+            command_id: 132,
+            session_id,
+        }) if session_id == second_session
+    ));
+    assert!(
+        !temp
+            .path()
+            .join("sessions")
+            .join(&second_session)
+            .exists(),
+        "deleting a session must remove its durable directory"
+    );
+    assert!(
+        temp.path()
+            .join("sessions")
+            .join(&first_session)
+            .exists(),
+        "the surviving session directory must remain intact"
+    );
+
+    runtime_commands(&bridge)
+        .try_open_session(133, &second_session)
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 133,
+            command: DesktopRuntimeCommandKind::OpenSession,
+            ..
+        })
+    ));
+    bridge.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_a_session_with_an_active_prompt_is_rejected_as_busy() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_env, mut bridge, first) = start_isolated_runtime(&temp).await;
+    let session_id = first.session.session.session_id;
+    runtime_commands(&bridge)
+        .try_submit_prompt_with_attachments(
+            141,
+            existing_prompt_target(&session_id),
+            "keep this prompt while delete is rejected",
+            &[],
+            None,
+        )
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::PromptAccepted { command_id: 141 })
+    ));
+
+    runtime_commands(&bridge)
+        .try_delete_session(142, &session_id)
+        .unwrap();
+    assert!(matches!(
+        bridge.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 142,
+            command: DesktopRuntimeCommandKind::DeleteSession,
+            ref code,
+            ..
+        }) if code == "busy"
+    ));
+    assert!(
+        temp.path()
+            .join("sessions")
+            .join(&session_id)
+            .exists(),
+        "a rejected delete must preserve the durable session"
+    );
+    bridge.shutdown().await.unwrap();
+}

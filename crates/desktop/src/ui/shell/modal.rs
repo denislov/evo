@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use super::ShellUiState;
 use crate::actions::{self, DesktopPaletteCommand, PALETTE_ENTRIES};
-use crate::app::native_shell::{ConversationFullMessageView, NativeDesktopState};
+use crate::app::native_shell::{
+    ConversationFullMessageView, NativeDesktopState, SessionDeleteConfirm,
+};
 use crate::ui::components::{
     controls::{
         DesktopActionRow, DesktopCriticalButton, DesktopCriticalTone, DesktopIcon,
@@ -32,6 +34,8 @@ pub(crate) enum RootModalHostEvent {
     CloseFullMessage,
     NavigateSearch(String),
     CloseSearch,
+    ConfirmDeleteSession,
+    CancelDeleteSession,
     DecideAuthorization {
         identity: ToolAuthorizationIdentity,
         decision: ToolAuthorizationDecision,
@@ -54,6 +58,7 @@ pub(crate) struct RootModalViewModel {
     pub(crate) search_loading: bool,
     pub(crate) search_sessions: Arc<[GlobalSearchSession]>,
     pub(crate) active_session_id: Arc<str>,
+    pub(crate) delete_confirm: Option<SessionDeleteConfirm>,
 }
 
 /// One result category in the global search surface.
@@ -130,6 +135,7 @@ pub(crate) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> RootMod
         search_loading: app.catalog.state().is_loading(),
         search_sessions: search_sessions.into(),
         active_session_id: Arc::from(active_session_id),
+        delete_confirm: ui.pending_delete_session.clone(),
     }
 }
 
@@ -138,6 +144,7 @@ pub(crate) struct RootModalHost {
     command_palette_focus: FocusHandle,
     full_message_focus: FocusHandle,
     search_focus: FocusHandle,
+    modal_focus: FocusHandle,
     search_input: gpui::Entity<InputState>,
     view_model: Option<RootModalViewModel>,
     _search_subscription: Subscription,
@@ -149,6 +156,7 @@ impl RootModalHost {
         command_palette_focus: FocusHandle,
         full_message_focus: FocusHandle,
         search_focus: FocusHandle,
+        modal_focus: FocusHandle,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
@@ -180,6 +188,7 @@ impl RootModalHost {
             command_palette_focus,
             full_message_focus,
             search_focus,
+            modal_focus,
             search_input,
             view_model: None,
             _search_subscription: search_subscription,
@@ -632,6 +641,99 @@ impl Render for RootModalHost {
                 )
         });
 
+        let delete_confirm_overlay = view_model.delete_confirm.as_ref().map(|confirm| {
+            let title = confirm
+                .name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "this session".into());
+            overlay_surface("delete-session-overlay", &self.modal_focus)
+                .role(Role::AlertDialog)
+                .aria_label("Delete session")
+                .aria_description(format!(
+                    "Delete {title}? This permanently removes the session and its event log."
+                ))
+                .child(
+                    div()
+                        .id("delete-session-dialog")
+                        .debug_selector(|| "desktop-delete-session-dialog".to_owned())
+                        .w_full()
+                        .max_w(px(480.))
+                        .rounded_token(DesignRadius::Md)
+                        .border_1()
+                        .border_color(rgb(theme.danger.value()))
+                        .bg(rgb(theme.elevated.value()))
+                        .p_token(DesignSpace::Xl)
+                        .flex()
+                        .flex_col()
+                        .gap_token(DesignSpace::Md)
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .text_color(rgb(theme.danger.value()))
+                                .child("DELETE SESSION")
+                                .child(
+                                    DesktopIconButton::new(
+                                        "close-delete-session-dialog",
+                                        DesktopIcon::Close,
+                                        "Cancel session deletion",
+                                    )
+                                    .build()
+                                    .debug_selector(|| "desktop-close-delete-session-dialog".into())
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(RootModalHostEvent::CancelDeleteSession);
+                                    })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(theme.text.value()))
+                                .whitespace_normal()
+                                .child(format!(
+                                    "Delete {title}? The session and its event log are removed permanently and cannot be recovered."
+                                )),
+                        )
+                        .child(
+                            div()
+                                .id("delete-session-identity")
+                                .font_family(MONOSPACE_FONT_FAMILY)
+                                .text_token(DesignText::Metadata)
+                                .text_color(rgb(theme.muted_text.value()))
+                                .child(SharedString::new(Arc::from(confirm.session_id.as_str()))),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "desktop-delete-session-actions".into())
+                                .flex()
+                                .justify_end()
+                                .gap_token(DesignSpace::Sm)
+                                .child(
+                                    Button::new("cancel-delete-session")
+                                        .debug_selector(|| "desktop-cancel-delete-session".into())
+                                        .label("Cancel")
+                                        .tooltip("Keep the session · Escape")
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(RootModalHostEvent::CancelDeleteSession);
+                                        })),
+                                )
+                                .child(
+                                    DesktopCriticalButton::new(
+                                        "confirm-delete-session",
+                                        "Delete",
+                                        "Permanently delete this session",
+                                        DesktopCriticalTone::Dangerous,
+                                    )
+                                    .build()
+                                    .debug_selector(|| "desktop-confirm-delete-session".into())
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(RootModalHostEvent::ConfirmDeleteSession);
+                                    })),
+                                ),
+                        ),
+                )
+        });
+
         div()
             .id("root-modal-host")
             .absolute()
@@ -640,6 +742,7 @@ impl Render for RootModalHost {
             .children(search_overlay)
             .children(full_message_overlay)
             .children(authorization_overlay)
+            .children(delete_confirm_overlay)
             .into_any_element()
     }
 }

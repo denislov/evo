@@ -207,6 +207,13 @@ pub(crate) enum DesktopModalKind {
     CommandPalette,
     FullMessage,
     Search,
+    ConfirmDeleteSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionDeleteConfirm {
+    pub(crate) session_id: String,
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,6 +380,7 @@ impl NativeShell {
         let command_palette_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let full_message_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let search_focus = cx.focus_handle().tab_stop(true).tab_index(6);
+        let modal_focus = cx.focus_handle().tab_stop(true).tab_index(6);
         let conversation_pane = cx.new(|_| ConversationPane::new());
         let conversation_header = cx.new(|_| ConversationHeader::new(center_header_focus.clone()));
         let sessions_pane = cx.new(|cx| SessionsPane::new(sidebar_focus.clone(), window, cx));
@@ -387,6 +395,7 @@ impl NativeShell {
                 command_palette_focus.clone(),
                 full_message_focus.clone(),
                 search_focus.clone(),
+                modal_focus.clone(),
                 window,
                 cx,
             )
@@ -554,6 +563,7 @@ impl NativeShell {
                 command_palette_focus,
                 full_message_focus,
                 search_focus,
+                modal_focus,
             ),
         };
         debug_assert!(shell.views.subscription_count() > 0);
@@ -620,6 +630,36 @@ impl NativeShell {
                 self.rename_session(session_id, name, cx);
             }
             UiIntent::CloseSession(session_id) => self.close_session(&session_id, cx),
+            UiIntent::DeleteSession(session_id) => {
+                let name = self
+                    .app
+                    .catalog
+                    .project_groups()
+                    .into_iter()
+                    .flat_map(|group| group.sessions)
+                    .find(|session| session.session_id == session_id)
+                    .and_then(|session| session.name);
+                self.ui.pending_delete_session = Some(SessionDeleteConfirm {
+                    session_id,
+                    name,
+                });
+                self.activate_modal(DesktopModalKind::ConfirmDeleteSession, window, cx);
+            }
+            UiIntent::ConfirmDeleteSession => {
+                let session_id = self
+                    .ui
+                    .pending_delete_session
+                    .take()
+                    .map(|confirm| confirm.session_id);
+                self.dismiss_modal(window, cx);
+                if let Some(session_id) = session_id {
+                    self.delete_session(&session_id, cx);
+                }
+            }
+            UiIntent::CancelDeleteSession => {
+                self.ui.pending_delete_session = None;
+                self.dismiss_modal(window, cx);
+            }
             UiIntent::OpenSearch => {
                 if matches!(self.app.catalog.state(), ProjectCatalogState::NotLoaded) {
                     self.request_session_catalog(cx);
@@ -873,6 +913,44 @@ impl NativeShell {
             });
         if let Err(error) = admission {
             let owner = WorkspaceKey::session(session_id);
+            let _ = self
+                .app
+                .complete_runtime_command(command_id, &owner, &intent);
+            self.app
+                .workspaces
+                .active_mut()
+                .set_preference_notice(error);
+        }
+        self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
+    }
+
+    fn delete_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let intent = DesktopCommandIntent::DeleteSession {
+            session_id: session_id.to_owned(),
+        };
+        let owner = WorkspaceKey::session(session_id);
+        let command_id = match self.app.commands.reserve(owner.clone(), intent.clone()) {
+            Ok(command_id) => command_id,
+            Err(error) => {
+                self.app
+                    .workspaces
+                    .active_mut()
+                    .set_preference_notice(error.to_string());
+                self.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
+                return;
+            }
+        };
+        let admission = self
+            .connection
+            .runtime_client
+            .as_ref()
+            .ok_or_else(|| "desktop runtime is unavailable".to_owned())
+            .and_then(|runtime| {
+                runtime
+                    .try_delete_session(command_id, session_id)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = admission {
             let _ = self
                 .app
                 .complete_runtime_command(command_id, &owner, &intent);

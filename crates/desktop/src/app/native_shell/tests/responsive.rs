@@ -1040,6 +1040,67 @@ fn sessions_show_names_search_name_and_id_and_offer_manual_rename(cx: &mut TestA
 }
 
 #[gpui::test]
+fn session_actions_confirm_delete_before_submitting_the_command(cx: &mut TestAppContext) {
+    initialize_visual_test(cx);
+    let (runtime, mut runtime_harness) = DesktopRuntimeBridge::instrumented_for_test();
+    let (shell, cx) = add_visual_shell(cx, runtime, visual_test_projection());
+    cx.run_until_parked();
+    runtime_harness.drain_command_kinds();
+    shell.update(cx, |shell, cx| {
+        shell.app.catalog.replace_catalog(
+            vec![desktop::runtime::DesktopSessionCatalogEntry {
+                session_id: "session-to-delete".into(),
+                name: Some("Release plan".into()),
+                updated_at: "9999-12-31T23:59:59Z".into(),
+                ..Default::default()
+            }],
+            0,
+        );
+        shell.refresh_views(UiChangeSet::one(UiRegion::Sessions), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("desktop-session-row-0").is_some());
+
+    let open_delete_menu = |cx: &mut gpui::VisualTestContext| {
+        let actions = cx
+            .debug_bounds("desktop-hit-session-actions-0")
+            .expect("session row exposes its compact actions menu");
+        cx.simulate_click(actions.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+    };
+    open_delete_menu(cx);
+    choose_popup_item(cx, 2);
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("desktop-delete-session-dialog").is_some(),
+        "delete requires a confirmation dialog"
+    );
+    assert_eq!(runtime_harness.drain_session_deletes(), Vec::<String>::new());
+
+    let cancel = cx
+        .debug_bounds("desktop-cancel-delete-session")
+        .expect("delete dialog exposes cancel");
+    cx.simulate_click(cancel.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("desktop-delete-session-dialog").is_none());
+    assert_eq!(runtime_harness.drain_session_deletes(), Vec::<String>::new());
+
+    open_delete_menu(cx);
+    choose_popup_item(cx, 2);
+    cx.run_until_parked();
+    let confirm = cx
+        .debug_bounds("desktop-confirm-delete-session")
+        .expect("delete dialog exposes confirm");
+    cx.simulate_click(confirm.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("desktop-delete-session-dialog").is_none());
+    assert_eq!(
+        runtime_harness.drain_session_deletes(),
+        [String::from("session-to-delete")]
+    );
+}
+
+#[gpui::test]
 fn idle_model_selector_groups_configured_text_models_and_submits_the_exact_id(
     cx: &mut TestAppContext,
 ) {

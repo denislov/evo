@@ -31,6 +31,9 @@ pub(super) enum UiIntent {
         name: String,
     },
     CloseSession(String),
+    DeleteSession(String),
+    ConfirmDeleteSession,
+    CancelDeleteSession,
     OpenSearch,
     DismissDrawer,
     ToggleSessions,
@@ -145,6 +148,9 @@ impl From<&SessionsPaneEvent> for UiIntent {
                 name: name.clone(),
             },
             SessionsPaneEvent::CloseSession(session_id) => Self::CloseSession(session_id.clone()),
+            SessionsPaneEvent::DeleteSession(session_id) => {
+                Self::DeleteSession(session_id.clone())
+            }
             SessionsPaneEvent::OpenSearch => Self::OpenSearch,
             SessionsPaneEvent::Dismiss => Self::DismissDrawer,
         }
@@ -197,6 +203,8 @@ impl From<&RootModalHostEvent> for UiIntent {
             }
             RootModalHostEvent::CopyFullMessage => Self::CopyFullMessage,
             RootModalHostEvent::CloseFullMessage => Self::CloseFullMessage,
+            RootModalHostEvent::ConfirmDeleteSession => Self::ConfirmDeleteSession,
+            RootModalHostEvent::CancelDeleteSession => Self::CancelDeleteSession,
             RootModalHostEvent::NavigateSearch(session_id) => {
                 Self::NavigateSearch(session_id.clone())
             }

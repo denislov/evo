@@ -517,6 +517,22 @@ impl CodingAgentSessionQuery {
             .map_err(CodingAgentPublicError::from)
     }
 
+    /// Permanently delete one durable session and its event log.
+    ///
+    /// The session must not be open: callers own the closed state. After the
+    /// directory is removed the session disappears from every subsequent
+    /// catalog listing.
+    pub fn delete_session(
+        &self,
+        session_id: impl AsRef<str>,
+    ) -> Result<(), CodingAgentPublicError> {
+        let options = self
+            .options_for_session(session_id.as_ref())
+            .map_err(CodingAgentPublicError::from)?;
+        crate::session::service::SessionService::delete(&options)
+            .map_err(CodingAgentPublicError::from)
+    }
+
     /// Resolve and, when possible, migrate the typed workspace needed to open
     /// one durable session. This reads no transcript state and exposes no
     /// session repository path.

@@ -1,4 +1,5 @@
 use ai::api::conversation::{AssistantMessage, ContentBlock, Context, Message, StopReason, Usage};
+use ai::api::model::{Model, ThinkingConfig};
 use ai::api::stream::{AssistantMessageEvent, EventStream, StreamOptions};
 use futures::StreamExt;
 
@@ -87,6 +88,7 @@ impl SessionNamingSeed {
             auth_diagnostics: runtime.auth_diagnostics().to_vec(),
             temperature: Some(0.2),
             max_tokens: Some(64),
+            thinking: naming_thinking(runtime.model()),
             timeout_ms: Some(30_000),
             ..StreamOptions::default()
         };
@@ -162,6 +164,7 @@ impl SessionNamingSeed {
     }
 }
 
+#[derive(Debug)]
 struct NamingModelFailure {
     message: String,
     usage: Option<Usage>,
@@ -176,6 +179,15 @@ async fn complete_naming_stream(
                 if successful_stop_reason(&reason)
                     && successful_stop_reason(&message.stop_reason) =>
             {
+                if (matches!(reason, StopReason::Length)
+                    || matches!(message.stop_reason, StopReason::Length))
+                    && !has_visible_text(&message)
+                {
+                    return Err(NamingModelFailure {
+                        message: "model exhausted its output budget before producing a name".into(),
+                        usage: Some(message.usage),
+                    });
+                }
                 return Ok(message);
             }
             AssistantMessageEvent::Done { reason, message } => {
@@ -212,6 +224,21 @@ fn successful_stop_reason(reason: &StopReason) -> bool {
         reason,
         StopReason::Stop | StopReason::Length | StopReason::ToolUse
     )
+}
+
+fn has_visible_text(message: &AssistantMessage) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Text { text, .. } if !text.trim().is_empty()))
+}
+
+fn naming_thinking(model: &Model) -> Option<ThinkingConfig> {
+    model.reasoning.then_some(ThinkingConfig {
+        enabled: false,
+        budget_tokens: None,
+        effort: None,
+    })
 }
 
 fn naming_runtime(runtime: RuntimeSnapshot) -> Result<RuntimeSnapshot, String> {
@@ -306,4 +333,95 @@ async fn persist_failure(
         "automatic session naming failure diagnostic",
         event_service.emit_diagnostic(Some(operation_id.to_owned()), message),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[test]
+    fn naming_disables_reasoning_for_reasoning_models() {
+        let model = ai::api::model::get_model("deepseek", "deepseek-v4-flash")
+            .expect("DeepSeek V4 Flash is in the model catalog");
+
+        assert_eq!(
+            naming_thinking(&model),
+            Some(ThinkingConfig {
+                enabled: false,
+                budget_tokens: None,
+                effort: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naming_omits_thinking_for_non_reasoning_models() {
+        let model = ai::api::model::all_models()
+            .iter()
+            .find(|model| !model.reasoning)
+            .expect("the model catalog contains a non-reasoning model");
+
+        assert_eq!(naming_thinking(model), None);
+    }
+
+    #[tokio::test]
+    async fn length_limited_reasoning_without_text_is_not_a_successful_name() {
+        let mut message = AssistantMessage::empty("deepseek-responses", "deepseek-v4-flash");
+        message.stop_reason = StopReason::Length;
+        message.content.push(ContentBlock::Thinking {
+            thinking: "reasoning consumed the output budget".into(),
+            thinking_signature: None,
+            provider_metadata: None,
+            redacted: None,
+        });
+        message.usage.output = 64;
+        message.usage.reasoning_tokens = 64;
+
+        let error = complete_naming_stream(Box::pin(stream::iter([AssistantMessageEvent::Done {
+            reason: StopReason::Length,
+            message,
+        }])))
+        .await
+        .expect_err("reasoning-only length completion must fail");
+
+        assert_eq!(
+            error.message,
+            "model exhausted its output budget before producing a name"
+        );
+        let usage = error.usage.expect("terminal model usage is preserved");
+        assert_eq!(usage.output, 64);
+        assert_eq!(usage.reasoning_tokens, 64);
+    }
+
+    #[tokio::test]
+    async fn length_limited_completion_with_text_reaches_name_validation() {
+        let mut message = AssistantMessage::empty("test", "test-model");
+        message.stop_reason = StopReason::Length;
+        message.content.push(ContentBlock::Text {
+            text: "Session naming regression".into(),
+            text_signature: None,
+        });
+
+        let message =
+            complete_naming_stream(Box::pin(stream::iter([AssistantMessageEvent::Done {
+                reason: StopReason::Length,
+                message,
+            }])))
+            .await
+            .expect("a visible title remains valid when the provider reports length");
+        let title = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+
+        assert_eq!(
+            validate_generated_name(&title),
+            Ok("Session naming regression".into())
+        );
+    }
 }

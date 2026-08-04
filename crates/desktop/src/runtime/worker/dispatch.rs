@@ -205,6 +205,18 @@ async fn dispatch_command_inner(
                 session_id,
             })
         }
+        DesktopRuntimeCommand::DeleteSession { session_id, .. } => {
+            if active.contains_key(&session_id) {
+                return Err(DesktopBridgeError::Busy {
+                    operation: format!("session {session_id} has an active prompt"),
+                });
+            }
+            state.delete_session(&session_id).await?;
+            Ok(DesktopRuntimeUpdate::SessionDeleted {
+                command_id,
+                session_id,
+            })
+        }
         DesktopRuntimeCommand::Resync { session_id, .. } => {
             let session_id = resolve_target(state, active, session_id.as_deref())?;
             if let Some(prompt) = active.get(&session_id) {

@@ -20,6 +20,7 @@ impl NativeShell {
             DesktopModalKind::CommandPalette => self.ui.command_palette_focus.focus(window, cx),
             DesktopModalKind::FullMessage => self.ui.full_message_focus.focus(window, cx),
             DesktopModalKind::Search => self.ui.search_focus.focus(window, cx),
+            DesktopModalKind::ConfirmDeleteSession => self.ui.modal_focus.focus(window, cx),
         }
         self.refresh_views(
             UiChangeSet::from_regions(&[UiRegion::ConversationHeader, UiRegion::Modal]),
@@ -189,6 +190,9 @@ impl NativeShell {
                 }
                 DesktopModalKind::Search => {
                     "Choose a search result or close search before using workspace shortcuts."
+                }
+                DesktopModalKind::ConfirmDeleteSession => {
+                    "Confirm or cancel the session deletion before using workspace shortcuts."
                 }
             }
             .into(),

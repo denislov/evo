@@ -55,12 +55,7 @@ impl CodingAgentSession {
             SessionPersistence::NonPersistent(state) => Ok(CodingAgentTranscriptSnapshot::new(
                 state.runtime_id.clone(),
                 None,
-                state
-                    .transcript
-                    .iter()
-                    .cloned()
-                    .map(crate::session::service::coding_transcript_item_from_replay)
-                    .collect(),
+                crate::session::service::coding_transcript_from_replay(state.transcript.clone()),
             )),
         }
     }

@@ -280,7 +280,7 @@ mod persistence;
 mod queries;
 mod recovery;
 
-pub(crate) use queries::coding_transcript_item_from_replay;
+pub(crate) use queries::coding_transcript_from_replay;
 
 fn observe_commit_receipt(cursor: &AtomicU64, receipt: SessionCommitReceipt) {
     if let Some(sequence) = receipt.committed_session_sequence {

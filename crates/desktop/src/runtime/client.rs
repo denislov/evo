@@ -468,6 +468,16 @@ impl DesktopRuntimeTestHarness {
         }
         renames
     }
+
+    pub(crate) fn drain_session_deletes(&mut self) -> Vec<String> {
+        let mut deletes = Vec::new();
+        while let Ok(command) = self.protocol_commands.try_recv() {
+            if let DesktopRuntimeCommand::DeleteSession { session_id, .. } = command {
+                deletes.push(session_id);
+            }
+        }
+        deletes
+    }
 }
 
 impl DesktopRuntimeEventStream {
@@ -655,6 +665,18 @@ impl RuntimeCommandClient {
     ) -> Result<(), DesktopCommandAdmissionError> {
         validate_session_id(session_id)?;
         self.try_send(DesktopRuntimeCommand::CloseSession {
+            command_id,
+            session_id: session_id.to_owned(),
+        })
+    }
+
+    pub fn try_delete_session(
+        &self,
+        command_id: u64,
+        session_id: &str,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        self.try_send(DesktopRuntimeCommand::DeleteSession {
             command_id,
             session_id: session_id.to_owned(),
         })

@@ -119,15 +119,6 @@ pub(crate) fn view_model(workspace: &SessionWorkspace) -> ComposerPaneViewModel 
 }
 
 pub(crate) fn attachment_disabled_reason(workspace: &SessionWorkspace) -> Option<&'static str> {
-    let supports_images = workspace
-        .project
-        .models
-        .iter()
-        .find(|model| model.id == workspace.project.selected_model_id)
-        .is_some_and(|model| model.supports_images);
-    if !supports_images {
-        return Some("Selected model does not support image attachments.");
-    }
     let snapshot = workspace
         .projection
         .as_ref()

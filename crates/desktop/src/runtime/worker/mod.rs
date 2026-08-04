@@ -690,6 +690,23 @@ impl RuntimeState {
         Ok(())
     }
 
+    pub(super) async fn delete_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(), DesktopBridgeError> {
+        if let Some(mut workspace) = self.workspaces.remove(session_id) {
+            workspace.session.shutdown().await?;
+        }
+        self.home
+            .context
+            .session_directory_query()?
+            .delete_session(session_id)?;
+        if self.focused_session_id.as_deref() == Some(session_id) {
+            self.focused_session_id = self.workspaces.keys().min().cloned();
+        }
+        Ok(())
+    }
+
     async fn shutdown_idle_sessions(&mut self) -> Result<(), DesktopBridgeError> {
         let mut session_ids = self.workspaces.keys().cloned().collect::<Vec<_>>();
         session_ids.sort();

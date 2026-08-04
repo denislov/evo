@@ -35,6 +35,7 @@ pub(crate) enum SessionsPaneEvent {
     SetProjectCollapsed { group_id: String, collapsed: bool },
     Rename(String, String),
     CloseSession(String),
+    DeleteSession(String),
     OpenSearch,
     Dismiss,
 }
@@ -561,6 +562,7 @@ impl Render for SessionsPane {
                         }
                         let session_actions_target = cx.entity().downgrade();
                         let close_target = session.session_id.clone();
+                        let delete_target = session.session_id.clone();
                         nested_sessions.push(
                             div()
                                 .id(("session-tree-item", index))
@@ -590,6 +592,8 @@ impl Render for SessionsPane {
                                             let name = rename_name.clone();
                                             let close_event_target = session_actions_target.clone();
                                             let close_target = close_target.clone();
+                                            let delete_event_target = session_actions_target.clone();
+                                            let delete_target = delete_target.clone();
                                             menu.item(
                                                 PopupMenuItem::new("Rename session").on_click(
                                                     move |_, window, cx| {
@@ -618,6 +622,23 @@ impl Render for SessionsPane {
                                                                 cx.emit(
                                                                     SessionsPaneEvent::CloseSession(
                                                                         close_target.clone(),
+                                                                    ),
+                                                                );
+                                                            });
+                                                        }
+                                                    },
+                                                ),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new("Delete session").on_click(
+                                                    move |_, _, cx| {
+                                                        if let Some(event_target) =
+                                                            delete_event_target.upgrade()
+                                                        {
+                                                            event_target.update(cx, |_, cx| {
+                                                                cx.emit(
+                                                                    SessionsPaneEvent::DeleteSession(
+                                                                        delete_target.clone(),
                                                                     ),
                                                                 );
                                                             });

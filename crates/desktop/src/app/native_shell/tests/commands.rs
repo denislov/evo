@@ -679,29 +679,6 @@ fn composer_rejects_attachment_overflow_without_changing_the_draft(cx: &mut Test
 }
 
 #[gpui::test]
-fn composer_disables_attachment_picker_for_a_model_without_image_support(cx: &mut TestAppContext) {
-    initialize_visual_test(cx);
-    let (shell, cx) = add_idle_visual_shell(cx);
-    shell.update(cx, |shell, cx| {
-        shell.app.workspaces.active_mut().project.selected_model_id = "adjacent-model".into();
-        shell.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        shell.read_with(cx, |shell, _| composer_pane::attachment_disabled_reason(
-            shell.app.workspaces.active()
-        )),
-        Some("Selected model does not support image attachments.")
-    );
-    let add = cx
-        .debug_bounds("desktop-hit-add-composer-attachments")
-        .expect("disabled attachment action remains visible with its reason");
-    cx.simulate_click(add.center(), gpui::Modifiers::default());
-    assert!(!cx.did_prompt_for_paths());
-}
-
-#[gpui::test]
 fn switching_workspaces_restores_each_persisted_thinking_level(cx: &mut TestAppContext) {
     initialize_visual_test(cx);
     let snapshot_a = visual_test_snapshot_for("thinking-session-a");

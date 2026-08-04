@@ -11,6 +11,8 @@ use crate::events::tool::ToolEvent;
 use crate::kernel::ids::ProfileId;
 use crate::profiles::ProfileKind;
 
+use super::transcript::assistant_segment_id;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentEventMappingContext {
     operation_id: String,
@@ -142,28 +144,58 @@ fn map_assistant_event(
     event: &AssistantMessageEvent,
 ) -> Vec<PromptStreamEvent> {
     match event {
-        AssistantMessageEvent::Start { .. }
-        | AssistantMessageEvent::TextStart { .. }
-        | AssistantMessageEvent::ThinkingStart { .. } => {
+        AssistantMessageEvent::Start {
+            content_index: Some(content_index),
+            partial,
+        }
+        | AssistantMessageEvent::TextStart {
+            content_index,
+            partial,
+        }
+        | AssistantMessageEvent::ThinkingStart {
+            content_index,
+            partial,
+        } => {
             vec![PromptStreamEvent::Message(MessageEvent::Started {
                 operation_id: context.operation_id.clone(),
                 turn_id: context.turn_id.clone(),
-                message_id: context.assistant_message_id.clone(),
+                message_id: Some(segment_message_id(
+                    context,
+                    assistant_segment_index(partial, *content_index),
+                )),
             })]
         }
-        AssistantMessageEvent::TextDelta { delta, .. } => {
+        AssistantMessageEvent::Start {
+            content_index: None,
+            ..
+        } => Vec::new(),
+        AssistantMessageEvent::TextDelta {
+            content_index,
+            delta,
+            partial,
+        } => {
             vec![PromptStreamEvent::Message(MessageEvent::Delta {
                 operation_id: context.operation_id.clone(),
                 turn_id: context.turn_id.clone(),
-                message_id: context.assistant_message_id.clone(),
+                message_id: Some(segment_message_id(
+                    context,
+                    assistant_segment_index(partial, *content_index),
+                )),
                 text: delta.clone(),
             })]
         }
-        AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+        AssistantMessageEvent::ThinkingDelta {
+            content_index,
+            delta,
+            partial,
+        } => {
             vec![PromptStreamEvent::Message(MessageEvent::ThinkingDelta {
                 operation_id: context.operation_id.clone(),
                 turn_id: context.turn_id.clone(),
-                message_id: context.assistant_message_id.clone(),
+                message_id: Some(segment_message_id(
+                    context,
+                    assistant_segment_index(partial, *content_index),
+                )),
                 text: delta.clone(),
             })]
         }
@@ -212,15 +244,32 @@ fn map_assistant_event(
             .unwrap_or_default(),
         AssistantMessageEvent::Error { .. } => Vec::new(),
         AssistantMessageEvent::Done { message, .. } => {
-            vec![PromptStreamEvent::Message(MessageEvent::Completed {
-                operation_id: context.operation_id.clone(),
-                turn_id: context.turn_id.clone(),
-                message_id: context.assistant_message_id.clone(),
-                final_text: assistant_text(&message.content),
-                images: assistant_images(&message.content),
-                usage: message.usage.clone(),
-                reasoning_duration_millis: context.reasoning_duration_millis,
-            })]
+            let segments = assistant_segments(&message.content);
+            let terminal_position = segments.len() - 1;
+            segments
+                .into_iter()
+                .enumerate()
+                .map(|(position, segment)| {
+                    let terminal_segment = position == terminal_position;
+                    PromptStreamEvent::Message(MessageEvent::Completed {
+                        operation_id: context.operation_id.clone(),
+                        turn_id: context.turn_id.clone(),
+                        message_id: Some(segment_message_id(context, segment.index)),
+                        final_text: segment.text,
+                        images: segment.images,
+                        usage: if terminal_segment {
+                            message.usage.clone()
+                        } else {
+                            Default::default()
+                        },
+                        reasoning_duration_millis: if terminal_segment {
+                            context.reasoning_duration_millis
+                        } else {
+                            None
+                        },
+                    })
+                })
+                .collect()
         }
         AssistantMessageEvent::TextEnd { .. }
         | AssistantMessageEvent::ThinkingEnd { .. }
@@ -278,30 +327,89 @@ fn content_blocks_text(content: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-fn assistant_text(content: &[ContentBlock]) -> String {
-    content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn segment_message_id(context: &AgentEventMappingContext, segment_index: usize) -> String {
+    let message_id = context
+        .assistant_message_id
+        .clone()
+        .unwrap_or_else(|| format!("msg_{}", context.turn_id));
+    assistant_segment_id(&message_id, segment_index)
 }
 
-fn assistant_images(content: &[ContentBlock]) -> Vec<crate::events::CodingAgentImageContent> {
-    content
+fn assistant_segment_index(
+    partial: &ai::api::conversation::AssistantMessage,
+    content_index: u32,
+) -> usize {
+    partial
+        .content
         .iter()
-        .filter_map(|block| match block {
+        .take(content_index as usize)
+        .filter(|block| matches!(block, ContentBlock::ProviderItem { .. }))
+        .count()
+}
+
+struct AssistantSegment {
+    index: usize,
+    text: String,
+    images: Vec<crate::events::CodingAgentImageContent>,
+}
+
+fn assistant_segments(content: &[ContentBlock]) -> Vec<AssistantSegment> {
+    struct PendingSegment {
+        index: usize,
+        text: Vec<String>,
+        images: Vec<crate::events::CodingAgentImageContent>,
+        visible: bool,
+    }
+
+    fn push_segment(segments: &mut Vec<AssistantSegment>, pending: &mut PendingSegment) {
+        if !pending.visible {
+            return;
+        }
+        segments.push(AssistantSegment {
+            index: pending.index,
+            text: std::mem::take(&mut pending.text).join("\n"),
+            images: std::mem::take(&mut pending.images),
+        });
+        pending.visible = false;
+    }
+
+    let mut segments = Vec::new();
+    let mut pending = PendingSegment {
+        index: 0,
+        text: Vec::new(),
+        images: Vec::new(),
+        visible: false,
+    };
+    for block in content {
+        match block {
+            ContentBlock::Text { text, .. } => {
+                pending.visible = true;
+                pending.text.push(text.clone());
+            }
+            ContentBlock::Thinking { .. } => pending.visible = true,
             ContentBlock::Image { mime_type, data } => {
-                Some(crate::events::CodingAgentImageContent {
+                pending.visible = true;
+                pending.images.push(crate::events::CodingAgentImageContent {
                     mime_type: mime_type.clone(),
                     data: data.clone(),
-                })
+                });
             }
-            _ => None,
-        })
-        .collect()
+            ContentBlock::ProviderItem { .. } => {
+                push_segment(&mut segments, &mut pending);
+                pending.index += 1;
+            }
+            ContentBlock::ToolCall { .. } => {}
+        }
+    }
+    push_segment(&mut segments, &mut pending);
+    if segments.is_empty() {
+        segments.push(AssistantSegment {
+            index: pending.index,
+            text: String::new(),
+            images: Vec::new(),
+        });
+    }
+    segments
 }
 
 fn map_delegation_tool_event(
@@ -360,6 +468,7 @@ fn parse_delegation_target_kind(kind: &str) -> Option<ProfileKind> {
 #[cfg(test)]
 mod provider_item_tests {
     use super::{AgentEventMappingContext, map_assistant_event};
+    use crate::events::message::MessageEvent;
     use crate::events::prompt_stream::PromptStreamEvent;
     use crate::events::tool::ToolEvent;
     use ai::api::conversation::{AssistantMessage, ContentBlock};
@@ -380,9 +489,7 @@ mod provider_item_tests {
 
     fn partial_with_action(status: &str, action: serde_json::Value) -> AssistantMessage {
         let mut message = partial(status);
-        let ContentBlock::ProviderItem { item, .. } =
-            &mut message.content[0]
-        else {
+        let ContentBlock::ProviderItem { item, .. } = &mut message.content[0] else {
             panic!("partial must carry a ProviderItem");
         };
         item["action"] = action;
@@ -459,5 +566,131 @@ mod provider_item_tests {
             [PromptStreamEvent::Tool(ToolEvent::Completed { summary, .. })]
                 if summary == "completed"
         ));
+    }
+
+    #[test]
+    fn same_message_content_is_segmented_around_provider_tools() {
+        let context = AgentEventMappingContext::new("op_1", "turn_1")
+            .with_assistant_message_id("message-1")
+            .with_reasoning_duration_millis(Some(25));
+        let message = interleaved_message();
+
+        let before = map_assistant_event(
+            &context,
+            &AssistantMessageEvent::TextDelta {
+                content_index: 1,
+                delta: "before".into(),
+                partial: message.clone(),
+            },
+        );
+        assert!(matches!(
+            before.as_slice(),
+            [PromptStreamEvent::Message(MessageEvent::Delta {
+                message_id: Some(message_id),
+                text,
+                ..
+            })] if message_id == "message-1" && text == "before"
+        ));
+
+        let after = map_assistant_event(
+            &context,
+            &AssistantMessageEvent::TextDelta {
+                content_index: 4,
+                delta: "after".into(),
+                partial: message.clone(),
+            },
+        );
+        assert!(matches!(
+            after.as_slice(),
+            [PromptStreamEvent::Message(MessageEvent::Delta {
+                message_id: Some(message_id),
+                text,
+                ..
+            })] if message_id == "message-1:segment:1" && text == "after"
+        ));
+
+        let completed = map_assistant_event(
+            &context,
+            &AssistantMessageEvent::Done {
+                reason: ai::api::conversation::StopReason::Stop,
+                message,
+            },
+        );
+        assert!(matches!(
+            completed.as_slice(),
+            [
+                PromptStreamEvent::Message(MessageEvent::Completed {
+                    message_id: Some(before_id),
+                    final_text: before,
+                    usage: before_usage,
+                    reasoning_duration_millis: None,
+                    ..
+                }),
+                PromptStreamEvent::Message(MessageEvent::Completed {
+                    message_id: Some(after_id),
+                    final_text: after,
+                    usage: after_usage,
+                    reasoning_duration_millis: Some(25),
+                    ..
+                })
+            ] if before_id == "message-1"
+                && before == "before"
+                && before_usage.total_tokens == 0
+                && after_id == "message-1:segment:1"
+                && after == "after"
+                && after_usage.total_tokens == 12
+        ));
+    }
+
+    #[test]
+    fn response_start_without_content_does_not_precede_a_provider_tool() {
+        let context =
+            AgentEventMappingContext::new("op_1", "turn_1").with_assistant_message_id("message-1");
+        assert!(
+            map_assistant_event(
+                &context,
+                &AssistantMessageEvent::Start {
+                    content_index: None,
+                    partial: AssistantMessage::empty("deepseek-responses", "deepseek-v4-flash"),
+                },
+            )
+            .is_empty()
+        );
+    }
+
+    fn interleaved_message() -> AssistantMessage {
+        let mut message = AssistantMessage::empty("deepseek-responses", "deepseek-v4-flash");
+        message.content = vec![
+            ContentBlock::Thinking {
+                thinking: "before reasoning".into(),
+                thinking_signature: None,
+                provider_metadata: None,
+                redacted: None,
+            },
+            ContentBlock::Text {
+                text: "before".into(),
+                text_signature: None,
+            },
+            ContentBlock::ProviderItem {
+                api: "deepseek-responses".into(),
+                item: serde_json::json!({
+                    "type": "web_search_call",
+                    "id": "provider-web-1",
+                    "status": "completed"
+                }),
+            },
+            ContentBlock::Thinking {
+                thinking: "after reasoning".into(),
+                thinking_signature: None,
+                provider_metadata: None,
+                redacted: None,
+            },
+            ContentBlock::Text {
+                text: "after".into(),
+                text_signature: None,
+            },
+        ];
+        message.usage.total_tokens = 12;
+        message
     }
 }

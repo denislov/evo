@@ -77,26 +77,6 @@ impl NativeShell {
     }
 
     pub(super) fn submit_composer(&mut self, cx: &mut Context<Self>) {
-        let selected_model_supports_images = {
-            let workspace = self.app.workspaces.active();
-            workspace
-                .project
-                .models
-                .iter()
-                .find(|model| model.id == workspace.project.selected_model_id)
-                .is_some_and(|model| model.supports_images)
-        };
-        if !self.app.workspaces.active().composer_attachments.is_empty()
-            && !selected_model_supports_images
-        {
-            self.app.workspaces.active_mut().set_preference_notice(
-                "Selected model does not support image attachments; the draft was retained.".into(),
-            );
-            self.refresh_views(UiChangeSet::one(UiRegion::Composer), cx);
-            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
-            cx.notify();
-            return;
-        }
         let intent = DesktopCommandIntent::Prompt;
         let Some(command_id) = self.reserve_command(intent.clone()) else {
             self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);

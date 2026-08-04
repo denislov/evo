@@ -23,6 +23,9 @@ pub(crate) enum DesktopCommandIntent {
     CloseSession {
         session_id: String,
     },
+    DeleteSession {
+        session_id: String,
+    },
     ListSessions,
     RenameSession {
         session_id: String,
@@ -58,6 +61,7 @@ impl DesktopCommandIntent {
             Self::CreateSession => DesktopRuntimeCommandKind::CreateSession,
             Self::OpenSession { .. } => DesktopRuntimeCommandKind::OpenSession,
             Self::CloseSession { .. } => DesktopRuntimeCommandKind::CloseSession,
+            Self::DeleteSession { .. } => DesktopRuntimeCommandKind::DeleteSession,
             Self::ListSessions => DesktopRuntimeCommandKind::ListSessions,
             Self::RenameSession { .. } => DesktopRuntimeCommandKind::RenameSession,
             Self::Abort { .. } => DesktopRuntimeCommandKind::Abort,

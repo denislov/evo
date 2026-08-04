@@ -41,6 +41,7 @@ pub(crate) enum RuntimeUpdateKind {
     Resynced,
     SessionChanged,
     SessionClosed,
+    SessionDeleted,
     SessionsListed,
     SessionRenamed,
     SessionNameObserved,
@@ -64,11 +65,12 @@ pub(crate) enum RuntimeUpdateKind {
 
 impl RuntimeUpdateKind {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 23] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::Reloaded,
         Self::Resynced,
         Self::SessionChanged,
         Self::SessionClosed,
+        Self::SessionDeleted,
         Self::SessionsListed,
         Self::SessionRenamed,
         Self::SessionNameObserved,
@@ -97,6 +99,7 @@ impl RuntimeUpdateKind {
             Self::Resynced => "resynced",
             Self::SessionChanged => "session_changed",
             Self::SessionClosed => "session_closed",
+            Self::SessionDeleted => "session_deleted",
             Self::SessionsListed => "sessions_listed",
             Self::SessionRenamed => "session_renamed",
             Self::SessionNameObserved => "session_name_observed",
@@ -126,6 +129,7 @@ pub(crate) const fn runtime_update_kind(update: &DesktopRuntimeUpdate) -> Runtim
         DesktopRuntimeUpdate::Resynced { .. } => RuntimeUpdateKind::Resynced,
         DesktopRuntimeUpdate::SessionChanged { .. } => RuntimeUpdateKind::SessionChanged,
         DesktopRuntimeUpdate::SessionClosed { .. } => RuntimeUpdateKind::SessionClosed,
+        DesktopRuntimeUpdate::SessionDeleted { .. } => RuntimeUpdateKind::SessionDeleted,
         DesktopRuntimeUpdate::SessionsListed { .. } => RuntimeUpdateKind::SessionsListed,
         DesktopRuntimeUpdate::SessionRenamed { .. } => RuntimeUpdateKind::SessionRenamed,
         DesktopRuntimeUpdate::SessionNameObserved { .. } => RuntimeUpdateKind::SessionNameObserved,
@@ -174,6 +178,7 @@ pub(crate) fn runtime_update_hydrated_snapshot(
             ..
         }
         | DesktopRuntimeUpdate::SessionClosed { .. }
+        | DesktopRuntimeUpdate::SessionDeleted { .. }
         | DesktopRuntimeUpdate::SessionsListed { .. }
         | DesktopRuntimeUpdate::SessionRenamed { .. }
         | DesktopRuntimeUpdate::SessionNameObserved { .. }
@@ -199,6 +204,7 @@ pub(crate) const fn runtime_update_command_id(update: &DesktopRuntimeUpdate) -> 
         | DesktopRuntimeUpdate::Resynced { command_id, .. }
         | DesktopRuntimeUpdate::SessionChanged { command_id, .. }
         | DesktopRuntimeUpdate::SessionClosed { command_id, .. }
+        | DesktopRuntimeUpdate::SessionDeleted { command_id, .. }
         | DesktopRuntimeUpdate::SessionsListed { command_id, .. }
         | DesktopRuntimeUpdate::SessionRenamed { command_id, .. }
         | DesktopRuntimeUpdate::SelectionChanged { command_id, .. }
@@ -227,7 +233,8 @@ pub(crate) fn runtime_update_observed_workspace_key(
     let session_id = match update {
         DesktopRuntimeUpdate::ProductEvent { session_id, .. }
         | DesktopRuntimeUpdate::SessionRenamed { session_id, .. }
-        | DesktopRuntimeUpdate::SessionClosed { session_id, .. } => Some(session_id.clone()),
+        | DesktopRuntimeUpdate::SessionClosed { session_id, .. }
+        | DesktopRuntimeUpdate::SessionDeleted { session_id, .. } => Some(session_id.clone()),
         DesktopRuntimeUpdate::SessionChanged { snapshot, .. }
         | DesktopRuntimeUpdate::PromptAcceptedWithSession { snapshot, .. }
         | DesktopRuntimeUpdate::PromptRejectedWithSession { snapshot, .. }
@@ -472,6 +479,31 @@ fn reduce_runtime_update<Presentation: RuntimeWorkspacePresentation>(
             }
             return Transition::from_changes(changes);
         }
+        DesktopRuntimeUpdate::SessionDeleted {
+            command_id,
+            session_id,
+        } => {
+            let owner = WorkspaceKey::session(&session_id);
+            let intent = DesktopCommandIntent::DeleteSession {
+                session_id: session_id.clone(),
+            };
+            if state.complete_runtime_command(command_id, &owner, &intent) {
+                let cancelled = state.remove_closed_workspace(&session_id);
+                state.catalog.remove_session(&session_id);
+                let foreground = state.workspaces.active_key().clone();
+                state.set_runtime_notice(
+                    &foreground,
+                    if cancelled == 0 {
+                        "Session deleted.".into()
+                    } else {
+                        format!("Session deleted; {cancelled} pending command(s) cancelled.")
+                    },
+                );
+                changes.insert(UiRegion::Sessions);
+                changes.insert(UiRegion::Inspector);
+            }
+            return Transition::from_changes(changes);
+        }
         DesktopRuntimeUpdate::FileReviewed { command_id, review } => {
             let request = CodingAgentFileReviewRequest::new(review.change.clone(), review.revision);
             let owner = state
@@ -703,6 +735,7 @@ pub(crate) fn projection_event(update: DesktopRuntimeUpdate) -> Option<Projectio
         }
         DesktopRuntimeUpdate::Stopped => Some(ProjectionEvent::Stopped),
         DesktopRuntimeUpdate::SessionClosed { .. }
+        | DesktopRuntimeUpdate::SessionDeleted { .. }
         | DesktopRuntimeUpdate::SessionsListed { .. }
         | DesktopRuntimeUpdate::SessionRenamed { .. }
         | DesktopRuntimeUpdate::SessionNameObserved { .. }
@@ -995,6 +1028,7 @@ fn reduce_pre_projection_update<Presentation: RuntimeWorkspacePresentation>(
         | DesktopRuntimeUpdate::Resynced { .. }
         | DesktopRuntimeUpdate::SessionChanged { .. }
         | DesktopRuntimeUpdate::SessionClosed { .. }
+        | DesktopRuntimeUpdate::SessionDeleted { .. }
         | DesktopRuntimeUpdate::SessionsListed { .. }
         | DesktopRuntimeUpdate::SessionRenamed { .. }
         | DesktopRuntimeUpdate::SessionNameObserved { .. }
@@ -1071,7 +1105,8 @@ fn reduce_command_rejected<Presentation: RuntimeWorkspacePresentation>(
         DesktopRuntimeCommandKind::Resync
         | DesktopRuntimeCommandKind::CreateSession
         | DesktopRuntimeCommandKind::OpenSession
-        | DesktopRuntimeCommandKind::CloseSession => {
+        | DesktopRuntimeCommandKind::CloseSession
+        | DesktopRuntimeCommandKind::DeleteSession => {
             state.set_runtime_notice(target, safe_runtime_rejection_notice(command, code));
             changes.insert(UiRegion::Sessions);
         }
@@ -1939,7 +1974,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_update_coverage_table_registers_all_twenty_three_protocol_variants() {
+    fn runtime_update_coverage_table_registers_all_twenty_four_protocol_variants() {
         let labels = RuntimeUpdateKind::ALL.map(RuntimeUpdateKind::label);
         assert_eq!(
             labels,
@@ -1948,6 +1983,7 @@ mod tests {
                 "resynced",
                 "session_changed",
                 "session_closed",
+                "session_deleted",
                 "sessions_listed",
                 "session_renamed",
                 "session_name_observed",

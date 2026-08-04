@@ -152,11 +152,7 @@ fn bounded_hydration(
     Ok(CodingAgentSessionHydration {
         summary,
         cwd,
-        transcript: replay
-            .transcript
-            .into_iter()
-            .map(coding_transcript_item_from_replay)
-            .collect(),
+        transcript: coding_transcript_from_replay(replay.transcript),
         omitted_items: bounded.omitted_items,
         continuation,
         diagnostics,
@@ -308,13 +304,15 @@ fn build_leaf_children(
         .collect()
 }
 
-pub(crate) use crate::domain::projection::transcript::coding_transcript_item_from_replay;
+pub(crate) use crate::domain::projection::transcript::coding_transcript_from_replay;
+#[cfg(test)]
+use crate::domain::projection::transcript::coding_transcript_item_from_replay;
 
 #[cfg(test)]
 mod coding_transcript_item_from_replay_tests {
     use super::*;
     use crate::session::event::PersistedContentBlock;
-    use crate::session::replay::{MessageStatus, TranscriptItem};
+    use crate::session::replay::{MessageStatus, ToolCallStatus, TranscriptItem};
     use crate::session::view::CodingAgentSessionTranscriptItem;
 
     #[test]
@@ -375,5 +373,180 @@ mod coding_transcript_item_from_replay_tests {
             panic!("assistant message must convert to an assistant transcript item");
         };
         assert!(model_id.is_none());
+    }
+
+    #[test]
+    fn provider_tool_before_text_is_restored_before_the_assistant_segment() {
+        let projected = coding_transcript_from_replay(vec![
+            assistant_message(
+                "message-1",
+                vec![provider_item("provider-web-1"), text("answer")],
+            ),
+            tool_call("session-tool-1", "provider-web-1"),
+        ]);
+
+        assert!(matches!(
+            projected.as_slice(),
+            [
+                CodingAgentSessionTranscriptItem::Tool { call_id, name, .. },
+                CodingAgentSessionTranscriptItem::Assistant {
+                    id,
+                    text,
+                    done: true,
+                    model_id: Some(model_id),
+                    completed_at: Some(completed_at),
+                    ..
+                }
+            ] if call_id == "session-tool-1"
+                && name == "web_search"
+                && id == "message-1:segment:1"
+                && text == "answer"
+                && model_id == "deepseek-v4-flash"
+                && completed_at == "2026-01-01T00:00:01Z"
+        ));
+    }
+
+    #[test]
+    fn provider_tool_between_text_blocks_splits_the_assistant_at_its_actual_position() {
+        let projected = coding_transcript_from_replay(vec![
+            assistant_message(
+                "message-2",
+                vec![
+                    text("before"),
+                    provider_item("provider-web-2"),
+                    text("after"),
+                ],
+            ),
+            tool_call("session-tool-2", "provider-web-2"),
+        ]);
+
+        assert!(matches!(
+            projected.as_slice(),
+            [
+                CodingAgentSessionTranscriptItem::Assistant {
+                    id: before_id,
+                    text: before,
+                    done: true,
+                    model_id: None,
+                    completed_at: None,
+                    ..
+                },
+                CodingAgentSessionTranscriptItem::Tool { call_id, .. },
+                CodingAgentSessionTranscriptItem::Assistant {
+                    id: after_id,
+                    text: after,
+                    done: true,
+                    model_id: Some(model_id),
+                    completed_at: Some(_),
+                    ..
+                }
+            ] if before_id == "message-2"
+                && before == "before"
+                && call_id == "session-tool-2"
+                && after_id == "message-2:segment:1"
+                && after == "after"
+                && model_id == "deepseek-v4-flash"
+        ));
+    }
+
+    #[test]
+    fn multiple_provider_tools_follow_content_block_order_without_duplicates() {
+        let projected = coding_transcript_from_replay(vec![
+            assistant_message(
+                "message-3",
+                vec![
+                    text("first"),
+                    provider_item("provider-web-3a"),
+                    text("second"),
+                    provider_item("provider-web-3b"),
+                    text("third"),
+                ],
+            ),
+            tool_call("session-tool-3a", "provider-web-3a"),
+            tool_call("session-tool-3b", "provider-web-3b"),
+        ]);
+
+        let labels = projected
+            .iter()
+            .map(|item| match item {
+                CodingAgentSessionTranscriptItem::Assistant { text, .. } => {
+                    format!("assistant:{text}")
+                }
+                CodingAgentSessionTranscriptItem::Tool { call_id, .. } => {
+                    format!("tool:{call_id}")
+                }
+                _ => "unexpected".into(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "assistant:first",
+                "tool:session-tool-3a",
+                "assistant:second",
+                "tool:session-tool-3b",
+                "assistant:third",
+            ]
+        );
+    }
+
+    #[test]
+    fn unmatched_provider_items_and_tools_keep_their_legacy_order() {
+        let projected = coding_transcript_from_replay(vec![
+            assistant_message(
+                "message-4",
+                vec![provider_item("missing-web"), text("answer")],
+            ),
+            tool_call("local-tool", "unrelated-provider-call"),
+        ]);
+
+        assert!(matches!(
+            projected.as_slice(),
+            [
+                CodingAgentSessionTranscriptItem::Assistant { id, text, .. },
+                CodingAgentSessionTranscriptItem::Tool { call_id, .. }
+            ] if id == "message-4" && text == "answer" && call_id == "local-tool"
+        ));
+    }
+
+    fn assistant_message(message_id: &str, content: Vec<PersistedContentBlock>) -> TranscriptItem {
+        TranscriptItem::AssistantMessage {
+            message_id: message_id.into(),
+            content,
+            status: MessageStatus::Completed,
+            reasoning_duration_millis: Some(25),
+            model_id: Some("deepseek-v4-flash".into()),
+            completed_at: Some("2026-01-01T00:00:01Z".into()),
+        }
+    }
+
+    fn text(value: &str) -> PersistedContentBlock {
+        PersistedContentBlock::Text { text: value.into() }
+    }
+
+    fn provider_item(id: &str) -> PersistedContentBlock {
+        PersistedContentBlock::ProviderItem {
+            api: "deepseek-responses".into(),
+            item: serde_json::json!({
+                "type": "web_search_call",
+                "id": id,
+                "status": "completed"
+            }),
+        }
+    }
+
+    fn tool_call(tool_call_id: &str, provider_call_id: &str) -> TranscriptItem {
+        TranscriptItem::ToolCall {
+            tool_call_id: tool_call_id.into(),
+            name: "web_search".into(),
+            arguments: serde_json::json!({
+                "type": "web_search_call",
+                "id": provider_call_id
+            }),
+            status: ToolCallStatus::Completed,
+            summary: "completed".into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            duration_millis: Some(10),
+        }
     }
 }

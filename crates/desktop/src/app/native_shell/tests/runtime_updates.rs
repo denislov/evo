@@ -34,7 +34,8 @@ fn inspector_section_selection_is_scoped_to_the_session() {
 
 #[test]
 fn interleaved_live_rows_keep_event_order_instead_of_sinking_tools_to_the_tail() {
-    // One agent loop alternates assistant message and tool: A1 → T1 → A2.
+    // One provider response alternates assistant content and a server-side
+    // tool: message segment A1 → T1 → message segment A2.
     // Both fold onto independent queues, so rendering one queue after the
     // other dropped every running tool below the newest message, and shifted
     // it down again on each new message. The tool cards visibly jumped to the
@@ -91,7 +92,7 @@ fn interleaved_live_rows_keep_event_order_instead_of_sinking_tools_to_the_tail()
     for event in [
         message_started(1, "turn-1", "message-1"),
         tool_started(2, "tool-1"),
-        message_started(3, "turn-2", "message-2"),
+        message_started(3, "turn-1", "message-1:segment:1"),
     ] {
         assert!(
             projection
@@ -119,7 +120,7 @@ fn interleaved_live_rows_keep_event_order_instead_of_sinking_tools_to_the_tail()
     let expected = [
         "assistant:message-1".to_owned(),
         "tool:tool-1".to_owned(),
-        "assistant:message-2".to_owned(),
+        "assistant:message-1:segment:1".to_owned(),
     ];
     assert_eq!(row_ids(&controller), expected);
 
@@ -135,8 +136,8 @@ fn interleaved_live_rows_keep_event_order_instead_of_sinking_tools_to_the_tail()
                     "payload": {
                         "kind": "delta",
                         "operation_id": "operation-1",
-                        "turn_id": "turn-2",
-                        "message_id": "message-2",
+                        "turn_id": "turn-1",
+                        "message_id": "message-1:segment:1",
                         "text": "streaming",
                     },
                 }),

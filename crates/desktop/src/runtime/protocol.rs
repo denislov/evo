@@ -58,6 +58,10 @@ pub(super) enum DesktopRuntimeCommand {
         command_id: u64,
         session_id: String,
     },
+    DeleteSession {
+        command_id: u64,
+        session_id: String,
+    },
     ListSessions {
         command_id: u64,
     },
@@ -249,6 +253,7 @@ impl DesktopRuntimeCommand {
             | Self::CreateSession { command_id }
             | Self::OpenSession { command_id, .. }
             | Self::CloseSession { command_id, .. }
+            | Self::DeleteSession { command_id, .. }
             | Self::ListSessions { command_id }
             | Self::RenameSession { command_id, .. }
             | Self::SelectModel { command_id, .. }
@@ -272,6 +277,7 @@ impl DesktopRuntimeCommand {
             Self::CreateSession { .. } => DesktopRuntimeCommandKind::CreateSession,
             Self::OpenSession { .. } => DesktopRuntimeCommandKind::OpenSession,
             Self::CloseSession { .. } => DesktopRuntimeCommandKind::CloseSession,
+            Self::DeleteSession { .. } => DesktopRuntimeCommandKind::DeleteSession,
             Self::ListSessions { .. } => DesktopRuntimeCommandKind::ListSessions,
             Self::RenameSession { .. } => DesktopRuntimeCommandKind::RenameSession,
             Self::SelectModel { .. } => DesktopRuntimeCommandKind::SelectModel,
@@ -294,6 +300,7 @@ impl DesktopRuntimeCommand {
         match self {
             Self::OpenSession { session_id, .. }
             | Self::CloseSession { session_id, .. }
+            | Self::DeleteSession { session_id, .. }
             | Self::RenameSession { session_id, .. } => Some(session_id),
             Self::Reload { target, .. }
             | Self::SelectModel { target, .. }
@@ -320,6 +327,7 @@ pub enum DesktopRuntimeCommandKind {
     CreateSession,
     OpenSession,
     CloseSession,
+    DeleteSession,
     ListSessions,
     RenameSession,
     SelectModel,
@@ -503,6 +511,10 @@ pub enum DesktopRuntimeUpdate {
         command_id: u64,
         session_id: String,
     },
+    SessionDeleted {
+        command_id: u64,
+        session_id: String,
+    },
     SessionsListed {
         command_id: u64,
         sessions: Vec<DesktopSessionCatalogEntry>,
@@ -609,6 +621,7 @@ impl DesktopRuntimeUpdate {
             Self::Resynced { .. } => "resynced",
             Self::SessionChanged { .. } => "session_changed",
             Self::SessionClosed { .. } => "session_closed",
+            Self::SessionDeleted { .. } => "session_deleted",
             Self::SessionsListed { .. } => "sessions_listed",
             Self::SessionRenamed { .. } => "session_renamed",
             Self::SessionNameObserved { .. } => "session_name_observed",

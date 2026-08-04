@@ -239,6 +239,14 @@ impl SessionService {
         .map(|(_, migration)| migration)
     }
 
+    pub(crate) fn delete(options: &CodingAgentSessionOptions) -> Result<(), CodingSessionError> {
+        let root = resolve_session_log_root(options)?;
+        let store = SessionLogStore::new(root);
+        let target = open_target(options)?;
+        let handle = store.open_session(&target)?;
+        store.remove_session(&handle)
+    }
+
     pub(crate) fn open_target(
         options: &CodingAgentSessionOptions,
     ) -> Result<CodingAgentSessionOpenTarget, CodingSessionError> {

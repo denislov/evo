@@ -6,6 +6,7 @@ use super::drawer::CenterDrawerKind;
 use crate::actions::DesktopCommandPalette;
 use crate::app::native_shell::{
     ConversationFullMessageView, DesktopModalKind, FocusInputModality, PanelResizeState,
+    SessionDeleteConfirm,
 };
 use crate::application::workspace::WorkspaceKey;
 use crate::ui::shell::{FocusState, FocusTarget};
@@ -35,12 +36,14 @@ pub(crate) struct ShellUiState {
     pub(crate) command_palette_focus: FocusHandle,
     pub(crate) full_message_focus: FocusHandle,
     pub(crate) search_focus: FocusHandle,
+    pub(crate) modal_focus: FocusHandle,
     pub(crate) command_palette: DesktopCommandPalette,
     pub(crate) active_modal: Option<DesktopModalKind>,
     pub(crate) active_drawer: Option<CenterDrawerKind>,
     pub(crate) center_surface: CenterSurface,
     pub(crate) drawer_restore_focus: Option<FocusTarget>,
     pub(crate) conversation_full_message: Option<ConversationFullMessageView>,
+    pub(crate) pending_delete_session: Option<SessionDeleteConfirm>,
     pub(crate) conversation_announcement: Option<(WorkspaceKey, u64, String)>,
     conversation_announcement_sequence: u64,
     pub(crate) panel_resize: Option<PanelResizeState>,
@@ -62,6 +65,7 @@ impl ShellUiState {
         command_palette_focus: FocusHandle,
         full_message_focus: FocusHandle,
         search_focus: FocusHandle,
+        modal_focus: FocusHandle,
     ) -> Self {
         Self {
             focus: FocusState::default(),
@@ -73,12 +77,14 @@ impl ShellUiState {
             command_palette_focus,
             full_message_focus,
             search_focus,
+            modal_focus,
             command_palette: DesktopCommandPalette::default(),
             active_modal: None,
             active_drawer: None,
             center_surface: CenterSurface::Primary,
             drawer_restore_focus: None,
             conversation_full_message: None,
+            pending_delete_session: None,
             conversation_announcement: None,
             conversation_announcement_sequence: 0,
             panel_resize: None,
