@@ -8,6 +8,33 @@ const MAX_ID_BYTES: usize = 128;
 pub struct WorkspaceId(String);
 
 impl WorkspaceId {
+    /// Parse a persisted workspace id and apply the same bounds as creation.
+    pub fn parse(value: impl Into<String>) -> Result<Self, WorkspaceIdentityError> {
+        let value = value.into();
+        let valid_prefix = [
+            WorkspaceKind::Source,
+            WorkspaceKind::ManagedChild,
+            WorkspaceKind::Projectless,
+            WorkspaceKind::Legacy,
+        ]
+        .into_iter()
+        .any(|kind| value.starts_with(&format!("{}-", kind.tag())));
+        let has_value = value
+            .split_once('-')
+            .is_some_and(|(_, suffix)| !suffix.is_empty());
+        if !valid_prefix
+            || !has_value
+            || value.is_empty()
+            || value.len() > MAX_ID_BYTES
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(WorkspaceIdentityError::InvalidId);
+        }
+        Ok(Self(value))
+    }
+
     pub fn user_supplied(
         kind: WorkspaceKind,
         value: impl Into<String>,
@@ -56,7 +83,7 @@ pub enum WorkspaceKind {
 }
 
 impl WorkspaceKind {
-    const fn tag(self) -> &'static str {
+    pub(crate) const fn tag(self) -> &'static str {
         match self {
             Self::Source => "source",
             Self::ManagedChild => "child",

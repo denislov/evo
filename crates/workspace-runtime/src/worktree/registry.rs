@@ -13,8 +13,8 @@
 //! no record are reported but never deleted, because their identity cannot be
 //! verified. GC only ever deletes directories that match a validated record.
 
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,14 +24,16 @@ use tokio_util::sync::CancellationToken;
 use super::git::run_git;
 use super::{ManagedWorktree, WorkingTreeMode, WorktreeBuilder, WorktreeCreationMode};
 use crate::contract::{
-    WorkspaceHandle, WorkspaceKind, WorkspaceLifecycle, valid_lifecycle_transition,
+    WorkspaceHandle, WorkspaceId, WorkspaceKind, WorkspaceLifecycle, valid_lifecycle_transition,
 };
 
 const REGISTRY_DIRECTORY: &str = "registry";
 const WORKTREES_DIRECTORY: &str = "worktrees";
+const WRITER_LOCK_FILE: &str = ".writer.lock";
 const ID_HASH_BYTES: usize = 16;
 
 static WORKTREE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Durable facts of one managed worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +96,12 @@ impl WorktreeRegistry {
     /// Open (creating on first use) a registry at `root`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, RegistryError> {
         let root = root.into();
+        fs::create_dir_all(&root).map_err(|error| RegistryError::Io {
+            message: format!("cannot create registry root: {error}"),
+        })?;
+        let root = fs::canonicalize(&root).map_err(|error| RegistryError::Io {
+            message: format!("cannot resolve registry root: {error}"),
+        })?;
         fs::create_dir_all(Self::registry_dir(&root)).map_err(|error| RegistryError::Io {
             message: format!("cannot create registry directory: {error}"),
         })?;
@@ -112,16 +120,17 @@ impl WorktreeRegistry {
         Self::worktrees_dir(&self.root)
     }
 
-    /// The directory a worktree with `id` occupies.
-    pub fn worktree_dir(&self, id: &str) -> PathBuf {
-        self.worktrees_root().join(id)
+    /// The directory a worktree with a validated identity occupies.
+    fn worktree_dir(&self, id: &WorkspaceId) -> PathBuf {
+        self.worktrees_root().join(id.as_str())
     }
 
     /// Create and register a managed child worktree in one step.
     ///
     /// A unique identity is derived from the source and owner, the destination
-    /// is allocated under this registry's worktrees root, and the resulting
-    /// record is registered as `Ready` only after materialization succeeded.
+    /// is allocated under this registry's worktrees root. A durable `Creating`
+    /// record is written before materialization and replaced by `Ready` only
+    /// after the builder succeeds.
     pub fn create_managed(
         &self,
         source: &WorkspaceHandle,
@@ -130,12 +139,35 @@ impl WorktreeRegistry {
         mode: WorkingTreeMode,
         cancellation: &CancellationToken,
     ) -> Result<WorktreeRecord, RegistryError> {
+        let _writer = self.acquire_writer()?;
         let value = unique_worktree_value(source, owner_operation);
         let id = crate::contract::WorkspaceId::user_supplied(WorkspaceKind::ManagedChild, value)
             .map_err(|error| RegistryError::InvalidRecord {
                 message: format!("cannot construct worktree id: {error}"),
             })?;
-        let dest = self.worktree_dir(id.as_str());
+        let dest = self.worktree_dir(&id);
+        let source_root = fs::canonicalize(source.root()).map_err(|error| RegistryError::Io {
+            message: format!("cannot resolve source workspace: {error}"),
+        })?;
+        let now = unix_seconds();
+        let creating = WorktreeRecord {
+            id: id.as_str().to_owned(),
+            kind: WorkspaceKind::ManagedChild,
+            source: source_root.clone(),
+            dest: dest.clone(),
+            owner_operation: owner_operation.to_owned(),
+            parent_session: parent_session.map(str::to_owned),
+            base_revision: None,
+            creation_mode: if fs::symlink_metadata(source.root().join(".git")).is_ok() {
+                WorktreeCreationMode::GitLinked
+            } else {
+                WorktreeCreationMode::Copy
+            },
+            lifecycle: WorkspaceLifecycle::Creating,
+            created_at: now,
+            updated_at: now,
+        };
+        self.register_unlocked(&creating)?;
         let managed = WorktreeBuilder::new(source.clone(), &dest, owner_operation)
             .parent_session(parent_session.map(str::to_owned))
             .worktree_id(id)
@@ -143,21 +175,35 @@ impl WorktreeRegistry {
             .cancellation_token(cancellation.clone())
             .create()
             .map_err(RegistryError::Worktree)?;
-        let now = unix_seconds();
-        let record = WorktreeRecord::from_managed(&managed, source.root(), now);
-        self.register(&record)?;
+        let record = WorktreeRecord::from_managed(&managed, &source_root, now);
+        self.register_unlocked(&record)?;
         Ok(record)
     }
 
     pub fn register(&self, record: &WorktreeRecord) -> Result<(), RegistryError> {
-        validate_record(record, &self.root)?;
-        write_record_atomic(&self.record_path(&record.id), record)
+        let _writer = self.acquire_writer()?;
+        self.register_unlocked(record)
     }
 
     pub fn load(&self, id: &str) -> Result<Option<WorktreeRecord>, RegistryError> {
-        let path = self.record_path(id);
+        let parsed = parse_registry_id(id)?;
+        self.load_unlocked(parsed.as_str())
+    }
+
+    fn load_unlocked(&self, id: &str) -> Result<Option<WorktreeRecord>, RegistryError> {
+        let parsed = parse_registry_id(id)?;
+        let path = self.record_path(parsed.as_str());
         match fs::read(&path) {
-            Ok(bytes) => deserialize_record(&bytes).map(Some),
+            Ok(bytes) => {
+                let record = deserialize_record(&bytes)?;
+                validate_record(&record, &self.root)?;
+                if record.id != parsed.as_str() {
+                    return Err(RegistryError::InvalidRecord {
+                        message: format!("record id {} does not match filename {}", record.id, id),
+                    });
+                }
+                Ok(Some(record))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(RegistryError::Io {
                 message: format!("cannot read record {id}: {error}"),
@@ -172,7 +218,7 @@ impl WorktreeRegistry {
             let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
                 continue;
             };
-            records.push(self.load(id)?.ok_or_else(|| RegistryError::Io {
+            records.push(self.load_unlocked(id)?.ok_or_else(|| RegistryError::Io {
                 message: format!("record {id} vanished while loading"),
             })?);
         }
@@ -186,16 +232,24 @@ impl WorktreeRegistry {
         next: WorkspaceLifecycle,
         now: u64,
     ) -> Result<WorktreeRecord, RegistryError> {
+        let _writer = self.acquire_writer()?;
+        let parsed = parse_registry_id(id)?;
         let mut record = self
-            .load(id)?
+            .load_unlocked(parsed.as_str())?
             .ok_or_else(|| RegistryError::UnknownWorktree { id: id.to_owned() })?;
         record.transition(next, now)?;
-        write_record_atomic(&self.record_path(id), &record)?;
+        write_record_atomic(&self.record_path(parsed.as_str()), &record)?;
         Ok(record)
     }
 
     pub fn remove(&self, id: &str) -> Result<(), RegistryError> {
-        match fs::remove_file(self.record_path(id)) {
+        let _writer = self.acquire_writer()?;
+        self.remove_unlocked(id)
+    }
+
+    fn remove_unlocked(&self, id: &str) -> Result<(), RegistryError> {
+        let parsed = parse_registry_id(id)?;
+        match fs::remove_file(self.record_path(parsed.as_str())) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(RegistryError::Io {
@@ -208,6 +262,11 @@ impl WorktreeRegistry {
         WorktreeRegistry::registry_dir(&self.root).join(format!("{id}.json"))
     }
 
+    fn register_unlocked(&self, record: &WorktreeRecord) -> Result<(), RegistryError> {
+        validate_record(record, &self.root)?;
+        write_record_atomic(&self.record_path(&record.id), record)
+    }
+
     fn registry_dir(root: &Path) -> PathBuf {
         root.join(REGISTRY_DIRECTORY)
     }
@@ -215,6 +274,28 @@ impl WorktreeRegistry {
     fn worktrees_dir(root: &Path) -> PathBuf {
         root.join(WORKTREES_DIRECTORY)
     }
+
+    fn acquire_writer(&self) -> Result<RegistryWriteGuard, RegistryError> {
+        let path = Self::registry_dir(&self.root).join(WRITER_LOCK_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| RegistryError::Io {
+                message: format!("cannot open registry writer lock: {error}"),
+            })?;
+        file.lock().map_err(|error| RegistryError::Io {
+            message: format!("cannot acquire registry writer lock: {error}"),
+        })?;
+        Ok(RegistryWriteGuard { _file: file })
+    }
+}
+
+#[derive(Debug)]
+struct RegistryWriteGuard {
+    _file: File,
 }
 
 /// Startup view of registry/disk inconsistency.
@@ -236,18 +317,20 @@ impl WorktreeRegistry {
     /// The returned report describes what was found before recovery, so
     /// callers can audit which records were cleaned.
     pub fn recover(&self) -> Result<RecoveryReport, RegistryError> {
-        let report = self.scan()?;
+        let _writer = self.acquire_writer()?;
+        let report = self.scan_unlocked()?;
         for record in &report.interrupted {
             remove_materialization(self, record)?;
-            self.remove(&record.id)?;
+            self.remove_unlocked(&record.id)?;
         }
         for record in &report.stale_records {
-            self.remove(&record.id)?;
+            remove_materialization(self, record)?;
+            self.remove_unlocked(&record.id)?;
         }
         Ok(report)
     }
 
-    fn scan(&self) -> Result<RecoveryReport, RegistryError> {
+    fn scan_unlocked(&self) -> Result<RecoveryReport, RegistryError> {
         let records = self.load_all()?;
         let mut report = RecoveryReport::default();
         let mut recorded_ids = std::collections::HashSet::new();
@@ -313,9 +396,19 @@ impl WorktreeRegistry {
     /// Collect stale managed worktrees: dead owners past `max_age_seconds`,
     /// oldest first, until `disk_budget_bytes` is reclaimed.
     pub fn gc(&self, options: &GcOptions) -> Result<GcReport, RegistryError> {
+        let _writer = self.acquire_writer()?;
         let records = self.load_all()?;
         let mut eligible = records
             .into_iter()
+            .filter(|record| {
+                matches!(
+                    record.lifecycle,
+                    WorkspaceLifecycle::Ready
+                        | WorkspaceLifecycle::Active
+                        | WorkspaceLifecycle::Merged
+                        | WorkspaceLifecycle::Discarded
+                )
+            })
             .filter(|record| !(options.owner_liveness)(&record.owner_operation))
             .filter(|record| {
                 options.now.saturating_sub(record.updated_at) >= options.max_age_seconds
@@ -337,9 +430,14 @@ impl WorktreeRegistry {
             if options.dry_run {
                 continue;
             }
-            let size = dir_size(&record.dest).unwrap_or(0);
+            let size = dir_size(&record.dest).map_err(|error| RegistryError::Io {
+                message: format!(
+                    "cannot calculate worktree size {}: {error}",
+                    record.dest.display()
+                ),
+            })?;
             remove_materialization(self, &record)?;
-            self.remove(&record.id)?;
+            self.remove_unlocked(&record.id)?;
             reclaimed = reclaimed.saturating_add(size);
             report.removed.push(GcRemovedWorktree {
                 id: record.id,
@@ -377,7 +475,8 @@ fn unique_worktree_value(source: &WorkspaceHandle, owner_operation: &str) -> Str
     digest.update([0]);
     digest.update(owner_operation.as_bytes());
     digest.update([0]);
-    digest.update(unix_seconds().to_le_bytes());
+    digest.update(unix_nanos().to_le_bytes());
+    digest.update(std::process::id().to_le_bytes());
     digest.update(
         WORKTREE_SEQUENCE
             .fetch_add(1, Ordering::Relaxed)
@@ -394,27 +493,66 @@ fn unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-fn validate_record(record: &WorktreeRecord, root: &Path) -> Result<(), RegistryError> {
-    if record.id.is_empty()
-        || !record
-            .id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+fn unix_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
+fn parse_registry_id(id: &str) -> Result<WorkspaceId, RegistryError> {
+    let parsed = WorkspaceId::parse(id).map_err(|error| RegistryError::InvalidRecord {
+        message: format!("invalid worktree id {id}: {error}"),
+    })?;
+    if !parsed
+        .as_str()
+        .starts_with(&format!("{}-", WorkspaceKind::ManagedChild.tag()))
     {
         return Err(RegistryError::InvalidRecord {
-            message: format!("id is not bounded ASCII: {}", record.id),
+            message: format!("registry id {id} is not a managed child id"),
         });
+    }
+    Ok(parsed)
+}
+
+fn validate_record(record: &WorktreeRecord, root: &Path) -> Result<(), RegistryError> {
+    let parsed_id = parse_registry_id(&record.id)?;
+    if record.kind != WorkspaceKind::ManagedChild
+        || !record.id.starts_with(&format!("{}-", record.kind.tag()))
+        || parsed_id.as_str() != record.id
+    {
+        return Err(RegistryError::InvalidRecord {
+            message: format!("id {} does not identify a managed child", record.id),
+        });
+    }
+    if !record.source.is_absolute() {
+        return Err(RegistryError::InvalidRecord {
+            message: format!("source is not absolute: {}", record.source.display()),
+        });
+    }
+    match fs::canonicalize(&record.source) {
+        Ok(canonical_source) if canonical_source == record.source => {}
+        Ok(_) => {
+            return Err(RegistryError::InvalidRecord {
+                message: format!("source is not canonical: {}", record.source.display()),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(RegistryError::InvalidRecord {
+                message: format!("cannot resolve source {}: {error}", record.source.display()),
+            });
+        }
     }
     if !record.dest.is_absolute() {
         return Err(RegistryError::InvalidRecord {
             message: format!("dest is not absolute: {}", record.dest.display()),
         });
     }
-    if !record
-        .dest
-        .starts_with(WorktreeRegistry::worktrees_dir(root))
-        || record
-            .dest
+    let normalized_dest = normalize_registry_path(&record.dest)?;
+    let worktrees_dir = WorktreeRegistry::worktrees_dir(root);
+    if normalized_dest.parent() != Some(worktrees_dir.as_path())
+        || normalized_dest
             .file_name()
             .map(|name| name.to_string_lossy())
             .as_deref()
@@ -428,7 +566,80 @@ fn validate_record(record: &WorktreeRecord, root: &Path) -> Result<(), RegistryE
             ),
         });
     }
+    let resolved_dest = resolve_registry_path(&normalized_dest)?;
+    let canonical_worktrees =
+        fs::canonicalize(&worktrees_dir).map_err(|error| RegistryError::InvalidRecord {
+            message: format!("cannot resolve worktrees root: {error}"),
+        })?;
+    if !resolved_dest.starts_with(&canonical_worktrees) {
+        return Err(RegistryError::InvalidRecord {
+            message: format!(
+                "destination {} resolves outside the registry worktrees root",
+                record.dest.display()
+            ),
+        });
+    }
     Ok(())
+}
+
+fn normalize_registry_path(path: &Path) -> Result<PathBuf, RegistryError> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(RegistryError::InvalidRecord {
+                        message: format!("destination escapes filesystem root: {}", path.display()),
+                    });
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
+}
+
+fn resolve_registry_path(path: &Path) -> Result<PathBuf, RegistryError> {
+    let mut ancestor = path.to_path_buf();
+    let mut suffix = PathBuf::new();
+    loop {
+        match fs::symlink_metadata(&ancestor) {
+            Ok(_) => {
+                let canonical =
+                    fs::canonicalize(&ancestor).map_err(|error| RegistryError::InvalidRecord {
+                        message: format!("cannot resolve destination ancestor: {error}"),
+                    })?;
+                return Ok(canonical.join(suffix));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let name = ancestor
+                    .file_name()
+                    .ok_or_else(|| RegistryError::InvalidRecord {
+                        message: format!(
+                            "destination has no existing ancestor: {}",
+                            path.display()
+                        ),
+                    })?;
+                let mut next = PathBuf::from(name);
+                next.push(&suffix);
+                suffix = next;
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| RegistryError::InvalidRecord {
+                        message: format!("destination has no parent: {}", path.display()),
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(RegistryError::InvalidRecord {
+                    message: format!("cannot inspect destination ancestor: {error}"),
+                });
+            }
+        }
+    }
 }
 
 fn deserialize_record(bytes: &[u8]) -> Result<WorktreeRecord, RegistryError> {
@@ -441,16 +652,71 @@ fn write_record_atomic(path: &Path, record: &WorktreeRecord) -> Result<(), Regis
     let bytes = serde_json::to_vec(record).map_err(|error| RegistryError::Io {
         message: format!("cannot encode record: {error}"),
     })?;
-    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    fs::write(&tmp, &bytes).map_err(|error| RegistryError::Io {
-        message: format!("cannot write record temp file: {error}"),
-    })?;
-    fs::rename(&tmp, path).map_err(|error| {
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), sequence));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp)
+        .map_err(|error| RegistryError::Io {
+            message: format!("cannot create record temp file: {error}"),
+        })?;
+    let result = file.write_all(&bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let result = result
+        .and_then(|()| replace_record_file(&tmp, path))
+        .and_then(|()| sync_parent_directory(path));
+    result.map_err(|error| {
         let _ = fs::remove_file(&tmp);
         RegistryError::Io {
             message: format!("cannot commit record: {error}"),
         }
     })
+}
+
+#[cfg(not(windows))]
+fn replace_record_file(tmp: &Path, path: &Path) -> io::Result<()> {
+    fs::rename(tmp, path)
+}
+
+#[cfg(windows)]
+fn replace_record_file(tmp: &Path, path: &Path) -> io::Result<()> {
+    use std::iter;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW};
+    let from = tmp
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let to = path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        if MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING) == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    File::open(path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "record has no parent directory",
+        )
+    })?)
+    .and_then(|directory| directory.sync_all())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, RegistryError> {
@@ -474,12 +740,17 @@ fn remove_materialization(
 ) -> Result<(), RegistryError> {
     validate_record(record, registry.root())?;
     if record.creation_mode == WorktreeCreationMode::GitLinked && record.source.is_dir() {
-        let _ = run_git(
-            &record.source,
-            &["worktree", "remove", "--force"],
-            Some(&record.dest),
-            &CancellationToken::new(),
-        );
+        let registered = super::git_worktree_registration_exists(&record.source, &record.dest)
+            .map_err(RegistryError::Worktree)?;
+        if registered {
+            run_git(
+                &record.source,
+                &["worktree", "remove", "--force"],
+                Some(&record.dest),
+                &CancellationToken::new(),
+            )
+            .map_err(RegistryError::Worktree)?;
+        }
     }
     match fs::symlink_metadata(&record.dest) {
         Ok(metadata) if metadata.is_dir() => {
@@ -509,24 +780,46 @@ fn remove_materialization(
         }
     }
     if record.creation_mode == WorktreeCreationMode::GitLinked && record.source.is_dir() {
-        let _ = run_git(
+        run_git(
             &record.source,
             &["worktree", "prune", "--expire", "now"],
             None,
             &CancellationToken::new(),
-        );
+        )
+        .map_err(RegistryError::Worktree)?;
+        if super::git_worktree_registration_exists(&record.source, &record.dest)
+            .map_err(RegistryError::Worktree)?
+        {
+            return Err(RegistryError::Worktree(super::WorktreeError::GitFailed {
+                message: format!(
+                    "git worktree registration remains for {}",
+                    record.dest.display()
+                ),
+            }));
+        }
     }
     Ok(())
 }
 
 /// Recursive byte size of `path`; missing paths count as zero.
 fn dir_size(path: &Path) -> Result<u64, io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_dir() => return Ok(metadata.len()),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    }
     let mut total = 0u64;
     let mut pending = vec![path.to_path_buf()];
     while let Some(current) = pending.pop() {
-        for entry in fs::read_dir(&current)? {
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
             let entry = entry?;
-            let metadata = entry.metadata()?;
+            let metadata = fs::symlink_metadata(entry.path())?;
             if metadata.is_dir() {
                 pending.push(entry.path());
             } else {

@@ -664,7 +664,10 @@ fn cleanup_failed_creation(
     }
 }
 
-fn git_worktree_registration_exists(source: &Path, dest: &Path) -> Result<bool, WorktreeError> {
+pub(crate) fn git_worktree_registration_exists(
+    source: &Path,
+    dest: &Path,
+) -> Result<bool, WorktreeError> {
     let output = git_capture(
         source,
         &["worktree", "list", "--porcelain", "-z"],

@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+use std::thread;
 
 use tokio_util::sync::CancellationToken;
 
@@ -322,4 +324,171 @@ fn gc_removes_git_linked_worktrees_including_registration() {
         !listing.contains(&record.dest.display().to_string()),
         "git worktree registration must be pruned: {listing}"
     );
+}
+
+#[test]
+fn invalid_ids_cannot_escape_the_registry_directory() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let victim = registry_dir.path().join("victim.json");
+    fs::write(&victim, b"must survive").expect("victim file");
+
+    let error = registry
+        .remove("../victim")
+        .expect_err("path traversal rejected");
+    assert!(matches!(error, super::RegistryError::InvalidRecord { .. }));
+    assert!(victim.exists(), "outside file must not be deleted");
+    let _ = source_dir;
+}
+
+#[test]
+fn record_identity_must_match_its_filename_and_destination() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let record = registered_worktree(&registry, source_dir.path(), "op-1");
+    let path = registry_dir
+        .path()
+        .join("registry")
+        .join(format!("{}.json", record.id));
+    let mut forged = record.clone();
+    forged.id = "child-forged".into();
+    fs::write(
+        &path,
+        serde_json::to_vec(&forged).expect("encode forged record"),
+    )
+    .expect("write forged record");
+
+    let error = registry
+        .load(&record.id)
+        .expect_err("forged identity rejected");
+    assert!(matches!(error, super::RegistryError::InvalidRecord { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_parent_cannot_pass_destination_containment() {
+    use std::os::unix::fs::symlink;
+
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let record = registered_worktree(&registry, source_dir.path(), "op-1");
+    fs::remove_dir_all(&record.dest).expect("remove materialization");
+    let external = tempfile::tempdir().expect("external dir");
+    let link = registry.worktrees_root().join("link");
+    symlink(external.path(), &link).expect("create symlink");
+    let mut forged = record.clone();
+    forged.dest = link.join(&record.id);
+
+    let error = registry
+        .register(&forged)
+        .expect_err("symlink parent rejected");
+    assert!(matches!(error, super::RegistryError::InvalidRecord { .. }));
+    assert!(external.path().exists());
+}
+
+#[test]
+fn failed_creation_leaves_recoverable_creating_record() {
+    let (registry_dir, source_dir) = registry_root();
+    fs::create_dir_all(source_dir.path()).expect("source dir");
+    fs::write(source_dir.path().join("file.txt"), "v1").expect("source file");
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let handle = WorkspaceHandle::new(WorkspaceKind::Source, source_dir.path()).expect("handle");
+    let token = CancellationToken::new();
+    token.cancel();
+
+    let error = registry
+        .create_managed(
+            &handle,
+            "op-cancelled",
+            None,
+            WorkingTreeMode::PreserveWorkingTree,
+            &token,
+        )
+        .expect_err("cancelled creation fails");
+    assert!(matches!(error, super::RegistryError::Worktree(_)));
+    let records = registry.load_all().expect("load creating record");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].lifecycle, WorkspaceLifecycle::Creating);
+    registry.recover().expect("recover creating record");
+    assert!(
+        registry
+            .load(&records[0].id)
+            .expect("load after recover")
+            .is_none()
+    );
+}
+
+#[test]
+fn concurrent_transitions_are_serialized() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let record = registered_worktree(&registry, source_dir.path(), "op-1");
+    let registry = Arc::new(registry);
+    let first = Arc::clone(&registry);
+    let second = Arc::clone(&registry);
+    let id = record.id.clone();
+    let left = thread::spawn(move || first.transition(&id, WorkspaceLifecycle::Active, 10));
+    let id = record.id.clone();
+    let right = thread::spawn(move || second.transition(&id, WorkspaceLifecycle::Active, 11));
+    let results = [
+        left.join().expect("left joins"),
+        right.join().expect("right joins"),
+    ];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        registry
+            .load(&record.id)
+            .expect("load final")
+            .expect("record")
+            .lifecycle,
+        WorkspaceLifecycle::Active
+    );
+}
+
+#[test]
+fn gc_does_not_collect_merge_pending_worktrees() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let record = registered_worktree(&registry, source_dir.path(), "op-finished");
+    registry
+        .transition(&record.id, WorkspaceLifecycle::Active, 10)
+        .expect("active");
+    registry
+        .transition(&record.id, WorkspaceLifecycle::MergePending, 11)
+        .expect("merge pending");
+    let report = registry
+        .gc(&GcOptions {
+            now: now_seconds() + 10_000,
+            max_age_seconds: 1,
+            disk_budget_bytes: None,
+            owner_liveness: Box::new(|_| false),
+            dry_run: false,
+        })
+        .expect("gc runs");
+    assert!(report.candidates.is_empty());
+    assert!(record.dest.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn gc_size_does_not_follow_child_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let record = registered_worktree(&registry, source_dir.path(), "op-finished");
+    let external = tempfile::tempdir().expect("external dir");
+    fs::write(external.path().join("large.bin"), vec![b'x'; 16 * 1024]).expect("external file");
+    symlink(external.path(), record.dest.join("external")).expect("child symlink");
+
+    let report = registry
+        .gc(&GcOptions {
+            now: now_seconds() + 10_000,
+            max_age_seconds: 1,
+            disk_budget_bytes: None,
+            owner_liveness: Box::new(|_| false),
+            dry_run: false,
+        })
+        .expect("gc runs");
+    assert!(report.removed[0].bytes_reclaimed < 16 * 1024);
 }
