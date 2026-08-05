@@ -89,7 +89,9 @@ pub(super) fn prepare_write_leaf(
         });
     }
     let mut options = OpenOptions::new();
-    options.write(true);
+    // Mutation fences need to inspect the pre-write revision through the same
+    // capability-bound handle before truncating the file.
+    options.read(true).write(true);
     match parent.open_with(&leaf, &options) {
         Ok(file) => Ok(FilesystemTargetObject::File(Arc::new(Mutex::new(file)))),
         Err(error) if error.kind() == ErrorKind::NotFound => match parent.symlink_metadata(&leaf) {
@@ -167,6 +169,43 @@ pub(super) fn target_object_fingerprint(
 
 pub(super) fn audit_identity_fingerprint(identity: &str) -> String {
     format!("{:x}", Sha256::digest(identity.as_bytes()))
+}
+
+pub(super) fn remove_bound_file(target: &FilesystemTarget) -> Result<(), String> {
+    if !matches!(target.object, Some(FilesystemTargetObject::File(_))) {
+        return Err(format!(
+            "filesystem target is not an opened file: {}",
+            target.display.display()
+        ));
+    }
+    if let Some(root) = &target.root {
+        let metadata = root
+            .symlink_metadata(&target.relative)
+            .map_err(|error| error.to_string())?;
+        let fingerprint = audit_identity_fingerprint(&metadata_identity(&metadata));
+        if fingerprint != target.target_fingerprint {
+            return Err(format!(
+                "filesystem target identity changed before deletion: {}",
+                target.display.display()
+            ));
+        }
+        root.remove_file(&target.relative)
+            .map_err(|error| error.to_string())
+    } else {
+        let (parent, leaf) =
+            ambient_parent_and_leaf(&target.display).map_err(|error| error.to_string())?;
+        let metadata = parent
+            .symlink_metadata(&leaf)
+            .map_err(|error| error.to_string())?;
+        let fingerprint = audit_identity_fingerprint(&metadata_identity(&metadata));
+        if fingerprint != target.target_fingerprint {
+            return Err(format!(
+                "filesystem target identity changed before deletion: {}",
+                target.display.display()
+            ));
+        }
+        parent.remove_file(&leaf).map_err(|error| error.to_string())
+    }
 }
 
 pub(super) fn review_metadata_error(error: std::io::Error) -> FilesystemReviewTargetError {

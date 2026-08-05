@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::kernel::error::CodingSessionError;
 use crate::limits;
 use crate::platform::io::bounded as bounded_io;
+use tool_contract::api::definition::ToolId;
 
 pub use crate::kernel::ids::ProfileId;
 
@@ -148,7 +149,7 @@ pub struct AgentProfile {
     pub description: Option<String>,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
-    pub tools: Vec<String>,
+    pub tools: Vec<ToolId>,
     pub skills: Vec<String>,
     pub supervision: SupervisionPolicy,
     pub delegation: DelegationPolicy,
@@ -311,7 +312,7 @@ struct AgentProfileFile {
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default)]
-    tools: Vec<String>,
+    tools: Vec<ToolId>,
     #[serde(default)]
     skills: Vec<String>,
     #[serde(default)]
@@ -463,7 +464,7 @@ fn built_in_helper_agent_profile(
         system_prompt: Some(system_prompt.into()),
         tools: BUILT_IN_READ_ONLY_TOOL_NAMES
             .iter()
-            .map(|name| (*name).to_owned())
+            .map(|name| ToolId::new(*name).expect("static tool id is valid"))
             .collect(),
         skills: Vec::new(),
         supervision: SupervisionPolicy::Session,

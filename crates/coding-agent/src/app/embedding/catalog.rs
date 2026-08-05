@@ -267,7 +267,7 @@ pub(super) fn api_can_disable_thinking(model: &Model) -> bool {
 
 pub(super) fn openai_completions_compat(
     model: &Model,
-) -> Option<&ai::api::compatibility::OpenAICompletionsCompat> {
+) -> Option<&ai_protocol::api::compatibility::OpenAICompletionsCompat> {
     match model.compat.as_ref() {
         Some(ModelCompat::OpenAICompletions(compat)) => Some(compat),
         _ => None,

@@ -503,11 +503,23 @@ mod loop_tests {
     use crate::agent::Agent;
     use crate::agent::types::{AgentConfig, AgentEvent, AgentMessage};
     use ai::api::client::AiClient;
-    use ai::api::conversation::{ContentBlock, StopReason};
-    use ai::api::model::{Model, ModelCost, ModelInput};
     use ai::api::provider::faux::{FauxCall, FauxProvider, FauxResponse, FauxToolCall};
+    use ai_protocol::api::conversation::{ContentBlock, StopReason};
+    use ai_protocol::api::model::{Model, ModelCost, ModelInput};
+    use ai_protocol::api::stream::AssistantMessageEvent;
     use futures::StreamExt;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
     use std::sync::Arc;
+    use tool_contract::api::definition::{
+        AuthorizationRisk, ToolBehaviorVersion, ToolCapabilities, ToolDefinition, ToolId, ToolKind,
+    };
+    use tool_contract::api::output::{ToolContent, ToolOutput};
+    use tool_contract::api::schema::schema_for;
+    use tool_runtime::api::{ToolRegistry, ToolRuntime, TypedTool};
+
+    #[derive(Deserialize, JsonSchema)]
+    struct RuntimeTestArgs {}
 
     fn test_model() -> Model {
         Model {
@@ -565,6 +577,36 @@ mod loop_tests {
         )
     }
 
+    fn install_test_tool(agent: &Agent) {
+        let definition = ToolDefinition {
+            id: ToolId::new("test_tool").unwrap(),
+            kind: ToolKind::Function,
+            description: "Typed test tool".into(),
+            parameters: schema_for::<RuntimeTestArgs>().unwrap(),
+            capabilities: ToolCapabilities::default(),
+            behavior: ToolBehaviorVersion::V1,
+            authorization_risk: AuthorizationRisk::None,
+            requirements: Vec::new(),
+        };
+        let tool = TypedTool::<RuntimeTestArgs>::new(definition, |_context, _args| {
+            Box::pin(async {
+                Ok(ToolOutput {
+                    content: vec![ToolContent::Text {
+                        text: "typed result".into(),
+                    }],
+                    details: Some(serde_json::json!({"runtime": true})),
+                    terminate: false,
+                })
+            })
+        })
+        .unwrap();
+        let mut registry = ToolRegistry::default();
+        registry.register(Arc::new(tool)).unwrap();
+        agent
+            .set_tool_runtime(ToolRuntime::new(registry).unwrap())
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn complete_consumption_yields_terminal_events() {
         let agent = test_agent(vec![text_call("answer is 42", StopReason::Stop)]);
@@ -581,6 +623,40 @@ mod loop_tests {
         assert_eq!(turns, 1);
         assert!(saw_done);
         assert_eq!(agent.messages().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn typed_runtime_tools_are_declared_and_executed_without_legacy_registration() {
+        let agent = test_agent(vec![
+            tool_call("typed"),
+            text_call("found", StopReason::Stop),
+        ]);
+        install_test_tool(&agent);
+
+        let request = agent.provider_request_snapshot().0;
+        assert!(request.tools.as_ref().is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.name == "test_tool" && tool.description.as_deref() == Some("Typed test tool")
+            })
+        }));
+
+        let mut stream = agent.prompt("hello");
+        let mut result = None;
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::ToolCallEnd {
+                result: tool_result,
+                ..
+            } = event
+            {
+                result = Some(tool_result);
+            }
+        }
+        let result = result.expect("typed tool result event");
+        assert!(matches!(
+            result.content.as_slice(),
+            [ContentBlock::Text { text, .. }] if text == "typed result"
+        ));
+        assert_eq!(result.details, Some(serde_json::json!({"runtime": true})));
     }
 
     #[tokio::test]
@@ -615,25 +691,7 @@ mod loop_tests {
             tool_call("searching"),
             text_call("found", StopReason::Stop),
         ]);
-        agent
-            .add_tool(crate::agent::types::AgentTool {
-                kind: Default::default(),
-                name: "test_tool".into(),
-                description: "A test tool".into(),
-                parameters: serde_json::json!({"type": "object"}),
-                execution_mode: None,
-                execute: Arc::new(|_context, _args, _on_update| {
-                    Box::pin(async move {
-                        Ok(crate::agent::types::AgentToolOutput::new(vec![
-                            ContentBlock::Text {
-                                text: "result".into(),
-                                text_signature: None,
-                            },
-                        ]))
-                    })
-                }),
-            })
-            .expect("valid tool");
+        install_test_tool(&agent);
         let mut stream = agent.prompt("hello");
         while let Some(event) = stream.next().await {
             if matches!(event, AgentEvent::ToolCallEnd { .. }) {
@@ -655,25 +713,7 @@ mod loop_tests {
             tool_call("searching"),
             text_call("found", StopReason::Stop),
         ]);
-        agent
-            .add_tool(crate::agent::types::AgentTool {
-                kind: Default::default(),
-                name: "test_tool".into(),
-                description: "A test tool".into(),
-                parameters: serde_json::json!({"type": "object"}),
-                execution_mode: None,
-                execute: Arc::new(|_context, _args, _on_update| {
-                    Box::pin(async move {
-                        Ok(crate::agent::types::AgentToolOutput::new(vec![
-                            ContentBlock::Text {
-                                text: "result".into(),
-                                text_signature: None,
-                            },
-                        ]))
-                    })
-                }),
-            })
-            .expect("valid tool");
+        install_test_tool(&agent);
         let mut stream = agent.prompt("hello");
         while let Some(event) = stream.next().await {
             if matches!(event, AgentEvent::ToolCallEnd { .. }) {
@@ -690,6 +730,31 @@ mod loop_tests {
                 .iter()
                 .any(|message| matches!(message, AgentMessage::UserText { text, .. } if text == "late input")),
             "cleared steering input must not reach the conversation"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "release performance baseline"]
+    async fn agent_core_release_faux_first_text_delta_baseline() {
+        const FIRST_DELTA_BUDGET_MICROS: u128 = 50_000;
+
+        let agent = test_agent(vec![text_call("first delta", StopReason::Stop)]);
+        let started = std::time::Instant::now();
+        let mut stream = agent.prompt("hello");
+        let first_delta_micros = loop {
+            let event = stream.next().await.expect("faux stream has a text delta");
+            if matches!(
+                event,
+                AgentEvent::LlmEvent(AssistantMessageEvent::TextDelta { .. })
+            ) {
+                break started.elapsed().as_micros();
+            }
+        };
+
+        println!("agent_perf\tfaux_first_text_delta_us={first_delta_micros}");
+        assert!(
+            first_delta_micros <= FIRST_DELTA_BUDGET_MICROS,
+            "local agent pipeline first TextDelta exceeded 50 ms: {first_delta_micros} us"
         );
     }
 }

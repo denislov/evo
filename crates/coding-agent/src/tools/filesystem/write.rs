@@ -2,25 +2,35 @@ use crate::mutex::MutexExt;
 use crate::platform::fs::capability::FilesystemCapability;
 use crate::platform::fs::mutation::{FileMutation, MutationGuard};
 use crate::tools::FilesystemTarget;
-use crate::tools::filesystem_target_for_execution;
-use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
-use ai::api::conversation::ContentBlock;
+use crate::tools::filesystem::mutation_receipt::{
+    receipt_from_revisions, revision, revision_from_reader, validate_fence,
+};
 use futures::future::{BoxFuture, FutureExt};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
+use tool_contract::api::definition::{
+    AuthorizationRisk, ToolBehaviorVersion, ToolCapabilities, ToolDefinition, ToolExecutionMode,
+    ToolId, ToolKind,
+};
+use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
+use tool_contract::api::schema::schema_for;
+use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
 
 const DESCRIPTION: &str = "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.";
 
-fn schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "path": { "type": "string", "description": "Path to the file to write (relative or absolute)" },
-            "content": { "type": "string", "description": "Content to write to the file" }
-        },
-        "required": ["path", "content"],
-        "additionalProperties": false
-    })
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WriteArgs {
+    path: String,
+    content: String,
+    #[serde(default, rename = "expectedRevision")]
+    #[schemars(rename = "expectedRevision")]
+    expected_revision: Option<String>,
+    #[serde(default, rename = "expectedTargetFingerprint")]
+    #[schemars(rename = "expectedTargetFingerprint")]
+    expected_target_fingerprint: Option<String>,
 }
 
 fn arg_str(args: &serde_json::Value, key: &str) -> Result<String, String> {
@@ -111,48 +121,117 @@ async fn write_target_with_operations(
     target: &FilesystemTarget,
     args: serde_json::Value,
     ops: Arc<dyn WriteOperations>,
-) -> Result<Vec<ContentBlock>, String> {
+) -> Result<ToolOutput, String> {
     let path = arg_str(&args, "path")?;
     let content = arg_str(&args, "content")?;
+    if content.len() > crate::limits::MAX_EDIT_RESULT_BYTES {
+        return Err(format!(
+            "write: content exceeds the {} safety limit",
+            crate::platform::io::output::format_size(crate::limits::MAX_EDIT_RESULT_BYTES)
+        ));
+    }
+    let expected_revision = args
+        .get("expectedRevision")
+        .and_then(|value| value.as_str());
+    let expected_target_fingerprint = args
+        .get("expectedTargetFingerprint")
+        .and_then(|value| value.as_str());
     let mutation = FileMutation::begin(target).await?;
+    let before = if target.is_vacant() {
+        None
+    } else {
+        let file = target.opened_file()?;
+        let mut file = file
+            .lock_resource("write revision")
+            .map_err(|error| error.to_string())?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("write: cannot stat revision source: {error}"))?;
+        if metadata.len() > crate::limits::MAX_TOOL_EDIT_FILE_BYTES as u64 {
+            return Err(format!(
+                "write: refusing to overwrite {path} because its current content exceeds the {} safety limit",
+                crate::platform::io::output::format_size(crate::limits::MAX_TOOL_EDIT_FILE_BYTES)
+            ));
+        }
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| format!("write: cannot seek revision source: {error}"))?;
+        Some(
+            revision_from_reader(&mut *file).map_err(|error| {
+                format!("write: cannot read current revision for {path}: {error}")
+            })?,
+        )
+    };
+    validate_fence(
+        expected_revision,
+        expected_target_fingerprint,
+        before.as_ref().map(|revision| revision.hash.as_str()),
+        target.target_fingerprint(),
+        &path,
+    )?;
     let target = target.clone();
     ops.write_file(&target, content.as_bytes(), mutation)
         .await?;
-    let n = content.len();
-    Ok(vec![ContentBlock::Text {
-        text: format!("Successfully wrote {n} bytes to {path}"),
-        text_signature: None,
-    }])
+    let after = revision(content.as_bytes());
+    let receipt = receipt_from_revisions(
+        path.clone(),
+        target.target_fingerprint().to_owned(),
+        before.as_ref(),
+        &after,
+        "write",
+        None,
+    );
+    Ok(ToolOutput {
+        content: vec![ToolContent::Text {
+            text: format!("Successfully wrote {} bytes to {path}", content.len()),
+        }],
+        details: Some(serde_json::json!({"changeReceipt": receipt})),
+        terminate: false,
+    })
 }
 
-pub fn write_tool(filesystem: FilesystemCapability) -> AgentTool {
-    write_tool_with_operations(filesystem, Arc::new(RealWriteOperations))
-}
-
-pub fn write_tool_with_operations(
+pub fn write_runtime_tool(
     filesystem: FilesystemCapability,
-    ops: Arc<dyn WriteOperations>,
-) -> AgentTool {
-    let execute: ToolFn = Arc::new(move |context, args, _on_update| {
-        let filesystem = filesystem.clone();
-        let ops = ops.clone();
-        Box::pin(async move {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let target =
-                filesystem_target_for_execution(&filesystem, &context, "write", path).await?;
-            write_target_with_operations(&target, args, ops)
-                .await
-                .map(AgentToolOutput::new)
-        })
-    });
-    AgentTool {
-        kind: Default::default(),
-        name: "write".into(),
+) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
+    let definition = ToolDefinition {
+        id: ToolId::new("write").expect("static tool id is valid"),
+        kind: ToolKind::Function,
         description: DESCRIPTION.into(),
-        parameters: schema(),
-        execution_mode: None,
-        execute,
-    }
+        parameters: schema_for::<WriteArgs>().expect("WriteArgs schema is valid"),
+        capabilities: ToolCapabilities {
+            read_only: false,
+            execution: ToolExecutionMode::Parallel,
+            cancel: true,
+            timeout: true,
+            streaming: false,
+            provider_executed: false,
+        },
+        behavior: ToolBehaviorVersion::V1,
+        authorization_risk: AuthorizationRisk::SideEffect,
+        requirements: Vec::new(),
+    };
+    Ok(Arc::new(TypedTool::<WriteArgs>::new(
+        definition,
+        move |context, args| {
+            let filesystem = filesystem.clone();
+            Box::pin(async move {
+                let target = crate::tools::filesystem_target_for_runtime_execution(
+                    &filesystem,
+                    &context,
+                    "write",
+                    &args.path,
+                )
+                .await
+                .map_err(|error| ToolError::new(ToolErrorKind::Execution, error))?;
+                write_target_with_operations(
+                    &target,
+                    serde_json::to_value(&args).expect("typed write args serialize"),
+                    Arc::new(RealWriteOperations),
+                )
+                .await
+                .map_err(|error| ToolError::new(ToolErrorKind::Execution, error))
+            }) as ToolFuture
+        },
+    )?))
 }
 
 #[cfg(test)]
@@ -162,8 +241,13 @@ mod tests {
     use std::time::Duration;
 
     use futures::FutureExt;
+    use tokio_util::sync::CancellationToken;
+    use tool_contract::api::definition::ToolId;
+    use tool_runtime::api::{ToolCallContext, ToolRegistry, ToolRuntime};
 
-    use super::{WriteOperations, write_target_with_operations};
+    use super::{
+        RealWriteOperations, WriteOperations, write_runtime_tool, write_target_with_operations,
+    };
     use crate::platform::fs::capability::FilesystemCapability;
     use crate::platform::fs::mutation::MutationGuard;
     use crate::tools::FilesystemTarget;
@@ -254,5 +338,75 @@ mod tests {
             .expect("second write task should join")
             .expect("second write should succeed");
         assert_eq!(operations.max_active.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn write_returns_change_receipt_and_rejects_a_stale_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("target.txt"), "initial\n").unwrap();
+        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let target = filesystem
+            .prepare_target_for_tool("write", "target.txt")
+            .await
+            .unwrap();
+
+        let output = write_target_with_operations(
+            &target,
+            serde_json::json!({"path": "target.txt", "content": "updated\n"}),
+            Arc::new(RealWriteOperations),
+        )
+        .await
+        .expect("write succeeds");
+        let receipt = output
+            .details
+            .expect("write receipt")
+            .get("changeReceipt")
+            .cloned()
+            .expect("receipt field");
+        assert_eq!(receipt["origin"], "write");
+        assert_eq!(receipt["before_revision"].as_str().unwrap().len(), 64);
+        assert_eq!(receipt["after_revision"].as_str().unwrap().len(), 64);
+        assert_eq!(receipt["byte_delta"], 0);
+
+        let stale = write_target_with_operations(
+            &target,
+            serde_json::json!({
+                "path": "target.txt",
+                "content": "stale\n",
+                "expectedRevision": "0000000000000000000000000000000000000000000000000000000000000000"
+            }),
+            Arc::new(RealWriteOperations),
+        )
+        .await
+        .expect_err("stale write must be rejected");
+        assert!(stale.contains("mutation fence rejected"));
+    }
+
+    #[tokio::test]
+    async fn typed_write_executes_through_the_runtime_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let mut registry = ToolRegistry::default();
+        registry
+            .register(write_runtime_tool(filesystem).unwrap())
+            .unwrap();
+        let runtime = ToolRuntime::new(registry).unwrap();
+        let context = ToolCallContext::new(
+            ToolId::new("write").unwrap(),
+            "write-call",
+            CancellationToken::new(),
+        );
+        let output = runtime
+            .execute(
+                context,
+                serde_json::json!({"path": "new.txt", "content": "hello\n"}),
+            )
+            .await
+            .expect("typed write succeeds");
+        assert_eq!(output.details.unwrap()["changeReceipt"]["origin"], "write");
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("new.txt")).unwrap(),
+            "hello\n"
+        );
     }
 }

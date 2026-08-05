@@ -134,10 +134,12 @@ name = "agent-core"
 version = "0.7.2"
 dependencies = [
  "ai",
+ "ai-protocol",
  "async-stream",
  "futures",
  "ignore",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -146,6 +148,8 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tool-contract",
+ "tool-runtime",
  "uuid",
 ]
 
@@ -176,6 +180,7 @@ dependencies = [
 name = "ai"
 version = "0.7.2"
 dependencies = [
+ "ai-protocol",
  "async-stream",
  "base64",
  "bytes",
@@ -186,6 +191,17 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "ai-protocol"
+version = "0.7.2"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]
@@ -1144,10 +1160,12 @@ version = "0.7.2"
 dependencies = [
  "agent-core",
  "ai",
+ "ai-protocol",
  "async-stream",
  "base64",
  "cap-std",
  "dirs",
+ "event-journal",
  "futures",
  "globset",
  "ignore",
@@ -1157,6 +1175,7 @@ dependencies = [
  "notify",
  "proc-macro2",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1167,8 +1186,11 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
+ "tool-contract",
+ "tool-runtime",
  "unicode-normalization",
  "windows-sys 0.61.2",
+ "workspace-runtime",
 ]
 
 [[package]]
@@ -1903,6 +1925,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "event-journal"
+version = "0.7.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "event-listener"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1922,10 +1955,6 @@ dependencies = [
  "event-listener",
  "pin-project-lite",
 ]
-
-[[package]]
-name = "evo"
-version = "0.7.2"
 
 [[package]]
 name = "exr"
@@ -7291,6 +7320,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
+name = "tool-contract"
+version = "0.7.2"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tool-runtime"
+version = "0.7.2"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tool-contract",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8942,6 +8994,14 @@ name = "workspace-hack"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "beffa227304dbaea3ad6a06ac674f9bc83a3dec3b7f63eeb442de37e7cb6bb01"
+
+[[package]]
+name = "workspace-runtime"
+version = "0.7.2"
+dependencies = [
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "writeable"

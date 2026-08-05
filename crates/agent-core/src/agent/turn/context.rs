@@ -1,14 +1,16 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 
-use ai::api::conversation::{AssistantMessage, Context};
-use ai::api::stream::StreamOptions;
+use ai_protocol::api::conversation::{AssistantMessage, Context};
+use ai_protocol::api::stream::StreamOptions;
 use futures::channel::mpsc;
 use tokio_util::sync::CancellationToken;
+use tool_contract::api::definition::ToolDefinition;
+use tool_runtime::api::ToolRuntime;
 
 use crate::agent::AgentState;
 use crate::agent::types::{
-    AgentConfig, AgentEvent, AgentMessage, AgentTool, AgentToolResult, ProviderRequestSnapshot,
+    AgentConfig, AgentEvent, AgentMessage, AgentToolResult, ProviderRequestSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,7 +38,8 @@ pub struct AgentTurnProviderRequestOverride {
 pub struct AgentTurnContext {
     pub config: AgentConfig,
     pub messages: Vec<AgentMessage>,
-    pub tools: Vec<AgentTool>,
+    pub tool_runtime: Option<ToolRuntime>,
+    pub provider_tools: Vec<ToolDefinition>,
     pub steering_queue: VecDeque<AgentMessage>,
     pub follow_up_queue: VecDeque<AgentMessage>,
     pub cancel_token: CancellationToken,
@@ -58,7 +61,8 @@ impl AgentTurnContext {
         Self {
             config: state.config.clone(),
             messages: state.messages.clone(),
-            tools: state.tools.clone(),
+            tool_runtime: state.tool_runtime.clone(),
+            provider_tools: state.provider_tools.clone(),
             steering_queue: state.steering_queue.clone(),
             follow_up_queue: state.follow_up_queue.clone(),
             cancel_token: state.cancel_token.clone(),

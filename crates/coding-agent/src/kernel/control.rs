@@ -9,13 +9,13 @@ pub(crate) enum PromptControlCommand {
         text: String,
     },
     SteerContent {
-        content: Vec<ai::api::conversation::ContentBlock>,
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
     },
     FollowUp {
         text: String,
     },
     FollowUpContent {
-        content: Vec<ai::api::conversation::ContentBlock>,
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
     },
 }
 

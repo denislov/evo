@@ -13,7 +13,6 @@ use crate::app::embedding::{
 };
 use crate::app::error::ApplicationError;
 use crate::app::invocation::CodingAgentInvocationOptions;
-use crate::authorization::ToolAuthorizationMode;
 use crate::app::operation_factory::CodingAgentOperationFactory;
 use crate::app::profile_catalog::CodingAgentProfileCatalog;
 use crate::app::prompt_input::{
@@ -31,6 +30,7 @@ use crate::app::startup::{
     resolve_application_context_from_options, resolve_profile_registry, rotation_model_choices,
 };
 use crate::app::theme::{CodingAgentThemeController, CodingAgentThemeSnapshot};
+use crate::authorization::ToolAuthorizationMode;
 use crate::limits::{
     MAX_INPUT_IMAGE_ENCODED_TOTAL_BYTES, MAX_INPUT_IMAGES, MAX_PROMPT_INPUT_BYTES,
 };
@@ -359,14 +359,14 @@ impl CodingAgentApplicationStartup {
         let mut content = Vec::with_capacity(images.len() + usize::from(!message.is_empty()));
         if !message.is_empty() {
             display.push(message.clone());
-            content.push(ai::api::conversation::ContentBlock::Text {
+            content.push(ai_protocol::api::conversation::ContentBlock::Text {
                 text: message.clone(),
                 text_signature: None,
             });
         }
         for image in images {
             display.push(format!("[image:{}]", image.mime_type));
-            content.push(ai::api::conversation::ContentBlock::Image {
+            content.push(ai_protocol::api::conversation::ContentBlock::Image {
                 data: image.data,
                 mime_type: image.mime_type,
             });
@@ -641,7 +641,9 @@ fn build_interactive_startup(
     })
 }
 
-fn model_thinking_level_map(model: &ai::api::model::Model) -> Option<[Option<Option<String>>; 5]> {
+fn model_thinking_level_map(
+    model: &ai_protocol::api::model::Model,
+) -> Option<[Option<Option<String>>; 5]> {
     let mapping = serde_json::to_value(model.thinking_level_map.as_ref()?)
         .expect("provider thinking-level mapping serializes");
     let mapping = mapping

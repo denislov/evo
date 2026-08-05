@@ -1,0 +1,18 @@
+[package]
+name = "tool-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
+tokio-util.workspace = true
+tool-contract.workspace = true
+
+[dev-dependencies]
+schemars.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

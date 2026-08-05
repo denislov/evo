@@ -3,7 +3,7 @@ use super::{
     CodingAgentImageContent, CodingAgentMessageProductEvent, CodingAgentProductEventDurability,
     CodingAgentProductEventKind, CodingAgentProductEventUsage,
 };
-use ai::api::conversation::Usage;
+use ai_protocol::api::conversation::Usage;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MessageEvent {

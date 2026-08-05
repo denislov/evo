@@ -1987,8 +1987,9 @@ fn apply_pending_permission_mode<T: Terminal>(
     apply_interactive_projection(tui, root_id, |root| {
         match current.connection.set_tool_authorization_mode(mode) {
             Ok(()) => {
-                root.transcript
-                    .push(TranscriptItem::system(format!("Permission mode set: {mode}")));
+                root.transcript.push(TranscriptItem::system(format!(
+                    "Permission mode set: {mode}"
+                )));
             }
             Err(error) => {
                 root.transcript.push(TranscriptItem::system(format!(

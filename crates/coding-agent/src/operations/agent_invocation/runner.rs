@@ -1,4 +1,4 @@
-use ai::api::conversation::AssistantMessage;
+use ai_protocol::api::conversation::AssistantMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::bootstrap::PromptInvocation;

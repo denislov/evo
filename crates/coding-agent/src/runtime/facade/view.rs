@@ -156,7 +156,11 @@ impl CodingAgentSession {
                 description: profile.description.as_deref().map(safe_public_summary),
                 source: profile.source,
                 model_id: profile.model.clone(),
-                tools: profile.tools.clone(),
+                tools: profile
+                    .tools
+                    .iter()
+                    .map(|id| id.as_str().to_owned())
+                    .collect(),
                 skills: profile.skills.clone(),
                 supervision: profile.supervision.clone(),
                 delegation: profile.delegation.clone(),

@@ -4,7 +4,7 @@ impl SessionLogStore {
     pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            append_lock: Arc::new(Mutex::new(())),
+            journal: JournalStore::default(),
             #[cfg(test)]
             io_faults: None,
         }
@@ -14,7 +14,7 @@ impl SessionLogStore {
     pub(crate) fn with_io_faults(root: impl Into<PathBuf>, io_faults: SessionIoFaultPlan) -> Self {
         Self {
             root: root.into(),
-            append_lock: Arc::new(Mutex::new(())),
+            journal: JournalStore::default(),
             io_faults: Some(io_faults),
         }
     }
@@ -33,15 +33,33 @@ impl SessionLogStore {
         &self,
         handle: &SessionHandle,
     ) -> Result<SessionWriteLease, CodingSessionError> {
-        let (lock_file, tail_recoveries) = self.acquire_repaired_lock(handle)?;
-        let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
-        let next_sequence =
-            self.next_session_sequence(&event_log_path, &handle.manifest.session_id)?;
-        Ok(SessionWriteLease {
-            _lock_file: lock_file,
-            next_sequence,
-            tail_recoveries,
-        })
+        let paths = journal_paths(handle)?;
+        let session_id = handle.manifest.session_id.clone();
+        let record_path = paths.records.clone();
+        let outbox_path = paths.outbox.clone();
+        let journal = self
+            .journal
+            .acquire_write_lease(
+                &paths,
+                |line| {
+                    decode_event_line(line, 0, &record_path)
+                        .map(|_| ())
+                        .map_err(journal_codec_error)
+                },
+                |line| {
+                    decode_durable_record::<DurableOutboxRecord>(
+                        line,
+                        0,
+                        &outbox_path,
+                        "session outbox record",
+                    )
+                    .map(|_| ())
+                    .map_err(journal_codec_error)
+                },
+                |path| next_session_sequence(path, &session_id).map_err(journal_codec_error),
+            )
+            .map_err(journal_error)?;
+        Ok(SessionWriteLease { journal })
     }
 
     /// Repairs a possible torn final frame without scanning the complete log.
@@ -50,63 +68,30 @@ impl SessionLogStore {
         &self,
         handle: &SessionHandle,
     ) -> Result<(), CodingSessionError> {
-        drop(self.acquire_repaired_lock(handle)?);
+        let paths = journal_paths(handle)?;
+        let record_path = paths.records.clone();
+        let outbox_path = paths.outbox.clone();
+        self.journal
+            .repair_tails_for_read(
+                &paths,
+                |line| {
+                    decode_event_line(line, 0, &record_path)
+                        .map(|_| ())
+                        .map_err(journal_codec_error)
+                },
+                |line| {
+                    decode_durable_record::<DurableOutboxRecord>(
+                        line,
+                        0,
+                        &outbox_path,
+                        "session outbox record",
+                    )
+                    .map(|_| ())
+                    .map_err(journal_codec_error)
+                },
+            )
+            .map_err(journal_error)?;
         Ok(())
-    }
-
-    fn acquire_repaired_lock(
-        &self,
-        handle: &SessionHandle,
-    ) -> Result<(File, Vec<String>), CodingSessionError> {
-        let lock_path = handle.session_dir.join(SESSION_WRITER_LOCK_FILE);
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .map_err(|error| {
-                session_error(format!(
-                    "failed to open session writer lock {}: {error}",
-                    lock_path.display()
-                ))
-            })?;
-        if let Err(error) = lock_file.try_lock() {
-            return Err(match error {
-                std::fs::TryLockError::WouldBlock => session_error(format!(
-                    "session already has a writer in another process (lock {})",
-                    lock_path.display()
-                )),
-                std::fs::TryLockError::Error(error) => session_error(format!(
-                    "failed to acquire session writer lock {}: {error}",
-                    lock_path.display()
-                )),
-            });
-        }
-        let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
-        let outbox_path = outbox_log_path(&handle.session_dir, &handle.manifest)?;
-        let mut tail_recoveries = Vec::new();
-        if let Some(recovery) =
-            repair_unterminated_tail(&event_log_path, "session event", |line| {
-                decode_event_line(line, 0, &event_log_path).map(|_| ())
-            })?
-        {
-            tail_recoveries.push(recovery);
-        }
-        if let Some(recovery) =
-            repair_unterminated_tail(&outbox_path, "session outbox record", |line| {
-                decode_durable_record::<DurableOutboxRecord>(
-                    line,
-                    0,
-                    &outbox_path,
-                    "session outbox record",
-                )
-                .map(|_| ())
-            })?
-        {
-            tail_recoveries.push(recovery);
-        }
-        Ok((lock_file, tail_recoveries))
     }
 
     #[allow(
@@ -165,8 +150,10 @@ impl SessionLogStore {
 
             write_manifest(&session_dir, &manifest)?;
 
-            create_empty_event_log(&session_dir)?;
-            create_empty_outbox_log(&session_dir)?;
+            JournalStore::create_log(&session_dir.join(SESSION_EVENT_LOG_FILE))
+                .map_err(journal_error)?;
+            JournalStore::create_log(&session_dir.join(SESSION_OUTBOX_LOG_FILE))
+                .map_err(journal_error)?;
             sync_directory(&session_dir)
         })();
         if let Err(create_error) = initialization {
@@ -201,7 +188,7 @@ impl SessionLogStore {
         }
         let outbox_path = outbox_log_path(&session_dir, &manifest)?;
         if !outbox_path.is_file() {
-            create_empty_outbox_log(&session_dir)?;
+            JournalStore::create_log(&outbox_path).map_err(journal_error)?;
             sync_directory(&session_dir)?;
         }
 
@@ -285,9 +272,6 @@ impl SessionLogStore {
         events: &[SessionEventEnvelope],
         lease: &mut SessionWriteLease,
     ) -> Result<u64, CodingSessionError> {
-        let _append_guard = self
-            .append_lock
-            .lock_resource("session append serialization")?;
         self.append_events_locked(handle, events, lease)
     }
 
@@ -298,10 +282,8 @@ impl SessionLogStore {
         records: &[DurableOutboxRecordCandidate],
         lease: &mut SessionWriteLease,
     ) -> Result<u64, CodingSessionError> {
-        let _append_guard = self
-            .append_lock
-            .lock_resource("session append serialization")?;
-        let prepared_events = self.prepare_events_locked(handle, events, lease.next_sequence)?;
+        let prepared_events =
+            self.prepare_events_locked(handle, events, lease.journal.next_sequence())?;
         let committed_through_session_sequence = prepared_events
             .last()
             .and_then(|event| event.session_sequence)
@@ -337,14 +319,32 @@ impl SessionLogStore {
                     .map_err(session_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // Ordering is intentional: a durable outbox-only tail is explicit
-        // recovery evidence, while events are never made visible before their
-        // publication obligation is durable.
-        self.append_outbox_locked(handle, &records)?;
-        self.append_prepared_events_locked(handle, &prepared_events)?;
-        lease.next_sequence = committed_through_session_sequence
-            .checked_add(1)
-            .ok_or_else(|| session_error("session event sequence overflowed"))?;
+        let paths = journal_paths(handle)?;
+        let event_frames = prepared_events
+            .iter()
+            .map(|event| encode_durable_record(event, "session event"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let outbox_frames = records
+            .iter()
+            .map(|record| encode_durable_record(record, "session outbox record"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let outbox_fault = if outbox_frames.is_empty() {
+            None
+        } else {
+            self.take_io_fault().map(Into::into)
+        };
+        let record_fault = self.take_io_fault().map(Into::into);
+        self.journal
+            .append_checkpoint(
+                &paths,
+                &event_frames,
+                &outbox_frames,
+                &mut lease.journal,
+                committed_through_session_sequence,
+                record_fault,
+                outbox_fault,
+            )
+            .map_err(journal_error)?;
         Ok(committed_through_session_sequence)
     }
 
@@ -354,15 +354,30 @@ impl SessionLogStore {
         events: &[SessionEventEnvelope],
         lease: &mut SessionWriteLease,
     ) -> Result<u64, CodingSessionError> {
-        let prepared_events = self.prepare_events_locked(handle, events, lease.next_sequence)?;
-        self.append_prepared_events_locked(handle, &prepared_events)?;
+        let prepared_events =
+            self.prepare_events_locked(handle, events, lease.journal.next_sequence())?;
         let committed_sequence = prepared_events
             .last()
             .and_then(|event| event.session_sequence)
             .unwrap_or_else(|| lease.committed_sequence());
-        lease.next_sequence = committed_sequence
-            .checked_add(1)
-            .ok_or_else(|| session_error("session event sequence overflowed"))?;
+        if prepared_events.is_empty() {
+            return Ok(committed_sequence);
+        }
+        let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
+        let frames = prepared_events
+            .iter()
+            .map(|event| encode_durable_record(event, "session event"))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.journal
+            .append_records(
+                &event_log_path,
+                &frames,
+                "session event",
+                &mut lease.journal,
+                committed_sequence,
+                self.take_io_fault().map(Into::into),
+            )
+            .map_err(journal_error)?;
         Ok(committed_sequence)
     }
 
@@ -380,54 +395,6 @@ impl SessionLogStore {
                 Ok(event)
             })
             .collect()
-    }
-
-    fn next_session_sequence(
-        &self,
-        event_log_path: &Path,
-        session_id: &str,
-    ) -> Result<u64, CodingSessionError> {
-        next_session_sequence(event_log_path, session_id)
-    }
-
-    fn append_prepared_events_locked(
-        &self,
-        handle: &SessionHandle,
-        events: &[SessionEventEnvelope],
-    ) -> Result<(), CodingSessionError> {
-        let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
-        let records = events
-            .iter()
-            .map(|event| encode_durable_record(event, "session event"))
-            .collect::<Result<Vec<_>, _>>()?;
-        append_durable_records(
-            &event_log_path,
-            &records,
-            "session event",
-            self.take_io_fault(),
-        )
-    }
-
-    fn append_outbox_locked(
-        &self,
-        handle: &SessionHandle,
-        records: &[DurableOutboxRecord],
-    ) -> Result<(), CodingSessionError> {
-        if records.is_empty() {
-            return Ok(());
-        }
-
-        let outbox_path = outbox_log_path(&handle.session_dir, &handle.manifest)?;
-        let records = records
-            .iter()
-            .map(|record| encode_durable_record(record, "session outbox record"))
-            .collect::<Result<Vec<_>, _>>()?;
-        append_durable_records(
-            &outbox_path,
-            &records,
-            "session outbox record",
-            self.take_io_fault(),
-        )
     }
 
     pub(crate) fn read_events(
@@ -455,28 +422,19 @@ impl SessionLogStore {
         handle: &SessionHandle,
     ) -> Result<SessionCreationWorkspace, CodingSessionError> {
         let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
-        let file = File::open(&event_log_path).map_err(|error| {
-            session_error(format!(
-                "failed to open session event log {}: {error}",
-                event_log_path.display()
-            ))
-        })?;
-        let mut reader = BufReader::new(file);
-        let mut line = Vec::new();
-        if !read_bounded_line(&mut reader, &mut line, &event_log_path)? {
+        let Some(line) = read_first_line(&event_log_path).map_err(journal_error)? else {
             return Err(session_error(format!(
                 "session event log {} is missing its SessionCreated frame",
                 event_log_path.display()
             )));
-        }
-        let line = decode_utf8_line(&line, 1, &event_log_path)?;
+        };
         if line.trim().is_empty() {
             return Err(session_error(format!(
                 "session event log {} has an empty first frame",
                 event_log_path.display()
             )));
         }
-        let event = decode_event_line(line, 1, &event_log_path)?;
+        let event = decode_event_line(&line, 1, &event_log_path)?;
         validate_contiguous_session_sequence(&event, 1)?;
         validate_event_for_session(&event, &handle.manifest.session_id)?;
         match event.data {
@@ -500,31 +458,20 @@ impl SessionLogStore {
         mut visitor: impl FnMut(SessionEventEnvelope) -> Result<(), CodingSessionError>,
     ) -> Result<(), CodingSessionError> {
         let event_log_path = event_log_path(&handle.session_dir, &handle.manifest)?;
-        let file = File::open(&event_log_path).map_err(|error| {
-            session_error(format!(
-                "failed to open session event log {}: {error}",
-                event_log_path.display()
-            ))
-        })?;
-        let mut reader = BufReader::new(file);
-        let mut line = Vec::new();
         let mut expected_sequence = 0_u64;
-        let mut line_number = 0_usize;
-        while read_bounded_line(&mut reader, &mut line, &event_log_path)? {
-            line_number += 1;
-            let line = decode_utf8_line(&line, line_number, &event_log_path)?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            expected_sequence = expected_sequence
-                .checked_add(1)
-                .ok_or_else(|| session_error("session event sequence overflowed"))?;
-            let event = decode_event_line(line, line_number, &event_log_path)?;
-            validate_contiguous_session_sequence(&event, expected_sequence)?;
-            validate_event_for_session(&event, &handle.manifest.session_id)?;
-            visitor(event)?;
-        }
-        Ok(())
+        visit_lines(&event_log_path, |line, line_number| {
+            (|| -> Result<(), CodingSessionError> {
+                expected_sequence = expected_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| session_error("session event sequence overflowed"))?;
+                let event = decode_event_line(line, line_number, &event_log_path)?;
+                validate_contiguous_session_sequence(&event, expected_sequence)?;
+                validate_event_for_session(&event, &handle.manifest.session_id)?;
+                visitor(event)
+            })()
+            .map_err(journal_codec_error)
+        })
+        .map_err(journal_error)
     }
 
     pub(crate) fn replay_session(
@@ -549,67 +496,62 @@ impl SessionLogStore {
         handle: &SessionHandle,
     ) -> Result<Vec<DurableOutboxRecord>, CodingSessionError> {
         let outbox_path = outbox_log_path(&handle.session_dir, &handle.manifest)?;
-        let file = File::open(&outbox_path).map_err(|error| {
-            session_error(format!(
-                "failed to open session outbox {}: {error}",
-                outbox_path.display()
-            ))
-        })?;
-        let mut reader = BufReader::new(file);
-        let mut line = Vec::new();
         let mut records = Vec::new();
         let mut record_ids = std::collections::HashSet::new();
         let mut previous_sequence = 0_u64;
-        let mut line_number = 0_usize;
-        while read_bounded_line(&mut reader, &mut line, &outbox_path)? {
-            line_number += 1;
-            let line = decode_utf8_line(&line, line_number, &outbox_path)?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let record: DurableOutboxRecord =
-                decode_durable_record(line, line_number, &outbox_path, "session outbox record")?;
-            if record.schema != OUTBOX_SCHEMA || record.version != OUTBOX_VERSION {
-                return Err(session_error(format!(
-                    "unsupported session outbox schema/version at {} line {}",
-                    outbox_path.display(),
-                    line_number
-                )));
-            }
-            if record.session_id != handle.manifest.session_id
-                || record.committed_through_session_sequence == 0
-                || record.source_event_ids.is_empty()
-                || record.operation_kind.as_deref().is_some_and(|kind| {
-                    kind.trim().is_empty()
-                        || crate::kernel::operation::OperationKind::from_str(kind).is_none()
-                })
-                || record
-                    .source_event_ids
-                    .iter()
-                    .any(|event_id| event_id.trim().is_empty())
-            {
-                return Err(session_error(format!(
-                    "invalid session outbox identity at {} line {}",
-                    outbox_path.display(),
-                    line_number
-                )));
-            }
-            if record.committed_through_session_sequence < previous_sequence {
-                return Err(session_error(format!(
-                    "session outbox cursor regressed at {} line {}",
-                    outbox_path.display(),
-                    line_number
-                )));
-            }
-            if !record_ids.insert(record.record_id.clone()) {
-                return Err(session_error(format!(
-                    "duplicate session outbox record {}",
-                    record.record_id
-                )));
-            }
-            previous_sequence = record.committed_through_session_sequence;
-            records.push(record);
-        }
+        visit_lines(&outbox_path, |line, line_number| {
+            (|| -> Result<(), CodingSessionError> {
+                let record: DurableOutboxRecord = decode_durable_record(
+                    line,
+                    line_number,
+                    &outbox_path,
+                    "session outbox record",
+                )?;
+                if record.schema != OUTBOX_SCHEMA || record.version != OUTBOX_VERSION {
+                    return Err(session_error(format!(
+                        "unsupported session outbox schema/version at {} line {}",
+                        outbox_path.display(),
+                        line_number
+                    )));
+                }
+                if record.session_id != handle.manifest.session_id
+                    || record.committed_through_session_sequence == 0
+                    || record.source_event_ids.is_empty()
+                    || record.operation_kind.as_deref().is_some_and(|kind| {
+                        kind.trim().is_empty()
+                            || crate::kernel::operation::OperationKind::from_str(kind).is_none()
+                    })
+                    || record
+                        .source_event_ids
+                        .iter()
+                        .any(|event_id| event_id.trim().is_empty())
+                {
+                    return Err(session_error(format!(
+                        "invalid session outbox identity at {} line {}",
+                        outbox_path.display(),
+                        line_number
+                    )));
+                }
+                if record.committed_through_session_sequence < previous_sequence {
+                    return Err(session_error(format!(
+                        "session outbox cursor regressed at {} line {}",
+                        outbox_path.display(),
+                        line_number
+                    )));
+                }
+                if !record_ids.insert(record.record_id.clone()) {
+                    return Err(session_error(format!(
+                        "duplicate session outbox record {}",
+                        record.record_id
+                    )));
+                }
+                previous_sequence = record.committed_through_session_sequence;
+                records.push(record);
+                Ok(())
+            })()
+            .map_err(journal_codec_error)
+        })
+        .map_err(journal_error)?;
         Ok(records)
     }
 

@@ -2,19 +2,20 @@ use crate::agent::queue::enqueue_message;
 use crate::agent::turn::AgentTurnRunner;
 use crate::agent::types::{
     AgentConfig, AgentInputQueue, AgentMessage, AgentQueueError, AgentResources, AgentStream,
-    AgentTool, AgentToolDefinitionError,
 };
 use crate::context::conversion::convert_to_context;
 use crate::hooks::BeforeProviderRequestHook;
 use crate::resources::{format_prompt_template_invocation, format_skill_invocation};
-use ai::api::conversation::Context;
-use ai::api::stream::StreamOptions;
+use ai_protocol::api::conversation::Context;
+use ai_protocol::api::stream::StreamOptions;
 use std::collections::VecDeque;
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 use tokio_util::sync::CancellationToken;
+use tool_contract::api::definition::{ToolDefinition, ToolDefinitionError};
+use tool_runtime::api::ToolRuntime;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AgentAdmissionError {
@@ -30,7 +31,8 @@ pub enum AgentAdmissionError {
 
 pub struct AgentState {
     pub messages: Vec<AgentMessage>,
-    pub tools: Vec<AgentTool>,
+    pub tool_runtime: Option<ToolRuntime>,
+    pub provider_tools: Vec<ToolDefinition>,
     pub config: AgentConfig,
     pub cancel_token: CancellationToken,
     pub steering_queue: VecDeque<AgentMessage>,
@@ -78,7 +80,8 @@ impl Agent {
         Self {
             state: Arc::new(RwLock::new(AgentState {
                 messages: Vec::new(),
-                tools: Vec::new(),
+                tool_runtime: None,
+                provider_tools: Vec::new(),
                 cancel_token: CancellationToken::new(),
                 config,
                 steering_queue: VecDeque::new(),
@@ -90,20 +93,58 @@ impl Agent {
         }
     }
 
-    pub fn add_tool(&self, tool: AgentTool) -> Result<(), AgentToolDefinitionError> {
-        tool.validate()?;
-        let mut state = self.state.write().unwrap();
-        if state
-            .tools
-            .iter()
-            .any(|existing| existing.name == tool.name)
-        {
-            return Err(AgentToolDefinitionError::new(
-                "name",
-                format!("duplicate tool name: {}", tool.name),
+    pub fn add_provider_tool(&self, definition: ToolDefinition) -> Result<(), ToolDefinitionError> {
+        definition.validate()?;
+        if !definition.capabilities.provider_executed {
+            return Err(ToolDefinitionError::new(
+                "capabilities",
+                "provider declaration must set provider_executed",
             ));
         }
-        state.tools.push(tool);
+        let mut state = self.state.write().unwrap();
+        if state
+            .provider_tools
+            .iter()
+            .any(|existing| existing.id == definition.id)
+            || state
+                .tool_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.definition(&definition.id).is_some())
+        {
+            return Err(ToolDefinitionError::new(
+                "id",
+                format!("duplicate tool id: {}", definition.id),
+            ));
+        }
+        state.provider_tools.push(definition);
+        Ok(())
+    }
+
+    pub fn set_tool_runtime(&self, runtime: ToolRuntime) -> Result<(), ToolDefinitionError> {
+        let definitions = runtime.definitions();
+        let mut state = self.state.write().unwrap();
+        for definition in &definitions {
+            if definition.capabilities.provider_executed {
+                return Err(ToolDefinitionError::new(
+                    "capabilities",
+                    format!(
+                        "provider-executed tool {} cannot enter the local runtime",
+                        definition.id
+                    ),
+                ));
+            }
+            if state
+                .provider_tools
+                .iter()
+                .any(|tool| tool.id == definition.id)
+            {
+                return Err(ToolDefinitionError::new(
+                    "id",
+                    format!("duplicate tool id: {}", definition.id),
+                ));
+            }
+        }
+        state.tool_runtime = Some(runtime);
         Ok(())
     }
 
@@ -157,7 +198,7 @@ impl Agent {
 
     pub fn steer_content(
         &self,
-        content: Vec<ai::api::conversation::ContentBlock>,
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
     ) -> Result<(), AgentQueueError> {
         let mut state = self.state.write().unwrap();
         let message_id = next_message_id(&state, "steer");
@@ -190,7 +231,7 @@ impl Agent {
 
     pub fn follow_up_content(
         &self,
-        content: Vec<ai::api::conversation::ContentBlock>,
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
     ) -> Result<(), AgentQueueError> {
         let mut state = self.state.write().unwrap();
         let message_id = next_message_id(&state, "followup");
@@ -367,10 +408,16 @@ impl Agent {
 
     pub fn provider_request_snapshot(&self) -> (Context, Option<StreamOptions>) {
         let state = self.state.read().unwrap();
+        let runtime_tools = state
+            .tool_runtime
+            .as_ref()
+            .map(ToolRuntime::definitions)
+            .unwrap_or_default();
         let context = convert_to_context(
             &state.config.system_prompt,
             &state.messages,
-            &state.tools,
+            &runtime_tools,
+            &state.provider_tools,
             &state.config.resources,
         );
         (context, state.config.stream_options.clone())

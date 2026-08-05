@@ -1,18 +1,20 @@
 [package]
 name = "tui"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [features]
 default = []
 test-support = []
 
 [dependencies]
-base64 = "0.22"
+base64.workspace = true
 bitflags = "2"
 crossterm = "0.28"
 pulldown-cmark = "0.12"
-thiserror = "2"
+thiserror.workspace = true
 unicode-segmentation = "1"
 unicode-width = "0.2"
 

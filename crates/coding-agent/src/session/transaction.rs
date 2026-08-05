@@ -14,7 +14,7 @@ const SESSION_TRANSACTION_WRITER_CAPACITY: usize = 128;
 const SESSION_TRANSACTION_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_TRANSACTION_BLOCKING_RETRY_INTERVAL: Duration = Duration::from_millis(1);
 
-use ai::api::conversation::Usage;
+use ai_protocol::api::conversation::Usage;
 use futures::future::BoxFuture;
 use serde_json::Value;
 

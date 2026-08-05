@@ -8,23 +8,40 @@ artifact_dir="${repository_root}/target/release-api-snapshots"
 cd "${repository_root}"
 mkdir -p "${artifact_dir}"
 
-# Release API inventory: agent-core ai coding-agent desktop tui.
-# Each target owns compile-time facade checks or serialized contract snapshots;
-# keeping the list explicit makes a newly exposed surface a reviewed release edit.
+# Release API inventory for every stable workspace facade and serialized contract.
+# Each command names a real facade or serialized contract test. Keeping the list
+# explicit makes a newly exposed surface a reviewed release edit.
 {
     printf 'release_api\tpackage=agent-core\ttarget=api_contract\n'
-    cargo test --locked -p agent-core --features test-support --test api_contract
+    cargo test --locked -p agent-core --test api_contract
 
-    printf 'release_api\tpackage=ai\ttargets=public_api,api_boundary_guards,provider_registry_boundary_guards\n'
-    cargo test --locked -p ai \
-        --test public_api \
-        --test api_boundary_guards \
-        --test provider_registry_boundary_guards
+    printf 'release_api\tpackage=ai-protocol\ttarget=api_contract\n'
+    cargo test --locked -p ai-protocol --test api_contract
 
-    printf 'release_api\tpackage=coding-agent\ttargets=api_contract,events_snapshot\n'
-    cargo test --locked -p coding-agent \
-        --test api_contract \
-        --test events_snapshot
+    printf 'release_api\tpackage=ai-protocol\ttarget=protocol_contract\n'
+    cargo test --locked -p ai-protocol --test protocol_contract
+
+    printf 'release_api\tpackage=ai\ttarget=api_contract\n'
+    cargo test --locked -p ai --test api_contract
+
+    printf 'release_api\tpackage=tool-contract\ttarget=api_contract\n'
+    cargo test --locked -p tool-contract
+
+    printf 'release_api\tpackage=tool-runtime\ttarget=api_contract\n'
+    cargo test --locked -p tool-runtime
+
+    printf 'release_api\tpackage=event-journal\ttarget=api_contract\n'
+    cargo test --locked -p event-journal
+
+    printf 'release_api\tpackage=coding-agent\ttarget=api_contract\n'
+    cargo test --locked -p coding-agent --test api_contract
+
+    printf 'release_api\tpackage=coding-agent\ttarget=product_event_projection_golden\n'
+    cargo test --locked -p coding-agent --lib domain::projection::golden
+
+    printf 'release_api\tpackage=coding-agent\ttarget=operation_and_capability_contracts\n'
+    cargo test --locked -p coding-agent --lib application::operation::tests
+    cargo test --locked -p coding-agent --lib operations::delegation::capability_snapshot_tests
 
     printf 'release_api\tpackage=desktop\ttarget=dependency_boundary\n'
     cargo test --locked -p desktop --test dependency_boundary

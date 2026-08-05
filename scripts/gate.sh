@@ -5,6 +5,8 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "$repo_root"
 
+scripts/architecture-gate.sh
+
 if rg -n -U \
     --glob '*.rs' \
     --glob '!mutex.rs' \

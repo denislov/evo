@@ -2,17 +2,23 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+#[cfg(test)]
+use std::io::BufWriter;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 
+use event_journal::api::error::{JournalError, JournalErrorKind};
+#[cfg(test)]
+use event_journal::api::frame::MAX_JOURNAL_RECORD_BYTES;
+use event_journal::api::frame::{decode_json_record, decode_json_value, encode_json_record};
+use event_journal::api::read::{read_first_line, visit_lines};
+use event_journal::api::storage::{AppendFault, JournalPaths, JournalStore, JournalWriteLease};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, value::RawValue};
-use sha2::{Digest, Sha256};
-
-use crate::mutex::MutexExt;
+use serde_json::Value;
 
 use super::manifest::{
     EVENT_SCHEMA, EVENT_VERSION, LEGACY_SESSION_VERSION, PersistedWorkspaceScope,
@@ -25,37 +31,18 @@ use crate::events::outbox::{
 };
 use crate::kernel::error::CodingSessionError;
 use crate::kernel::ids::ProfileId;
+#[cfg(test)]
+use crate::mutex::MutexExt;
 use crate::session::event::{SessionEventData, SessionEventEnvelope};
 use crate::workspace::projectless_workspace_id_for_session;
 
 const SESSION_WRITER_LOCK_FILE: &str = ".writer.lock";
-const MAX_SESSION_RECORD_BYTES: usize = 1024 * 1024;
-const MAX_SESSION_PAYLOAD_BYTES: usize = MAX_SESSION_RECORD_BYTES - 4096;
-const DURABLE_FRAME_SCHEMA: &str = "evo.session.frame";
-const DURABLE_FRAME_VERSION: u32 = 2;
 static MANIFEST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Debug, serde::Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct DurableFrameMetadata {
-    schema: String,
-    version: u32,
-    payload_bytes: u32,
-    sha256: String,
-}
-
-#[derive(Debug, serde::Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct DurableFrame {
-    #[serde(rename = "_evo_frame")]
-    metadata: DurableFrameMetadata,
-    payload: Box<RawValue>,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionLogStore {
     root: PathBuf,
-    append_lock: Arc<Mutex<()>>,
+    journal: JournalStore,
     #[cfg(test)]
     io_faults: Option<SessionIoFaultPlan>,
 }
@@ -90,18 +77,25 @@ impl SessionIoFaultPlan {
 
 #[derive(Debug)]
 pub(crate) struct SessionWriteLease {
-    _lock_file: File,
-    next_sequence: u64,
-    tail_recoveries: Vec<String>,
+    journal: JournalWriteLease,
 }
 
 impl SessionWriteLease {
     pub(crate) fn committed_sequence(&self) -> u64 {
-        self.next_sequence.saturating_sub(1)
+        self.journal.committed_sequence()
     }
 
     pub(crate) fn tail_recoveries(&self) -> &[String] {
-        &self.tail_recoveries
+        self.journal.tail_recoveries()
+    }
+}
+
+impl From<SessionIoFault> for AppendFault {
+    fn from(value: SessionIoFault) -> Self {
+        match value {
+            SessionIoFault::WriteAfterBytes(bytes) => Self::WriteAfterBytes(bytes),
+            SessionIoFault::Sync => Self::Sync,
+        }
     }
 }
 
@@ -306,6 +300,28 @@ impl ManifestPatch {
 mod io;
 
 use io::*;
+
+fn journal_error(error: JournalError) -> CodingSessionError {
+    if error.kind() == JournalErrorKind::WriteRejected {
+        CodingSessionError::SessionWriteRejected {
+            message: error.message().to_owned(),
+        }
+    } else {
+        session_error(error.to_string())
+    }
+}
+
+fn journal_codec_error(error: CodingSessionError) -> JournalError {
+    JournalError::codec(error.to_string())
+}
+
+fn journal_paths(handle: &SessionHandle) -> Result<JournalPaths, CodingSessionError> {
+    Ok(JournalPaths::new(
+        event_log_path(&handle.session_dir, &handle.manifest)?,
+        outbox_log_path(&handle.session_dir, &handle.manifest)?,
+        handle.session_dir.join(SESSION_WRITER_LOCK_FILE),
+    ))
+}
 
 pub(crate) fn normalize_session_id(value: &str) -> Result<String, CodingSessionError> {
     normalize_session_id_impl(value)

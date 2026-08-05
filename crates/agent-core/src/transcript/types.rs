@@ -1,4 +1,4 @@
-use ai::api::conversation::{ContentBlock, StopReason};
+use ai_protocol::api::conversation::{ContentBlock, StopReason};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 

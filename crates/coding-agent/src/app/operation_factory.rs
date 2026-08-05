@@ -1,10 +1,10 @@
 use std::fmt;
 
 use agent_core::api::agent::{AgentResources, ThinkingLevel};
-use agent_core::api::tool::{AgentTool, ToolExecutionMode};
-use ai::api::auth::ProviderAuthDiagnostic;
 use ai::api::client::AiClient;
-use ai::api::model::Model;
+use ai_protocol::api::auth::ProviderAuthDiagnostic;
+use ai_protocol::api::model::Model;
+use tool_contract::api::definition::ToolExecutionMode;
 
 use crate::app::bootstrap::{PromptInvocation, SessionRunOptions};
 use crate::app::embedding::CodingAgentThinkingLevel;
@@ -31,7 +31,7 @@ pub struct CodingAgentOperationFactory {
     auth_diagnostics: Vec<ProviderAuthDiagnostic>,
     system_prompt: Option<String>,
     max_turns: Option<u32>,
-    tools: Vec<AgentTool>,
+    tools: Vec<std::sync::Arc<dyn tool_runtime::api::DynamicTool>>,
     register_builtins: bool,
     ai_client: Option<AiClient>,
     session: Option<SessionRunOptions>,
@@ -65,7 +65,7 @@ impl CodingAgentOperationFactory {
         auth_diagnostics: Vec<ProviderAuthDiagnostic>,
         system_prompt: Option<String>,
         max_turns: Option<u32>,
-        tools: Vec<AgentTool>,
+        tools: Vec<std::sync::Arc<dyn tool_runtime::api::DynamicTool>>,
         register_builtins: bool,
         ai_client: Option<AiClient>,
         session: Option<SessionRunOptions>,

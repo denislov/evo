@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use ai::api::conversation::Context;
-use ai::api::model::Model;
-use ai::api::stream::StreamOptions;
+use ai_protocol::api::conversation::Context;
+use ai_protocol::api::model::Model;
+use ai_protocol::api::stream::StreamOptions;
 
 use super::HookFuture;
 use crate::agent::types::ProviderRequestSnapshot;

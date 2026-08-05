@@ -3,12 +3,12 @@ use crate::app::invocation::CodingAgentInvocationOptions;
 use agent_core::api::agent::{
     AgentConfig, AgentResources, CompactionConfig, CompactionSettings, ThinkingLevel,
 };
-use agent_core::api::tool::{AgentTool, ToolExecutionMode};
-use ai::api::auth::ProviderAuthDiagnostic;
 use ai::api::client::AiClient;
-use ai::api::model::Model;
-use ai::api::stream::StreamOptions;
+use ai_protocol::api::auth::ProviderAuthDiagnostic;
+use ai_protocol::api::model::Model;
+use ai_protocol::api::stream::StreamOptions;
 use std::path::PathBuf;
+use tool_contract::api::definition::ToolExecutionMode;
 
 use crate::workspace::CodingAgentResolvedWorkspace;
 
@@ -71,7 +71,7 @@ impl SessionRunOptions {
 #[derive(Clone)]
 pub(crate) struct ApplicationRunOptions {
     pub model_override: Option<Model>,
-    pub tools: Vec<AgentTool>,
+    pub tools: Vec<std::sync::Arc<dyn tool_runtime::api::DynamicTool>>,
     pub register_builtins: bool,
     pub global_config_only: bool,
     pub ai_client: Option<AiClient>,
@@ -271,7 +271,7 @@ pub fn effective_no_context_files(
 #[derive(Clone, Debug)]
 pub enum PromptInvocation {
     Text(String),
-    Content(Vec<ai::api::conversation::ContentBlock>),
+    Content(Vec<ai_protocol::api::conversation::ContentBlock>),
     Compact {
         custom_instructions: Option<String>,
     },

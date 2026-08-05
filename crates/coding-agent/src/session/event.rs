@@ -4,8 +4,8 @@ use serde_json::Value;
 use crate::authorization::{ToolAuthorizationDecision, ToolAuthorizationRequest};
 use crate::operations::delegation::DelegationLineageEntry;
 use crate::profiles::{ProfileId, ProfileKind};
-use ai::api::conversation::{ProviderMetadata, Usage};
-use ai::api::model::Model;
+use ai_protocol::api::conversation::{ProviderMetadata, Usage};
+use ai_protocol::api::model::Model;
 
 use super::manifest::{EVENT_SCHEMA, EVENT_VERSION, PersistedWorkspaceScope};
 
@@ -468,7 +468,7 @@ pub(crate) enum DiagnosticLevel {
 #[cfg(test)]
 mod tests {
     use super::PersistedContentBlock;
-    use ai::api::conversation::ProviderMetadata;
+    use ai_protocol::api::conversation::ProviderMetadata;
 
     #[test]
     fn legacy_thinking_content_without_provider_metadata_still_deserializes() {

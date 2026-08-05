@@ -335,7 +335,9 @@ fn content_to_text(content: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ResponsesOptions, ResponsesTextFormat, ThinkingConfig, Tool};
+    use ai_protocol::api::stream::ResponsesOptions;
+
+    use crate::protocol::{ResponsesTextFormat, ThinkingConfig, Tool};
 
     fn text(value: &str) -> ContentBlock {
         ContentBlock::Text {

@@ -66,7 +66,7 @@ impl CodingAgentProfileCatalog {
                 break;
             }
             let inventory = DelegationTargetInventory::from_registry(registry, &profile.delegation);
-            let (tools, tools_truncated) = bounded_strings(&profile.tools);
+            let (tools, tools_truncated) = bounded_tool_ids(&profile.tools);
             let (skills, skills_truncated) = bounded_strings(&profile.skills);
             let (agent_targets, agents_truncated) =
                 bounded_profile_ids(inventory.agent_ids().cloned());
@@ -160,6 +160,17 @@ fn bounded_strings(values: &[String]) -> (Vec<String>, bool) {
             .iter()
             .take(MAX_PROFILE_LIST_ITEMS)
             .map(|value| safe_public_summary(value))
+            .collect(),
+        values.len() > MAX_PROFILE_LIST_ITEMS,
+    )
+}
+
+fn bounded_tool_ids(values: &[tool_contract::api::definition::ToolId]) -> (Vec<String>, bool) {
+    (
+        values
+            .iter()
+            .take(MAX_PROFILE_LIST_ITEMS)
+            .map(|id| safe_public_summary(id.as_str()))
             .collect(),
         values.len() > MAX_PROFILE_LIST_ITEMS,
     )

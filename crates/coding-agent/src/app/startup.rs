@@ -14,10 +14,10 @@ use crate::tools::{self, ToolFilter};
 use agent_core::api::resources::{
     AgentResources, DiagnosticSeverity as ResourceDiagnosticSeverity, ResourceDiagnostic,
 };
-use ai::api::auth::ProviderAuthDiagnostic;
 use ai::api::client::AiClient;
-use ai::api::model::Model;
 use ai::api::transport::TransportConfig;
+use ai_protocol::api::auth::ProviderAuthDiagnostic;
+use ai_protocol::api::model::Model;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ pub struct ResolvedApplicationContext {
     pub loaded_resources: LoadedResources,
     pub context_files: Vec<crate::resources::ContextFile>,
     pub system_prompt: Option<String>,
-    pub tools: Vec<agent_core::api::tool::AgentTool>,
+    pub tools: Vec<std::sync::Arc<dyn tool_runtime::api::DynamicTool>>,
     pub register_builtins: bool,
     pub global_config_only: bool,
     pub ai_client: Option<AiClient>,

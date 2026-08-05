@@ -44,7 +44,8 @@ use crate::interactive::transient_overlay::TransientOverlayBridge;
 use crate::interactive::tree_selector::{TreeSelectorInput, TreeSelectorState};
 use crate::interactive::{Transcript, TranscriptItem, UiEvent};
 use coding_agent::api::authorization::{
-    ToolAuthorizationDecision, ToolAuthorizationMode, ToolAuthorizationRequest, ToolAuthorizationRisk,
+    ToolAuthorizationDecision, ToolAuthorizationMode, ToolAuthorizationRequest,
+    ToolAuthorizationRisk,
 };
 use coding_agent::api::client::{
     CodingAgentContextSnapshot, CodingAgentFileChangeSnapshot, CodingAgentOperationSnapshot,
@@ -1354,10 +1355,7 @@ impl InteractiveRoot {
         if let Some(content) = request.preview.content_preview.as_deref() {
             inner.push(fit_line("  preview:", content_width));
             for content_line in content.lines().take(6) {
-                inner.push(fit_line(
-                    &format!("    {content_line}"),
-                    content_width,
-                ));
+                inner.push(fit_line(&format!("    {content_line}"), content_width));
             }
         }
         for (index, label) in ["Allow once", "Allow for operation", "Deny"]

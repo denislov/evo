@@ -1,7 +1,13 @@
+pub(crate) mod apply_patch;
+pub(crate) mod bounded;
 mod diff;
 pub(crate) mod edit;
 pub(crate) mod find;
 pub(crate) mod grep;
+pub(crate) mod hashline;
 pub(crate) mod ls;
+pub(crate) mod mutation_receipt;
+pub(crate) mod patch;
 pub(crate) mod read;
+pub(crate) mod text_match;
 pub(crate) mod write;

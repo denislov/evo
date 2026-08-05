@@ -22,6 +22,7 @@ pub struct ShellCapability {
 }
 
 impl ShellCapability {
+    #[cfg(test)]
     pub fn new(cwd: PathBuf) -> Self {
         Self {
             cwd,
@@ -114,17 +115,6 @@ pub(crate) enum ProcessOutcome {
         message: String,
         output: ProcessOutput,
     },
-}
-
-impl ProcessOutcome {
-    pub(crate) fn output(&self) -> &ProcessOutput {
-        match self {
-            Self::Completed { output, .. }
-            | Self::TimedOut { output }
-            | Self::Cancelled { output }
-            | Self::Failed { output, .. } => output,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -25,6 +25,7 @@ pub struct FilesystemTarget {
     relative: PathBuf,
     display: PathBuf,
     target_fingerprint: String,
+    root: Option<Arc<Dir>>,
     object: Option<FilesystemTargetObject>,
 }
 
@@ -216,6 +217,7 @@ impl FilesystemCapability {
             display: preview.display,
             relative,
             target_fingerprint: "unbound-preview".into(),
+            root: Some(self.root.clone()),
             object: None,
         })
     }
@@ -582,6 +584,7 @@ impl FilesystemCapability {
                     .unwrap_or_else(|| PathBuf::from(".")),
                 display: preview.display,
                 target_fingerprint: "unbound-preview".into(),
+                root: None,
                 object: None,
             }
         };
@@ -597,7 +600,7 @@ impl FilesystemCapability {
                         capability_error_detail(&error)
                     ))
                 }),
-            "edit" => self
+            "edit" | "hashline_edit" => self
                 .open_target_file(&target, workspace_local, true, true)
                 .map(|file| FilesystemTargetObject::File(Arc::new(Mutex::new(file))))
                 .unwrap_or_else(|error| {
@@ -647,6 +650,13 @@ impl FilesystemCapability {
                     FilesystemTargetObject::Unavailable(message)
                 }),
             "write" => {
+                if workspace_local {
+                    self.prepare_write_target(&target)?
+                } else {
+                    self.prepare_external_write_target(&target)?
+                }
+            }
+            "apply_patch" => {
                 if workspace_local {
                     self.prepare_write_target(&target)?
                 } else {
@@ -878,6 +888,10 @@ impl FilesystemTarget {
 
     pub(crate) fn is_vacant(&self) -> bool {
         matches!(self.object, Some(FilesystemTargetObject::Vacant { .. }))
+    }
+
+    pub(crate) fn remove_file(&self) -> Result<(), String> {
+        remove_bound_file(self)
     }
 }
 

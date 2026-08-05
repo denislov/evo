@@ -1,4 +1,4 @@
-use ai::api::conversation::{AssistantMessage, ContentBlock};
+use ai_protocol::api::conversation::{AssistantMessage, ContentBlock};
 
 // ── AgentMessage ───────────────────────────────────
 

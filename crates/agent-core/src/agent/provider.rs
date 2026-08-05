@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use ai::api::conversation::{AssistantMessage, Context, StopReason};
-use ai::api::model::Model;
-use ai::api::stream::{AssistantMessageEvent, EventStream, StreamOptions};
+use ai_protocol::api::conversation::{AssistantMessage, Context, StopReason};
+use ai_protocol::api::model::Model;
+use ai_protocol::api::stream::{AssistantMessageEvent, EventStream, StreamOptions};
 use async_stream::stream;
 
 pub type ProviderStreamer =

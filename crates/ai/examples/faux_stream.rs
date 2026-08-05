@@ -1,8 +1,8 @@
-use ai::api::conversation::{ContentBlock, Context, Message};
-use ai::api::model::{Model, ModelCost, ModelInput};
 use ai::api::provider::ProviderRegistry;
 use ai::api::provider::faux::{FauxProvider, FauxResponse};
-use ai::api::stream::AssistantMessageEvent;
+use ai_protocol::api::conversation::{ContentBlock, Context, Message};
+use ai_protocol::api::model::{Model, ModelCost, ModelInput};
+use ai_protocol::api::stream::AssistantMessageEvent;
 use futures::StreamExt;
 use std::sync::Arc;
 

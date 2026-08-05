@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::kernel::error::CodingSessionError;
 use crate::kernel::ids::ProfileId;
+use tool_contract::api::definition::ToolId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct CapabilityGeneration(pub(crate) u64);
@@ -66,19 +67,19 @@ impl ModelCapability {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ToolCapabilitySet {
     allow_all: bool,
-    allowed: BTreeSet<String>,
+    allowed: BTreeSet<ToolId>,
 }
 
 impl ToolCapabilitySet {
-    pub(crate) fn from_names(names: impl IntoIterator<Item = String>) -> Self {
+    pub(crate) fn from_ids(ids: impl IntoIterator<Item = ToolId>) -> Self {
         Self {
             allow_all: false,
-            allowed: names.into_iter().collect(),
+            allowed: ids.into_iter().collect(),
         }
     }
 
-    pub(crate) fn allows(&self, name: &str) -> bool {
-        self.allow_all || self.allowed.contains(name)
+    pub(crate) fn allows(&self, id: &ToolId) -> bool {
+        self.allow_all || self.allowed.contains(id)
     }
 }
 

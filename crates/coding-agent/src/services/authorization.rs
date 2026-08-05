@@ -14,7 +14,6 @@ use crate::services::event::EventService;
 use crate::services::ports::{CapabilityQuery, EventSink, SessionWriterPort};
 use crate::session::event::{PersistedToolAuthorizationResolution, SessionEventData};
 use agent_core::api::agent::{BeforeToolCallContext, BeforeToolCallResult};
-use agent_core::api::tool::AgentTool;
 use agent_core::api::transcript::create_session_id;
 use agent_core::api::transcript::create_timestamp;
 use serde_json::Value;
@@ -24,43 +23,42 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tool_contract::api::definition::AuthorizationRisk;
+use tool_contract::api::definition::{ToolDefinition, ToolId};
 
 const TOOL_AUTHORIZATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const TOOL_AUTHORIZATION_TIMEOUT_REASON: &str = "tool authorization timed out";
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ToolAuthorizationInventory {
-    explicit_tools: BTreeMap<String, Option<DeclaredToolAuthorizationRisk>>,
+    pub(super) explicit_tools: BTreeMap<ToolId, Option<DeclaredToolAuthorizationRisk>>,
 }
 
 impl ToolAuthorizationInventory {
-    pub(crate) fn new(explicit_tools: &[AgentTool]) -> Self {
+    pub(crate) fn new(runtime_tools: &[ToolDefinition]) -> Self {
+        let tools = runtime_tools
+            .iter()
+            .map(|tool| (tool.id.clone(), declared_risk(tool.authorization_risk)))
+            .collect();
         Self {
-            explicit_tools: explicit_tools
-                .iter()
-                .map(|tool| (tool.name.clone(), declared_tool_risk(tool)))
-                .collect(),
+            explicit_tools: tools,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeclaredToolAuthorizationRisk {
+pub(super) enum DeclaredToolAuthorizationRisk {
     WorkspaceLocalReadOnly,
     SideEffect,
 }
 
-fn declared_tool_risk(tool: &AgentTool) -> Option<DeclaredToolAuthorizationRisk> {
-    match tool
-        .parameters
-        .get("x-evo-authorization-risk")
-        .and_then(Value::as_str)
-    {
-        Some("workspace_local_read_only") => {
+fn declared_risk(risk: AuthorizationRisk) -> Option<DeclaredToolAuthorizationRisk> {
+    match risk {
+        AuthorizationRisk::WorkspaceLocalReadOnly => {
             Some(DeclaredToolAuthorizationRisk::WorkspaceLocalReadOnly)
         }
-        Some("side_effect") => Some(DeclaredToolAuthorizationRisk::SideEffect),
-        _ => None,
+        AuthorizationRisk::SideEffect => Some(DeclaredToolAuthorizationRisk::SideEffect),
+        AuthorizationRisk::None => None,
     }
 }
 
@@ -183,10 +181,7 @@ impl AuthorizationService {
         }
     }
 
-    pub(crate) fn set_mode(
-        &self,
-        mode: ToolAuthorizationMode,
-    ) -> Result<(), CodingSessionError> {
+    pub(crate) fn set_mode(&self, mode: ToolAuthorizationMode) -> Result<(), CodingSessionError> {
         self.state.lock_resource("authorization state")?.mode = mode;
         Ok(())
     }
@@ -197,10 +192,7 @@ impl AuthorizationService {
     }
 
     pub(crate) fn uses_interactive_waiters(&self) -> bool {
-        self.state
-            .lock_or_recover("authorization state")
-            .mode
-            == ToolAuthorizationMode::Ask
+        self.state.lock_or_recover("authorization state").mode == ToolAuthorizationMode::Ask
     }
 
     pub(crate) async fn authorize_with_event_writer(

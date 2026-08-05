@@ -1,8 +1,8 @@
 use std::pin::Pin;
 
-use ai::api::conversation::{AssistantMessage, Context};
-use ai::api::model::Model;
-use ai::api::stream::{AssistantMessageEvent, StreamOptions};
+use ai_protocol::api::conversation::{AssistantMessage, Context};
+use ai_protocol::api::model::Model;
+use ai_protocol::api::stream::{AssistantMessageEvent, StreamOptions};
 use futures::Stream;
 
 use super::{AgentToolOutput, AgentToolResult};

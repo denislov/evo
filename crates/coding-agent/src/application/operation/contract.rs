@@ -28,7 +28,7 @@ use crate::operations::team_invocation::runner::{AgentTeamOptions, AgentTeamOutc
 use crate::public_error::{
     CodingAgentPublicDiagnostic, CodingAgentPublicError, safe_public_summary,
 };
-use ai::api::conversation::AssistantMessage;
+use ai_protocol::api::conversation::AssistantMessage;
 
 /// Controls whether branch summarization may reuse a previously persisted summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

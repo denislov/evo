@@ -5,14 +5,15 @@
 //! surfacing — the request simply goes out without the tool and the model
 //! answers as if search did not exist. These tests pin the layers that would
 //! otherwise fail silently: the model-support gate, the profile grant, the
-//! delegated capability release, and the outgoing wire shape.
+//! delegated capability release, and the declaration contract.
 use agent_core::api::agent::AgentResources;
-use ai::api::model::{Model, ModelCost, ModelInput};
+use ai_protocol::api::model::{Model, ModelCost, ModelInput};
 
-use super::{PRODUCT_TOOL_NAMES, SERVER_TOOL_NAMES, grant_server_tools, server_side_tools};
+use super::{grant_server_tools, product_tool_ids, server_side_tools, server_tool_ids};
 use crate::app::bootstrap::{PromptInvocation, SessionRunOptions};
 use crate::app::prompt_runtime::PromptRuntimeOptions;
 use crate::operations::prompt::context::PromptTurnOptions;
+use tool_contract::api::definition::ToolId;
 
 fn model(api: &str) -> Model {
     Model {
@@ -33,13 +34,14 @@ fn model(api: &str) -> Model {
 }
 
 fn runtime_tool_names(api: &str) -> Vec<String> {
-    runtime_tool_names_from(
-        api,
-        super::builtin_tools(".".into()).expect("builtin tools"),
-    )
+    runtime_tool_names_from(api, Vec::new(), true)
 }
 
-fn runtime_tool_names_from(api: &str, tools: Vec<agent_core::api::tool::AgentTool>) -> Vec<String> {
+fn runtime_tool_names_from(
+    api: &str,
+    tools: Vec<std::sync::Arc<dyn tool_runtime::api::DynamicTool>>,
+    register_builtins: bool,
+) -> Vec<String> {
     let options = PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
         model: model(api),
         api_key: None,
@@ -47,7 +49,7 @@ fn runtime_tool_names_from(api: &str, tools: Vec<agent_core::api::tool::AgentToo
         system_prompt: None,
         max_turns: Some(1),
         tools,
-        register_builtins: false,
+        register_builtins,
         ai_client: None,
         session: Some(SessionRunOptions::disabled(".".into())),
         session_target: None,
@@ -61,10 +63,7 @@ fn runtime_tool_names_from(api: &str, tools: Vec<agent_core::api::tool::AgentToo
     options
         .runtime()
         .expect("runtime snapshot")
-        .tools()
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect()
+        .all_tool_names()
 }
 
 #[test]
@@ -72,7 +71,7 @@ fn no_tools_is_not_reopened_by_a_server_side_declaration() {
     // `filter_tools` runs before the runtime snapshot is built, so `--no-tools`
     // reaches this layer as an empty inventory. Re-adding a provider-side tool
     // would reopen a door the caller explicitly shut.
-    assert!(runtime_tool_names_from("deepseek-responses", Vec::new()).is_empty());
+    assert!(runtime_tool_names_from("deepseek-responses", Vec::new(), false).is_empty());
 }
 
 #[test]
@@ -103,19 +102,98 @@ fn web_search_is_declared_only_for_models_whose_api_supports_it() {
 
 #[test]
 fn declaring_the_same_runtime_twice_does_not_duplicate_the_tool() {
-    // `add_tool` and `apply_tool_policy` both reject duplicate names, so a
-    // restore path that already carries the declaration must not gain a second.
     let names = runtime_tool_names("deepseek-responses");
     let declared = names.iter().filter(|name| *name == "web_search").count();
     assert_eq!(declared, 1, "duplicate declaration in {names:?}");
 }
 
 #[test]
+fn web_search_is_not_a_local_executable() {
+    let options = PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
+        model: model("deepseek-responses"),
+        api_key: None,
+        auth_diagnostics: Vec::new(),
+        system_prompt: None,
+        max_turns: Some(1),
+        tools: Vec::new(),
+        register_builtins: true,
+        ai_client: None,
+        session: Some(SessionRunOptions::disabled(".".into())),
+        session_target: None,
+        session_name: None,
+        thinking_level: None,
+        tool_execution: None,
+        resources: AgentResources::default(),
+        settings: None,
+        invocation: PromptInvocation::Text("hi".into()),
+    });
+    let runtime = options.runtime().expect("runtime snapshot");
+    assert!(
+        runtime
+            .tools()
+            .iter()
+            .all(|tool| tool.definition().id.as_str() != "web_search")
+    );
+    assert_eq!(runtime.provider_tools()[0].id.as_str(), "web_search");
+}
+
+#[test]
+fn local_builtin_tools_are_registered_only_in_the_typed_runtime_set() {
+    let options = PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
+        model: model("openai-completions"),
+        api_key: None,
+        auth_diagnostics: Vec::new(),
+        system_prompt: None,
+        max_turns: Some(1),
+        tools: Vec::new(),
+        register_builtins: true,
+        ai_client: None,
+        session: Some(SessionRunOptions::disabled(".".into())),
+        session_target: None,
+        session_name: None,
+        thinking_level: None,
+        tool_execution: None,
+        resources: AgentResources::default(),
+        settings: None,
+        invocation: PromptInvocation::Text("hi".into()),
+    });
+    let runtime = options.runtime().expect("runtime snapshot");
+    assert!(
+        runtime
+            .tools()
+            .iter()
+            .all(|tool| !matches!(tool.definition().id.as_str(), "read" | "ls" | "bash"))
+    );
+    assert_eq!(
+        runtime
+            .typed_tool_ids()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "apply_patch",
+            "bash",
+            "edit",
+            "find",
+            "grep",
+            "hashline_edit",
+            "ls",
+            "read",
+            "write",
+        ]
+    );
+    assert!(runtime.all_tool_names().iter().any(|name| name == "read"));
+    assert!(runtime.all_tool_names().iter().any(|name| name == "ls"));
+    assert!(runtime.all_tool_names().iter().any(|name| name == "find"));
+    assert!(runtime.all_tool_names().iter().any(|name| name == "grep"));
+    assert!(runtime.all_tool_names().iter().any(|name| name == "bash"));
+}
+
+#[test]
 fn server_tools_are_granted_alongside_an_explicit_profile_list() {
-    let mut profile_tools = vec!["read".to_owned(), "bash".to_owned()];
+    let mut profile_tools = vec![ToolId::new("read").unwrap(), ToolId::new("bash").unwrap()];
     grant_server_tools(&mut profile_tools);
-    assert!(profile_tools.iter().any(|name| name == "web_search"));
-    assert!(profile_tools.iter().any(|name| name == "read"));
+    assert!(profile_tools.iter().any(|id| id.as_str() == "web_search"));
+    assert!(profile_tools.iter().any(|id| id.as_str() == "read"));
 
     // Idempotent: a profile that already names it gains nothing.
     let before = profile_tools.len();
@@ -134,42 +212,28 @@ fn an_explicitly_empty_tool_list_stays_empty() {
 
 #[test]
 fn server_tools_are_in_the_product_capability_universe() {
-    // Names absent from `PRODUCT_TOOL_NAMES` are filtered out of the capability
+    // IDs absent from the product inventory are filtered out of the capability
     // set and then dropped from the agent inventory without a diagnostic.
-    for name in SERVER_TOOL_NAMES {
+    for id in server_tool_ids() {
         assert!(
-            PRODUCT_TOOL_NAMES.contains(&name),
-            "{name} is not in the capability universe"
+            product_tool_ids().iter().any(|product| product == &id),
+            "{} is not in the capability universe",
+            id
         );
     }
 }
 
 #[test]
-fn declared_web_search_reaches_the_deepseek_wire_as_a_server_tool() {
-    use ai::api::conversation::{Context, Tool};
+fn web_search_uses_a_provider_only_contract() {
+    use tool_contract::api::definition::ToolKind;
 
     let tools = server_side_tools(&model("deepseek-responses"));
     assert_eq!(tools.len(), 1);
-
-    // Mirrors `assemble_context`: the agent tool's kind is what carries the
-    // server-side intent onto the wire.
-    let context = Context {
-        system_prompt: None,
-        messages: Vec::new(),
-        tools: Some(
-            tools
-                .iter()
-                .map(|tool| Tool {
-                    kind: tool.kind,
-                    name: tool.name.clone(),
-                    description: Some(tool.description.clone()),
-                    parameters: tool.parameters.clone(),
-                })
-                .collect(),
-        ),
-    };
-    let value = serde_json::to_value(&context).expect("context serializes");
-    assert_eq!(value["tools"][0]["type"], "web_search");
+    let definition = &tools[0];
+    assert_eq!(definition.kind, ToolKind::WebSearch);
+    assert!(definition.capabilities.provider_executed);
+    assert!(definition.capabilities.read_only);
+    assert!(definition.parameters.is_null());
 }
 
 mod delegation {
@@ -179,6 +243,7 @@ mod delegation {
     };
     use crate::operations::delegation::capability_snapshot_for_delegated_profile;
     use crate::profiles::{AgentProfile, DelegationPolicy, ProfileId, ProfileSource};
+    use tool_contract::api::definition::ToolId;
 
     fn parent_with_tools(names: &[&str]) -> OperationCapabilitySnapshot {
         OperationCapabilitySnapshot {
@@ -186,7 +251,9 @@ mod delegation {
             operation_id: "parent".into(),
             actor: ActorId::Client,
             model: None,
-            tools: ToolCapabilitySet::from_names(names.iter().map(|name| (*name).to_owned())),
+            tools: ToolCapabilitySet::from_ids(
+                names.iter().map(|name| ToolId::new(*name).unwrap()),
+            ),
             commands: CommandCapabilitySet::default(),
             filesystem: None,
             shell: None,
@@ -204,7 +271,10 @@ mod delegation {
             description: None,
             model: None,
             system_prompt: None,
-            tools: tools.iter().map(|name| (*name).to_owned()).collect(),
+            tools: tools
+                .iter()
+                .map(|name| ToolId::new(*name).unwrap())
+                .collect(),
             skills: Vec::new(),
             supervision: Default::default(),
             delegation: DelegationPolicy::default(),
@@ -222,13 +292,13 @@ mod delegation {
             &profile(&["read"]),
             ActorId::Client,
         );
-        assert!(released.tools.allows("read"));
+        assert!(released.tools.allows(&ToolId::new("read").unwrap()));
         assert!(
-            released.tools.allows("web_search"),
+            released.tools.allows(&ToolId::new("web_search").unwrap()),
             "delegate should inherit provider-side search"
         );
         assert!(
-            !released.tools.allows("bash"),
+            !released.tools.allows(&ToolId::new("bash").unwrap()),
             "profile did not ask for bash"
         );
     }
@@ -243,7 +313,7 @@ mod delegation {
             ActorId::Client,
         );
         assert!(
-            !released.tools.allows("web_search"),
+            !released.tools.allows(&ToolId::new("web_search").unwrap()),
             "a parent without web_search must not hand it to a child"
         );
     }
@@ -257,7 +327,7 @@ mod delegation {
             &profile(&[]),
             ActorId::Client,
         );
-        assert!(!released.tools.allows("web_search"));
-        assert!(!released.tools.allows("read"));
+        assert!(!released.tools.allows(&ToolId::new("web_search").unwrap()));
+        assert!(!released.tools.allows(&ToolId::new("read").unwrap()));
     }
 }

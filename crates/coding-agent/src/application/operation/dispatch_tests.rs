@@ -12,10 +12,15 @@ use std::sync::{
 };
 
 use agent_core::api::agent::AgentResources;
-use agent_core::api::tool::AgentTool;
-use ai::api::conversation::StopReason;
-use ai::api::model::{Model, ModelCost, ModelInput};
 use ai::api::provider::faux::{FauxProvider, FauxResponse, FauxToolCall};
+use ai_protocol::api::conversation::StopReason;
+use ai_protocol::api::model::{Model, ModelCost, ModelInput};
+use tool_contract::api::definition::{
+    AuthorizationRisk, ToolBehaviorVersion, ToolCapabilities, ToolDefinition, ToolExecutionMode,
+    ToolId, ToolKind,
+};
+use tool_contract::api::output::{ToolContent, ToolOutput};
+use tool_runtime::api::{DynamicTool, FunctionTool, ToolFuture};
 
 use super::OperationDispatchMode;
 use super::contract::{CodingAgentOperation, CodingAgentOperationOutcome};
@@ -54,7 +59,11 @@ fn prompt_options(api: &str, prompt: &str) -> PromptTurnOptions {
     prompt_options_with_tools(api, prompt, Vec::new())
 }
 
-fn prompt_options_with_tools(api: &str, prompt: &str, tools: Vec<AgentTool>) -> PromptTurnOptions {
+fn prompt_options_with_tools(
+    api: &str,
+    prompt: &str,
+    tools: Vec<Arc<dyn DynamicTool>>,
+) -> PromptTurnOptions {
     PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
         model: model(api),
         api_key: None,
@@ -72,6 +81,43 @@ fn prompt_options_with_tools(api: &str, prompt: &str, tools: Vec<AgentTool>) -> 
         resources: AgentResources::default(),
         settings: None,
         invocation: PromptInvocation::Text(prompt.into()),
+    })
+}
+
+fn side_effect_tool(executed: Arc<AtomicBool>) -> Arc<dyn DynamicTool> {
+    let definition = ToolDefinition {
+        id: ToolId::new("authorized_side_effect").unwrap(),
+        kind: ToolKind::Function,
+        description: "Exercise tool authorization.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        capabilities: ToolCapabilities {
+            read_only: false,
+            execution: ToolExecutionMode::Parallel,
+            cancel: false,
+            timeout: false,
+            streaming: false,
+            provider_executed: false,
+        },
+        behavior: ToolBehaviorVersion::V1,
+        authorization_risk: AuthorizationRisk::SideEffect,
+        requirements: Vec::new(),
+    };
+    FunctionTool::new(definition, move |_context, _arguments| {
+        let executed = executed.clone();
+        Box::pin(async move {
+            executed.store(true, Ordering::Release);
+            Ok(ToolOutput {
+                content: vec![ToolContent::Text {
+                    text: "tool result".into(),
+                }],
+                details: None,
+                terminate: false,
+            })
+        }) as ToolFuture
     })
 }
 
@@ -102,24 +148,7 @@ async fn persistent_prompt_with_tool_authorization_completes_on_current_thread_r
         ])),
     );
     let tool_executed = Arc::new(AtomicBool::new(false));
-    let tool_executed_for_call = tool_executed.clone();
-    let tool = AgentTool::new_text(
-        "authorized_side_effect",
-        "Exercise the interactive authorization and durable writer path.",
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false,
-            "x-evo-authorization-risk": "side_effect"
-        }),
-        move |_context, _arguments| {
-            let tool_executed = tool_executed_for_call.clone();
-            async move {
-                tool_executed.store(true, Ordering::Release);
-                Ok("tool result".to_owned())
-            }
-        },
-    );
+    let tool = side_effect_tool(tool_executed.clone());
     let temp = tempfile::tempdir().unwrap();
     let mut session = CodingAgentSession::create_internal(
         CodingAgentSessionOptions::new()
@@ -203,24 +232,7 @@ async fn yolo_mode_auto_approves_side_effecting_tools() {
         ])),
     );
     let tool_executed = Arc::new(AtomicBool::new(false));
-    let tool_executed_for_call = tool_executed.clone();
-    let tool = AgentTool::new_text(
-        "authorized_side_effect",
-        "Exercise yolo authorization.",
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false,
-            "x-evo-authorization-risk": "side_effect"
-        }),
-        move |_context, _arguments| {
-            let tool_executed = tool_executed_for_call.clone();
-            async move {
-                tool_executed.store(true, Ordering::Release);
-                Ok("tool result".to_owned())
-            }
-        },
-    );
+    let tool = side_effect_tool(tool_executed.clone());
     let temp = tempfile::tempdir().unwrap();
     let mut session = CodingAgentSession::create_internal(
         CodingAgentSessionOptions::new()
@@ -240,10 +252,13 @@ async fn yolo_mode_auto_approves_side_effecting_tools() {
         vec![tool],
     ));
 
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), session.run_internal(operation))
-        .await
-        .expect("yolo prompt should complete")
-        .expect("yolo prompt outcome");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        session.run_internal(operation),
+    )
+    .await
+    .expect("yolo prompt should complete")
+    .expect("yolo prompt outcome");
     assert!(matches!(outcome, CodingAgentOperationOutcome::Prompt(_)));
     assert!(
         tool_executed.load(Ordering::Acquire),
@@ -279,31 +294,11 @@ async fn plan_mode_denies_mutating_tools_without_prompting() {
                 }],
                 StopReason::ToolUse,
             ),
-            FauxProvider::text_call(
-                "mutating tool was refused",
-                StopReason::Stop,
-            ),
+            FauxProvider::text_call("mutating tool was refused", StopReason::Stop),
         ])),
     );
     let tool_executed = Arc::new(AtomicBool::new(false));
-    let tool_executed_for_call = tool_executed.clone();
-    let tool = AgentTool::new_text(
-        "authorized_side_effect",
-        "Exercise plan authorization.",
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false,
-            "x-evo-authorization-risk": "side_effect"
-        }),
-        move |_context, _arguments| {
-            let tool_executed = tool_executed_for_call.clone();
-            async move {
-                tool_executed.store(true, Ordering::Release);
-                Ok("tool result".to_owned())
-            }
-        },
-    );
+    let tool = side_effect_tool(tool_executed.clone());
     let temp = tempfile::tempdir().unwrap();
     let mut session = CodingAgentSession::create_internal(
         CodingAgentSessionOptions::new()
@@ -323,10 +318,13 @@ async fn plan_mode_denies_mutating_tools_without_prompting() {
         vec![tool],
     ));
 
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), session.run_internal(operation))
-        .await
-        .expect("plan prompt should complete")
-        .expect("plan prompt outcome");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        session.run_internal(operation),
+    )
+    .await
+    .expect("plan prompt should complete")
+    .expect("plan prompt outcome");
     assert!(matches!(outcome, CodingAgentOperationOutcome::Prompt(_)));
     assert!(
         !tool_executed.load(Ordering::Acquire),

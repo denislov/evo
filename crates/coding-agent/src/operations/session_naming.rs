@@ -1,6 +1,8 @@
-use ai::api::conversation::{AssistantMessage, ContentBlock, Context, Message, StopReason, Usage};
-use ai::api::model::{Model, ThinkingConfig};
-use ai::api::stream::{AssistantMessageEvent, EventStream, StreamOptions};
+use ai_protocol::api::conversation::{
+    AssistantMessage, ContentBlock, Context, Message, StopReason, Usage,
+};
+use ai_protocol::api::model::{Model, ThinkingConfig};
+use ai_protocol::api::stream::{AssistantMessageEvent, EventStream, StreamOptions};
 use futures::StreamExt;
 
 use crate::app::bootstrap::PromptInvocation;

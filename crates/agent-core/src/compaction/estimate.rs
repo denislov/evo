@@ -1,5 +1,5 @@
 use crate::agent::types::AgentMessage;
-use ai::api::conversation::{ContentBlock, StopReason, Usage};
+use ai_protocol::api::conversation::{ContentBlock, StopReason, Usage};
 
 pub fn estimate_tokens(messages: &[AgentMessage]) -> u32 {
     let mut total: u32 = 0;
@@ -149,7 +149,7 @@ pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ai::api::conversation::AssistantMessage;
+    use ai_protocol::api::conversation::AssistantMessage;
 
     fn user(text: &str) -> AgentMessage {
         AgentMessage::UserText {

@@ -1,12 +1,16 @@
 use agent_core::api::agent::{Agent, AgentConfig, AgentEvent, AgentMessage};
-use agent_core::api::tool::{AgentTool, AgentToolOutput};
 use ai::api::client::AiClient;
-use ai::api::conversation::{ContentBlock, StopReason};
-use ai::api::model::{Model, ModelCost, ModelInput};
 use ai::api::provider::faux::FauxProvider;
-use ai::api::stream::AssistantMessageEvent;
+use ai_protocol::api::conversation::StopReason;
+use ai_protocol::api::model::{Model, ModelCost, ModelInput};
+use ai_protocol::api::stream::AssistantMessageEvent;
 use futures::StreamExt;
 use std::sync::Arc;
+use tool_contract::api::definition::{
+    AuthorizationRisk, ToolBehaviorVersion, ToolCapabilities, ToolDefinition, ToolId, ToolKind,
+};
+use tool_contract::api::output::{ToolContent, ToolOutput};
+use tool_runtime::api::{FunctionTool, ToolFuture, ToolRegistry, ToolRuntime};
 
 #[tokio::main]
 async fn main() {
@@ -49,23 +53,32 @@ async fn main() {
 
     let agent = Agent::new(config);
 
+    let definition = ToolDefinition {
+        id: ToolId::new("search").expect("static tool id is valid"),
+        kind: ToolKind::Function,
+        description: "Search the web".into(),
+        parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+        capabilities: ToolCapabilities::default(),
+        behavior: ToolBehaviorVersion::V1,
+        authorization_risk: AuthorizationRisk::None,
+        requirements: Vec::new(),
+    };
+    let tool = FunctionTool::new(definition, |_context, _arguments| {
+        Box::pin(async move {
+            Ok(ToolOutput {
+                content: vec![ToolContent::Text {
+                    text: "search results: 42 is the answer".into(),
+                }],
+                details: None,
+                terminate: false,
+            })
+        }) as ToolFuture
+    });
+    let mut registry = ToolRegistry::default();
+    registry.register(tool).expect("tool registration");
     agent
-        .add_tool(AgentTool {
-            kind: Default::default(),
-            name: "search".into(),
-            description: "Search the web".into(),
-            parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
-            execution_mode: None,
-            execute: Arc::new(|_context, _args, _on_update| {
-                Box::pin(async move {
-                    Ok(AgentToolOutput::new(vec![ContentBlock::Text {
-                        text: "search results: 42 is the answer".into(),
-                        text_signature: None,
-                    }]))
-                })
-            }),
-        })
-        .expect("example tool definition must be valid");
+        .set_tool_runtime(ToolRuntime::new(registry).expect("valid runtime"))
+        .expect("example tool runtime must be valid");
 
     println!("=== agent-core loop example ===\n");
 

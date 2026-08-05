@@ -1,6 +1,7 @@
 pub(crate) mod provider;
 pub(crate) mod queue;
 pub(crate) mod runtime;
+pub(crate) mod tool_adapter;
 pub(crate) mod turn;
 pub(crate) mod types;
 

@@ -22,9 +22,7 @@ pub mod agent {
 /// Tool definitions and provider-neutral tool execution results.
 pub mod tool {
     pub use crate::agent::types::{
-        AgentTool, AgentToolArgumentError, AgentToolDefinitionError, AgentToolOutput,
-        AgentToolResult, ToolExecutionContext, ToolExecutionMode, ToolFn, ToolUpdateCallback,
-        tool_arguments_match_schema,
+        AgentToolOutput, AgentToolResult, ToolExecutionContext, ToolUpdateCallback,
     };
 }
 

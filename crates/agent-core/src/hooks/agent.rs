@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use ai::api::conversation::{AssistantMessage, Message};
-use ai::api::model::Model;
-use ai::api::stream::StreamOptions;
+use ai_protocol::api::conversation::{AssistantMessage, Message};
+use ai_protocol::api::model::Model;
+use ai_protocol::api::stream::StreamOptions;
 
 use super::{AfterToolCallHook, BeforeProviderRequestHook, BeforeToolCallHook, HookFuture};
 use crate::agent::types::{AgentMessage, AgentResources, ThinkingLevel};

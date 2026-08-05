@@ -253,7 +253,7 @@ impl ConversationProjection {
         let mut projection = Self {
             session_id: snapshot.session_id,
             active_leaf_id: snapshot.active_leaf_id,
-            blocks: VecDeque::new(),
+            blocks: VecDeque::with_capacity(snapshot.items.len().min(MAX_TRANSCRIPT_BLOCKS)),
             omitted_blocks: omitted_items,
             retained_bytes: 0,
         };

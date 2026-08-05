@@ -18,10 +18,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use agent_core::api::agent::{Agent, AgentMessage, AgentResources, ProviderStreamer};
-use agent_core::api::tool::AgentTool;
 use ai::api::client::AiClient;
-use ai::api::conversation::{AssistantMessage, ContentBlock, Context, StopReason};
-use ai::api::stream::{EventStream, StreamOptions};
+use ai_protocol::api::conversation::{AssistantMessage, ContentBlock, Context, StopReason};
+use ai_protocol::api::stream::{EventStream, StreamOptions};
+use tool_runtime::api::{ToolRegistry, ToolRuntime};
 
 use crate::app::bootstrap::{SessionMode, build_agent_config_with_auth_diagnostics};
 
@@ -122,40 +122,127 @@ impl RuntimeService {
 
         let mut diagnostics = runtime.profile_diagnostics().to_vec();
         let resources = apply_skill_policy(runtime, &mut diagnostics);
-        let mut policy_tools = delegation_tools(
+        let provider_tools = runtime.provider_tools();
+        let mut typed_registry = ToolRegistry::default();
+        for id in runtime
+            .typed_tool_ids()
+            .filter(|id| snapshot.tools.allows(id))
+        {
+            let tool = match id.as_str() {
+                "read" => snapshot
+                    .filesystem
+                    .clone()
+                    .map(crate::tools::filesystem::read::read_runtime_tool)
+                    .transpose()
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?,
+                "ls" => snapshot
+                    .filesystem
+                    .clone()
+                    .map(crate::tools::filesystem::ls::ls_runtime_tool)
+                    .transpose()
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?,
+                "find" => snapshot
+                    .filesystem
+                    .clone()
+                    .map(crate::tools::filesystem::find::find_runtime_tool)
+                    .transpose()
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?,
+                "grep" => snapshot
+                    .filesystem
+                    .clone()
+                    .map(crate::tools::filesystem::grep::grep_runtime_tool)
+                    .transpose()
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?,
+                "write" => snapshot
+                    .filesystem
+                    .clone()
+                    .map(crate::tools::filesystem::write::write_runtime_tool)
+                    .transpose()
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?,
+                "edit" => snapshot
+                    .filesystem
+                    .clone()
+                    .map(crate::tools::filesystem::edit::edit_runtime_tool)
+                    .transpose()
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?,
+                "hashline_edit" => snapshot
+                    .filesystem
+                    .clone()
+                    .map(crate::tools::filesystem::hashline::hashline_edit_runtime_tool)
+                    .transpose()
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?,
+                "apply_patch" => snapshot
+                    .filesystem
+                    .clone()
+                    .map(crate::tools::filesystem::apply_patch::apply_patch_runtime_tool)
+                    .transpose()
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?,
+                "bash" => snapshot
+                    .shell
+                    .clone()
+                    .map(crate::tools::shell::bash_runtime_tool)
+                    .transpose()
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?,
+                _ => None,
+            };
+            if let Some(tool) = tool {
+                typed_registry
+                    .register(tool)
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?;
+            }
+        }
+        for tool in runtime.tools() {
+            if snapshot.tools.allows(&tool.definition().id) {
+                typed_registry.register(tool.clone()).map_err(|error| {
+                    CodingSessionError::Tool {
+                        message: error.to_string(),
+                    }
+                })?;
+            }
+        }
+        for tool in delegation_tools(
             runtime.profile_id(),
             runtime.profile_delegation_policy(),
             runtime.delegation_target_inventory(),
             delegation_executor,
-        );
-        let uses_interactive_waiters = authorization
-            .as_ref()
-            .is_some_and(|context| context.service.uses_interactive_waiters());
-        if !uses_interactive_waiters {
-            for tool in &mut policy_tools {
-                if let Some(schema) = tool.parameters.as_object_mut() {
-                    schema.remove("x-evo-authorization-risk");
-                }
+        ) {
+            if snapshot.tools.allows(&tool.definition().id) {
+                typed_registry
+                    .register(tool)
+                    .map_err(|error| CodingSessionError::Tool {
+                        message: error.to_string(),
+                    })?;
             }
         }
-        let authorization_tools = runtime
-            .tools()
-            .iter()
-            .chain(policy_tools.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        let authorization_inventory = ToolAuthorizationInventory::new(&authorization_tools);
-        let tools = apply_tool_policy(runtime, policy_tools, &mut diagnostics)?
-            .into_iter()
-            .filter(|tool| snapshot.tools.allows(&tool.name))
-            .filter_map(|tool| {
-                crate::tools::bind_builtin_tool_to_capabilities(
-                    tool,
-                    snapshot.filesystem.as_ref(),
-                    snapshot.shell.as_ref(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let runtime_definitions = typed_registry.definitions();
+        let typed_runtime = (!runtime_definitions.is_empty())
+            .then(|| ToolRuntime::new(typed_registry))
+            .transpose()
+            .map_err(|error| CodingSessionError::Tool {
+                message: error.to_string(),
+            })?;
+        record_unavailable_profile_tools(runtime, &runtime_definitions, &mut diagnostics);
+        let authorization_inventory = ToolAuthorizationInventory::new(&runtime_definitions);
 
         let mut config = build_agent_config_with_auth_diagnostics(
             runtime.model().clone(),
@@ -207,9 +294,19 @@ impl RuntimeService {
         }
 
         let agent = Agent::new(config);
-        for tool in tools {
+        if let Some(runtime) = typed_runtime {
             agent
-                .add_tool(tool)
+                .set_tool_runtime(runtime)
+                .map_err(|error| CodingSessionError::Tool {
+                    message: error.to_string(),
+                })?;
+        }
+        for definition in provider_tools
+            .into_iter()
+            .filter(|definition| snapshot.tools.allows(&definition.id))
+        {
+            agent
+                .add_provider_tool(definition)
                 .map_err(|error| CodingSessionError::Tool {
                     message: error.to_string(),
                 })?;
@@ -276,9 +373,9 @@ impl RuntimeService {
                             name: name.clone(),
                             arguments: arguments.clone(),
                             kind: if name == "apply_patch" && arguments.is_string() {
-                                ai::api::conversation::ToolCallKind::Custom
+                                ai_protocol::api::conversation::ToolCallKind::Custom
                             } else {
-                                ai::api::conversation::ToolCallKind::Function
+                                ai_protocol::api::conversation::ToolCallKind::Function
                             },
                             thought_signature: None,
                         });
@@ -342,45 +439,28 @@ impl RuntimeService {
     }
 }
 
-fn apply_tool_policy(
+fn record_unavailable_profile_tools(
     runtime: &RuntimeSnapshot,
-    policy_tools: Vec<AgentTool>,
+    runtime_definitions: &[tool_contract::api::definition::ToolDefinition],
     diagnostics: &mut Vec<CodingDiagnostic>,
-) -> Result<Vec<AgentTool>, CodingSessionError> {
-    let mut tools = Vec::new();
-    let mut owners = std::collections::BTreeMap::new();
-    let policy_tool_names = policy_tools
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect::<BTreeSet<_>>();
-    for (owner, candidates) in [
-        ("runtime", runtime.tools().to_vec()),
-        ("delegation", policy_tools),
-    ] {
-        for tool in candidates {
-            if let Some(first) = owners.insert(tool.name.clone(), owner) {
-                return Err(CodingSessionError::Tool {
-                    message: format!(
-                        "tool_name_conflict: tool `{}` is declared by both {first} and {owner} inventory",
-                        tool.name
-                    ),
-                });
-            }
-            tools.push(tool);
-        }
-    }
-    tools.sort_by(|left, right| left.name.cmp(&right.name));
+) {
     let Some(allowlist) = runtime.profile_tool_allowlist() else {
-        return Ok(tools);
+        return;
     };
 
-    let available = tools
+    let provider_tools = runtime.provider_tools();
+    let available = runtime_definitions
         .iter()
-        .map(|tool| tool.name.as_str())
+        .map(|definition| definition.id.as_str())
+        .chain(
+            provider_tools
+                .iter()
+                .map(|definition| definition.id.as_str()),
+        )
         .collect::<BTreeSet<_>>();
     let allowed = allowlist
         .iter()
-        .map(String::as_str)
+        .map(|id| id.as_str())
         .collect::<BTreeSet<_>>();
     for requested in &allowed {
         if !available.contains(requested) {
@@ -389,12 +469,6 @@ fn apply_tool_policy(
             )));
         }
     }
-    Ok(tools
-        .into_iter()
-        .filter(|tool| {
-            policy_tool_names.contains(tool.name.as_str()) || allowed.contains(tool.name.as_str())
-        })
-        .collect())
 }
 
 fn apply_skill_policy(

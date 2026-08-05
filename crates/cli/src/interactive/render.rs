@@ -1194,7 +1194,10 @@ fn render_assistant_message(
                 Some(seconds) => format!("Thought for {seconds:.1}s"),
                 None => hidden_thinking_label.to_string(),
             };
-            lines.push(fit_line(&paint_with(&label, &styles.thinking, color), width));
+            lines.push(fit_line(
+                &paint_with(&label, &styles.thinking, color),
+                width,
+            ));
         } else {
             let thinking_lines = thinking.lines().collect::<Vec<_>>();
             const MAX_THINKING_PREVIEW_ROWS: usize = 4;
@@ -1210,8 +1213,9 @@ fn render_assistant_message(
                     let label = match thinking_seconds {
                         Some(seconds) => format!("Thought for {seconds:.1}s"),
                         None => {
-                            let start =
-                                thinking_lines.len().saturating_sub(MAX_THINKING_PREVIEW_ROWS);
+                            let start = thinking_lines
+                                .len()
+                                .saturating_sub(MAX_THINKING_PREVIEW_ROWS);
                             if start > 0 {
                                 format!("thinking · preview · {start} earlier lines")
                             } else {
@@ -1219,7 +1223,9 @@ fn render_assistant_message(
                             }
                         }
                     };
-                    let start = thinking_lines.len().saturating_sub(MAX_THINKING_PREVIEW_ROWS);
+                    let start = thinking_lines
+                        .len()
+                        .saturating_sub(MAX_THINKING_PREVIEW_ROWS);
                     (thinking_lines[start..].to_vec(), label)
                 }
                 TranscriptDisplayState::Expanded => {
@@ -1242,7 +1248,9 @@ fn render_assistant_message(
             if display_state == TranscriptDisplayState::Preview {
                 // Capped preview height: keep the trailing rows so long
                 // streaming thinking cannot grow the block past the cap.
-                let start = content_lines.len().saturating_sub(MAX_THINKING_PREVIEW_ROWS);
+                let start = content_lines
+                    .len()
+                    .saturating_sub(MAX_THINKING_PREVIEW_ROWS);
                 content_lines.drain(..start);
             }
             lines.extend(content_lines);
@@ -1405,14 +1413,7 @@ fn render_tool_block(
     // structured action summary instead of transcript text, so it
     // self-renders search queries / opened pages instead of raw JSON.
     if name == "web_search" {
-        return render_web_search_block(
-            result,
-            is_error,
-            width,
-            color,
-            styles,
-            result_limit,
-        );
+        return render_web_search_block(result, is_error, width, color, styles, result_limit);
     }
 
     let mut lines = vec![paint_bg_line(&header, width, bg, color)];
@@ -1931,7 +1932,8 @@ fn parse_web_search_action(result: &str) -> Option<WebSearchAction> {
 
 /// Paint a single diff line with semantic colors: `+` added, `-` removed,
 /// ` ` context, and hunk headers (`@@`/`---`/`+++`) dimmed.
-fn paint_diff_line(line: &str, color: bool, styles: &TranscriptStyles, fallback: Style) -> String {    let (prefix, style) = if line.starts_with("+++") || line.starts_with("---") {
+fn paint_diff_line(line: &str, color: bool, styles: &TranscriptStyles, fallback: Style) -> String {
+    let (prefix, style) = if line.starts_with("+++") || line.starts_with("---") {
         (line, styles.tool_diff_context)
     } else if let Some(rest) = line.strip_prefix('+') {
         (rest, styles.tool_diff_added)
@@ -2081,8 +2083,8 @@ mod tests {
     use base64::Engine;
 
     use super::*;
-    use crate::interactive::transcript::TranscriptViewState;
     use crate::interactive::UiEvent;
+    use crate::interactive::transcript::TranscriptViewState;
     use coding_agent::api::settings::CodingAgentThemeSnapshot;
 
     #[test]
@@ -2121,9 +2123,7 @@ mod tests {
             framed_modal_lines(lines.clone(), 4, &Style::default(), false),
             lines
         );
-        assert!(
-            framed_modal_lines(Vec::new(), 12, &Style::default(), false).is_empty()
-        );
+        assert!(framed_modal_lines(Vec::new(), 12, &Style::default(), false).is_empty());
     }
 
     #[test]

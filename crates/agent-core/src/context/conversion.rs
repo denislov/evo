@@ -1,7 +1,9 @@
-use crate::agent::types::{AgentMessage, AgentResources, AgentTool};
+use crate::agent::tool_adapter::contract_tool_declaration;
+use crate::agent::types::{AgentMessage, AgentResources};
 use crate::execution::capture::bash_execution_to_text;
 use crate::resources::system_prompt::format_skills_for_system_prompt;
-use ai::api::conversation::{ContentBlock, Context, Message, Tool};
+use ai_protocol::api::conversation::{ContentBlock, Context, Message, Tool};
+use tool_contract::api::definition::ToolDefinition;
 
 /// Convert `AgentMessage`s into the LLM-facing `Message` list. Mirrors TS
 /// `convertToLlm` (`pi/packages/agent/src/harness/messages.ts`). The harness
@@ -97,7 +99,8 @@ pub fn assemble_context(
     system_prompt: &Option<String>,
     agent_messages: &[AgentMessage],
     llm_messages: Vec<Message>,
-    tools: &[AgentTool],
+    runtime_tools: &[ToolDefinition],
+    provider_tools: &[ToolDefinition],
     resources: &AgentResources,
 ) -> Context {
     let system = {
@@ -123,20 +126,15 @@ pub fn assemble_context(
         }
     };
 
-    let llm_tools: Option<Vec<Tool>> = if tools.is_empty() {
+    let llm_tools: Option<Vec<Tool>> = if runtime_tools.is_empty() && provider_tools.is_empty() {
         None
     } else {
-        Some(
-            tools
-                .iter()
-                .map(|t| Tool {
-                    kind: t.kind,
-                    name: t.name.clone(),
-                    description: Some(t.description.clone()),
-                    parameters: t.parameters.clone(),
-                })
-                .collect(),
-        )
+        let mut declarations = runtime_tools
+            .iter()
+            .map(contract_tool_declaration)
+            .collect::<Vec<_>>();
+        declarations.extend(provider_tools.iter().map(contract_tool_declaration));
+        Some(declarations)
     };
 
     Context {
@@ -149,9 +147,17 @@ pub fn assemble_context(
 pub fn convert_to_context(
     system_prompt: &Option<String>,
     messages: &[AgentMessage],
-    tools: &[AgentTool],
+    runtime_tools: &[ToolDefinition],
+    provider_tools: &[ToolDefinition],
     resources: &AgentResources,
 ) -> Context {
     let llm_messages = default_convert_to_llm(messages, resources);
-    assemble_context(system_prompt, messages, llm_messages, tools, resources)
+    assemble_context(
+        system_prompt,
+        messages,
+        llm_messages,
+        runtime_tools,
+        provider_tools,
+        resources,
+    )
 }

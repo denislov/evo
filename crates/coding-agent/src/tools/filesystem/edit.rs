@@ -1,8 +1,3 @@
-use crate::kernel::error::CodingSessionError;
-use crate::operations::self_healing_edit::runner::{
-    SelfHealingEditContext, SelfHealingEditOptions, SelfHealingEditOutcome,
-    SelfHealingEditReplacement, SelfHealingEditRunner,
-};
 use crate::platform::fs::capability::FilesystemCapability;
 use crate::platform::fs::edit_file::OpenedEditFile as PlatformOpenedEditFile;
 use crate::platform::fs::mutation::{FileMutation, MutationGuard};
@@ -11,12 +6,22 @@ use crate::tools::filesystem::diff::{
     TextReplacement, apply_replacements_preserving_unchanged_lines, generate_diff_string,
     generate_unified_patch,
 };
-use crate::tools::filesystem_target_for_execution;
-use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
-use ai::api::conversation::ContentBlock;
+use crate::tools::filesystem::mutation_receipt::{
+    bounded_diff, content_revision, receipt, validate_fence,
+};
+use crate::tools::filesystem::text_match::normalize_unicode_confusables;
+use agent_core::api::tool::AgentToolOutput;
 use futures::future::{BoxFuture, FutureExt};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use unicode_normalization::UnicodeNormalization;
+use tool_contract::api::definition::{
+    AuthorizationRisk, ToolBehaviorVersion, ToolCapabilities, ToolDefinition, ToolExecutionMode,
+    ToolId, ToolKind, ToolRequirement,
+};
+use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
+use tool_contract::api::schema::schema_for;
+use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
 
 const DESCRIPTION: &str = "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. Merge nearby changes into one edit; do not include large unchanged regions.";
 
@@ -25,17 +30,28 @@ struct Edit {
     new_text: String,
 }
 
-fn schema() -> serde_json::Value {
-    serde_json::json!({
-        "type":"object",
-        "properties":{
-            "path":{"type":"string"},
-            "edits":{"type":"array","items":{"type":"object",
-                "properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},
-                "required":["oldText","newText"],"additionalProperties":false}}
-        },
-        "required":["path","edits"],"additionalProperties":false
-    })
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct EditArgs {
+    path: String,
+    edits: Vec<EditReplacementArgs>,
+    #[serde(default, rename = "expectedRevision")]
+    #[schemars(rename = "expectedRevision")]
+    expected_revision: Option<String>,
+    #[serde(default, rename = "expectedTargetFingerprint")]
+    #[schemars(rename = "expectedTargetFingerprint")]
+    expected_target_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct EditReplacementArgs {
+    #[serde(rename = "oldText")]
+    #[schemars(rename = "oldText")]
+    old_text: String,
+    #[serde(rename = "newText")]
+    #[schemars(rename = "newText")]
+    new_text: String,
 }
 
 fn detect_crlf(s: &str) -> bool {
@@ -65,26 +81,6 @@ fn strip_bom(s: &str) -> (&str, &str) {
     }
 }
 
-fn normalize_for_fuzzy(text: &str) -> String {
-    let nfkc: String = text.nfkc().collect();
-    let trimmed: String = nfkc
-        .split('\n')
-        .map(|l| l.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n");
-    trimmed
-        .chars()
-        .map(|c| match c {
-            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
-            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
-            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
-            | '\u{2212}' => '-',
-            '\u{00A0}' | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{2002}'..='\u{200A}' => ' ',
-            other => other,
-        })
-        .collect()
-}
-
 fn count_occurrences(content: &str, old: &str) -> usize {
     if old.is_empty() {
         return 0;
@@ -99,8 +95,8 @@ fn fuzzy_find_text(content: &str, old_text: &str) -> (bool, usize, usize, bool) 
     if let Some(idx) = content.find(old_text) {
         return (true, idx, old_text.len(), false);
     }
-    let fuzzy_content = normalize_for_fuzzy(content);
-    let fuzzy_old = normalize_for_fuzzy(old_text);
+    let fuzzy_content = normalize_unicode_confusables(content);
+    let fuzzy_old = normalize_unicode_confusables(old_text);
     if let Some(idx) = fuzzy_content.find(&fuzzy_old) {
         return (true, idx, fuzzy_old.len(), true);
     }
@@ -134,7 +130,7 @@ fn apply_edits(normalized: &str, edits: &[Edit], path: &str) -> Result<(String, 
     // `applyReplacementsPreservingUnchangedLines`).
     let used_fuzzy = norm.iter().any(|e| !normalized.contains(&e.old_text));
     let base: String = if used_fuzzy {
-        normalize_for_fuzzy(normalized)
+        normalize_unicode_confusables(normalized)
     } else {
         normalized.to_string()
     };
@@ -146,7 +142,7 @@ fn apply_edits(normalized: &str, edits: &[Edit], path: &str) -> Result<(String, 
             return Err(not_found(path, i, total));
         }
         let search_text = if used_fuzzy {
-            normalize_for_fuzzy(&e.old_text)
+            normalize_unicode_confusables(&e.old_text)
         } else {
             e.old_text.clone()
         };
@@ -321,122 +317,37 @@ impl OpenedEditFile for RealOpenedEditFile {
     }
 }
 
-async fn edit_tool_execute_with_operations(
-    filesystem: &FilesystemCapability,
-    context: &agent_core::api::tool::ToolExecutionContext,
-    args: serde_json::Value,
-    ops: Arc<dyn EditOperations>,
-) -> Result<AgentToolOutput, String> {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("edit: missing or non-string 'path' argument")?
-        .to_string();
-    let replacements = parse_edits(&args)?
-        .into_iter()
-        .map(|edit| SelfHealingEditReplacement::new(edit.old_text, edit.new_text))
-        .collect::<Vec<_>>();
-    let target = filesystem_target_for_execution(filesystem, context, "edit", &path).await?;
-    let options =
-        SelfHealingEditOptions::from_bound_target(filesystem.clone(), target, path, replacements)
-            .with_operations(ops);
-    let mut context = SelfHealingEditContext::new(options);
-    let runner = SelfHealingEditRunner::new().map_err(|error| error.to_string())?;
-    match runner.run_typed(&mut context, None).await {
-        Ok(_) => context
-            .finish_success()
-            .map(self_healing_outcome_to_tool_output)
-            .map_err(coding_session_error_message),
-        Err(error) => Err(coding_session_error_message(error)),
-    }
-}
-
-fn coding_session_error_message(error: CodingSessionError) -> String {
-    match error {
-        CodingSessionError::Config { message }
-        | CodingSessionError::Input { message }
-        | CodingSessionError::Resource { message }
-        | CodingSessionError::Session { message }
-        | CodingSessionError::SessionWriteRejected { message }
-        | CodingSessionError::SessionWriteFailure { message, .. }
-        | CodingSessionError::SelfHealingEditFailed { message, .. }
-        | CodingSessionError::Provider { message }
-        | CodingSessionError::Tool { message }
-        | CodingSessionError::Workflow { message } => message,
-        CodingSessionError::Cancelled => "cancelled".to_owned(),
-        CodingSessionError::UnsupportedCapability { capability } => {
-            format!("unsupported capability: {capability}")
-        }
-        CodingSessionError::Busy { operation } => format!("busy: {operation}"),
-        CodingSessionError::PartialCommit {
-            operation_id,
-            message,
-        } => format!("partial commit uncertainty for operation {operation_id}: {message}"),
-        pending @ CodingSessionError::RecoveryPending { .. } => pending.to_string(),
-        gap @ CodingSessionError::EventStreamGap { .. } => gap.to_string(),
-        lag @ CodingSessionError::EventStreamLag { .. } => lag.to_string(),
-        version @ CodingSessionError::UnsupportedProtocolVersion { .. } => version.to_string(),
-        other @ (CodingSessionError::SubmissionPreparationBusy
-        | CodingSessionError::SubmissionDraftMismatch
-        | CodingSessionError::ClientCapacityExceeded { .. }
-        | CodingSessionError::Lifecycle { .. }) => other.to_string(),
-    }
-}
-
-fn self_healing_outcome_to_tool_output(outcome: SelfHealingEditOutcome) -> AgentToolOutput {
-    let diagnostics = outcome
-        .diagnostics
-        .iter()
-        .map(|diagnostic| diagnostic.message.clone())
-        .collect::<Vec<_>>();
-    let check_output = outcome.check_output.as_ref().map(|output| {
-        serde_json::json!({
-            "command": output.command.clone(),
-            "stdout": output.stdout.clone(),
-            "stderr": output.stderr.clone(),
-            "exitCode": output.exit_code,
-        })
-    });
-    let mut workflow = serde_json::json!({
-        "attempts": outcome.attempts,
-        "diagnostics": diagnostics,
-    });
-    if let Some(check_output) = check_output {
-        workflow["checkOutput"] = check_output;
-    }
-
-    let mut details = serde_json::json!({
-        "diff": outcome.diff,
-        "patch": outcome.patch,
-        "selfHealingEdit": workflow,
-    });
-    if let Some(first_changed_line) = outcome.first_changed_line {
-        details["firstChangedLine"] = serde_json::json!(first_changed_line);
-    }
-
-    AgentToolOutput::new(vec![ContentBlock::Text {
-        text: outcome.message,
-        text_signature: None,
-    }])
-    .with_details(details)
-}
-
-pub(crate) async fn edit_execute_with_target(
+pub(crate) async fn edit_execute_with_target_contract(
     target: &FilesystemTarget,
     args: serde_json::Value,
     ops: Arc<dyn EditOperations>,
-) -> Result<AgentToolOutput, String> {
+) -> Result<ToolOutput, String> {
     let path = args
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("edit: missing or non-string 'path' argument")?
         .to_string();
     let edits = parse_edits(&args)?;
+    let expected_revision = args
+        .get("expectedRevision")
+        .and_then(|value| value.as_str());
+    let expected_target_fingerprint = args
+        .get("expectedTargetFingerprint")
+        .and_then(|value| value.as_str());
     let mutation = FileMutation::begin(target).await?;
+    let target_fingerprint = target.target_fingerprint().to_owned();
     let target = target.clone();
     let opened = ops.open_file(&target).await?;
     let raw = opened.read_file().await?;
-    let content = String::from_utf8(raw).map_err(|error| {
+    let actual_revision = content_revision(&raw);
+    validate_fence(
+        expected_revision,
+        expected_target_fingerprint,
+        Some(&actual_revision),
+        &target_fingerprint,
+        &path,
+    )?;
+    let content = String::from_utf8(raw.clone()).map_err(|error| {
         format!(
             "edit: cannot edit {path} because the file is not valid UTF-8 (invalid byte at offset {}); use bash with an encoding-aware tool instead",
             error.utf8_error().valid_up_to()
@@ -458,51 +369,102 @@ pub(crate) async fn edit_execute_with_target(
         .await?;
     let diff = generate_diff_string(&base, &new_content, 4);
     let patch = generate_unified_patch(&path, &base, &new_content);
+    let bounded_patch = bounded_diff(patch);
+    let bounded_diff_text = bounded_diff(diff.diff);
+    let change_receipt = receipt(
+        path.clone(),
+        target_fingerprint,
+        Some(&raw),
+        final_content.as_bytes(),
+        "edit",
+        bounded_patch.clone(),
+    );
     let mut details = serde_json::json!({
-        "diff": diff.diff,
-        "patch": patch,
+        "diff": bounded_diff_text,
+        "patch": bounded_patch,
+        "changeReceipt": change_receipt,
     });
     if let Some(first_changed_line) = diff.first_changed_line {
         details["firstChangedLine"] = serde_json::json!(first_changed_line);
     }
-    Ok(AgentToolOutput::new(vec![ContentBlock::Text {
-        text: format!("Successfully replaced {} block(s) in {path}.", edits.len()),
-        text_signature: None,
-    }])
-    .with_details(details))
+    Ok(ToolOutput {
+        content: vec![ToolContent::Text {
+            text: format!("Successfully replaced {} block(s) in {path}.", edits.len()),
+        }],
+        details: Some(details),
+        terminate: false,
+    })
 }
 
-pub fn edit_tool(filesystem: FilesystemCapability) -> AgentTool {
-    edit_tool_with_operations(filesystem, Arc::new(RealEditOperations))
-}
-
-pub fn edit_tool_with_operations(
-    filesystem: FilesystemCapability,
+pub(crate) async fn edit_execute_with_target(
+    target: &FilesystemTarget,
+    args: serde_json::Value,
     ops: Arc<dyn EditOperations>,
-) -> AgentTool {
-    let execute: ToolFn = Arc::new(move |context, args, _on_update| {
-        let filesystem = filesystem.clone();
-        let ops = ops.clone();
-        Box::pin(async move {
-            edit_tool_execute_with_operations(&filesystem, &context, args, ops).await
-        })
-    });
-    AgentTool {
-        kind: Default::default(),
-        name: "edit".into(),
+) -> Result<AgentToolOutput, String> {
+    edit_execute_with_target_contract(target, args, ops)
+        .await
+        .map(AgentToolOutput::from)
+}
+
+pub fn edit_runtime_tool(
+    filesystem: FilesystemCapability,
+) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
+    let definition = ToolDefinition {
+        id: ToolId::new("edit").expect("static tool id is valid"),
+        kind: ToolKind::Function,
         description: DESCRIPTION.into(),
-        parameters: schema(),
-        execution_mode: None,
-        execute,
-    }
+        parameters: schema_for::<EditArgs>().expect("EditArgs schema is valid"),
+        capabilities: ToolCapabilities {
+            read_only: false,
+            execution: ToolExecutionMode::Parallel,
+            cancel: true,
+            timeout: true,
+            streaming: false,
+            provider_executed: false,
+        },
+        behavior: ToolBehaviorVersion::V1,
+        authorization_risk: AuthorizationRisk::SideEffect,
+        requirements: vec![ToolRequirement {
+            tool: ToolId::new("read").expect("static tool id is valid"),
+            minimum_behavior: ToolBehaviorVersion::V1,
+        }],
+    };
+    Ok(Arc::new(TypedTool::<EditArgs>::new(
+        definition,
+        move |context, args| {
+            let filesystem = filesystem.clone();
+            Box::pin(async move {
+                let target = crate::tools::filesystem_target_for_runtime_execution(
+                    &filesystem,
+                    &context,
+                    "edit",
+                    &args.path,
+                )
+                .await
+                .map_err(|error| ToolError::new(ToolErrorKind::Execution, error))?;
+                edit_execute_with_target_contract(
+                    &target,
+                    serde_json::to_value(&args).expect("typed edit args serialize"),
+                    Arc::new(RealEditOperations),
+                )
+                .await
+                .map_err(|error| ToolError::new(ToolErrorKind::Execution, error))
+            }) as ToolFuture
+        },
+    )?))
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use super::{Edit, RealEditOperations, apply_edits, edit_execute_with_target};
+    use super::{
+        Edit, RealEditOperations, apply_edits, edit_execute_with_target, edit_runtime_tool,
+    };
     use crate::platform::fs::capability::FilesystemCapability;
+    use tokio_util::sync::CancellationToken;
+    use tool_contract::api::definition::ToolId;
+    use tool_runtime::api::{ToolCallContext, ToolRegistry, ToolRuntime};
 
     #[test]
     fn fuzzy_uniqueness_counts_in_the_same_normalized_space_as_search() {
@@ -561,5 +523,105 @@ mod tests {
             assert!(error.contains("encoding-aware tool"));
             assert_eq!(std::fs::read(path).unwrap(), bytes);
         }
+    }
+
+    #[tokio::test]
+    async fn edit_returns_change_receipt_and_rejects_a_stale_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("target.txt"), "before\n").unwrap();
+        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let target = filesystem
+            .prepare_target_for_tool("edit", "target.txt")
+            .await
+            .unwrap();
+
+        let output = edit_execute_with_target(
+            &target,
+            serde_json::json!({
+                "path": "target.txt",
+                "edits": [{"oldText": "before", "newText": "after"}]
+            }),
+            Arc::new(RealEditOperations),
+        )
+        .await
+        .expect("edit succeeds");
+        let receipt = output
+            .details
+            .expect("edit details")
+            .get("changeReceipt")
+            .cloned()
+            .expect("receipt field");
+        assert_eq!(receipt["origin"], "edit");
+        assert_eq!(receipt["before_revision"].as_str().unwrap().len(), 64);
+        assert_eq!(receipt["after_revision"].as_str().unwrap().len(), 64);
+
+        let stale = edit_execute_with_target(
+            &target,
+            serde_json::json!({
+                "path": "target.txt",
+                "expectedRevision": "0000000000000000000000000000000000000000000000000000000000000000",
+                "edits": [{"oldText": "after", "newText": "stale"}]
+            }),
+            Arc::new(RealEditOperations),
+        )
+        .await
+        .expect_err("stale edit must be rejected");
+        assert!(stale.contains("mutation fence rejected"));
+    }
+
+    #[test]
+    fn typed_edit_requires_read_behavior() {
+        let temp = tempfile::tempdir().unwrap();
+        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let mut registry = ToolRegistry::default();
+        registry
+            .register(edit_runtime_tool(filesystem).unwrap())
+            .unwrap();
+        let error = match ToolRuntime::new(registry) {
+            Ok(_) => panic!("read requirement must be enforced"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("requires missing tool read"));
+    }
+
+    #[tokio::test]
+    async fn typed_edit_executes_through_contract_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("target.txt"), "before\n").unwrap();
+        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let mut registry = ToolRegistry::default();
+        registry
+            .register(
+                crate::tools::filesystem::read::read_runtime_tool(filesystem.clone()).unwrap(),
+            )
+            .unwrap();
+        registry
+            .register(edit_runtime_tool(filesystem).unwrap())
+            .unwrap();
+        let runtime = ToolRuntime::new(registry).unwrap();
+        let context = ToolCallContext::new(
+            ToolId::new("edit").unwrap(),
+            "edit-call",
+            CancellationToken::new(),
+        );
+        let output = runtime
+            .execute(
+                context,
+                serde_json::json!({
+                    "path": "target.txt",
+                    "edits": [{"oldText": "before", "newText": "after"}]
+                }),
+            )
+            .await
+            .expect("typed edit succeeds");
+        assert!(
+            output.details.unwrap()["changeReceipt"]["after_revision"]
+                .as_str()
+                .is_some()
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("target.txt")).unwrap(),
+            "after\n"
+        );
     }
 }

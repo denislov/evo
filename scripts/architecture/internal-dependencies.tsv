@@ -1,0 +1,15 @@
+# source-package	target-package
+agent-core	ai-protocol
+agent-core	tool-contract
+agent-core	tool-runtime
+ai	ai-protocol
+cli	coding-agent
+cli	tui
+coding-agent	agent-core
+coding-agent	ai
+coding-agent	ai-protocol
+coding-agent	event-journal
+coding-agent	tool-contract
+coding-agent	tool-runtime
+desktop	coding-agent
+tool-runtime	tool-contract

@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use agent_core::api::agent::ThinkingLevel;
 use agent_core::api::resources::{AgentResources, Skill, load_skills};
-use ai::api::compatibility::{ModelCompat, ThinkingFormat, ThinkingLevelMap, ThinkingLevelValue};
-use ai::api::model::{Model, ModelInput};
+use ai_protocol::api::compatibility::{ModelCompat, ThinkingFormat};
+use ai_protocol::api::compatibility::{ThinkingLevelMap, ThinkingLevelValue};
+use ai_protocol::api::model::{Model, ModelInput};
 
 use crate::app::auth::{CodingAgentAuthController, load_global_auth_store};
 use crate::app::bootstrap::{DEFAULT_MODEL_ID, PromptInvocation, SessionMode, select_model};

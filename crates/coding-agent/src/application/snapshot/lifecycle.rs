@@ -217,7 +217,7 @@ impl SnapshotCoordinator {
         operation_id: &str,
         control_id: crate::runtime::client::connection::CodingAgentControlId,
         kind: crate::runtime::client::connection::CodingAgentControlKind,
-        content: Vec<ai::api::conversation::ContentBlock>,
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
     ) -> Result<
         crate::runtime::client::connection::CodingAgentControlReceipt,
         crate::runtime::client::connection::CodingAgentControlRejection,

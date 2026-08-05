@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use agent_core::api::agent::AgentMessage;
 use agent_core::api::compaction::summarize_with_provider_streamer;
-use ai::api::conversation::{AssistantMessage, ContentBlock};
-use ai::api::stream::StreamOptions;
+use ai_protocol::api::conversation::{AssistantMessage, ContentBlock};
+use ai_protocol::api::stream::StreamOptions;
 use tokio_util::sync::CancellationToken;
 
 use crate::application::capability::OperationCapabilitySnapshot;

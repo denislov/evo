@@ -89,7 +89,7 @@ pub(crate) struct DraftRecord {
 #[derive(Debug, Clone)]
 enum PromptControlPayload {
     Text(String),
-    Content(Vec<ai::api::conversation::ContentBlock>),
+    Content(Vec<ai_protocol::api::conversation::ContentBlock>),
 }
 
 impl PromptControlPayload {

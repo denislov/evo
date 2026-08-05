@@ -95,7 +95,7 @@ mod tests {
             tool_call_id: tool_call_id.into(),
             tool_name: "tool".into(),
             is_error: false,
-            content: vec![ai::api::conversation::ContentBlock::Text {
+            content: vec![ai_protocol::api::conversation::ContentBlock::Text {
                 text: text.into(),
                 text_signature: None,
             }],
@@ -103,8 +103,8 @@ mod tests {
     }
 
     fn assistant(message_id: &str, text: &str) -> AgentMessage {
-        let mut message = ai::api::conversation::AssistantMessage::empty("api", "model");
-        message.content = vec![ai::api::conversation::ContentBlock::Text {
+        let mut message = ai_protocol::api::conversation::AssistantMessage::empty("api", "model");
+        message.content = vec![ai_protocol::api::conversation::ContentBlock::Text {
             text: text.into(),
             text_signature: None,
         }];

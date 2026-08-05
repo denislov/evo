@@ -33,7 +33,7 @@ impl PromptControlHandle {
 
     pub(crate) fn steer_content(
         &self,
-        content: Vec<ai::api::conversation::ContentBlock>,
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
     ) -> Result<(), CodingSessionError> {
         self.send(PromptControlCommand::SteerContent { content })
     }
@@ -44,7 +44,7 @@ impl PromptControlHandle {
 
     pub(crate) fn follow_up_content(
         &self,
-        content: Vec<ai::api::conversation::ContentBlock>,
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
     ) -> Result<(), CodingSessionError> {
         self.send(PromptControlCommand::FollowUpContent { content })
     }

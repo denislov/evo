@@ -12,6 +12,7 @@ use crate::platform::fs::capability::FilesystemCapability;
 use crate::platform::process::ShellCapability;
 use crate::profiles::ProfileId;
 use crate::session::event::PersistedRuntimeGenerationRef;
+use tool_contract::api::definition::ToolId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OperationCapabilitySnapshot {
@@ -52,8 +53,8 @@ pub(crate) struct CapabilitySnapshotInput {
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) shell_path: Option<String>,
     pub(crate) shell_command_prefix: Option<String>,
-    pub(crate) runtime_tools: Vec<String>,
-    pub(crate) profile_tools: Vec<String>,
+    pub(crate) runtime_tools: Vec<ToolId>,
+    pub(crate) profile_tools: Vec<ToolId>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,18 +96,18 @@ impl CapabilitySnapshotService {
             input
                 .runtime_tools
                 .into_iter()
-                .filter(|name| input.profile_tools.iter().any(|allowed| allowed == name))
+                .filter(|id| input.profile_tools.iter().any(|allowed| allowed == id))
                 .collect::<Vec<_>>()
         };
         let cwd = input.cwd;
         let filesystem = cwd
             .as_ref()
-            .filter(|_| allowed_tools.iter().any(|name| tool_uses_filesystem(name)))
+            .filter(|_| allowed_tools.iter().any(tool_uses_filesystem))
             .map(|cwd| FilesystemCapability::new(cwd.clone()))
             .transpose()?;
         let shell = cwd
             .as_ref()
-            .filter(|_| allowed_tools.iter().any(|name| name == "bash"))
+            .filter(|_| allowed_tools.iter().any(|id| id.as_str() == "bash"))
             .map(|cwd| {
                 ShellCapability::with_configuration(
                     cwd.clone(),
@@ -119,7 +120,7 @@ impl CapabilitySnapshotService {
             operation_id: input.operation_id,
             actor: input.actor,
             model,
-            tools: ToolCapabilitySet::from_names(allowed_tools),
+            tools: ToolCapabilitySet::from_ids(allowed_tools),
             commands: CommandCapabilitySet::default(),
             filesystem,
             shell,
@@ -140,6 +141,9 @@ impl Default for CapabilitySnapshotService {
     }
 }
 
-pub(crate) fn tool_uses_filesystem(name: &str) -> bool {
-    matches!(name, "read" | "write" | "edit" | "grep" | "find" | "ls")
+pub(crate) fn tool_uses_filesystem(id: &ToolId) -> bool {
+    matches!(
+        id.as_str(),
+        "read" | "write" | "edit" | "hashline_edit" | "apply_patch" | "grep" | "find" | "ls"
+    )
 }

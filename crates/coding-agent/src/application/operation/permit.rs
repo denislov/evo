@@ -105,6 +105,7 @@ mod tests {
         ActorId, CapabilityGeneration, CommandCapabilitySet, ToolCapabilitySet,
     };
     use crate::kernel::operation::OperationKind;
+    use tool_contract::api::definition::ToolId;
 
     #[derive(Clone, Copy)]
     enum TerminalExit {
@@ -122,7 +123,7 @@ mod tests {
             operation_id: operation_id.to_owned(),
             actor: ActorId::Client,
             model: None,
-            tools: ToolCapabilitySet::from_names(["read".to_owned()]),
+            tools: ToolCapabilitySet::from_ids([ToolId::new("read").unwrap()]),
             commands: CommandCapabilitySet::default(),
             filesystem: Some(filesystem),
             shell: None,

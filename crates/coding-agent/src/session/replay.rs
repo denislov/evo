@@ -7,7 +7,7 @@ use crate::session::event::{
     PersistedDelegationStatus, PersistedToolResult, SessionEventData, SessionEventEnvelope,
 };
 use agent_core::api::compaction::calculate_context_tokens;
-use ai::api::conversation::Usage;
+use ai_protocol::api::conversation::Usage;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

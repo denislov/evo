@@ -9,13 +9,13 @@ use crate::interactive::input::InputPump;
 use crate::interactive::r#loop::run_interactive_loop_with_input;
 use crate::interactive::session_actions::SessionChoice;
 use crate::output::CliOutput;
+use coding_agent::api::authorization::ToolAuthorizationMode;
 use coding_agent::api::embedding::{
     CodingAgentAuthCommand, CodingAgentAuthController, CodingAgentAuthMutationOutcome,
     CodingAgentInteractiveStartup, CodingAgentModelCatalogEntry, CodingAgentPreparedPrompt,
     CodingAgentProfileCatalog, CodingAgentResourceCommand, CodingAgentSessionQuery,
     CodingAgentThinkingLevel,
 };
-use coding_agent::api::authorization::ToolAuthorizationMode;
 use coding_agent::api::operation::{
     BranchSummaryReusePolicy, CodingAgentOperation, CodingAgentOperationFactory, PromptInvocation,
     SelfHealingEditModelRepairOptions, SelfHealingEditRequest,

@@ -1,4 +1,5 @@
 use super::*;
+use tool_contract::api::definition::ToolId;
 
 pub(super) enum Evaluation {
     Allow,
@@ -33,7 +34,7 @@ pub(super) async fn bind_filesystem_target(
             .get("path")
             .and_then(Value::as_str)
             .unwrap_or("."),
-        "write" | "edit" => context
+        "write" | "edit" | "hashline_edit" => context
             .arguments
             .get("path")
             .and_then(Value::as_str)
@@ -70,6 +71,7 @@ pub(super) fn evaluate(
     snapshot: &OperationCapabilitySnapshot,
     inventory: &ToolAuthorizationInventory,
 ) -> Result<Evaluation, String> {
+    let tool_id = ToolId::new(context.tool_name.clone()).ok();
     match context.tool_name.as_str() {
         "read" | "grep" | "find" | "ls" => {
             let Some(filesystem) = snapshot.filesystem.as_ref() else {
@@ -93,7 +95,7 @@ pub(super) fn evaluate(
                 ))
             }
         }
-        "write" | "edit" => {
+        "write" | "edit" | "hashline_edit" => {
             let Some(filesystem) = snapshot.filesystem.as_ref() else {
                 return Err("filesystem capability is not granted".into());
             };
@@ -109,6 +111,36 @@ pub(super) fn evaluate(
                 ToolAuthorizationRisk::FilesystemMutation,
                 target.display,
                 "Modify a file",
+                mutation_content_preview(context),
+            ))
+        }
+        "apply_patch" => {
+            let Some(filesystem) = snapshot.filesystem.as_ref() else {
+                return Err("filesystem capability is not granted".into());
+            };
+            let patch = context
+                .arguments
+                .get("patch")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "apply_patch is missing `patch`".to_owned())?;
+            let parsed = crate::tools::filesystem::patch::parse_patch(patch)
+                .map_err(|error| format!("invalid apply_patch input: {error}"))?;
+            let mut previews = parsed
+                .files
+                .iter()
+                .map(|file| filesystem.preview_path(&file.path))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            if previews.iter().any(|preview| !preview.workspace_local) {
+                return Err("apply_patch only accepts workspace-local paths; use an explicit write operation for external targets".into());
+            }
+            let preview = previews
+                .pop()
+                .ok_or_else(|| "apply_patch must contain at least one file".to_owned())?;
+            Ok(path_request_with_content(
+                ToolAuthorizationRisk::FilesystemMutation,
+                preview.display,
+                "Apply a workspace patch",
                 mutation_content_preview(context),
             ))
         }
@@ -138,9 +170,9 @@ pub(super) fn evaluate(
             })
         }
         "delegate_agent" | "delegate_team" => {
-            match inventory
-                .explicit_tools
-                .get(context.tool_name.as_str())
+            match tool_id
+                .as_ref()
+                .and_then(|id| inventory.explicit_tools.get(id))
                 .copied()
                 .flatten()
             {
@@ -152,8 +184,16 @@ pub(super) fn evaluate(
                 _ => Ok(Evaluation::Allow),
             }
         }
-        name if inventory.explicit_tools.contains_key(name) => {
-            match inventory.explicit_tools.get(name).copied().flatten() {
+        _ if tool_id
+            .as_ref()
+            .is_some_and(|id| inventory.explicit_tools.contains_key(id)) =>
+        {
+            match tool_id
+                .as_ref()
+                .and_then(|id| inventory.explicit_tools.get(id))
+                .copied()
+                .flatten()
+            {
                 Some(DeclaredToolAuthorizationRisk::WorkspaceLocalReadOnly) => {
                     Ok(Evaluation::Allow)
                 }

@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ai::api::conversation::{AssistantMessage, ContentBlock, Context, Message, StopReason};
-use ai::api::stream::{AssistantMessageEvent, StreamOptions};
+use ai_protocol::api::conversation::{
+    AssistantMessage, ContentBlock, Context, Message, StopReason,
+};
+use ai_protocol::api::stream::{AssistantMessageEvent, StreamOptions};
 use futures::{
     StreamExt,
     future::{BoxFuture, FutureExt},
@@ -285,22 +287,6 @@ impl SelfHealingEditOptions {
             max_repair_attempts: 0,
             repair_observer: None,
         }
-    }
-
-    pub(crate) fn from_bound_target(
-        filesystem: FilesystemCapability,
-        target: FilesystemTarget,
-        path: impl Into<String>,
-        replacements: Vec<SelfHealingEditReplacement>,
-    ) -> Self {
-        let mut options = Self::from_filesystem(filesystem, path, replacements);
-        options.target = Some(target);
-        options
-    }
-
-    pub(crate) fn with_operations(mut self, operations: Arc<dyn EditOperations>) -> Self {
-        self.operations = operations;
-        self
     }
 
     pub(crate) fn with_check_command(mut self, command: impl Into<String>) -> Self {

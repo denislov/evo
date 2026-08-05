@@ -29,4 +29,14 @@ pub(crate) const MAX_FILE_REVIEW_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_FILE_REVIEW_CONTENT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_FILE_REVIEW_DIFF_BYTES: usize = 256 * 1024;
 
+pub(crate) const MAX_TOOL_EDIT_FILE_BYTES: usize = 5 * 1024 * 1024;
 pub(crate) const MAX_EDIT_RESULT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_CHANGE_RECEIPT_DIFF_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_HASHLINE_DETAILS_BYTES: usize = 50 * 1024;
+pub(crate) const MAX_HASHLINE_DETAIL_LINES: usize = 2_000;
+pub(crate) const MAX_HASHLINE_EDITS: usize = 1_024;
+pub(crate) const MAX_PATCH_INPUT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_PATCH_FILES: usize = 32;
+pub(crate) const MAX_PATCH_HUNKS: usize = 1_024;
+pub(crate) const MAX_PATCH_LINES: usize = 20_000;
+pub(crate) const MAX_SHELL_COMMAND_BYTES: usize = 1024 * 1024;

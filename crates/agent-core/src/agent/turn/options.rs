@@ -1,6 +1,6 @@
 use crate::agent::types::ThinkingLevel;
-use ai::api::model::{Model, ThinkingConfig};
-use ai::api::stream::StreamOptions;
+use ai_protocol::api::model::{Model, ThinkingConfig};
+use ai_protocol::api::stream::StreamOptions;
 
 pub(crate) fn stream_options_for_turn(
     model: &Model,

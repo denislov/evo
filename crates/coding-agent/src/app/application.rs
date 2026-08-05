@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use ai::api::model::Model;
+use ai_protocol::api::model::Model;
 
 use crate::app::bootstrap::{ApplicationRunOptions, SessionMode, SessionRunOptions};
 use crate::app::embedding::embedding_diagnostic_from_application;
@@ -11,7 +11,6 @@ use crate::app::prompt_execution::{
 };
 use crate::app::startup;
 use crate::config;
-use crate::tools::builtin_tools;
 
 pub(crate) fn default_application_options(
     cwd: PathBuf,
@@ -27,7 +26,7 @@ pub(crate) fn default_application_options(
     };
     Ok(ApplicationRunOptions {
         model_override,
-        tools: builtin_tools(cwd)?,
+        tools: Vec::new(),
         register_builtins: true,
         global_config_only: false,
         ai_client: None,

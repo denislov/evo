@@ -4,6 +4,31 @@ use std::pin::Pin;
 use super::*;
 use crate::kernel::capability::CapabilityGeneration;
 use crate::services::ports::{CapabilityTransitionLease, SessionWriter};
+use tool_contract::api::definition::{
+    ToolBehaviorVersion, ToolCapabilities, ToolDefinition, ToolId, ToolKind,
+};
+
+#[test]
+fn typed_runtime_definitions_keep_their_declared_authorization_risk() {
+    let definition = ToolDefinition {
+        id: ToolId::new("read").unwrap(),
+        kind: ToolKind::Function,
+        description: "Read a file".into(),
+        parameters: serde_json::json!({"type": "object"}),
+        capabilities: ToolCapabilities {
+            read_only: true,
+            ..ToolCapabilities::default()
+        },
+        behavior: ToolBehaviorVersion::V1,
+        authorization_risk: AuthorizationRisk::WorkspaceLocalReadOnly,
+        requirements: Vec::new(),
+    };
+    let inventory = ToolAuthorizationInventory::new(&[definition]);
+    assert_eq!(
+        inventory.explicit_tools.get(&ToolId::new("read").unwrap()),
+        Some(&Some(DeclaredToolAuthorizationRisk::WorkspaceLocalReadOnly))
+    );
+}
 
 #[derive(Debug, Default)]
 struct FakeSessionWriter {
@@ -381,10 +406,7 @@ fn mode_switch_shares_across_service_clones() {
         .set_mode(ToolAuthorizationMode::Plan)
         .expect("mode switch should succeed");
     assert_eq!(
-        service
-            .state
-            .lock_or_recover("authorization state")
-            .mode,
+        service.state.lock_or_recover("authorization state").mode,
         ToolAuthorizationMode::Plan
     );
     assert!(!service.uses_interactive_waiters());

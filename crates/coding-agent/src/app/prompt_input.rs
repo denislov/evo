@@ -5,7 +5,7 @@ use crate::limits::{
     MAX_PROMPT_INPUT_BYTES,
 };
 use crate::platform::io::bounded as bounded_io;
-use ai::api::conversation::ContentBlock;
+use ai_protocol::api::conversation::ContentBlock;
 use base64::Engine;
 use image::{GenericImageView, ImageFormat, ImageReader, Limits};
 use std::io::Cursor;

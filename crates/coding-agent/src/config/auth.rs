@@ -230,7 +230,7 @@ impl AuthStoreProviderAuthResolver {
     pub(crate) fn new(
         current_provider: impl Into<String>,
         api_key: Option<String>,
-        diagnostics: Vec<ai::api::auth::ProviderAuthDiagnostic>,
+        diagnostics: Vec<ai_protocol::api::auth::ProviderAuthDiagnostic>,
         store: AuthStore,
     ) -> Self {
         Self {
@@ -260,7 +260,10 @@ impl AuthStoreProviderAuthResolver {
 }
 
 impl ai::api::auth::ProviderAuthResolver for AuthStoreProviderAuthResolver {
-    fn resolve_model_auth(&self, model: &ai::api::model::Model) -> ai::api::auth::ProviderAuth {
+    fn resolve_model_auth(
+        &self,
+        model: &ai_protocol::api::model::Model,
+    ) -> ai::api::auth::ProviderAuth {
         // Preserve environment-resolved auth material, then replace only the
         // provider credential with the product-resolved material. The current
         // provider may carry an invocation-scoped key; every other provider is
@@ -287,8 +290,8 @@ impl ai::api::auth::ProviderAuthResolver for AuthStoreProviderAuthResolver {
 }
 
 impl ResolvedKey {
-    pub fn provider_auth_diagnostic(&self) -> ai::api::auth::ProviderAuthDiagnostic {
-        ai::api::auth::ProviderAuthDiagnostic {
+    pub fn provider_auth_diagnostic(&self) -> ai_protocol::api::auth::ProviderAuthDiagnostic {
+        ai_protocol::api::auth::ProviderAuthDiagnostic {
             field: "api_key".into(),
             source: match (&self.source, &self.material) {
                 (KeySource::Cli, AuthMaterialKind::ApiKey) => "cli:api_key".into(),

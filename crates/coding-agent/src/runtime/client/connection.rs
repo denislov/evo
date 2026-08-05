@@ -399,7 +399,7 @@ impl CodingAgentPromptControl {
         &self,
         control_id: CodingAgentControlId,
         kind: CodingAgentControlKind,
-        content: Vec<ai::api::conversation::ContentBlock>,
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
     ) -> Result<CodingAgentControlReceipt, CodingAgentControlRejection> {
         self.coordinator.enqueue_content_control(
             &self.handle(),

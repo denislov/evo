@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ai::api::conversation::{AssistantMessage, ContentBlock};
+use ai_protocol::api::conversation::{AssistantMessage, ContentBlock};
 use serde_json::Value;
 
 use super::HookFuture;

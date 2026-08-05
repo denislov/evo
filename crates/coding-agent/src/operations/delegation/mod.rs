@@ -1,10 +1,9 @@
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use agent_core::api::agent::AgentResources;
-use agent_core::api::tool::AgentTool;
 use serde::{Deserialize, Serialize};
 use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
+use tool_contract::api::definition::ToolId;
 
 use crate::app::bootstrap::{PromptInvocation, SessionRunOptions};
 use crate::app::prompt_runtime::PromptRuntimeOptions;
@@ -23,8 +22,12 @@ use crate::session::replay::ReplayPendingDelegationConfirmation;
 
 const DELEGATION_CONFIRMATION_TTL_HOURS: i64 = 24;
 
+#[cfg(test)]
+mod capability_snapshot_tests;
 pub(crate) mod confirmation;
 pub(crate) mod execution;
+mod tool;
+pub(crate) use tool::delegation_tools;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DelegationTargetInventory {
@@ -71,44 +74,14 @@ impl DelegationTargetInventory {
     }
 }
 
-pub(crate) fn delegation_tools(
-    profile_id: Option<&ProfileId>,
-    policy: Option<&DelegationPolicy>,
-    inventory: &DelegationTargetInventory,
-    executor: Option<DelegationToolExecutor>,
-) -> Vec<AgentTool> {
-    let Some(policy) = policy else {
-        return Vec::new();
-    };
-    let profile_id = profile_id
-        .cloned()
-        .unwrap_or_else(|| ProfileId::from("default"));
-    let mut tools = Vec::new();
-    if policy.allow_delegate_agent && !inventory.agents.is_empty() {
-        tools.push(delegate_agent_tool(
-            profile_id.clone(),
-            policy.clone(),
-            &inventory.agents,
-            executor.clone(),
-        ));
-    }
-    if policy.allow_delegate_team && !inventory.teams.is_empty() {
-        tools.push(delegate_team_tool(
-            profile_id,
-            policy.clone(),
-            &inventory.teams,
-            executor,
-        ));
-    }
-    tools
-}
-
-pub(crate) fn delegation_tool_names(
-    policy: &DelegationPolicy,
-) -> impl Iterator<Item = &'static str> {
+pub(crate) fn delegation_tool_ids(policy: &DelegationPolicy) -> impl Iterator<Item = ToolId> {
     [
-        policy.allow_delegate_agent.then_some("delegate_agent"),
-        policy.allow_delegate_team.then_some("delegate_team"),
+        policy
+            .allow_delegate_agent
+            .then(|| ToolId::new("delegate_agent").expect("static tool id is valid")),
+        policy
+            .allow_delegate_team
+            .then(|| ToolId::new("delegate_team").expect("static tool id is valid")),
     ]
     .into_iter()
     .flatten()
@@ -123,26 +96,24 @@ pub(crate) fn capability_snapshot_for_delegated_profile(
     let mut released_tools = profile
         .tools
         .iter()
-        .filter(|name| parent.tools.allows(name))
+        .filter(|id| parent.tools.allows(id))
         .cloned()
         .collect::<Vec<_>>();
-    for tool_name in delegation_tool_names(&profile.delegation) {
-        if parent.tools.allows(tool_name) && !released_tools.iter().any(|name| name == tool_name) {
-            released_tools.push(tool_name.to_owned());
+    for tool_id in delegation_tool_ids(&profile.delegation) {
+        if parent.tools.allows(&tool_id) && !released_tools.iter().any(|id| id == &tool_id) {
+            released_tools.push(tool_id);
         }
     }
     // Server-side tools follow the child automatically, but never wider than
     // the parent: a delegate cannot reach the network its parent could not.
     if !released_tools.is_empty() {
-        for tool_name in crate::tools::SERVER_TOOL_NAMES {
-            if parent.tools.allows(tool_name)
-                && !released_tools.iter().any(|name| name == tool_name)
-            {
-                released_tools.push(tool_name.to_owned());
+        for tool_id in crate::tools::server_tool_ids() {
+            if parent.tools.allows(&tool_id) && !released_tools.iter().any(|id| id == &tool_id) {
+                released_tools.push(tool_id);
             }
         }
     }
-    let releases_filesystem = released_tools.iter().any(|name| tool_uses_filesystem(name));
+    let releases_filesystem = released_tools.iter().any(tool_uses_filesystem);
     OperationCapabilitySnapshot {
         generation: parent.generation,
         operation_id: operation_id.into(),
@@ -150,13 +121,13 @@ pub(crate) fn capability_snapshot_for_delegated_profile(
         model: Some(ModelCapability {
             profile_id: Some(profile.id.clone()),
         }),
-        tools: ToolCapabilitySet::from_names(released_tools),
+        tools: ToolCapabilitySet::from_ids(released_tools),
         commands: Default::default(),
         filesystem: parent.filesystem.clone().filter(|_| releases_filesystem),
         shell: parent
             .shell
             .clone()
-            .filter(|_| profile.tools.iter().any(|name| name == "bash")),
+            .filter(|_| profile.tools.iter().any(|id| id.as_str() == "bash")),
         session_read: None,
         session_write: None,
         ui: None,
@@ -417,7 +388,7 @@ fn prompt_options_from_delegation_runtime_seed(
         .into_iter()
         .collect();
     let api_key = resolved_api_key.map(|key| key.value);
-    let tools = restored_builtin_tools(cwd, &seed.tool_names)?;
+    let tools = Vec::new();
     let options = PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
         model: seed.model,
         api_key,
@@ -438,27 +409,6 @@ fn prompt_options_from_delegation_runtime_seed(
     })
     .with_mode(parse_prompt_turn_mode(&seed.mode)?);
     Ok(options)
-}
-
-fn restored_builtin_tools(
-    cwd: &Path,
-    tool_names: &[String],
-) -> Result<Vec<AgentTool>, CodingSessionError> {
-    if tool_names.is_empty() {
-        return Ok(Vec::new());
-    }
-    let names = tool_names
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    // Server-side tools are intentionally absent here. They bind no local
-    // capability, so nothing constructs them from a cwd, and the delegate may
-    // run a different model than the seed was captured under. `RuntimeSnapshot`
-    // re-adds them from the delegate's own model instead.
-    Ok(crate::tools::builtin_tools(cwd.to_path_buf())?
-        .into_iter()
-        .filter(|tool| names.contains(tool.name.as_str()))
-        .collect())
 }
 
 fn parse_optional_runtime_value<T>(
@@ -498,7 +448,9 @@ fn prompt_turn_mode_label(mode: PromptTurnMode) -> &'static str {
     }
 }
 
-fn persisted_delegation_model(model: &ai::api::model::Model) -> ai::api::model::Model {
+fn persisted_delegation_model(
+    model: &ai_protocol::api::model::Model,
+) -> ai_protocol::api::model::Model {
     let mut persisted = model.clone();
     persisted.headers = None;
     persisted
@@ -519,11 +471,7 @@ pub(crate) fn delegation_runtime_seed_from_prompt_options(
         model: persisted_delegation_model(runtime.model()),
         system_prompt: runtime.system_prompt().map(str::to_owned),
         max_turns: runtime.max_turns(),
-        tool_names: runtime
-            .tools()
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect(),
+        tool_names: runtime.all_tool_names(),
         register_builtins: runtime.register_builtins(),
         thinking_level: runtime.thinking_level().map(|level| level.to_string()),
         tool_execution: runtime.tool_execution().map(|mode| mode.to_string()),
@@ -661,141 +609,6 @@ fn confirmation_reason(request: &DelegationRequest, policy: &DelegationPolicy) -
         }
         DelegationConfirmationMode::Writes => None,
     }
-}
-
-fn delegate_agent_tool(
-    profile_id: ProfileId,
-    policy: DelegationPolicy,
-    targets: &[DelegationTarget],
-    executor: Option<DelegationToolExecutor>,
-) -> AgentTool {
-    AgentTool::new_text(
-        "delegate_agent",
-        delegation_description(
-            "Request bounded help from another configured agent profile. The session owner validates policy before any child work is allowed.",
-            "agent",
-            targets,
-        ),
-        delegation_parameters(
-            "agent_id",
-            "agent",
-            targets,
-            matches!(
-                policy.require_confirmation,
-                DelegationConfirmationMode::Always
-            ),
-        ),
-        move |context, args| {
-            let profile_id = profile_id.clone();
-            let policy = policy.clone();
-            let executor = executor.clone();
-            async move {
-                match executor {
-                    Some(executor) => executor(context, args).await,
-                    None => {
-                        handle_delegation_request("agent", "agent_id", &profile_id, &policy, args)
-                    }
-                }
-            }
-        },
-    )
-}
-
-fn delegate_team_tool(
-    profile_id: ProfileId,
-    policy: DelegationPolicy,
-    targets: &[DelegationTarget],
-    executor: Option<DelegationToolExecutor>,
-) -> AgentTool {
-    AgentTool::new_text(
-        "delegate_team",
-        delegation_description(
-            "Request bounded help from a configured team profile. The session owner validates policy before any child work is allowed.",
-            "team",
-            targets,
-        ),
-        delegation_parameters(
-            "team_id",
-            "team",
-            targets,
-            !matches!(
-                policy.require_confirmation,
-                DelegationConfirmationMode::Never
-            ),
-        ),
-        move |context, args| {
-            let profile_id = profile_id.clone();
-            let policy = policy.clone();
-            let executor = executor.clone();
-            async move {
-                match executor {
-                    Some(executor) => executor(context, args).await,
-                    None => {
-                        handle_delegation_request("team", "team_id", &profile_id, &policy, args)
-                    }
-                }
-            }
-        },
-    )
-}
-
-fn delegation_description(base: &str, kind: &str, targets: &[DelegationTarget]) -> String {
-    let inventory = targets
-        .iter()
-        .map(|target| {
-            let display_name = single_line(&target.display_name);
-            match target.description.as_deref().map(single_line) {
-                Some(description) if !description.is_empty() => {
-                    format!("- {}: {} - {}", target.id, display_name, description)
-                }
-                _ => format!("- {}: {}", target.id, display_name),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{base}\n\nAvailable {kind} profiles:\n{inventory}")
-}
-
-fn single_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn delegation_parameters(
-    target_field: &str,
-    target_kind: &str,
-    targets: &[DelegationTarget],
-    requires_confirmation: bool,
-) -> serde_json::Value {
-    let target_ids = targets
-        .iter()
-        .map(|target| target.id.as_str())
-        .collect::<Vec<_>>();
-    let mut properties = serde_json::Map::new();
-    properties.insert(
-        target_field.to_string(),
-        serde_json::json!({
-            "type": "string",
-            "description": format!("Configured {target_kind} profile id"),
-            "enum": target_ids
-        }),
-    );
-    properties.insert(
-        "task".to_string(),
-        serde_json::json!({
-            "type": "string",
-            "description": "Focused task for the delegated child operation"
-        }),
-    );
-    let mut schema = serde_json::json!({
-        "type": "object",
-        "properties": properties,
-        "required": [target_field, "task"],
-        "additionalProperties": false
-    });
-    if requires_confirmation {
-        schema["x-evo-authorization-risk"] = serde_json::json!("side_effect");
-    }
-    schema
 }
 
 fn handle_delegation_request(

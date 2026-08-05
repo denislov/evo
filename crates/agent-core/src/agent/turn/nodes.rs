@@ -1,18 +1,17 @@
 use std::collections::HashSet;
-use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::agent::provider::stream_model_with_provider_streamer;
 use crate::agent::queue::drain_queue;
+use crate::agent::tool_adapter::{error_result, serialized_result_bytes};
 use crate::agent::turn::options::stream_options_for_turn;
+use crate::agent::turn::tool_execution::{execute_tool, execute_tool_with_updates};
 use crate::agent::turn::tools::{
-    ToolCallExecution, ToolCallRequest, append_tool_result_messages, extract_tool_calls,
-    should_use_sequential_tools,
+    ExecutableTool, ToolCallExecution, ToolCallRequest, append_tool_result_messages,
+    extract_tool_calls, find_executable_tool, should_use_sequential_tools,
 };
 use crate::agent::types::{
-    AgentEvent, AgentMessage, AgentTool, AgentToolOutput, AgentToolResult, ProviderRequestSnapshot,
-    ToolExecutionContext, ToolUpdateCallback,
+    AgentEvent, AgentMessage, AgentToolResult, ProviderRequestSnapshot, ToolExecutionContext,
 };
 use crate::compaction::estimate::estimate_context_tokens;
 use crate::compaction::prepare::{prepare_compaction, should_compact};
@@ -22,20 +21,17 @@ use crate::hooks::{
     AfterToolCallContext, AfterToolCallHook, BeforeProviderRequestContext, BeforeToolCallContext,
     PrepareNextTurnContext, ShouldStopAfterTurnContext,
 };
-use ai::api::conversation::{AssistantMessage, ContentBlock, StopReason, Usage};
-use ai::api::stream::AssistantMessageEvent;
-use ai::api::stream::json::parse_terminal_json;
-use futures::channel::mpsc;
+use ai_protocol::api::conversation::{AssistantMessage, ContentBlock, StopReason, Usage};
+use ai_protocol::api::stream::AssistantMessageEvent;
+use ai_protocol::api::stream::json::parse_terminal_json;
 use futures::{FutureExt, StreamExt};
 use tokio_util::sync::CancellationToken;
+use tool_contract::api::output::ToolErrorKind;
 
 use super::context::{AgentTurnContext, PendingToolCall, RuntimeCompactionState};
 
 const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 const MAX_CONCURRENT_TOOL_CALLS: usize = 8;
-const TOOL_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const MAX_TOOL_UPDATES_PER_CALL: usize = 64;
-const MAX_TOOL_UPDATE_BYTES_PER_CALL: usize = 256 * 1024;
 const MAX_TOOL_RESULT_BYTES_PER_CALL: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +43,7 @@ pub(crate) enum ToolExecutionLimit {
 }
 
 impl ToolExecutionLimit {
-    fn message(self) -> &'static str {
+    pub(super) fn message(self) -> &'static str {
         match self {
             Self::CallsPerTurn => "tool-call count exceeds the per-turn limit",
             Self::Deadline => "tool execution deadline exceeded",
@@ -158,12 +154,18 @@ pub(crate) async fn prepare_provider_request(
     };
 
     let messages_for_context = transformed_messages.as_ref().unwrap_or(&ctx.messages);
+    let runtime_tools = ctx
+        .tool_runtime
+        .as_ref()
+        .map(tool_runtime::api::ToolRuntime::definitions)
+        .unwrap_or_default();
     let context = if let Some(llm_messages) = llm_messages_override {
         assemble_context(
             &ctx.config.system_prompt,
             messages_for_context,
             llm_messages,
-            &ctx.tools,
+            &runtime_tools,
+            &ctx.provider_tools,
             &ctx.config.resources,
         )
     } else if transformed_messages.is_some() {
@@ -172,14 +174,16 @@ pub(crate) async fn prepare_provider_request(
             &ctx.config.system_prompt,
             messages_for_context,
             llm_messages,
-            &ctx.tools,
+            &runtime_tools,
+            &ctx.provider_tools,
             &ctx.config.resources,
         )
     } else {
         convert_to_context(
             &ctx.config.system_prompt,
             &ctx.messages,
-            &ctx.tools,
+            &runtime_tools,
+            &ctx.provider_tools,
             &ctx.config.resources,
         )
     };
@@ -460,7 +464,7 @@ fn normalize_terminal_tool_arguments(assistant: &mut AssistantMessage) -> Result
         else {
             continue;
         };
-        if *kind == ai::api::conversation::ToolCallKind::Custom {
+        if *kind == ai_protocol::api::conversation::ToolCallKind::Custom {
             continue;
         }
         let serde_json::Value::String(raw) = arguments else {
@@ -590,8 +594,13 @@ pub(crate) async fn execute_tools(
             arguments: call.arguments.clone(),
         })
         .collect();
+    let runtime_tools = ctx
+        .tool_runtime
+        .as_ref()
+        .map(tool_runtime::api::ToolRuntime::definitions)
+        .unwrap_or_default();
     let use_sequential =
-        should_use_sequential_tools(ctx.config.tool_execution, &requests, &ctx.tools);
+        should_use_sequential_tools(ctx.config.tool_execution, &requests, &runtime_tools);
     let hook_assistant = if ctx.config.hooks.before_tool_call.is_some()
         || ctx.config.hooks.after_tool_call.is_some()
     {
@@ -608,7 +617,7 @@ pub(crate) async fn execute_tools(
     let executions = if use_sequential {
         let mut executions = Vec::with_capacity(pending.len());
         for call in pending {
-            let tool = find_tool(&ctx.tools, &call.name);
+            let tool = find_executable_tool(ctx.tool_runtime.as_ref(), &call.name);
             let blocked = match invalid_tool_call_result(tool.as_ref(), &call) {
                 Some(result) => Some(result),
                 None => {
@@ -654,7 +663,7 @@ pub(crate) async fn execute_tools(
         let after_hook = ctx.config.hooks.after_tool_call.clone();
         let mut prepared = Vec::with_capacity(pending.len());
         for call in pending {
-            let tool = find_tool(&ctx.tools, &call.name);
+            let tool = find_executable_tool(ctx.tool_runtime.as_ref(), &call.name);
             let blocked = match invalid_tool_call_result(tool.as_ref(), &call) {
                 Some(result) => Some(result),
                 None => {
@@ -693,7 +702,11 @@ pub(crate) async fn execute_tools(
 
 async fn collect_parallel_tool_executions(
     ctx: &mut AgentTurnContext,
-    prepared: Vec<(PendingToolCall, Option<AgentTool>, Option<AgentToolResult>)>,
+    prepared: Vec<(
+        PendingToolCall,
+        Option<ExecutableTool>,
+        Option<AgentToolResult>,
+    )>,
     after_hook: Option<AfterToolCallHook>,
     assistant_message: Option<Arc<AssistantMessage>>,
     messages: Option<Arc<[AgentMessage]>>,
@@ -782,7 +795,9 @@ async fn before_tool_result(
 
     let cancellation_token = ctx.cancel_token.clone();
     tokio::select! {
-        _ = cancellation_token.clone().cancelled_owned() => Some(AgentToolResult::error("aborted")),
+        _ = cancellation_token.clone().cancelled_owned() => {
+            Some(error_result(ToolErrorKind::Cancelled, "aborted"))
+        },
         result = hook(hook_context) => match result {
             Ok(Some(result)) if result.block => Some(AgentToolResult::error(
                 result.reason.unwrap_or_else(|| "blocked".into()),
@@ -838,7 +853,9 @@ async fn apply_after_tool_hook(
     };
 
     match tokio::select! {
-        _ = cancellation.clone().cancelled_owned() => return AgentToolResult::error("aborted"),
+        _ = cancellation.clone().cancelled_owned() => {
+            return error_result(ToolErrorKind::Cancelled, "aborted")
+        },
         result = hook(hook_context) => result,
     } {
         Ok(Some(after)) => {
@@ -858,210 +875,30 @@ async fn apply_after_tool_hook(
     }
 }
 
-fn find_tool(tools: &[AgentTool], name: &str) -> Option<AgentTool> {
-    tools.iter().find(|tool| tool.name == name).cloned()
-}
-
 fn invalid_tool_call_result(
-    tool: Option<&AgentTool>,
+    tool: Option<&ExecutableTool>,
     call: &PendingToolCall,
 ) -> Option<AgentToolResult> {
     let Some(tool) = tool else {
-        return Some(AgentToolResult::error(format!(
-            "unknown tool: {}",
-            call.name
-        )));
+        return Some(error_result(
+            ToolErrorKind::Unavailable,
+            format!("unknown tool: {}", call.name),
+        ));
     };
-    // Provider-executed tools are declared to the provider but never dispatched
-    // here. A call arriving for one means the provider echoed a server tool
-    // back as a function call, so refuse it rather than running the stub.
-    if tool.is_provider_executed() {
-        return Some(AgentToolResult::error(format!(
-            "{} is executed by the provider and cannot be called locally",
-            call.name
-        )));
-    }
     tool.validate_arguments(&call.arguments)
         .err()
-        .map(|error| AgentToolResult::error(error.to_string()))
-}
-
-async fn execute_tool_with_updates(
-    ctx: &mut AgentTurnContext,
-    call: &PendingToolCall,
-    tool: Option<AgentTool>,
-) -> AgentToolResult {
-    let (update_tx, mut update_rx) = mpsc::unbounded::<AgentToolOutput>();
-    let progress_budget = Arc::new(std::sync::Mutex::new(ToolProgressBudget::default()));
-    let callback_budget = Arc::clone(&progress_budget);
-    let update_callback: ToolUpdateCallback = Arc::new(move |update| {
-        let Some(bytes) = serialized_tool_output_bytes(&update) else {
-            callback_budget.lock().unwrap().exceeded = true;
-            return;
-        };
-        let mut budget = callback_budget.lock().unwrap();
-        let next_events = budget.events.saturating_add(1);
-        let next_bytes = budget.bytes.saturating_add(bytes);
-        if next_events > MAX_TOOL_UPDATES_PER_CALL || next_bytes > MAX_TOOL_UPDATE_BYTES_PER_CALL {
-            budget.exceeded = true;
-            return;
-        }
-        budget.events = next_events;
-        budget.bytes = next_bytes;
-        let _ = update_tx.unbounded_send(update);
-    });
-    let execution_cancel = ctx.cancel_token.child_token();
-    let tool_cancel = execution_cancel.clone();
-    let mut execute_future = Box::pin({
-        let arguments = call.arguments.clone();
-        let tool_name = call.name.clone();
-        let execution_context = ToolExecutionContext::new(
-            ctx.config.tool_execution_scope.clone(),
-            ctx.turn,
-            call.id.clone(),
-            call.name.clone(),
-            tool_cancel,
-        );
-        async move {
-            match tool {
-                Some(tool) => {
-                    match (tool.execute)(execution_context, arguments, Some(update_callback)).await
-                    {
-                        Ok(output) => AgentToolResult::from_output(output),
-                        Err(error) => AgentToolResult::error(error),
-                    }
-                }
-                None => AgentToolResult::error(format!("unknown tool: {}", tool_name)),
-            }
-        }
-    })
-    .fuse();
-    let mut deadline = Box::pin(tokio::time::sleep(TOOL_EXECUTION_TIMEOUT).fuse());
-    let mut update_open = true;
-    let cancellation_token = ctx.cancel_token.clone();
-    let result = loop {
-        if !update_open {
-            break tokio::select! {
-                _ = cancellation_token.clone().cancelled_owned() => {
-                    AgentToolResult::error("aborted")
-                }
-                _ = &mut deadline => {
-                    execution_cancel.cancel();
-                    AgentToolResult::error(ToolExecutionLimit::Deadline.message())
-                }
-                result = execute_future => result,
-            };
-        }
-        tokio::select! {
-            _ = cancellation_token.clone().cancelled_owned() => {
-                break AgentToolResult::error("aborted");
-            }
-            _ = &mut deadline => {
-                execution_cancel.cancel();
-                break AgentToolResult::error(ToolExecutionLimit::Deadline.message());
-            }
-            maybe_update = update_rx.next().fuse() => {
-                if let Some(update) = maybe_update {
-                    ctx.emit(AgentEvent::ToolCallUpdate {
-                        tool_call_id: call.id.clone(),
-                        tool_name: call.name.clone(),
-                        update,
-                    });
-                } else {
-                    update_open = false;
-                }
-            }
-            completed = &mut execute_future => {
-                break completed;
-            }
-        }
-    };
-    while let Some(Some(update)) = update_rx.next().now_or_never() {
-        ctx.emit(AgentEvent::ToolCallUpdate {
-            tool_call_id: call.id.clone(),
-            tool_name: call.name.clone(),
-            update,
-        });
-    }
-    if progress_budget.lock().unwrap().exceeded {
-        AgentToolResult::error(ToolExecutionLimit::Progress.message())
-    } else {
-        result
-    }
-}
-
-async fn execute_tool(
-    tool: Option<AgentTool>,
-    execution_context: ToolExecutionContext,
-    arguments: serde_json::Value,
-) -> AgentToolResult {
-    let tool_name = execution_context.tool_name().to_owned();
-    let cancellation = execution_context.cancel_token().clone();
-    match tool {
-        Some(tool) => {
-            match tokio::select! {
-                _ = cancellation.clone().cancelled_owned() => Err("aborted".to_owned()),
-                _ = tokio::time::sleep(TOOL_EXECUTION_TIMEOUT) => {
-                    cancellation.cancel();
-                    Err(ToolExecutionLimit::Deadline.message().to_owned())
-                }
-                result = (tool.execute)(execution_context, arguments, None) => result,
-            } {
-                Ok(output) => AgentToolResult::from_output(output),
-                Err(error) => AgentToolResult::error(error),
-            }
-        }
-        None => AgentToolResult::error(format!("unknown tool: {}", tool_name)),
-    }
-}
-
-#[derive(Default)]
-struct ToolProgressBudget {
-    events: usize,
-    bytes: usize,
-    exceeded: bool,
+        .map(AgentToolResult::from)
 }
 
 fn retain_bounded_tool_result(result: AgentToolResult) -> AgentToolResult {
-    if serialized_tool_result_bytes(&result)
-        .is_some_and(|bytes| bytes <= MAX_TOOL_RESULT_BYTES_PER_CALL)
+    if serialized_result_bytes(&result).is_some_and(|bytes| bytes <= MAX_TOOL_RESULT_BYTES_PER_CALL)
     {
         result
     } else {
-        AgentToolResult::error(ToolExecutionLimit::Result.message())
-    }
-}
-
-fn serialized_tool_output_bytes(output: &AgentToolOutput) -> Option<usize> {
-    let mut writer = ByteCounter::default();
-    serde_json::to_writer(&mut writer, &output.content).ok()?;
-    serde_json::to_writer(&mut writer, &output.details).ok()?;
-    Some(writer.bytes)
-}
-
-fn serialized_tool_result_bytes(result: &AgentToolResult) -> Option<usize> {
-    let mut writer = ByteCounter::default();
-    serde_json::to_writer(&mut writer, &result.content).ok()?;
-    serde_json::to_writer(&mut writer, &result.details).ok()?;
-    Some(writer.bytes)
-}
-
-#[derive(Default)]
-struct ByteCounter {
-    bytes: usize,
-}
-
-impl Write for ByteCounter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.bytes = self
-            .bytes
-            .checked_add(buffer.len())
-            .ok_or_else(|| io::Error::other("serialized tool output size overflow"))?;
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        error_result(
+            ToolErrorKind::Protocol,
+            ToolExecutionLimit::Result.message(),
+        )
     }
 }
 

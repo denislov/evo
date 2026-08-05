@@ -1,9 +1,10 @@
-use ai::api::model::Model;
-use ai::api::stream::StreamOptions;
+use ai_protocol::api::model::Model;
+use ai_protocol::api::stream::StreamOptions;
+use tool_contract::api::definition::ToolExecutionMode;
 
 use crate::hooks::AgentHooks;
 
-use super::{AgentResources, ProviderStreamer, QueueMode, ThinkingLevel, ToolExecutionMode};
+use super::{AgentResources, ProviderStreamer, QueueMode, ThinkingLevel};
 
 // ── Compaction types ───────────────────────────────
 

@@ -1,6 +1,7 @@
 [workspace]
+resolver = "3"
 members = [
-  "crates/agent-core", 'crates/ai', "crates/cli", "crates/coding-agent", "crates/desktop", "crates/tui",
+  "crates/agent-core", "crates/ai-protocol", 'crates/ai', "crates/cli", "crates/coding-agent", "crates/desktop", "crates/event-journal", "crates/tool-contract", "crates/tool-runtime", "crates/tui", "crates/workspace-runtime",
 ]
 # The vendored `gpui-component` checkout carries its own workspace; leave it to
 # resolve against that one rather than inheriting this manifest's settings.
@@ -8,13 +9,36 @@ exclude = ["third-party"]
 
 [workspace.package]
 version = "0.7.2"
-
-[package]
-name = "evo"
-version.workspace = true
 edition = "2024"
+rust-version = "1.96"
+license = "LicenseRef-Proprietary"
 
-[dependencies]
+[workspace.dependencies]
+agent-core = { path = "crates/agent-core" }
+ai = { path = "crates/ai" }
+ai-protocol = { path = "crates/ai-protocol" }
+coding-agent = { path = "crates/coding-agent" }
+event-journal = { path = "crates/event-journal" }
+tool-contract = { path = "crates/tool-contract" }
+tool-runtime = { path = "crates/tool-runtime" }
+workspace-runtime = { path = "crates/workspace-runtime" }
+tui = { path = "crates/tui" }
+async-stream = "0.3"
+base64 = "0.22"
+futures = "0.3"
+libc = "0.2"
+regex = "1"
+schemars = "1.2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "2", features = ["full", "visit"] }
+tempfile = "3"
+thiserror = "2"
+time = "0.3"
+tokio = "1"
+tokio-util = "0.7"
+toml = "0.8"
+uuid = "1"
 
 # Build `gpui-component` from a locally vendored checkout of the pinned upstream
 # revision plus the patches in `patches/gpui-component/`. The dependency

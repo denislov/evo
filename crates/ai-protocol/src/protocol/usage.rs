@@ -64,7 +64,7 @@ const fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
-pub(crate) const fn saturating_token_total(input: u32, output: u32) -> u32 {
+pub const fn saturating_token_total(input: u32, output: u32) -> u32 {
     input.saturating_add(output)
 }
 

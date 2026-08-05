@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 
 use super::types::AgentMessage;
-use ai::api::conversation::ContentBlock;
+use ai_protocol::api::conversation::ContentBlock;
 
 pub const MAX_AGENT_QUEUE_ITEMS: usize = 32;
 pub const MAX_AGENT_QUEUE_BYTES: usize = 1024 * 1024;

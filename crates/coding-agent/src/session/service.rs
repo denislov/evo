@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_core::api::transcript::{SessionEntry, SessionTreeNode, StoredAgentMessage};
-use ai::api::conversation::{ContentBlock, Usage};
+use ai_protocol::api::conversation::{ContentBlock, Usage};
 use tokio::sync::watch;
 
 use crate::application::capability::OperationCapabilitySnapshot;

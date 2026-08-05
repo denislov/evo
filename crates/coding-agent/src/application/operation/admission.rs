@@ -12,6 +12,7 @@ use crate::runtime::facade::CodingAgentSession;
 use crate::runtime::intent::{QueryIntent, QueryIntentMetadata};
 use crate::session::service::{SessionPersistence, session_cwd};
 use std::path::PathBuf;
+use tool_contract::api::definition::ToolId;
 
 impl CodingAgentSession {
     pub(super) fn prepare_operation_for_admission(
@@ -132,7 +133,7 @@ impl CodingAgentSession {
         operation: &CodingAgentOperation,
         operation_runtime: Option<&crate::operations::prompt::context::RuntimeSnapshot>,
     ) -> CapabilitySnapshotInput {
-        let runtime_tools = self.operation_runtime_tool_names(operation_runtime);
+        let runtime_tools = self.operation_runtime_tool_ids(operation_runtime);
         let profile_tools = match self.active_agent_profile() {
             Some(profile) if !profile.tools.is_empty() => {
                 // A profile enumerates the local tools it wants; provider-side
@@ -169,19 +170,18 @@ impl CodingAgentSession {
         }
     }
 
-    fn operation_runtime_tool_names(
+    fn operation_runtime_tool_ids(
         &self,
         operation_runtime: Option<&crate::operations::prompt::context::RuntimeSnapshot>,
-    ) -> Vec<String> {
-        let mut names = self.current_runtime_tool_names();
+    ) -> Vec<ToolId> {
+        let mut names = self.current_runtime_tool_ids();
         if let Some(runtime) = operation_runtime {
-            names.extend(runtime.tools().iter().map(|tool| tool.name.clone()));
+            names.extend(runtime.all_tool_ids());
         }
         if let Some(profile) = self.active_agent_profile() {
-            names.extend(
-                crate::operations::delegation::delegation_tool_names(&profile.delegation)
-                    .map(str::to_owned),
-            );
+            names.extend(crate::operations::delegation::delegation_tool_ids(
+                &profile.delegation,
+            ));
         }
         names.sort();
         names.dedup();
@@ -200,11 +200,8 @@ impl CodingAgentSession {
         self.runtime_host.profile_registry.agent(id.as_str())
     }
 
-    fn current_runtime_tool_names(&self) -> Vec<String> {
-        crate::tools::PRODUCT_TOOL_NAMES
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+    fn current_runtime_tool_ids(&self) -> Vec<ToolId> {
+        crate::tools::product_tool_ids()
     }
 }
 

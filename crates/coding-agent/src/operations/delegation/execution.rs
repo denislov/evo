@@ -26,7 +26,6 @@ use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
 use crate::services::runtime::RuntimeService;
 use crate::session::event::PersistedDelegationStatus;
-use agent_core::api::tool::ToolExecutionContext;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -124,7 +123,7 @@ pub(crate) async fn execute_tool_request_with_pending(
     policy: DelegationPolicy,
     prompt_options: PromptTurnOptions,
     parent_capability_snapshot: OperationCapabilitySnapshot,
-    tool_context: ToolExecutionContext,
+    tool_context: tool_runtime::api::ToolCallContext,
     args: serde_json::Value,
     deferred_pending: Arc<Mutex<Vec<PendingDelegationConfirmationState>>>,
     confirmation_awaited: bool,
@@ -133,8 +132,8 @@ pub(crate) async fn execute_tool_request_with_pending(
     current_depth: usize,
     delegation_lineage: Vec<DelegationLineageEntry>,
 ) -> Result<String, String> {
-    let cancellation = tool_context.cancel_token().clone();
-    let (target_kind, target_field) = match tool_context.tool_name() {
+    let cancellation = tool_context.cancel.clone();
+    let (target_kind, target_field) = match tool_context.tool_id.as_str() {
         "delegate_agent" => (ProfileKind::Agent, "agent_id"),
         "delegate_team" => (ProfileKind::Team, "team_id"),
         other => return Err(format!("unsupported delegation tool: {other}")),
@@ -143,11 +142,11 @@ pub(crate) async fn execute_tool_request_with_pending(
     let task = required_non_empty_string(&args, "task")?;
     let request = DelegationRequest {
         operation_id: tool_context
-            .scope_id()
-            .unwrap_or(&parent_capability_snapshot.operation_id)
-            .to_owned(),
+            .operation_id
+            .clone()
+            .unwrap_or_else(|| parent_capability_snapshot.operation_id.clone()),
         turn_id,
-        tool_call_id: tool_context.tool_call_id().to_owned(),
+        tool_call_id: tool_context.call_id.clone(),
         requesting_profile_id: requesting_profile_id.clone(),
         target_kind,
         target_id: target_id.clone(),

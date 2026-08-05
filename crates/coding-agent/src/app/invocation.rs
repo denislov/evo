@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use agent_core::api::tool::ToolExecutionMode;
+use tool_contract::api::definition::ToolExecutionMode;
 
 use crate::app::embedding::CodingAgentThinkingLevel;
 use crate::runtime::facade::PromptTurnMode;

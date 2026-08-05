@@ -3,8 +3,8 @@ use crate::events::{
     CodingAgentProductEventReplacement, CodingAgentProductEventUsage,
 };
 
-impl From<ai::api::conversation::Usage> for CodingAgentProductEventUsage {
-    fn from(usage: ai::api::conversation::Usage) -> Self {
+impl From<ai_protocol::api::conversation::Usage> for CodingAgentProductEventUsage {
+    fn from(usage: ai_protocol::api::conversation::Usage) -> Self {
         Self {
             input: usage.input,
             output: usage.output,

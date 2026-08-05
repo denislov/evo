@@ -1,6 +1,6 @@
 use agent_core::api::agent::AgentEvent;
-use ai::api::conversation::ContentBlock;
-use ai::api::stream::AssistantMessageEvent;
+use ai_protocol::api::conversation::ContentBlock;
+use ai_protocol::api::stream::AssistantMessageEvent;
 
 use crate::events::agent::AgentStreamEvent;
 use crate::events::delegation::{DelegationEvent, DelegationEventContext};
@@ -280,7 +280,7 @@ fn map_assistant_event(
 }
 
 pub(crate) fn provider_item(
-    partial: &ai::api::conversation::AssistantMessage,
+    partial: &ai_protocol::api::conversation::AssistantMessage,
     content_index: u32,
 ) -> Option<(String, String, &serde_json::Value)> {
     let ContentBlock::ProviderItem { item, .. } = partial.content.get(content_index as usize)?
@@ -336,7 +336,7 @@ fn segment_message_id(context: &AgentEventMappingContext, segment_index: usize) 
 }
 
 fn assistant_segment_index(
-    partial: &ai::api::conversation::AssistantMessage,
+    partial: &ai_protocol::api::conversation::AssistantMessage,
     content_index: u32,
 ) -> usize {
     partial
@@ -471,8 +471,8 @@ mod provider_item_tests {
     use crate::events::message::MessageEvent;
     use crate::events::prompt_stream::PromptStreamEvent;
     use crate::events::tool::ToolEvent;
-    use ai::api::conversation::{AssistantMessage, ContentBlock};
-    use ai::api::stream::AssistantMessageEvent;
+    use ai_protocol::api::conversation::{AssistantMessage, ContentBlock};
+    use ai_protocol::api::stream::AssistantMessageEvent;
 
     fn partial(status: &str) -> AssistantMessage {
         let mut message = AssistantMessage::empty("deepseek-responses", "deepseek-v4-flash");
@@ -612,7 +612,7 @@ mod provider_item_tests {
         let completed = map_assistant_event(
             &context,
             &AssistantMessageEvent::Done {
-                reason: ai::api::conversation::StopReason::Stop,
+                reason: ai_protocol::api::conversation::StopReason::Stop,
                 message,
             },
         );

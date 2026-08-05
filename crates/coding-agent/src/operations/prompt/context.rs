@@ -1,16 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use agent_core::api::agent::{Agent, AgentEvent, AgentResources, ProviderStreamer, ThinkingLevel};
-use agent_core::api::tool::{AgentTool, AgentToolResult, ToolExecutionContext, ToolExecutionMode};
-use ai::api::auth::ProviderAuthDiagnostic;
-use ai::api::conversation::{AssistantMessage, ContentBlock};
-use ai::api::model::Model;
-use ai::api::stream::AssistantMessageEvent;
+use agent_core::api::tool::AgentToolResult;
+use ai_protocol::api::auth::ProviderAuthDiagnostic;
+use ai_protocol::api::conversation::{AssistantMessage, ContentBlock};
+use ai_protocol::api::model::Model;
+use ai_protocol::api::stream::AssistantMessageEvent;
 use tokio_util::sync::CancellationToken;
+use tool_contract::api::definition::ToolId;
+use tool_contract::api::definition::{ToolDefinition, ToolExecutionMode};
+use tool_runtime::api::ToolCallContext;
 
 use crate::app::bootstrap::{PromptInvocation, SessionRunOptions};
 use crate::app::prompt_runtime::{PromptRuntimeOptions, assistant_text};
@@ -339,7 +342,8 @@ pub(crate) struct RuntimeSnapshot {
     auth_diagnostics: Vec<ProviderAuthDiagnostic>,
     system_prompt: Option<String>,
     max_turns: Option<u32>,
-    tools: Vec<AgentTool>,
+    tools: Vec<Arc<dyn tool_runtime::api::DynamicTool>>,
+    typed_tool_ids: BTreeSet<ToolId>,
     register_builtins: bool,
     resources: AgentResources,
     settings: Option<Settings>,
@@ -349,7 +353,7 @@ pub(crate) struct RuntimeSnapshot {
     profile_id: Option<ProfileId>,
     profile_delegation_policy: Option<DelegationPolicy>,
     delegation_target_inventory: DelegationTargetInventory,
-    profile_tool_allowlist: Option<Vec<String>>,
+    profile_tool_allowlist: Option<Vec<ToolId>>,
     profile_skill_allowlist: Option<Vec<String>>,
     profile_diagnostics: Vec<CodingDiagnostic>,
     provider_streamer: Option<ProviderStreamer>,
@@ -364,6 +368,7 @@ impl std::fmt::Debug for RuntimeSnapshot {
             .field("system_prompt", &self.system_prompt)
             .field("max_turns", &self.max_turns)
             .field("tools_len", &self.tools.len())
+            .field("typed_tool_ids", &self.typed_tool_ids)
             .field("register_builtins", &self.register_builtins)
             .field("resources", &self.resources)
             .field("settings", &self.settings)
@@ -405,26 +410,13 @@ impl RuntimeSnapshot {
             invocation: _,
         } = options;
         let credential_provider = model.provider.clone();
-
-        // Server-side tools are declared, not executed here, so they are not
-        // part of the caller-supplied inventory (which is capability-bound to a
-        // cwd). Add them once, at the single point where the resolved model is
-        // known, so the policy chain, the delegation seed, and the outgoing
-        // tool list all see the same set. Callers that already supplied one
-        // win, keeping this idempotent across restore paths.
-        //
-        // An empty inventory is left empty. `filter_tools` has already run by
-        // this point, so `--no-tools` arrives here as an empty list; adding a
-        // provider-side tool back would reopen a door the caller shut. Same
-        // rule as `grant_server_tools` applies to the name lists.
-        let mut tools = tools;
-        if !tools.is_empty() {
-            for tool in crate::tools::server_side_tools(&model) {
-                if !tools.iter().any(|existing| existing.name == tool.name) {
-                    tools.push(tool);
-                }
-            }
-        }
+        let typed_tool_ids = if register_builtins {
+            crate::tools::builtin_runtime_tool_ids()
+                .into_iter()
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
 
         Self {
             model,
@@ -434,6 +426,7 @@ impl RuntimeSnapshot {
             system_prompt,
             max_turns,
             tools,
+            typed_tool_ids,
             register_builtins,
             resources,
             settings,
@@ -548,8 +541,54 @@ impl RuntimeSnapshot {
         self.max_turns
     }
 
-    pub(crate) fn tools(&self) -> &[AgentTool] {
+    pub(crate) fn tools(&self) -> &[Arc<dyn tool_runtime::api::DynamicTool>] {
         &self.tools
+    }
+
+    pub(crate) fn provider_tools(&self) -> Vec<ToolDefinition> {
+        // The local inventory was already filtered before this snapshot was
+        // built. Empty therefore means an explicit no-tools policy.
+        if self.tools.is_empty() && self.typed_tool_ids.is_empty() {
+            return Vec::new();
+        }
+        let allowlist = self.profile_tool_allowlist();
+        crate::tools::server_side_tools(&self.model)
+            .into_iter()
+            .filter(|definition| {
+                allowlist.is_none_or(|allowed| allowed.iter().any(|id| id == &definition.id))
+            })
+            .collect()
+    }
+
+    pub(crate) fn all_tool_ids(&self) -> Vec<ToolId> {
+        let mut names = self
+            .tools
+            .iter()
+            .map(|tool| tool.definition().id.clone())
+            .chain(self.typed_tool_ids().cloned())
+            .chain(
+                self.provider_tools()
+                    .into_iter()
+                    .map(|definition| definition.id),
+            )
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    pub(crate) fn all_tool_names(&self) -> Vec<String> {
+        self.all_tool_ids()
+            .into_iter()
+            .map(|id| id.as_str().to_owned())
+            .collect()
+    }
+
+    pub(crate) fn typed_tool_ids(&self) -> impl Iterator<Item = &ToolId> {
+        self.typed_tool_ids.iter().filter(|id| {
+            self.profile_tool_allowlist()
+                .is_none_or(|allowed| allowed.iter().any(|allowed| allowed == *id))
+        })
     }
 
     pub(crate) fn register_builtins(&self) -> bool {
@@ -594,7 +633,7 @@ impl RuntimeSnapshot {
         &self.delegation_target_inventory
     }
 
-    pub(crate) fn profile_tool_allowlist(&self) -> Option<&[String]> {
+    pub(crate) fn profile_tool_allowlist(&self) -> Option<&[ToolId]> {
         self.profile_tool_allowlist.as_deref()
     }
 
@@ -665,7 +704,7 @@ pub(crate) struct PromptTurnContext {
 
 pub(crate) type DelegationToolExecutor = Arc<
     dyn Fn(
-            ToolExecutionContext,
+            ToolCallContext,
             serde_json::Value,
         ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
         + Send
@@ -679,230 +718,4 @@ mod stream;
 use stream::{ReasoningDurationTracker, persisted_content_blocks_from_invocation};
 
 #[cfg(test)]
-mod transition_table_tests {
-    use super::*;
-    use crate::kernel::error::SessionWriteFailureReason;
-
-    fn context() -> PromptTurnContext {
-        PromptTurnContext::new(
-            PromptTurnIds::new("operation", "turn"),
-            PromptTurnOptions::new(PromptInvocation::Text("test".into())),
-        )
-    }
-
-    fn assistant_message(text: &str) -> AssistantMessage {
-        let mut message = AssistantMessage::empty("test-api", "test-model");
-        message.content.push(ContentBlock::Text {
-            text: text.into(),
-            text_signature: None,
-        });
-        message
-    }
-
-    #[test]
-    fn prompt_input_preparation_transition_table() {
-        #[derive(Debug)]
-        enum Expected {
-            Text(&'static str),
-            Error(&'static str),
-        }
-
-        let cases = [
-            (
-                "text",
-                PromptInvocation::Text("hello".into()),
-                Expected::Text("hello"),
-            ),
-            (
-                "empty text",
-                PromptInvocation::Text(String::new()),
-                Expected::Error("input"),
-            ),
-            (
-                "content",
-                PromptInvocation::Content(vec![ContentBlock::Text {
-                    text: "content".into(),
-                    text_signature: None,
-                }]),
-                Expected::Text("content"),
-            ),
-            (
-                "empty content",
-                PromptInvocation::Content(Vec::new()),
-                Expected::Error("input"),
-            ),
-            (
-                "skill",
-                PromptInvocation::Skill {
-                    name: "review".into(),
-                    additional_instructions: Some("focus on safety".into()),
-                },
-                Expected::Text("skill:review\nfocus on safety"),
-            ),
-            (
-                "prompt template",
-                PromptInvocation::PromptTemplate {
-                    name: "release".into(),
-                    args: vec!["v1".into(), "stable".into()],
-                },
-                Expected::Text("prompt_template:release\nv1\nstable"),
-            ),
-            (
-                "manual compaction",
-                PromptInvocation::Compact {
-                    custom_instructions: None,
-                },
-                Expected::Error("unsupported_capability"),
-            ),
-        ];
-
-        for (name, invocation, expected) in cases {
-            match (
-                persisted_content_blocks_from_invocation(&invocation),
-                expected,
-            ) {
-                (Ok(blocks), Expected::Text(expected_text)) => assert!(
-                    matches!(
-                        blocks.as_slice(),
-                        [PersistedContentBlock::Text { text }] if text == expected_text
-                    ),
-                    "{name}: {blocks:?}"
-                ),
-                (Err(error), Expected::Error(expected_code)) => {
-                    assert_eq!(error.code(), expected_code, "{name}")
-                }
-                (actual, expected) => panic!("{name}: expected {expected:?}, got {actual:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn prompt_completion_recording_transition_table() {
-        #[derive(Debug, Clone, Copy)]
-        enum Action {
-            Complete,
-            RecordFinal,
-        }
-
-        let mut context = context();
-        let cases = [
-            (Action::Complete, false, false),
-            (Action::RecordFinal, true, false),
-            (Action::Complete, true, true),
-            (Action::Complete, true, true),
-        ];
-
-        for (action, expected_ok, expected_recorded) in cases {
-            let result = match action {
-                Action::Complete => context.record_prompt_completed(),
-                Action::RecordFinal => {
-                    context.record_final_message(assistant_message("done"));
-                    Ok(())
-                }
-            };
-            assert_eq!(result.is_ok(), expected_ok, "{action:?}");
-            assert_eq!(context.completion_recorded, expected_recorded, "{action:?}");
-        }
-    }
-
-    #[test]
-    fn prompt_outcome_transition_table() {
-        #[derive(Debug, Clone, Copy)]
-        enum Action {
-            SuccessWithoutMessage,
-            Success,
-            Abort,
-            Fail,
-            FailQueueSaturated,
-        }
-
-        #[derive(Debug, Clone, Copy)]
-        enum Expected {
-            Error,
-            Success,
-            Aborted,
-            Failed { diagnostics: usize },
-        }
-
-        let cases = [
-            (Action::SuccessWithoutMessage, Expected::Error),
-            (Action::Success, Expected::Success),
-            (Action::Abort, Expected::Aborted),
-            (Action::Fail, Expected::Failed { diagnostics: 0 }),
-            (
-                Action::FailQueueSaturated,
-                Expected::Failed { diagnostics: 1 },
-            ),
-        ];
-
-        for (action, expected) in cases {
-            let mut context = context();
-            let outcome = match action {
-                Action::SuccessWithoutMessage => context.finish_success(None, None),
-                Action::Success => {
-                    context.record_final_message(assistant_message("done"));
-                    context.finish_success(Some("session".into()), Some("leaf".into()))
-                }
-                Action::Abort => Ok(context.finish_abort("cancelled", Some("session".into()))),
-                Action::Fail => Ok(context.finish_failure(CodingSessionError::Provider {
-                    message: "provider failed".into(),
-                })),
-                Action::FailQueueSaturated => Ok(context.finish_failure(
-                    CodingSessionError::SessionWriteFailure {
-                        reason: SessionWriteFailureReason::QueueSaturated,
-                        message: "writer queue is full".into(),
-                    },
-                )),
-            };
-
-            match (outcome, expected) {
-                (Err(_), Expected::Error) => {}
-                (
-                    Ok(InternalPromptTurnOutcome::Success {
-                        final_text,
-                        session_id,
-                        leaf_id,
-                        ..
-                    }),
-                    Expected::Success,
-                ) => {
-                    assert_eq!(final_text, "done");
-                    assert_eq!(session_id.as_deref(), Some("session"));
-                    assert_eq!(leaf_id.as_deref(), Some("leaf"));
-                }
-                (Ok(InternalPromptTurnOutcome::Aborted { reason, .. }), Expected::Aborted) => {
-                    assert_eq!(reason, "cancelled")
-                }
-                (
-                    Ok(InternalPromptTurnOutcome::Failed { diagnostics, .. }),
-                    Expected::Failed {
-                        diagnostics: expected_diagnostics,
-                    },
-                ) => assert_eq!(diagnostics.len(), expected_diagnostics),
-                (actual, expected) => {
-                    panic!("{action:?}: expected {expected:?}, got {actual:?}")
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn queue_saturation_adds_an_operation_diagnostic() {
-        let context = PromptTurnContext::new(
-            PromptTurnIds::new("operation-queue-saturated", "turn-queue-saturated"),
-            PromptTurnOptions::new(PromptInvocation::Text("test".into())),
-        );
-        let outcome = context.finish_failure(CodingSessionError::SessionWriteFailure {
-            reason: SessionWriteFailureReason::QueueSaturated,
-            message: "bounded queue timeout".into(),
-        });
-        let InternalPromptTurnOutcome::Failed { diagnostics, .. } = outcome else {
-            panic!("queue saturation must remain a typed failed prompt outcome");
-        };
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .message
-                .contains("Session persistence is lagging")
-        }));
-    }
-}
+mod transition_table_tests;

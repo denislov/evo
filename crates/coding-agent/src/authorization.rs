@@ -59,9 +59,17 @@ mod mode_tests {
 
     #[test]
     fn modes_round_trip_through_display_and_parse() {
-        for mode in [ToolAuthorizationMode::Plan, ToolAuthorizationMode::Ask, ToolAuthorizationMode::Yolo] {
+        for mode in [
+            ToolAuthorizationMode::Plan,
+            ToolAuthorizationMode::Ask,
+            ToolAuthorizationMode::Yolo,
+        ] {
             let text = mode.to_string();
-            assert_eq!(text.parse::<ToolAuthorizationMode>().unwrap(), mode, "{text}");
+            assert_eq!(
+                text.parse::<ToolAuthorizationMode>().unwrap(),
+                mode,
+                "{text}"
+            );
         }
     }
 

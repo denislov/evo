@@ -2,14 +2,20 @@ use crate::platform::fs::cap_walk::{CapWalkEntry, CapWalkEntryKind, CapWalkRoot,
 use crate::platform::fs::capability::FilesystemCapability;
 use crate::platform::io::output::{DEFAULT_MAX_BYTES, TruncationLimit, format_size, truncate_head};
 use crate::tools::FilesystemTarget;
-use crate::tools::args::bounded_arg;
-use crate::tools::filesystem_target_for_execution;
-use agent_core::api::tool::{AgentTool, AgentToolOutput, ToolFn};
-use ai::api::conversation::ContentBlock;
+use crate::tools::filesystem_target_for_runtime_execution;
 use globset::{GlobBuilder, GlobMatcher};
 use regex::RegexBuilder;
+use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer};
 use std::path::Path;
 use std::sync::Arc;
+use tool_contract::api::definition::{
+    AuthorizationRisk, ToolBehaviorVersion, ToolCapabilities, ToolDefinition, ToolExecutionMode,
+    ToolId, ToolKind,
+};
+use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
+use tool_contract::api::schema::schema_for;
+use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
 
 const DESCRIPTION: &str = "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars.";
 const DEFAULT_LIMIT: usize = 100;
@@ -18,43 +24,96 @@ const MAX_CONTEXT: usize = 20;
 const MAX_LINE_CHARS: usize = 500;
 const MAX_GREP_FILE_BYTES: u64 = 5 * 1024 * 1024;
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GrepArgs {
+    /// Search pattern (regex unless `literal` is true).
+    pattern: String,
+    /// Directory or file to search (default: current directory).
+    #[serde(default = "default_path")]
+    path: String,
+    /// Optional file glob filter, such as `*.rs` or `**/*.spec.ts`.
+    #[serde(default)]
+    glob: Option<String>,
+    /// Case-insensitive search.
+    #[serde(default, rename = "ignoreCase")]
+    #[schemars(rename = "ignoreCase")]
+    ignore_case: bool,
+    /// Treat pattern as a literal string instead of a regular expression.
+    #[serde(default)]
+    literal: bool,
+    /// Number of context lines before and after each match.
+    #[schemars(range(min = 0, max = 20))]
+    #[serde(default, deserialize_with = "deserialize_optional_context")]
+    context: Option<u64>,
+    /// Maximum number of matching lines to return.
+    #[schemars(range(min = 1, max = 1_000))]
+    #[serde(default, deserialize_with = "deserialize_optional_limit")]
+    limit: Option<u64>,
+}
+
+fn default_path() -> String {
+    ".".into()
+}
+
+fn deserialize_optional_context<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<u64>::deserialize(deserializer)?;
+    if value.is_some_and(|value| value > MAX_CONTEXT as u64) {
+        return Err(serde::de::Error::custom(format!(
+            "context must be between 0 and {MAX_CONTEXT}"
+        )));
+    }
+    Ok(value)
+}
+
+fn deserialize_optional_limit<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<u64>::deserialize(deserializer)?;
+    if value.is_some_and(|value| value == 0 || value > MAX_LIMIT as u64) {
+        return Err(serde::de::Error::custom(format!(
+            "limit must be between 1 and {MAX_LIMIT}"
+        )));
+    }
+    Ok(value)
+}
+
+impl GrepArgs {
+    fn context(&self) -> Result<usize, ToolError> {
+        let context = self.context.unwrap_or(0);
+        if context > MAX_CONTEXT as u64 {
+            return Err(ToolError::new(
+                ToolErrorKind::InvalidArguments,
+                format!("grep: context must be between 0 and {MAX_CONTEXT}"),
+            ));
+        }
+        Ok(context as usize)
+    }
+
+    fn limit(&self) -> Result<usize, ToolError> {
+        let limit = self.limit.unwrap_or(DEFAULT_LIMIT as u64);
+        if limit == 0 || limit > MAX_LIMIT as u64 {
+            return Err(ToolError::new(
+                ToolErrorKind::InvalidArguments,
+                format!("grep: limit must be between 1 and {MAX_LIMIT}"),
+            ));
+        }
+        Ok(limit as usize)
+    }
+}
+
 struct Candidate {
     entry: CapWalkEntry,
     display: String,
     basename: String,
 }
 
-fn schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "pattern": { "type": "string", "description": "Search pattern (regex or literal string)" },
-            "path": { "type": "string", "description": "Directory or file to search (default: current directory)" },
-            "glob": { "type": "string", "description": "Filter files by glob pattern, e.g. '*.rs' or '**/*.spec.ts'" },
-            "ignoreCase": { "type": "boolean", "description": "Case-insensitive search (default: false)" },
-            "literal": { "type": "boolean", "description": "Treat pattern as literal string instead of regex (default: false)" },
-            "context": { "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT, "description": "Number of lines to show before and after each match (default: 0)" },
-            "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "description": "Maximum number of matches to return (default: 100)" }
-        },
-        "required": ["pattern"]
-    })
-}
-
-fn text_block(text: String) -> Vec<ContentBlock> {
-    vec![ContentBlock::Text {
-        text,
-        text_signature: None,
-    }]
-}
-
-fn limit_arg(args: &serde_json::Value) -> Result<usize, String> {
-    bounded_arg(args, "limit", DEFAULT_LIMIT, MAX_LIMIT)
-        .map(|limit| limit.max(1))
-        .map_err(|error| format!("grep: {error}"))
-}
-
-fn context_arg(args: &serde_json::Value) -> Result<usize, String> {
-    bounded_arg(args, "context", 0, MAX_CONTEXT).map_err(|error| format!("grep: {error}"))
+fn text_block(text: String) -> Vec<ToolContent> {
+    vec![ToolContent::Text { text }]
 }
 
 fn compile_glob(pattern: &str) -> Result<GlobMatcher, String> {
@@ -155,54 +214,82 @@ fn output_match_block(
     any_truncated
 }
 
-async fn grep_target(
-    target: &FilesystemTarget,
-    args: serde_json::Value,
-) -> Result<Vec<ContentBlock>, String> {
-    let pattern = args
-        .get("pattern")
-        .and_then(|v| v.as_str())
-        .ok_or("grep: missing or non-string 'pattern' argument")?
-        .to_owned();
-    let glob = args.get("glob").and_then(|v| v.as_str()).map(str::to_owned);
-    let ignore_case = args
-        .get("ignoreCase")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let literal = args
-        .get("literal")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let context = context_arg(&args)?;
-    let limit = limit_arg(&args)?;
+async fn grep_target(target: &FilesystemTarget, args: GrepArgs) -> Result<ToolOutput, ToolError> {
+    let context = args.context()?;
+    let limit = args.limit()?;
+    let pattern = args.pattern;
+    let path = args.path;
+    let glob = args.glob;
+    let ignore_case = args.ignore_case;
+    let literal = args.literal;
+    let target_fingerprint = target.target_fingerprint().to_owned();
     let target = target.clone();
     tokio::task::spawn_blocking(move || {
-        grep_target_blocking(target, pattern, glob, ignore_case, literal, context, limit)
+        grep_target_blocking(GrepExecution {
+            target,
+            path,
+            pattern,
+            glob,
+            ignore_case,
+            literal,
+            context,
+            limit,
+            target_fingerprint,
+        })
     })
     .await
-    .map_err(|error| format!("grep: blocking filesystem task failed: {error}"))?
+    .map_err(|error| {
+        ToolError::new(
+            ToolErrorKind::Execution,
+            format!("grep: blocking filesystem task failed: {error}"),
+        )
+    })?
 }
 
-fn grep_target_blocking(
+struct GrepExecution {
     target: FilesystemTarget,
+    path: String,
     pattern: String,
     glob: Option<String>,
     ignore_case: bool,
     literal: bool,
     context: usize,
     limit: usize,
-) -> Result<Vec<ContentBlock>, String> {
+    target_fingerprint: String,
+}
+
+fn grep_target_blocking(input: GrepExecution) -> Result<ToolOutput, ToolError> {
+    let GrepExecution {
+        target,
+        path,
+        pattern,
+        glob,
+        ignore_case,
+        literal,
+        context,
+        limit,
+        target_fingerprint,
+    } = input;
     let regex_pattern = if literal {
         regex::escape(&pattern)
     } else {
-        pattern
+        pattern.clone()
     };
     let regex = RegexBuilder::new(&regex_pattern)
         .case_insensitive(ignore_case)
         .build()
-        .map_err(|e| format!("grep: invalid regex: {e}"))?;
+        .map_err(|e| {
+            ToolError::new(
+                ToolErrorKind::InvalidArguments,
+                format!("grep: invalid regex: {e}"),
+            )
+        })?;
 
-    let glob_matcher = glob.as_deref().map(compile_glob).transpose()?;
+    let glob_matcher = glob
+        .as_deref()
+        .map(compile_glob)
+        .transpose()
+        .map_err(|error| ToolError::new(ToolErrorKind::InvalidArguments, error))?;
     let glob_matches_path = glob
         .as_deref()
         .map(|pattern| pattern.contains('/'))
@@ -213,7 +300,9 @@ fn grep_target_blocking(
     let mut lines_truncated = false;
     let mut skipped_large_files = 0usize;
 
-    for candidate in candidates_for_walk(walk_target(&target)?) {
+    let walked = walk_target(&target)
+        .map_err(|error| ToolError::new(ToolErrorKind::Execution, error.to_string()))?;
+    for candidate in candidates_for_walk(walked) {
         if let Some(matcher) = &glob_matcher {
             let target = if glob_matches_path {
                 candidate.display.as_str()
@@ -262,7 +351,18 @@ fn grep_target_blocking(
                 format_size(MAX_GREP_FILE_BYTES as usize)
             ));
         }
-        return Ok(text_block(message));
+        return Ok(ToolOutput {
+            content: text_block(message),
+            details: Some(serde_json::json!({
+                "path": path,
+                "pattern": pattern,
+                "target_fingerprint": target_fingerprint,
+                "matches": 0,
+                "skipped_large_files": skipped_large_files,
+                "truncated": false,
+            })),
+            terminate: false,
+        });
     }
 
     let output = output_lines.join("\n");
@@ -304,42 +404,98 @@ fn grep_target_blocking(
         output.push_str(&format!("\n\n[{}]", notices.join(". ")));
     }
 
-    Ok(text_block(output))
+    Ok(ToolOutput {
+        content: text_block(output),
+        details: Some(serde_json::json!({
+            "path": path,
+            "pattern": pattern,
+            "target_fingerprint": target_fingerprint,
+            "matches": match_count,
+            "skipped_large_files": skipped_large_files,
+            "truncated": match_limit_reached || truncation.truncated || lines_truncated,
+        })),
+        terminate: false,
+    })
 }
 
-pub fn grep_tool(filesystem: FilesystemCapability) -> AgentTool {
-    let execute: ToolFn = Arc::new(move |context, args, _on_update| {
-        let filesystem = filesystem.clone();
-        Box::pin(async move {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let target =
-                filesystem_target_for_execution(&filesystem, &context, "grep", path).await?;
-            grep_target(&target, args).await.map(AgentToolOutput::new)
-        })
-    });
-    AgentTool {
-        kind: Default::default(),
-        name: "grep".into(),
+pub fn grep_runtime_tool(
+    filesystem: FilesystemCapability,
+) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
+    let definition = ToolDefinition {
+        id: ToolId::new("grep").expect("static tool id is valid"),
+        kind: ToolKind::Function,
         description: DESCRIPTION.into(),
-        parameters: schema(),
-        execution_mode: None,
-        execute,
-    }
+        parameters: schema_for::<GrepArgs>().expect("GrepArgs schema is valid"),
+        capabilities: ToolCapabilities {
+            read_only: true,
+            execution: ToolExecutionMode::Parallel,
+            cancel: true,
+            timeout: true,
+            streaming: false,
+            provider_executed: false,
+        },
+        behavior: ToolBehaviorVersion::V1,
+        authorization_risk: AuthorizationRisk::WorkspaceLocalReadOnly,
+        requirements: Vec::new(),
+    };
+    Ok(Arc::new(TypedTool::<GrepArgs>::new(
+        definition,
+        move |context, args| {
+            let filesystem = filesystem.clone();
+            Box::pin(async move {
+                let target = filesystem_target_for_runtime_execution(
+                    &filesystem,
+                    &context,
+                    "grep",
+                    &args.path,
+                )
+                .await
+                .map_err(|error| ToolError::new(ToolErrorKind::Execution, error))?;
+                grep_target(&target, args).await
+            }) as ToolFuture
+        },
+    )?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+    use tool_runtime::api::{ToolCallContext, ToolRegistry, ToolRuntime};
+
+    fn runtime(filesystem: FilesystemCapability) -> ToolRuntime {
+        let mut registry = ToolRegistry::default();
+        registry
+            .register(grep_runtime_tool(filesystem).unwrap())
+            .unwrap();
+        ToolRuntime::new(registry).unwrap()
+    }
+
+    fn context() -> ToolCallContext {
+        ToolCallContext::new(
+            ToolId::new("grep").unwrap(),
+            "grep-call",
+            CancellationToken::new(),
+        )
+    }
 
     #[test]
     fn schema_and_runtime_share_the_context_maximum() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let tool = grep_runtime_tool(filesystem).unwrap();
+        let definition = tool.definition();
+        assert_eq!(definition.parameters["additionalProperties"], false);
+        assert_eq!(definition.parameters["required"], json!(["pattern"]));
         assert_eq!(
-            schema()["properties"]["context"]["maximum"],
+            definition.parameters["properties"]["context"]["anyOf"][0]["maximum"],
             json!(MAX_CONTEXT)
         );
-        assert_eq!(context_arg(&json!({"context": u64::MAX})), Ok(MAX_CONTEXT));
-        assert_eq!(limit_arg(&json!({"limit": u64::MAX})), Ok(MAX_LIMIT));
+        assert_eq!(
+            definition.parameters["properties"]["limit"]["anyOf"][0]["maximum"],
+            json!(MAX_LIMIT)
+        );
     }
 
     #[test]
@@ -348,12 +504,48 @@ mod tests {
         assert_eq!(context_window(5, 10, 2), (3, 7));
     }
 
-    #[test]
-    fn invalid_context_types_are_explicit_errors() {
-        for value in [json!(-1), json!(1.5), json!("1")] {
-            let error =
-                context_arg(&json!({"context": value})).expect_err("invalid context must fail");
-            assert!(error.starts_with("grep: argument 'context'"));
+    #[tokio::test]
+    async fn invalid_context_types_are_explicit_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let runtime = runtime(filesystem);
+        for value in [json!(-1), json!(21), json!(1.5), json!("1")] {
+            let error = runtime
+                .execute(context(), json!({"pattern": "needle", "context": value}))
+                .await
+                .expect_err("invalid context must fail");
+            assert_eq!(error.kind, ToolErrorKind::InvalidArguments);
         }
+    }
+
+    #[tokio::test]
+    async fn typed_grep_searches_with_context_and_returns_bounded_details() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("notes.txt"),
+            "before\nNeedle\nafter\nother\n",
+        )
+        .expect("write fixture");
+        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let output = runtime(filesystem)
+            .execute(
+                context(),
+                json!({"pattern": "needle", "ignoreCase": true, "context": 1}),
+            )
+            .await
+            .expect("typed grep succeeds");
+        assert!(matches!(
+            output.content.as_slice(),
+            [ToolContent::Text { text }] if text == "notes.txt-1- before\nnotes.txt:2: Needle\nnotes.txt-3- after"
+        ));
+        let details = output.details.expect("grep details");
+        assert_eq!(details["matches"], 1);
+        assert_eq!(details["skipped_large_files"], 0);
+        assert_eq!(details["truncated"], false);
+        assert!(
+            details["target_fingerprint"]
+                .as_str()
+                .is_some_and(|value| value.len() == 64)
+        );
     }
 }

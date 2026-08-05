@@ -1,9 +1,9 @@
 use crate::agent::provider::stream_model_with_provider_streamer;
 use crate::agent::types::{AgentMessage, ProviderStreamer};
 use crate::compaction::error::CompactionError;
-use ai::api::conversation::{ContentBlock, Context, Message};
-use ai::api::model::Model;
-use ai::api::stream::{StreamOptions, complete};
+use ai_protocol::api::conversation::{ContentBlock, Context, Message};
+use ai_protocol::api::model::Model;
+use ai_protocol::api::stream::{StreamOptions, complete};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
