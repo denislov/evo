@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use crate::ChangeTrackerError;
 
 pub(super) struct ObservedFile {
+    pub(super) exists: bool,
     pub(super) revision: String,
     pub(super) content: Option<Vec<u8>>,
 }
@@ -72,11 +73,13 @@ pub(super) fn read_observed(
                 }
             }
             Ok(ObservedFile {
+                exists: true,
                 revision: format!("{:x}", hasher.finalize()),
                 content: retain_content.then_some(retained),
             })
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ObservedFile {
+            exists: false,
             revision: revision(&[]),
             content: Some(Vec::new()),
         }),

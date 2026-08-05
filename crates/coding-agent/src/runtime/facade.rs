@@ -21,7 +21,8 @@ pub use crate::events::{
     CodingAgentProductEventKind, CodingAgentProductEventProfileKind,
     CodingAgentProductEventReplacement, CodingAgentProductEventTerminalOperation,
     CodingAgentProductEventTerminalOperationKind, CodingAgentProductEventTerminalStatus,
-    CodingAgentProductEventUsage, CodingAgentRecoveryResolution, CodingAgentRuntimeProductEvent,
+    CodingAgentProductEventUsage, CodingAgentRecoveryResolution, CodingAgentReviewChange,
+    CodingAgentReviewHunk, CodingAgentReviewProductEvent, CodingAgentRuntimeProductEvent,
     CodingAgentSessionProductEvent, CodingAgentSessionWriteFailureReason,
     CodingAgentSessionWriteFailureStatus, CodingAgentTeamProductEvent, CodingAgentToolProductEvent,
     CodingAgentWorkflowProductEvent,
@@ -60,15 +61,15 @@ pub use crate::runtime::client::connection::{
     CodingAgentControlReceipt, CodingAgentControlRejection, CodingAgentControlRejectionReason,
     CodingAgentDelegationSnapshot, CodingAgentDetachOutcome, CodingAgentDraft, CodingAgentDraftId,
     CodingAgentDraftKind, CodingAgentFileChangeSnapshot, CodingAgentFreshSnapshotRecovery,
-    CodingAgentMutationRejection, CodingAgentOperationControl, CodingAgentOperationSnapshot,
-    CodingAgentOperationStatus, CodingAgentOutcomeAcknowledgementId, CodingAgentPreparedSubmission,
-    CodingAgentProductEventReceiver, CodingAgentPromptControl, CodingAgentReconnect,
-    CodingAgentReconnectDelivery, CodingAgentReconnectReceiver, CodingAgentRecoveryReason,
-    CodingAgentRuntimeShutdownHandle, CodingAgentShutdownOutcome, CodingAgentSnapshot,
-    CodingAgentSnapshotCursor, CodingAgentSubmissionDraft, CodingAgentSubmittedEventDurability,
-    CodingAgentSubmittedOperation, CodingAgentSubmittedOperationStatus,
-    CodingAgentSubmittedTerminalAnchor, CodingAgentTerminalUncertainty,
-    CodingAgentTurnUsageSnapshot, CodingAgentUsageSnapshot,
+    CodingAgentHunkChangeSnapshot, CodingAgentMutationRejection, CodingAgentOperationControl,
+    CodingAgentOperationSnapshot, CodingAgentOperationStatus, CodingAgentOutcomeAcknowledgementId,
+    CodingAgentPreparedSubmission, CodingAgentProductEventReceiver, CodingAgentPromptControl,
+    CodingAgentReconnect, CodingAgentReconnectDelivery, CodingAgentReconnectReceiver,
+    CodingAgentRecoveryReason, CodingAgentRuntimeShutdownHandle, CodingAgentShutdownOutcome,
+    CodingAgentSnapshot, CodingAgentSnapshotCursor, CodingAgentSubmissionDraft,
+    CodingAgentSubmittedEventDurability, CodingAgentSubmittedOperation,
+    CodingAgentSubmittedOperationStatus, CodingAgentSubmittedTerminalAnchor,
+    CodingAgentTerminalUncertainty, CodingAgentTurnUsageSnapshot, CodingAgentUsageSnapshot,
 };
 pub use crate::runtime::client::projection::{
     CodingAgentClientBootstrap, CodingAgentClientDiagnostic, CodingAgentClientMessage,
@@ -95,7 +96,8 @@ pub use crate::runtime::facade::view::{
 };
 pub use crate::runtime::file_review::{
     CodingAgentExternalEditorTarget, CodingAgentFileChangeIdentity, CodingAgentFileReview,
-    CodingAgentFileReviewRequest, CodingAgentFileRevision,
+    CodingAgentFileReviewActionRequest, CodingAgentFileReviewRequest, CodingAgentFileRevision,
+    CodingAgentHunkReviewActionRequest,
 };
 pub use crate::runtime::version::{
     PRODUCT_EVENT_PROTOCOL_VERSION, ProtocolFamilyVersion, UI_SNAPSHOT_PROTOCOL_VERSION,

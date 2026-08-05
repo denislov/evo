@@ -32,6 +32,7 @@ impl PromptTurnContext {
             requested_abort_reason: None,
             capability_snapshot: None,
             delegation_executor: None,
+            mutation_tracking: None,
             deferred_pending_delegations: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -77,6 +78,14 @@ impl PromptTurnContext {
 
     pub(crate) fn delegation_executor(&self) -> Option<DelegationToolExecutor> {
         self.delegation_executor.clone()
+    }
+
+    pub(crate) fn set_mutation_tracking(&mut self, tracking: MutationTracking) {
+        self.mutation_tracking = Some(tracking);
+    }
+
+    pub(crate) fn mutation_tracking(&self) -> Option<MutationTracking> {
+        self.mutation_tracking.clone()
     }
 
     pub(crate) fn has_delegation_executor(&self) -> bool {

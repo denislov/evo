@@ -838,7 +838,7 @@ impl RuntimeCommandClient {
         })
     }
 
-    pub fn try_review_changed_file(
+    pub fn try_open_change(
         &self,
         command_id: u64,
         session_id: &str,
@@ -846,7 +846,7 @@ impl RuntimeCommandClient {
     ) -> Result<(), DesktopCommandAdmissionError> {
         validate_session_id(session_id)?;
         validate_file_review_request(request)?;
-        self.try_send(DesktopRuntimeCommand::ReviewChangedFile {
+        self.try_send(DesktopRuntimeCommand::OpenChange {
             command_id,
             session_id: session_id.to_owned(),
             request: request.clone(),

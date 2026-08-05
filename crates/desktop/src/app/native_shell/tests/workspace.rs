@@ -1150,7 +1150,6 @@ fn background_workspace_advances_silently_and_switching_restores_scoped_state(
     let (shell, cx) = add_visual_shell(cx, runtime, session_a_projection);
     cx.run_until_parked();
     runtime_harness.drain_command_kinds();
-
     shell.update(cx, |shell, cx| {
         let mut session_b_snapshot = visual_test_snapshot_for("session-b");
         session_b_snapshot.session.active_operation = Some("operation-session-b".into());
@@ -1164,19 +1163,25 @@ fn background_workspace_advances_silently_and_switching_restores_scoped_state(
         let change = CodingAgentFileChangeSnapshot {
             path: "session-b-only.rs".into(),
             mutation_kind: "edit".into(),
+            source: "agent_edit".into(),
             operation_id: "operation-session-b".into(),
             tool_call_id: None,
+            session_id: Some("session-b".into()),
+            turn_id: Some("turn-session-b".into()),
             updated_sequence: 3,
+            before_revision: Some("before".into()),
+            after_revision: "after".into(),
+            after_exists: true,
             first_changed_line: Some(4),
             added_lines: Some(1),
             removed_lines: Some(0),
             diff: None,
+            hunks: Vec::new(),
         };
         let review_request = CodingAgentFileReviewRequest::from(&change);
         session_b.composer.edit("draft b");
         session_b.presentation.inspector_section = InspectorSection::Task;
         session_b.file_review = Arc::new(DesktopFileReviewState::Loading(review_request.clone()));
-
         shell.app.workspaces.active_mut().composer.edit("draft a");
         shell
             .app
@@ -1204,7 +1209,6 @@ fn background_workspace_advances_silently_and_switching_restores_scoped_state(
         );
         shell.refresh_conversation_rows_at_width(800, cx);
         shell.ui.runtime_ui_notification_count = 0;
-
         let mut finished_snapshot = visual_test_snapshot_for("session-b");
         finished_snapshot.session.cursor.last_event_sequence = 7;
         finished_snapshot.session.cursor.last_session_sequence = 7;
@@ -1218,7 +1222,6 @@ fn background_workspace_advances_silently_and_switching_restores_scoped_state(
             },
         );
         assert!(shell.poll_runtime_for_test(cx));
-
         assert_eq!(active_session_id(shell), Some("session-a"));
         assert_eq!(shell.ui.runtime_ui_notification_count, 0);
         assert_eq!(shell.app.workspaces.active().composer.draft(), "draft a");
@@ -1236,7 +1239,6 @@ fn background_workspace_advances_silently_and_switching_restores_scoped_state(
                 .commands
                 .contains(shell.app.workspaces.active_key(), &review_intent,)
         );
-
         let background = workspace_for_session(shell, "session-b")
             .expect("session B remains parked after its background update");
         assert_eq!(
@@ -1262,7 +1264,6 @@ fn background_workspace_advances_silently_and_switching_restores_scoped_state(
             &WorkspaceKey::session("session-b"),
             &review_intent,
         ));
-
         assert!(activate_session(shell, "session-b"));
         assert_eq!(shell.app.workspaces.active().composer.draft(), "draft b");
         assert_eq!(
@@ -1275,7 +1276,6 @@ fn background_workspace_advances_silently_and_switching_restores_scoped_state(
             shell.app.workspaces.active().presentation.inspector_section,
             InspectorSection::Runtime
         );
-
         for session_id in ["session-c", "session-d"] {
             let snapshot = visual_test_snapshot_for(session_id);
             let projection = DesktopProjection::new(snapshot.clone())

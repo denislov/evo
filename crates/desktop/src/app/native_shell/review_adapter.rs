@@ -170,7 +170,7 @@ impl NativeShell {
             .ok_or_else(|| "desktop runtime is unavailable".to_owned())
             .and_then(|runtime| {
                 runtime
-                    .try_review_changed_file(command_id, &session_id, &request)
+                    .try_open_change(command_id, &session_id, &request)
                     .map_err(|error| error.to_string())
             });
         match admission {

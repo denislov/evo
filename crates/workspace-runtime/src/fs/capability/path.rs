@@ -171,6 +171,68 @@ pub(super) fn audit_identity_fingerprint(identity: &str) -> String {
     format!("{:x}", Sha256::digest(identity.as_bytes()))
 }
 
+pub(super) fn revalidate_bound_target(target: &FilesystemTarget) -> Result<(), String> {
+    match target.object.as_ref() {
+        Some(FilesystemTargetObject::File(_)) => {
+            let identity = if let Some(root) = &target.root {
+                let metadata = root
+                    .symlink_metadata(&target.relative)
+                    .map_err(|error| error.to_string())?;
+                metadata_identity(&metadata)
+            } else {
+                let metadata = std::fs::symlink_metadata(&target.display)
+                    .map_err(|error| error.to_string())?;
+                ambient_metadata_identity(&metadata)
+            };
+            let fingerprint = audit_identity_fingerprint(&identity);
+            if fingerprint != target.target_fingerprint {
+                return Err(format!(
+                    "filesystem target identity changed: {}",
+                    target.display.display()
+                ));
+            }
+            Ok(())
+        }
+        Some(FilesystemTargetObject::Vacant {
+            parent,
+            missing_parents,
+            leaf,
+        }) => {
+            let fingerprint = target_object_fingerprint(
+                target
+                    .object
+                    .as_ref()
+                    .expect("validated vacant target remains bound"),
+            )
+            .map_err(|error| error.to_string())?;
+            if fingerprint != target.target_fingerprint {
+                return Err(format!(
+                    "filesystem target creation parent identity changed: {}",
+                    target.display.display()
+                ));
+            }
+            let next = missing_parents.first().unwrap_or(leaf);
+            match parent.symlink_metadata(next) {
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.to_string()),
+                Ok(_) => Err(format!(
+                    "filesystem target is no longer vacant: {}",
+                    target.display.display()
+                )),
+            }
+        }
+        Some(FilesystemTargetObject::Directory(_)) => Err(format!(
+            "filesystem target is a directory, not a review file: {}",
+            target.display.display()
+        )),
+        Some(FilesystemTargetObject::Unavailable(error)) => Err(error.clone()),
+        None => Err(format!(
+            "filesystem target is not authorization-bound: {}",
+            target.display.display()
+        )),
+    }
+}
+
 pub(super) fn remove_bound_file(target: &FilesystemTarget) -> Result<(), String> {
     if !matches!(target.object, Some(FilesystemTargetObject::File(_))) {
         return Err(format!(

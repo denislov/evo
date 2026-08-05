@@ -149,6 +149,7 @@ fn build_agent_runtime(ctx: &mut PromptTurnContext) -> Result<(), CodingSessionE
         snapshot,
         authorization,
         delegation_executor,
+        ctx.mutation_tracking(),
     )?;
     for diagnostic in build.diagnostics {
         ctx.record_diagnostic(diagnostic);

@@ -292,5 +292,53 @@
       "state": "live_only"
     },
     "delivery_class": "terminal"
+  },
+  {
+    "stream_id": "test-stream",
+    "sequence": 13,
+    "event": {
+      "family": "review",
+      "payload": {
+        "kind": "changed",
+        "changes": [
+          {
+            "path": "src/lib.rs",
+            "mutationKind": "agent_edit",
+            "source": "agent_edit",
+            "operationId": "operation-1",
+            "toolCallId": "tool-1",
+            "sessionId": "session-1",
+            "turnId": "turn-1",
+            "updatedSequence": 42,
+            "beforeRevision": "before",
+            "afterRevision": "after",
+            "afterExists": true,
+            "firstChangedLine": 3,
+            "addedLines": 1,
+            "removedLines": 1,
+            "diff": "@@ -3,1 +3,1 @@\n-old\n+new",
+            "hunks": [
+              {
+                "id": "hunk-1",
+                "source": "agent_edit",
+                "oldStart": 3,
+                "oldLines": 1,
+                "newStart": 3,
+                "newLines": 1,
+                "diff": "@@ -3,1 +3,1 @@\n-old\n+new"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "operation_id": null,
+    "session_id": "session-1",
+    "terminal_status": null,
+    "terminal_operation": null,
+    "durability": {
+      "state": "live_only"
+    },
+    "delivery_class": "data"
   }
 ]

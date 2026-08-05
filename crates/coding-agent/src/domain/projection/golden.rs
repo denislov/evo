@@ -56,6 +56,7 @@ fn product_event_schema_golden_covers_every_family_and_round_trips() {
             "workflow".to_owned(),
             "diagnostic".to_owned(),
             "capability".to_owned(),
+            "review".to_owned(),
         ])
     );
     assert_eq!(

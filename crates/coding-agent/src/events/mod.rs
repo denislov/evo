@@ -11,6 +11,7 @@ pub(crate) mod outbox;
 pub(crate) mod prompt;
 pub(crate) mod prompt_stream;
 pub(crate) mod recovery;
+pub(crate) mod review;
 pub(crate) mod runtime;
 pub(crate) mod session;
 pub(crate) mod team;
@@ -56,6 +57,7 @@ pub enum CodingAgentProductEventFamily {
     Workflow,
     Diagnostic,
     Capability,
+    Review,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -81,6 +83,7 @@ impl CodingAgentProductEventFamily {
             Self::Workflow => "workflow",
             Self::Diagnostic => "diagnostic",
             Self::Capability => "capability",
+            Self::Review => "review",
         }
     }
 }
@@ -690,7 +693,18 @@ pub enum CodingAgentProductEventKind {
     Workflow(CodingAgentWorkflowProductEvent),
     Diagnostic(CodingAgentDiagnosticProductEvent),
     Capability(CodingAgentCapabilityProductEvent),
+    Review(CodingAgentReviewProductEvent),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CodingAgentReviewProductEvent {
+    Changed {
+        changes: Vec<review::CodingAgentReviewChange>,
+    },
+}
+
+pub use review::{CodingAgentReviewChange, CodingAgentReviewHunk};
 
 mod model;
 

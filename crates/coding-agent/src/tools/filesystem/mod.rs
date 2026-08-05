@@ -1,6 +1,6 @@
 pub(crate) mod apply_patch;
 pub(crate) mod bounded;
-mod diff;
+pub(crate) mod diff;
 pub(crate) mod edit;
 pub(crate) mod find;
 pub(crate) mod grep;

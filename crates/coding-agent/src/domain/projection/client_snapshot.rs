@@ -87,13 +87,20 @@ impl From<UiFileChangeProjection> for CodingAgentFileChangeSnapshot {
         Self {
             path: change.path,
             mutation_kind: change.mutation_kind,
+            source: change.source,
             operation_id: change.operation_id,
             tool_call_id: change.tool_call_id,
+            session_id: change.session_id,
+            turn_id: change.turn_id,
             updated_sequence: change.updated_sequence,
+            before_revision: change.before_revision,
+            after_revision: change.after_revision,
+            after_exists: change.after_exists,
             first_changed_line: change.first_changed_line,
             added_lines: change.added_lines,
             removed_lines: change.removed_lines,
             diff: change.diff,
+            hunks: change.hunks,
         }
     }
 }

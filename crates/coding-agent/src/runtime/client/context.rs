@@ -29,13 +29,20 @@ pub(crate) struct UiOperationProjection {
 pub(crate) struct UiFileChangeProjection {
     pub(crate) path: String,
     pub(crate) mutation_kind: String,
+    pub(crate) source: String,
     pub(crate) operation_id: String,
     pub(crate) tool_call_id: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) turn_id: Option<String>,
     pub(crate) updated_sequence: u64,
+    pub(crate) before_revision: Option<String>,
+    pub(crate) after_revision: String,
+    pub(crate) after_exists: bool,
     pub(crate) first_changed_line: Option<usize>,
     pub(crate) added_lines: Option<usize>,
     pub(crate) removed_lines: Option<usize>,
     pub(crate) diff: Option<String>,
+    pub(crate) hunks: Vec<crate::runtime::client::connection::CodingAgentHunkChangeSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,21 +122,6 @@ impl UiContextProjection {
                 failure: operation.failure,
             })
             .collect();
-        self.changes = context
-            .changes
-            .into_iter()
-            .map(|change| UiFileChangeProjection {
-                path: change.path,
-                mutation_kind: change.mutation_kind,
-                operation_id: change.operation_id,
-                tool_call_id: change.tool_call_id,
-                updated_sequence: change.updated_sequence,
-                first_changed_line: change.first_changed_line,
-                added_lines: change.added_lines,
-                removed_lines: change.removed_lines,
-                diff: change.diff,
-            })
-            .collect();
         self.delegations = context
             .delegations
             .into_iter()
@@ -166,6 +158,10 @@ impl UiContextProjection {
             model_id: context.usage.model_id,
             context_window: context.usage.context_window,
         };
+    }
+
+    pub(crate) fn replace_review_changes(&mut self, changes: Vec<UiFileChangeProjection>) {
+        self.changes = changes;
     }
 }
 

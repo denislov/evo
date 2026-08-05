@@ -320,13 +320,20 @@ fn native_shell_inspector_smoke_submits_recovery_and_file_review_commands(cx: &m
     let change = CodingAgentFileChangeSnapshot {
         path: "crates/desktop/src/app/native_shell.rs".into(),
         mutation_kind: "edit".into(),
+        source: "agent_edit".into(),
         operation_id: "operation-file-review".into(),
         tool_call_id: Some("tool-call-file-review".into()),
+        session_id: Some("session-visual-test".into()),
+        turn_id: Some("turn-file-review".into()),
         updated_sequence: 7,
+        before_revision: Some("before".into()),
+        after_revision: "after".into(),
+        after_exists: true,
         first_changed_line: Some(1),
         added_lines: Some(2),
         removed_lines: Some(1),
         diff: Some("@@ -1 +1 @@".into()),
+        hunks: Vec::new(),
     };
     let recovery_identity = DesktopRecoveryIdentity::from(&recovery);
     let review_request = CodingAgentFileReviewRequest::from(&change);
@@ -382,7 +389,7 @@ fn native_shell_inspector_smoke_submits_recovery_and_file_review_commands(cx: &m
     assert!(
         runtime_harness
             .drain_command_kinds()
-            .contains(&desktop::runtime::DesktopRuntimeCommandKind::ReviewChangedFile)
+            .contains(&desktop::runtime::DesktopRuntimeCommandKind::OpenChange)
     );
     assert!(shell.read_with(cx, |shell, _| {
         matches!(

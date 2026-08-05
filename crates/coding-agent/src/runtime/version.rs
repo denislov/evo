@@ -25,6 +25,6 @@ impl fmt::Display for ProtocolFamilyVersion {
 }
 
 pub const PRODUCT_EVENT_PROTOCOL_VERSION: ProtocolFamilyVersion =
-    ProtocolFamilyVersion::new("product_event", 3, 0);
+    ProtocolFamilyVersion::new("product_event", 4, 0);
 pub const UI_SNAPSHOT_PROTOCOL_VERSION: ProtocolFamilyVersion =
-    ProtocolFamilyVersion::new("ui_snapshot", 3, 0);
+    ProtocolFamilyVersion::new("ui_snapshot", 4, 0);

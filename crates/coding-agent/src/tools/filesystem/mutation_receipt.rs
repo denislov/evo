@@ -62,17 +62,17 @@ pub(crate) fn receipt(
     path: String,
     target_fingerprint: String,
     before: Option<&[u8]>,
-    after: &[u8],
+    after: Option<&[u8]>,
     origin: &str,
     unified_diff: Option<String>,
 ) -> ChangeReceipt {
     let before = before.map(revision);
-    let after = revision(after);
+    let after = after.map(revision);
     receipt_from_revisions(
         path,
         target_fingerprint,
         before.as_ref(),
-        &after,
+        after.as_ref(),
         origin,
         unified_diff,
     )
@@ -82,22 +82,25 @@ pub(crate) fn receipt_from_revisions(
     path: String,
     target_fingerprint: String,
     before: Option<&ContentRevision>,
-    after: &ContentRevision,
+    after: Option<&ContentRevision>,
     origin: &str,
     unified_diff: Option<String>,
 ) -> ChangeReceipt {
     let before_len = before.map_or(0, |revision| revision.bytes);
-    let byte_delta = i64::try_from(after.bytes)
+    let after_len = after.map_or(0, |revision| revision.bytes);
+    let byte_delta = i64::try_from(after_len)
         .unwrap_or(i64::MAX)
         .saturating_sub(i64::try_from(before_len).unwrap_or(i64::MAX));
     let line_delta = after
-        .lines
+        .map_or(0, |revision| revision.lines)
         .saturating_sub(before.map_or(0, |revision| revision.lines));
     ChangeReceipt {
         path,
         target_fingerprint,
         before_revision: before.map(|revision| revision.hash.clone()),
-        after_revision: after.hash.clone(),
+        after_revision: after
+            .map_or_else(|| content_revision(&[]), |revision| revision.hash.clone()),
+        after_exists: after.is_some(),
         byte_delta,
         line_delta,
         origin: origin.into(),
@@ -117,7 +120,7 @@ mod tests {
             "notes.txt".into(),
             "target".into(),
             Some(before),
-            after,
+            Some(after),
             "edit",
             Some("@@".into()),
         );
@@ -125,6 +128,7 @@ mod tests {
         assert_eq!(receipt.line_delta, 1);
         assert_eq!(receipt.before_revision, Some(content_revision(before)));
         assert_eq!(receipt.after_revision, content_revision(after));
+        assert!(receipt.after_exists);
     }
 
     #[test]
@@ -140,5 +144,28 @@ mod tests {
             .is_err()
         );
         assert!(validate_fence(None, Some("old-target"), None, "target", "notes.txt").is_err());
+    }
+
+    #[test]
+    fn deletion_is_distinct_from_an_empty_file() {
+        let deleted = receipt(
+            "notes.txt".into(),
+            "target".into(),
+            Some(b"before\n"),
+            None,
+            "apply_patch",
+            None,
+        );
+        let empty = receipt(
+            "notes.txt".into(),
+            "target".into(),
+            Some(b"before\n"),
+            Some(b""),
+            "write",
+            None,
+        );
+        assert!(!deleted.after_exists);
+        assert!(empty.after_exists);
+        assert_eq!(deleted.after_revision, empty.after_revision);
     }
 }

@@ -35,6 +35,7 @@ use crate::profiles::{AgentProfile, DelegationPolicy, ProfileId, ProfileKind, Pr
 use crate::services::authorization::{AuthorizationHookContext, AuthorizationService};
 use crate::services::event::{AgentEventMappingContext, EventService, map_agent_event};
 use crate::services::ports::SessionWriterPort;
+use crate::services::review::MutationTracking;
 use crate::session::event::{
     DiagnosticLevel, PersistedContentBlock, PersistedDelegationStatus, PersistedToolResult,
 };
@@ -750,6 +751,7 @@ pub(crate) struct PromptTurnContext {
     requested_abort_reason: Option<String>,
     capability_snapshot: Option<OperationCapabilitySnapshot>,
     delegation_executor: Option<DelegationToolExecutor>,
+    mutation_tracking: Option<MutationTracking>,
     deferred_pending_delegations: Arc<Mutex<Vec<PendingDelegationConfirmationState>>>,
 }
 

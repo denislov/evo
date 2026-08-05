@@ -263,7 +263,7 @@ impl RuntimeState {
         })
     }
 
-    pub(super) async fn review_changed_file(
+    pub(super) async fn open_change(
         &self,
         session_id: &str,
         request: CodingAgentFileReviewRequest,
@@ -276,7 +276,7 @@ impl RuntimeState {
                 })?;
         workspace
             .session
-            .review_changed_file(request)
+            .open_change(request)
             .await
             .map_err(DesktopBridgeError::from)
     }
@@ -444,15 +444,10 @@ impl RuntimeState {
                 operation: "desktop_discard_child_worktree".into(),
             })?
             .session;
-        let outcome = session
-            .run(CodingAgentOperation::DiscardChildWorktree { worktree_id })
-            .await?;
-        let CodingAgentOperationOutcome::WorktreeDiscarded { worktree_id } = outcome else {
-            return Err(DesktopBridgeError::Session {
-                message: "discarding a child worktree returned an unexpected outcome".into(),
-            });
-        };
-        Ok(worktree_id)
+        session
+            .discard_child_proposal(worktree_id)
+            .await
+            .map_err(DesktopBridgeError::from)
     }
 
     pub(super) async fn create_session(

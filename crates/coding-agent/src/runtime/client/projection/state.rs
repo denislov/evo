@@ -56,7 +56,7 @@ impl CodingAgentClientProjection {
             tools: VecDeque::new(),
             diagnostics: VecDeque::new(),
             recoveries: VecDeque::new(),
-            context_pending: ProductContextPendingState::default(),
+            context_pending: ProductContextPendingState,
             resync_issue: None,
         })
     }
@@ -163,7 +163,7 @@ impl CodingAgentClientProjection {
         }
         // Pending context folds belong to the snapshot's own context, which this
         // replacement supersedes either way.
-        self.context_pending = ProductContextPendingState::default();
+        self.context_pending = ProductContextPendingState;
         self.resync_issue = None;
         Ok(all_projection_areas())
     }
@@ -268,11 +268,11 @@ impl CodingAgentClientProjection {
         ) {
             changes.insert(match change {
                 ProductContextFoldChange::Operations => CodingAgentClientProjectionArea::Operations,
-                ProductContextFoldChange::Changes => CodingAgentClientProjectionArea::Changes,
                 ProductContextFoldChange::Delegations => {
                     CodingAgentClientProjectionArea::Delegations
                 }
                 ProductContextFoldChange::Usage => CodingAgentClientProjectionArea::Usage,
+                ProductContextFoldChange::Changes => CodingAgentClientProjectionArea::Changes,
             });
         }
         self.apply_message(event, &mut changes);

@@ -264,15 +264,12 @@ async fn merge_operation_dispatch_reaches_the_runner_through_a_session() {
     );
 
     let error = session
-        .run_internal(
-            crate::application::operation::contract::CodingAgentOperation::DiscardChildWorktree {
-                worktree_id: "child-0000000000000000".into(),
-            },
-        )
+        .discard_child_proposal("child-0000000000000000".into())
         .await
         .expect_err("unknown worktree id fails closed");
-    assert!(
-        error.to_string().contains("not registered"),
-        "dispatch must surface the runner error, got: {error}"
+    assert_eq!(error.code(), "input");
+    assert_eq!(
+        error.category,
+        crate::runtime::facade::CodingAgentErrorCategory::Input
     );
 }

@@ -8,8 +8,8 @@ use coding_agent::api::authorization::{
     ToolAuthorizationScope,
 };
 use coding_agent::api::client::{
-    CodingAgentContextSnapshot, CodingAgentFileChangeSnapshot, CodingAgentSnapshot,
-    CodingAgentSnapshotCursor, UI_SNAPSHOT_PROTOCOL_VERSION,
+    CodingAgentContextSnapshot, CodingAgentSnapshot, CodingAgentSnapshotCursor,
+    UI_SNAPSHOT_PROTOCOL_VERSION,
 };
 use coding_agent::api::embedding::{
     CodingAgentEmbeddingSnapshot, CodingAgentModelChoice, CodingAgentProfileChoice,
@@ -33,8 +33,11 @@ use super::super::native_shell::{
     NativeVisualCatalogFixture, NativeVisualDrawerFixture,
 };
 use crate::preferences::DesktopPreferences;
+
+mod fixture;
 use crate::projection::DesktopProjection;
 use crate::runtime::{DesktopRuntimeBridge, DesktopRuntimeHydratedSnapshot};
+use fixture::visual_change;
 
 const PERFORMANCE_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_PERF_REPLAY";
 const VISUAL_REPLAY_ENV: &str = "EVO_DESKTOP_NATIVE_VISUAL_REPLAY";
@@ -795,28 +798,14 @@ fn visual_projection(state: VisualReplayState) -> Result<DesktopProjection, Stri
     let transcript = CodingAgentTranscriptSnapshot::new(session_id.clone(), None, items);
     let mut snapshot = hydrated_snapshot(session_id, transcript);
     snapshot.session.context.changes = vec![
-        CodingAgentFileChangeSnapshot {
-            path: "crates/desktop/src/app/native_shell/inspector_pane.rs".into(),
-            mutation_kind: "edit".into(),
-            operation_id: "visual-operation".into(),
-            tool_call_id: Some("visual-running-edit".into()),
-            updated_sequence: 2,
-            first_changed_line: Some(343),
-            added_lines: Some(1),
-            removed_lines: Some(0),
-            diff: Some("@@ -348,0 +349 @@\n+                    .flex_wrap()".into()),
-        },
-        CodingAgentFileChangeSnapshot {
-            path: "scripts/desktop-visual-golden.sh".into(),
-            mutation_kind: "edit".into(),
-            operation_id: "visual-operation".into(),
-            tool_call_id: Some("visual-running-edit".into()),
-            updated_sequence: 2,
-            first_changed_line: Some(1),
-            added_lines: Some(24),
-            removed_lines: Some(3),
-            diff: None,
-        },
+        visual_change(
+            "crates/desktop/src/app/native_shell/inspector_pane.rs",
+            343,
+            1,
+            0,
+            Some("@@ -348,0 +349 @@\n+                    .flex_wrap()"),
+        ),
+        visual_change("scripts/desktop-visual-golden.sh", 1, 24, 3, None),
     ];
     if state == VisualReplayState::Authorization {
         snapshot.session.pending_authorizations = vec![visual_authorization_request()];

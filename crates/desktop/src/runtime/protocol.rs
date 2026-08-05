@@ -121,7 +121,7 @@ pub(super) enum DesktopRuntimeCommand {
         identity: DesktopRecoveryIdentity,
         resolution: CodingAgentRecoveryResolution,
     },
-    ReviewChangedFile {
+    OpenChange {
         command_id: u64,
         session_id: String,
         request: CodingAgentFileReviewRequest,
@@ -281,7 +281,7 @@ impl DesktopRuntimeCommand {
             | Self::DecideToolAuthorization { command_id, .. }
             | Self::RetryRecovery { command_id, .. }
             | Self::ResolveRecovery { command_id, .. }
-            | Self::ReviewChangedFile { command_id, .. }
+            | Self::OpenChange { command_id, .. }
             | Self::OpenExternalEditor { command_id, .. }
             | Self::ListMergeProposals { command_id, .. }
             | Self::MergeChildWorktree { command_id, .. }
@@ -310,7 +310,7 @@ impl DesktopRuntimeCommand {
             }
             Self::RetryRecovery { .. } => DesktopRuntimeCommandKind::RetryRecovery,
             Self::ResolveRecovery { .. } => DesktopRuntimeCommandKind::ResolveRecovery,
-            Self::ReviewChangedFile { .. } => DesktopRuntimeCommandKind::ReviewChangedFile,
+            Self::OpenChange { .. } => DesktopRuntimeCommandKind::OpenChange,
             Self::OpenExternalEditor { .. } => DesktopRuntimeCommandKind::OpenExternalEditor,
             Self::ListMergeProposals { .. } => DesktopRuntimeCommandKind::ListMergeProposals,
             Self::MergeChildWorktree { .. } => DesktopRuntimeCommandKind::MergeChildWorktree,
@@ -328,7 +328,7 @@ impl DesktopRuntimeCommand {
             | Self::SelectModel { target, .. }
             | Self::SelectSessionProfile { target, .. } => target.session_id(),
             Self::SubmitPrompt { target, .. } => target.existing_session_id(),
-            Self::ReviewChangedFile { session_id, .. }
+            Self::OpenChange { session_id, .. }
             | Self::OpenExternalEditor { session_id, .. }
             | Self::ListMergeProposals { session_id, .. }
             | Self::MergeChildWorktree { session_id, .. }
@@ -364,7 +364,7 @@ pub enum DesktopRuntimeCommandKind {
     DecideToolAuthorization,
     RetryRecovery,
     ResolveRecovery,
-    ReviewChangedFile,
+    OpenChange,
     OpenExternalEditor,
     ListMergeProposals,
     MergeChildWorktree,

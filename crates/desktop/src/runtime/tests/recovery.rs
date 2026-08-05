@@ -514,12 +514,59 @@ fn assert_bounded_streaming_overlays(
     assert!(outcome.is_applied());
     let delta = outcome.delta().unwrap();
     assert!(delta.tools);
-    assert!(delta.context.contains(ContextDirtyFlags::CHANGES));
+    assert!(!delta.context.contains(ContextDirtyFlags::CHANGES));
     assert!(!delta.conversation);
     assert_eq!(
         overlays.tools().back().unwrap().status,
         DesktopToolStatus::Completed
     );
+
+    sequence += 1;
+    let review_changed = rewritten_event_kind(
+        base_event,
+        sequence,
+        &stream_id,
+        &session_id,
+        operation_id,
+        serde_json::json!({
+            "family": "review",
+            "payload": {
+                "kind": "changed",
+                "changes": [{
+                    "path": "README.md",
+                    "mutationKind": "edit",
+                    "source": "agent_edit",
+                    "operationId": operation_id,
+                    "toolCallId": "tool-overlay",
+                    "sessionId": session_id,
+                    "turnId": "turn-tool",
+                    "updatedSequence": sequence,
+                    "beforeRevision": "before",
+                    "afterRevision": "after",
+                    "afterExists": true,
+                    "firstChangedLine": 1,
+                    "addedLines": 1,
+                    "removedLines": 1,
+                    "diff": "@@ -1,1 +1,1 @@\n-old\n+new",
+                    "hunks": [{
+                        "id": "hunk-overlay",
+                        "source": "agent_edit",
+                        "oldStart": 1,
+                        "oldLines": 1,
+                        "newStart": 1,
+                        "newLines": 1,
+                        "diff": "@@ -1,1 +1,1 @@\n-old\n+new"
+                    }]
+                }]
+            }
+        }),
+    );
+    let outcome = overlays.apply(ProjectionEvent::Product(review_changed));
+    assert!(outcome.is_applied());
+    let delta = outcome.delta().unwrap();
+    assert!(delta.context.contains(ContextDirtyFlags::CHANGES));
+    assert!(!delta.tools);
+    assert!(!delta.conversation);
     assert_eq!(
         overlays.snapshot().context.changes.first().unwrap().path,
         "README.md"

@@ -664,19 +664,10 @@ pub struct CodingAgentOperationSnapshot {
     pub failure: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodingAgentFileChangeSnapshot {
-    pub path: String,
-    pub mutation_kind: String,
-    pub operation_id: String,
-    pub tool_call_id: Option<String>,
-    pub updated_sequence: u64,
-    pub first_changed_line: Option<usize>,
-    pub added_lines: Option<usize>,
-    pub removed_lines: Option<usize>,
-    pub diff: Option<String>,
-}
+pub use crate::events::review::{
+    CodingAgentReviewChange as CodingAgentFileChangeSnapshot,
+    CodingAgentReviewHunk as CodingAgentHunkChangeSnapshot,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

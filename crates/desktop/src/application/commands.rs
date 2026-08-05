@@ -88,7 +88,7 @@ impl DesktopCommandIntent {
                 action: DesktopRecoveryAction::MarkFailed | DesktopRecoveryAction::Abort,
                 ..
             } => DesktopRuntimeCommandKind::ResolveRecovery,
-            Self::FileReview { .. } => DesktopRuntimeCommandKind::ReviewChangedFile,
+            Self::FileReview { .. } => DesktopRuntimeCommandKind::OpenChange,
             Self::ListMergeProposals => DesktopRuntimeCommandKind::ListMergeProposals,
             Self::MergeProposal { .. } => DesktopRuntimeCommandKind::MergeChildWorktree,
             Self::DiscardProposal { .. } => DesktopRuntimeCommandKind::DiscardChildWorktree,

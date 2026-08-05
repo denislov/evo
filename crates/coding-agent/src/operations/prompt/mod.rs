@@ -13,6 +13,7 @@ use crate::platform::time::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
 use crate::profiles::{ProfileId, ProfileKind, ProfileRegistry};
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
+use crate::services::review::ReviewService;
 use crate::session::event::PersistedDelegationStatus;
 use crate::session::service::{FinalizedSessionWrite, SessionPersistence, SessionService};
 use context::{
@@ -29,6 +30,7 @@ struct PromptOperation<'a> {
     event_service: &'a EventService,
     pending_delegation_confirmations: &'a mut PendingDelegationConfirmationQueue,
     authorization_service: &'a AuthorizationService,
+    review_service: &'a ReviewService,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -39,6 +41,7 @@ pub(crate) async fn run(
     event_service: &EventService,
     pending_delegation_confirmations: &mut PendingDelegationConfirmationQueue,
     authorization_service: &AuthorizationService,
+    review_service: &ReviewService,
     options: PromptTurnOptions,
     snapshot: &OperationCapabilitySnapshot,
     cancellation: Option<CancellationToken>,
@@ -50,6 +53,7 @@ pub(crate) async fn run(
         event_service,
         pending_delegation_confirmations,
         authorization_service,
+        review_service,
     }
     .run_inner(options, snapshot, cancellation)
     .await
@@ -346,6 +350,11 @@ impl PromptOperation<'_> {
                 context.set_authorization_service(self.authorization_service.clone());
                 context.set_authorization_event_writer(session_service.event_writer());
                 context.set_session_id(session_service.session_id().to_owned());
+                context.set_mutation_tracking(self.review_service.mutation_tracking(
+                    session_service.session_id(),
+                    context.turn_id(),
+                    context.operation_id(),
+                )?);
                 context.set_replay(replay);
                 context.set_transaction(transaction);
                 if let Some(receiver) = prompt_control_receiver {
@@ -367,6 +376,11 @@ impl PromptOperation<'_> {
                 context.set_authorization_service(self.authorization_service.clone());
                 context
                     .set_non_persistent_session(state.runtime_id.clone(), state.transcript.clone());
+                context.set_mutation_tracking(self.review_service.mutation_tracking(
+                    &state.runtime_id,
+                    context.turn_id(),
+                    context.operation_id(),
+                )?);
                 if let Some(receiver) = prompt_control_receiver {
                     context.set_prompt_control_receiver(receiver);
                 }

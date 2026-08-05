@@ -3,13 +3,17 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 use similar::TextDiff;
 
-use super::{HunkId, HunkRange};
+use super::{ChangeSource, HunkId, HunkRange, TrackingContext};
 
 #[derive(Clone)]
 pub(super) struct HunkIdentity {
     pub(super) id: HunkId,
     pub(super) fingerprint: String,
     pub(super) range: HunkRange,
+    pub(super) source: ChangeSource,
+    pub(super) context: Option<TrackingContext>,
+    pub(super) before_revision: Option<String>,
+    pub(super) after_revision: String,
 }
 
 pub(super) struct ParsedHunk {
@@ -152,4 +156,50 @@ fn range_overlap(left: HunkRange, right: HunkRange) -> usize {
 
 fn content_fingerprint(content: &[u8]) -> String {
     format!("{:x}", Sha256::digest(content))
+}
+
+pub(super) fn replace_line_range(
+    base: &[u8],
+    base_start: usize,
+    base_count: usize,
+    source: &[u8],
+    source_start: usize,
+    source_count: usize,
+) -> Result<Vec<u8>, String> {
+    let base = std::str::from_utf8(base).map_err(|_| "base content is not UTF-8")?;
+    let source = std::str::from_utf8(source).map_err(|_| "source content is not UTF-8")?;
+    let base_lines = split_lines_preserving_endings(base);
+    let source_lines = split_lines_preserving_endings(source);
+    let base_index = line_index(base_start);
+    let source_index = line_index(source_start);
+    let base_end = base_index
+        .checked_add(base_count)
+        .filter(|end| *end <= base_lines.len())
+        .ok_or("base hunk range is outside content")?;
+    let source_end = source_index
+        .checked_add(source_count)
+        .filter(|end| *end <= source_lines.len())
+        .ok_or("source hunk range is outside content")?;
+    if base_index > base_lines.len() || source_index > source_lines.len() {
+        return Err("hunk start is outside content".into());
+    }
+    let capacity = base.len().saturating_add(
+        source_lines[source_index..source_end]
+            .iter()
+            .map(|line| line.len())
+            .sum(),
+    );
+    let mut patched = String::with_capacity(capacity);
+    patched.extend(base_lines[..base_index].iter().copied());
+    patched.extend(source_lines[source_index..source_end].iter().copied());
+    patched.extend(base_lines[base_end..].iter().copied());
+    Ok(patched.into_bytes())
+}
+
+fn split_lines_preserving_endings(content: &str) -> Vec<&str> {
+    content.split_inclusive('\n').collect()
+}
+
+fn line_index(start: usize) -> usize {
+    start.saturating_sub(1)
 }

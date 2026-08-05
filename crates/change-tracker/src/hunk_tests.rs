@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use similar::TextDiff;
 use tempfile::TempDir;
 
 use super::*;
@@ -17,16 +18,28 @@ fn context() -> TrackingContext {
         session_id: "session-1".into(),
         turn_id: "turn-2".into(),
         operation_id: "operation-3".into(),
+        tool_call_id: Some("call-4".into()),
     }
 }
 
 fn receipt(path: &str, before: Option<&[u8]>, after: &[u8], diff: Option<&str>) -> ChangeReceipt {
+    receipt_state(path, before, Some(after), diff)
+}
+
+fn receipt_state(
+    path: &str,
+    before: Option<&[u8]>,
+    after: Option<&[u8]>,
+    diff: Option<&str>,
+) -> ChangeReceipt {
+    let after_bytes = after.unwrap_or_default();
     ChangeReceipt {
         path: path.into(),
         target_fingerprint: format!("target:{path}"),
         before_revision: before.map(revision),
-        after_revision: revision(after),
-        byte_delta: i64::try_from(after.len()).unwrap()
+        after_revision: revision(after_bytes),
+        after_exists: after.is_some(),
+        byte_delta: i64::try_from(after_bytes.len()).unwrap()
             - i64::try_from(before.map_or(0, <[u8]>::len)).unwrap(),
         line_delta: 0,
         origin: "edit".into(),
@@ -60,6 +73,16 @@ fn patch(old_start: usize, new_start: usize, removed: &str, added: &str) -> Stri
     format!(
         "--- notes.txt\n+++ notes.txt\n@@ -{old_start},1 +{new_start},1 @@\n-{removed}\n+{added}"
     )
+}
+
+fn full_patch(path: &str, before: &[u8], after: &[u8]) -> String {
+    let before = std::str::from_utf8(before).unwrap();
+    let after = std::str::from_utf8(after).unwrap();
+    TextDiff::from_lines(before, after)
+        .unified_diff()
+        .context_radius(usize::MAX / 4)
+        .header(path, path)
+        .to_string()
 }
 
 async fn expire_window() {
@@ -160,7 +183,7 @@ async fn unmatched_revision_becomes_external_on_an_agent_file() {
     );
     assert_eq!(
         snapshot.files[0].before_revision,
-        Some(revision(b"agent\n"))
+        Some(revision(b"before\n"))
     );
     assert_eq!(snapshot.files[0].after_revision, revision(b"external\n"));
     assert_eq!(snapshot.facts.len(), 2);
@@ -220,41 +243,54 @@ async fn merge_and_hook_receipts_preserve_explicit_sources() {
 #[tokio::test]
 async fn content_identity_survives_position_drift() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("notes.txt"), "after\n").unwrap();
+    let before = b"top\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nbefore\nbottom\n";
+    let after = b"top\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nafter\nbottom\n";
+    std::fs::write(dir.path().join("notes.txt"), after).unwrap();
     let tracker = HunkTracker::start(dir.path(), options()).unwrap();
     let handle = tracker.handle();
     handle
         .record_receipt(
             receipt(
                 "notes.txt",
-                Some(b"before\n"),
-                b"after\n",
-                Some(&patch(2, 2, "before", "after")),
+                Some(before),
+                after,
+                Some(&full_patch("notes.txt", before, after)),
             ),
             ChangeSource::AgentEdit,
             context(),
         )
         .await
         .unwrap();
-    let first = handle.snapshot().await.unwrap().files[0].hunks[0]
+    let first = handle.snapshot().await.unwrap().files[0]
+        .hunks
+        .iter()
+        .find(|hunk| hunk.source == ChangeSource::AgentEdit)
+        .unwrap()
         .id
         .clone();
-    let mut shifted = receipt(
-        "notes.txt",
-        Some(b"prefix\nbefore\n"),
-        b"prefix\nafter\n",
-        Some(&patch(20, 20, "before", "after")),
-    );
-    shifted.after_revision = revision(b"after\n");
+    let shifted = [b"prefix\n".as_slice(), after].concat();
+    std::fs::write(dir.path().join("notes.txt"), &shifted).unwrap();
     handle
-        .record_receipt(shifted, ChangeSource::AgentEdit, context())
+        .observe(event(dir.path(), "notes.txt", FsChangeKind::Modified))
         .await
         .unwrap();
-    let second = handle.snapshot().await.unwrap().files[0].hunks[0]
+    expire_window().await;
+    let snapshot = handle.snapshot().await.unwrap();
+    let second = snapshot.files[0]
+        .hunks
+        .iter()
+        .find(|hunk| hunk.source == ChangeSource::AgentEdit)
+        .unwrap()
         .id
         .clone();
 
     assert_eq!(first, second);
+    assert!(
+        snapshot.files[0]
+            .hunks
+            .iter()
+            .any(|hunk| hunk.source == ChangeSource::ExternalEditOnAgentFile)
+    );
     tracker.shutdown().await.unwrap();
 }
 
@@ -304,6 +340,276 @@ async fn rename_keeps_file_state_and_hunk_identity() {
     assert_eq!(snapshot.files[0].path, PathBuf::from("new.txt"));
     assert_eq!(snapshot.files[0].hunks[0].id, id);
     assert_eq!(snapshot.facts.len(), 2);
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn consecutive_receipts_recompute_from_original_baseline() {
+    let dir = TempDir::new().unwrap();
+    let baseline = b"first\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nsecond\n";
+    let first_edit = b"FIRST\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nsecond\n";
+    let second_edit = b"FIRST\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nSECOND\n";
+    std::fs::write(dir.path().join("notes.txt"), first_edit).unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(baseline),
+                first_edit,
+                Some(&full_patch("notes.txt", baseline, first_edit)),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    let first_id = handle.snapshot().await.unwrap().files[0].hunks[0]
+        .id
+        .clone();
+
+    std::fs::write(dir.path().join("notes.txt"), second_edit).unwrap();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(first_edit),
+                second_edit,
+                Some(&full_patch("notes.txt", first_edit, second_edit)),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+
+    let snapshot = handle.snapshot().await.unwrap();
+    assert_eq!(snapshot.files[0].before_revision, Some(revision(baseline)));
+    assert_eq!(snapshot.files[0].hunks.len(), 2);
+    assert!(
+        snapshot.files[0]
+            .hunks
+            .iter()
+            .any(|hunk| hunk.id == first_id)
+    );
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn accept_hunk_updates_baseline_and_reject_plan_reverts_only_remaining_hunk() {
+    let dir = TempDir::new().unwrap();
+    let baseline = b"first\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nsecond\n";
+    let current = b"FIRST\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nSECOND\n";
+    std::fs::write(dir.path().join("notes.txt"), current).unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(baseline),
+                current,
+                Some(&full_patch("notes.txt", baseline, current)),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    let initial = handle.snapshot().await.unwrap().files.remove(0);
+    let accepted = initial.hunks[0].clone();
+    handle
+        .accept_hunk(
+            &initial.path,
+            initial.recorded_sequence,
+            accepted.id,
+            &initial.after_revision,
+            "target:notes.txt",
+        )
+        .await
+        .unwrap();
+    let remaining = handle.snapshot().await.unwrap().files.remove(0);
+    assert_eq!(remaining.hunks.len(), 1);
+    let plan = handle
+        .prepare_reject_hunk(
+            &remaining.path,
+            remaining.recorded_sequence,
+            remaining.hunks[0].id.clone(),
+            &remaining.after_revision,
+            "target:notes.txt",
+        )
+        .await
+        .unwrap();
+    let RejectReplacement::Write(replacement) = plan.replacement else {
+        panic!("remaining text hunk must produce a write plan");
+    };
+    assert_ne!(replacement, baseline);
+    assert_ne!(replacement, current);
+    std::fs::write(dir.path().join("notes.txt"), &replacement).unwrap();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(current),
+                &replacement,
+                Some(&full_patch("notes.txt", current, &replacement)),
+            ),
+            ChangeSource::HookEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    assert!(handle.snapshot().await.unwrap().files.is_empty());
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reject_file_distinguishes_created_deleted_and_empty_files() {
+    let created_dir = TempDir::new().unwrap();
+    std::fs::write(created_dir.path().join("empty.txt"), []).unwrap();
+    let tracker = HunkTracker::start(created_dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt("empty.txt", None, b"", Some("")),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    let created = handle.snapshot().await.unwrap().files.remove(0);
+    assert!(created.after_exists);
+    assert!(matches!(
+        handle
+            .prepare_reject_file(
+                &created.path,
+                created.recorded_sequence,
+                &created.after_revision,
+                "target:empty.txt",
+            )
+            .await
+            .unwrap()
+            .replacement,
+        RejectReplacement::Delete
+    ));
+    tracker.shutdown().await.unwrap();
+
+    let deleted_dir = TempDir::new().unwrap();
+    let tracker = HunkTracker::start(deleted_dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt_state("empty.txt", Some(b""), None, Some("")),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    let deleted = handle.snapshot().await.unwrap().files.remove(0);
+    assert!(!deleted.after_exists);
+    assert!(matches!(
+        handle
+            .prepare_reject_file(
+                &deleted.path,
+                deleted.recorded_sequence,
+                &deleted.after_revision,
+                "target:empty.txt",
+            )
+            .await
+            .unwrap()
+            .replacement,
+        RejectReplacement::Write(bytes) if bytes.is_empty()
+    ));
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_hunk_revision_and_fingerprint_fail_closed() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "after\n").unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(b"before\n"),
+                b"after\n",
+                Some(&patch(1, 1, "before", "after")),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    let snapshot = handle.snapshot().await.unwrap().files.remove(0);
+    assert!(
+        handle
+            .prepare_reject_hunk(
+                &snapshot.path,
+                snapshot.recorded_sequence,
+                HunkId::parse("missing-hunk").unwrap(),
+                &snapshot.after_revision,
+                "target:notes.txt",
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        handle
+            .prepare_reject_file(
+                &snapshot.path,
+                snapshot.recorded_sequence,
+                "0".repeat(64),
+                "target:notes.txt",
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        handle
+            .prepare_reject_file(
+                &snapshot.path,
+                snapshot.recorded_sequence,
+                &snapshot.after_revision,
+                "replacement-target",
+            )
+            .await
+            .is_err()
+    );
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reject_refuses_binary_or_unavailable_baselines() {
+    let dir = TempDir::new().unwrap();
+    let before = b"\0before";
+    let after = b"\0after";
+    std::fs::write(dir.path().join("binary.dat"), after).unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt("binary.dat", Some(before), after, None),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    let snapshot = handle.snapshot().await.unwrap().files.remove(0);
+    assert!(snapshot.hunks[0].unified_diff.is_none());
+    assert!(matches!(
+        handle
+            .prepare_reject_file(
+                &snapshot.path,
+                snapshot.recorded_sequence,
+                &snapshot.after_revision,
+                "target:binary.dat",
+            )
+            .await,
+        Err(ChangeTrackerError::InvalidFact { .. })
+    ));
     tracker.shutdown().await.unwrap();
 }
 
@@ -401,10 +707,13 @@ async fn change_fact_and_hunk_budgets_are_transactional() {
     limited.max_hunks_per_file = 1;
     let tracker = HunkTracker::start(dir.path(), limited).unwrap();
     let handle = tracker.handle();
-    let two_hunks = "--- notes.txt\n+++ notes.txt\n@@ -1,1 +1,1 @@\n-before\n+after\n@@ -8,1 +8,1 @@\n-old\n+new";
+    let before = b"before\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nold\n";
+    let after = b"after\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nnew\n";
+    std::fs::write(dir.path().join("notes.txt"), after).unwrap();
+    let two_hunks = full_patch("notes.txt", before, after);
     let error = handle
         .record_receipt(
-            receipt("notes.txt", Some(b"before\n"), b"after\n", Some(two_hunks)),
+            receipt("notes.txt", Some(before), after, Some(&two_hunks)),
             ChangeSource::AgentEdit,
             context(),
         )
@@ -455,9 +764,13 @@ async fn oversized_content_is_hashed_without_retaining_an_unbounded_diff() {
 #[tokio::test]
 async fn saturated_command_queue_fails_closed() {
     let (commands, _receiver) = mpsc::channel(1);
+    let (snapshots, _) = watch::channel(HunkTrackerSnapshot::empty());
     let (reply, _reply_receiver) = oneshot::channel();
     assert!(commands.try_send(Command::Snapshot { reply }).is_ok());
-    let handle = HunkTrackerHandle { commands };
+    let handle = HunkTrackerHandle {
+        commands,
+        snapshots,
+    };
     assert!(matches!(
         handle.snapshot().await,
         Err(ChangeTrackerError::BudgetExceeded { .. })

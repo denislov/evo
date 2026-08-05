@@ -368,6 +368,7 @@ impl CodingAgentSession {
                                 .session_coordinator
                                 .pending_delegation_confirmations,
                             &self.runtime_host.authorization_service,
+                            &self.runtime_host.review_service,
                             options,
                             &snapshot,
                             operation_cancellation.clone(),

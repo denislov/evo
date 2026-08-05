@@ -1237,7 +1237,7 @@ fn reduce_command_rejected<Presentation: RuntimeWorkspacePresentation>(
             state.set_runtime_notice(target, notice);
             changes.insert(UiRegion::Sessions);
         }
-        DesktopRuntimeCommandKind::ReviewChangedFile => {
+        DesktopRuntimeCommandKind::OpenChange => {
             if let DesktopCommandIntent::FileReview { request } = intent {
                 state.set_file_review_failed(target, request, code.to_owned());
                 state.set_runtime_notice(

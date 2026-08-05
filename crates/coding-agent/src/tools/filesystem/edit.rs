@@ -1,3 +1,4 @@
+use crate::services::review::MutationTracking;
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem::diff::{
     TextReplacement, apply_replacements_preserving_unchanged_lines, generate_diff_string,
@@ -322,6 +323,16 @@ pub(crate) async fn edit_execute_with_target_contract(
     args: serde_json::Value,
     ops: Arc<dyn EditOperations>,
 ) -> Result<ToolOutput, String> {
+    edit_execute_with_target_tracking(target, args, ops, None, None).await
+}
+
+async fn edit_execute_with_target_tracking(
+    target: &FilesystemTarget,
+    args: serde_json::Value,
+    ops: Arc<dyn EditOperations>,
+    tracking: Option<&MutationTracking>,
+    tool_call_id: Option<&str>,
+) -> Result<ToolOutput, String> {
     let path = args
         .get("path")
         .and_then(|v| v.as_str())
@@ -375,10 +386,20 @@ pub(crate) async fn edit_execute_with_target_contract(
         path.clone(),
         target_fingerprint,
         Some(&raw),
-        final_content.as_bytes(),
+        Some(final_content.as_bytes()),
         "edit",
         bounded_patch.clone(),
     );
+    if let Some(tracking) = tracking {
+        tracking
+            .record(tool_call_id.unwrap_or("edit"), change_receipt.clone())
+            .await
+            .map_err(|error| {
+                format!(
+                    "edit: mutation committed but change tracking failed; reconcile required: {error}"
+                )
+            })?;
+    }
     let mut details = serde_json::json!({
         "diff": bounded_diff_text,
         "patch": bounded_patch,
@@ -406,8 +427,16 @@ pub(crate) async fn edit_execute_with_target(
         .map(AgentToolOutput::from)
 }
 
+#[cfg(test)]
 pub fn edit_runtime_tool(
     filesystem: WorkspaceAccessHandle,
+) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
+    edit_runtime_tool_with_tracking(filesystem, None)
+}
+
+pub(crate) fn edit_runtime_tool_with_tracking(
+    filesystem: WorkspaceAccessHandle,
+    tracking: Option<MutationTracking>,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("edit").expect("static tool id is valid"),
@@ -433,6 +462,7 @@ pub fn edit_runtime_tool(
         definition,
         move |context, args| {
             let filesystem = filesystem.clone();
+            let tracking = tracking.clone();
             Box::pin(async move {
                 let target = crate::tools::filesystem_target_for_runtime_execution(
                     &filesystem,
@@ -442,10 +472,12 @@ pub fn edit_runtime_tool(
                 )
                 .await
                 .map_err(|error| ToolError::new(ToolErrorKind::Execution, error))?;
-                edit_execute_with_target_contract(
+                edit_execute_with_target_tracking(
                     &target,
                     serde_json::to_value(&args).expect("typed edit args serialize"),
                     Arc::new(RealEditOperations),
+                    tracking.as_ref(),
+                    Some(&context.call_id),
                 )
                 .await
                 .map_err(|error| ToolError::new(ToolErrorKind::Execution, error))

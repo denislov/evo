@@ -1,4 +1,5 @@
 use crate::mutex::MutexExt;
+use crate::services::review::MutationTracking;
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem::mutation_receipt::{
     bounded_diff, receipt_from_revisions, revision, validate_fence,
@@ -117,10 +118,21 @@ impl WriteOperations for RealWriteOperations {
     }
 }
 
+#[cfg(test)]
 async fn write_target_with_operations(
     target: &FilesystemTarget,
     args: serde_json::Value,
     ops: Arc<dyn WriteOperations>,
+) -> Result<ToolOutput, String> {
+    write_target_with_tracking(target, args, ops, None, None).await
+}
+
+async fn write_target_with_tracking(
+    target: &FilesystemTarget,
+    args: serde_json::Value,
+    ops: Arc<dyn WriteOperations>,
+    tracking: Option<&MutationTracking>,
+    tool_call_id: Option<&str>,
 ) -> Result<ToolOutput, String> {
     let path = arg_str(&args, "path")?;
     let content = arg_str(&args, "content")?;
@@ -182,10 +194,23 @@ async fn write_target_with_operations(
         path.clone(),
         target.target_fingerprint().to_owned(),
         before.as_ref().map(|(revision, _)| revision),
-        &after,
+        Some(&after),
         "write",
         unified_diff,
     );
+    if let Some(tracking) = tracking {
+        tracking
+            .record(
+                tool_call_id.unwrap_or("write"),
+                receipt.clone(),
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "write: mutation committed but change tracking failed; reconcile required: {error}"
+                )
+            })?;
+    }
     Ok(ToolOutput {
         content: vec![ToolContent::Text {
             text: format!("Successfully wrote {} bytes to {path}", content.len()),
@@ -195,8 +220,16 @@ async fn write_target_with_operations(
     })
 }
 
+#[cfg(test)]
 pub fn write_runtime_tool(
     filesystem: WorkspaceAccessHandle,
+) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
+    write_runtime_tool_with_tracking(filesystem, None)
+}
+
+pub(crate) fn write_runtime_tool_with_tracking(
+    filesystem: WorkspaceAccessHandle,
+    tracking: Option<MutationTracking>,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("write").expect("static tool id is valid"),
@@ -219,6 +252,7 @@ pub fn write_runtime_tool(
         definition,
         move |context, args| {
             let filesystem = filesystem.clone();
+            let tracking = tracking.clone();
             Box::pin(async move {
                 let target = crate::tools::filesystem_target_for_runtime_execution(
                     &filesystem,
@@ -228,10 +262,12 @@ pub fn write_runtime_tool(
                 )
                 .await
                 .map_err(|error| ToolError::new(ToolErrorKind::Execution, error))?;
-                write_target_with_operations(
+                write_target_with_tracking(
                     &target,
                     serde_json::to_value(&args).expect("typed write args serialize"),
                     Arc::new(RealWriteOperations),
+                    tracking.as_ref(),
+                    Some(&context.call_id),
                 )
                 .await
                 .map_err(|error| ToolError::new(ToolErrorKind::Execution, error))

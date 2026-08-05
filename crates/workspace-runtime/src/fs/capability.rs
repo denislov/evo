@@ -870,6 +870,10 @@ impl FilesystemTarget {
         matches!(self.object, Some(FilesystemTargetObject::Vacant { .. }))
     }
 
+    pub fn revalidate_identity(&self) -> Result<(), String> {
+        revalidate_bound_target(self)
+    }
+
     pub fn remove_file(&self) -> Result<(), String> {
         remove_bound_file(self)
     }

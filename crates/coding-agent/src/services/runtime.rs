@@ -33,6 +33,7 @@ use crate::operations::prompt::context::{
     CodingDiagnostic, DelegationToolExecutor, RuntimeSnapshot,
 };
 use crate::services::authorization::{AuthorizationHookContext, ToolAuthorizationInventory};
+use crate::services::review::MutationTracking;
 use crate::session::event::PersistedContentBlock;
 use crate::session::replay::{MessageStatus, SessionReplay, ToolCallStatus, TranscriptItem};
 
@@ -106,7 +107,7 @@ impl RuntimeService {
         runtime: &RuntimeSnapshot,
         snapshot: &OperationCapabilitySnapshot,
     ) -> Result<AgentRuntimeBuild, CodingSessionError> {
-        self.build_agent_runtime_with_authorization(runtime, snapshot, None, None)
+        self.build_agent_runtime_with_authorization(runtime, snapshot, None, None, None)
     }
 
     pub(crate) fn build_agent_runtime_with_authorization(
@@ -115,6 +116,7 @@ impl RuntimeService {
         snapshot: &OperationCapabilitySnapshot,
         authorization: Option<AuthorizationHookContext>,
         delegation_executor: Option<DelegationToolExecutor>,
+        mutation_tracking: Option<MutationTracking>,
     ) -> Result<AgentRuntimeBuild, CodingSessionError> {
         let model_capability =
             ModelCapability::require(snapshot.model.as_ref(), runtime.profile_id())?;
@@ -164,7 +166,12 @@ impl RuntimeService {
                 "write" => snapshot
                     .workspace
                     .clone()
-                    .map(crate::tools::filesystem::write::write_runtime_tool)
+                    .map(|filesystem| {
+                        crate::tools::filesystem::write::write_runtime_tool_with_tracking(
+                            filesystem,
+                            mutation_tracking.clone(),
+                        )
+                    })
                     .transpose()
                     .map_err(|error| CodingSessionError::Tool {
                         message: error.to_string(),
@@ -172,7 +179,12 @@ impl RuntimeService {
                 "edit" => snapshot
                     .workspace
                     .clone()
-                    .map(crate::tools::filesystem::edit::edit_runtime_tool)
+                    .map(|filesystem| {
+                        crate::tools::filesystem::edit::edit_runtime_tool_with_tracking(
+                            filesystem,
+                            mutation_tracking.clone(),
+                        )
+                    })
                     .transpose()
                     .map_err(|error| CodingSessionError::Tool {
                         message: error.to_string(),
@@ -180,7 +192,12 @@ impl RuntimeService {
                 "hashline_edit" => snapshot
                     .workspace
                     .clone()
-                    .map(crate::tools::filesystem::hashline::hashline_edit_runtime_tool)
+                    .map(|filesystem| {
+                        crate::tools::filesystem::hashline::hashline_edit_runtime_tool_with_tracking(
+                            filesystem,
+                            mutation_tracking.clone(),
+                        )
+                    })
                     .transpose()
                     .map_err(|error| CodingSessionError::Tool {
                         message: error.to_string(),
@@ -188,7 +205,12 @@ impl RuntimeService {
                 "apply_patch" => snapshot
                     .workspace
                     .clone()
-                    .map(crate::tools::filesystem::apply_patch::apply_patch_runtime_tool)
+                    .map(|filesystem| {
+                        crate::tools::filesystem::apply_patch::apply_patch_runtime_tool_with_tracking(
+                            filesystem,
+                            mutation_tracking.clone(),
+                        )
+                    })
                     .transpose()
                     .map_err(|error| CodingSessionError::Tool {
                         message: error.to_string(),

@@ -5,6 +5,7 @@
 //! so a stale proposal cannot silently edit an unrelated part of a file.
 
 use crate::mutex::MutexExt;
+use crate::services::review::MutationTracking;
 use crate::tools::filesystem::bounded::read_target_bytes;
 use crate::tools::filesystem::mutation_receipt::{bounded_diff, receipt, validate_fence};
 use crate::tools::filesystem_target_for_runtime_execution;
@@ -213,8 +214,16 @@ pub(crate) fn apply_batch(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn hashline_edit_runtime_tool(
     filesystem: WorkspaceAccessHandle,
+) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
+    hashline_edit_runtime_tool_with_tracking(filesystem, None)
+}
+
+pub(crate) fn hashline_edit_runtime_tool_with_tracking(
+    filesystem: WorkspaceAccessHandle,
+    tracking: Option<MutationTracking>,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("hashline_edit").expect("static tool id is valid"),
@@ -240,6 +249,7 @@ pub(crate) fn hashline_edit_runtime_tool(
         definition,
         move |context, args| {
             let filesystem = filesystem.clone();
+            let tracking = tracking.clone();
             Box::pin(async move {
                 if args.edits.is_empty() || args.edits.len() > crate::limits::MAX_HASHLINE_EDITS {
                     return Err(ToolError::new(
@@ -336,10 +346,23 @@ pub(crate) fn hashline_edit_runtime_tool(
                     args.path.clone(),
                     target.target_fingerprint().to_owned(),
                     Some(&raw),
-                    updated.as_bytes(),
+                    Some(updated.as_bytes()),
                     "hashline_edit",
                     bounded_diff(patch),
                 );
+                if let Some(tracking) = tracking.as_ref() {
+                    tracking
+                        .record(&context.call_id, change_receipt.clone())
+                        .await
+                        .map_err(|error| {
+                            ToolError::new(
+                                ToolErrorKind::Execution,
+                                format!(
+                                    "hashline_edit: mutation committed but change tracking failed; reconcile required: {error}"
+                                ),
+                            )
+                        })?;
+                }
                 Ok(ToolOutput {
                     content: vec![ToolContent::Text {
                         text: format!(

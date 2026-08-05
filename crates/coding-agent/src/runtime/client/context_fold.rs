@@ -1,53 +1,37 @@
-use std::collections::HashMap;
-
-use serde_json::Value;
-
 use crate::events::{
     CodingAgentAgentProductEvent, CodingAgentDelegationProductEvent,
     CodingAgentDiagnosticProductEvent, CodingAgentMessageProductEvent, CodingAgentProductEvent,
     CodingAgentProductEventKind, CodingAgentProductEventProfileKind,
-    CodingAgentProductEventTerminalStatus, CodingAgentTeamProductEvent,
-    CodingAgentToolProductEvent, CodingAgentWorkflowProductEvent,
+    CodingAgentProductEventTerminalStatus, CodingAgentReviewProductEvent,
+    CodingAgentTeamProductEvent, CodingAgentWorkflowProductEvent,
 };
 use crate::runtime::client::connection::{
-    CodingAgentContextSnapshot, CodingAgentDelegationSnapshot, CodingAgentFileChangeSnapshot,
-    CodingAgentOperationSnapshot, CodingAgentOperationStatus, CodingAgentTurnUsageSnapshot,
+    CodingAgentContextSnapshot, CodingAgentDelegationSnapshot, CodingAgentOperationSnapshot,
+    CodingAgentOperationStatus, CodingAgentTurnUsageSnapshot,
 };
 
 pub(crate) const MAX_CONTEXT_OPERATIONS: usize = 32;
 pub(crate) const MAX_CONTEXT_CHANGES: usize = 64;
 pub(crate) const MAX_CONTEXT_DELEGATIONS: usize = 32;
 pub(crate) const MAX_CONTEXT_OPERATION_DIAGNOSTICS: usize = 4;
-const MAX_PENDING_MUTATIONS: usize = 128;
 const MAX_ID_BYTES: usize = 256;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
-const MAX_TOOL_BYTES: usize = 256 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ProductContextPendingState {
-    mutations: HashMap<String, ProductPendingMutation>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProductPendingMutation {
-    operation_id: String,
-    tool_call_id: String,
-    path: String,
-    mutation_kind: String,
-}
+pub(crate) struct ProductContextPendingState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProductContextFoldChange {
     Operations,
-    Changes,
     Delegations,
     Usage,
+    Changes,
 }
 
 pub(crate) fn fold_product_context(
     context: &mut CodingAgentContextSnapshot,
-    pending: &mut ProductContextPendingState,
+    _pending: &mut ProductContextPendingState,
     event: &CodingAgentProductEvent,
     operation_kind: Option<&str>,
 ) -> Vec<ProductContextFoldChange> {
@@ -55,14 +39,18 @@ pub(crate) fn fold_product_context(
     if fold_operation(context, event, operation_kind) {
         changes.push(ProductContextFoldChange::Operations);
     }
-    if fold_change(context, pending, event) {
-        changes.push(ProductContextFoldChange::Changes);
-    }
     if fold_delegation(context, event) {
         changes.push(ProductContextFoldChange::Delegations);
     }
     if fold_usage(context, event) {
         changes.push(ProductContextFoldChange::Usage);
+    }
+    if let CodingAgentProductEventKind::Review(CodingAgentReviewProductEvent::Changed {
+        changes: review_changes,
+    }) = event.event()
+    {
+        context.changes = review_changes.clone();
+        changes.push(ProductContextFoldChange::Changes);
     }
     changes
 }
@@ -164,89 +152,6 @@ fn fold_operation(
         }
     }
     trim_context_operations(&mut context.operations);
-    true
-}
-
-fn fold_change(
-    context: &mut CodingAgentContextSnapshot,
-    pending: &mut ProductContextPendingState,
-    event: &CodingAgentProductEvent,
-) -> bool {
-    let next = match event.event() {
-        CodingAgentProductEventKind::Tool(CodingAgentToolProductEvent::Started {
-            operation_id,
-            tool_call_id,
-            name,
-            arguments_json,
-            ..
-        }) if matches!(name.as_str(), "edit" | "write") => {
-            if let Some(path) = mutation_path(arguments_json)
-                && (pending.mutations.len() < MAX_PENDING_MUTATIONS
-                    || pending.mutations.contains_key(tool_call_id))
-            {
-                pending.mutations.insert(
-                    tool_call_id.clone(),
-                    ProductPendingMutation {
-                        operation_id: operation_id.clone(),
-                        tool_call_id: tool_call_id.clone(),
-                        path,
-                        mutation_kind: name.clone(),
-                    },
-                );
-            }
-            return true;
-        }
-        CodingAgentProductEventKind::Tool(CodingAgentToolProductEvent::Completed {
-            tool_call_id,
-            name,
-            ..
-        }) if matches!(name.as_str(), "edit" | "write") => pending
-            .mutations
-            .remove(tool_call_id)
-            .map(|pending| CodingAgentFileChangeSnapshot {
-                path: pending.path,
-                mutation_kind: pending.mutation_kind,
-                operation_id: pending.operation_id,
-                tool_call_id: Some(pending.tool_call_id),
-                updated_sequence: event.sequence(),
-                first_changed_line: None,
-                added_lines: None,
-                removed_lines: None,
-                diff: None,
-            }),
-        CodingAgentProductEventKind::Tool(CodingAgentToolProductEvent::Failed {
-            tool_call_id,
-            name,
-            ..
-        }) if matches!(name.as_str(), "edit" | "write") => {
-            pending.mutations.remove(tool_call_id);
-            return true;
-        }
-        CodingAgentProductEventKind::Workflow(
-            CodingAgentWorkflowProductEvent::SelfHealingEditCompleted {
-                operation_id,
-                path,
-                first_changed_line,
-                ..
-            },
-        ) => Some(CodingAgentFileChangeSnapshot {
-            path: bounded_text(path, MAX_TOOL_BYTES),
-            mutation_kind: "self_healing_edit".into(),
-            operation_id: bounded_text(operation_id, MAX_ID_BYTES),
-            tool_call_id: None,
-            updated_sequence: event.sequence(),
-            first_changed_line: *first_changed_line,
-            added_lines: None,
-            removed_lines: None,
-            diff: None,
-        }),
-        _ => return false,
-    };
-    if let Some(next) = next {
-        context.changes.retain(|current| current.path != next.path);
-        context.changes.insert(0, next);
-        context.changes.truncate(MAX_CONTEXT_CHANGES);
-    }
     true
 }
 
@@ -417,15 +322,6 @@ pub(crate) fn trim_context_operations(operations: &mut Vec<CodingAgentOperationS
             .unwrap_or(operations.len() - 1);
         operations.remove(remove_index);
     }
-}
-
-fn mutation_path(arguments_json: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(arguments_json).ok()?;
-    ["path", "file_path", "filePath"]
-        .into_iter()
-        .find_map(|key| value.get(key).and_then(Value::as_str))
-        .filter(|path| !path.trim().is_empty())
-        .map(|path| bounded_text(path, MAX_TOOL_BYTES))
 }
 
 fn terminal_status(status: CodingAgentProductEventTerminalStatus) -> CodingAgentOperationStatus {

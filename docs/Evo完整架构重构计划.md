@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～3 完成，Phase 4 / ARC-400 完成，准备进入 ARC-410）
+> 状态：执行中（Phase 0～3 完成，Phase 4 / ARC-400～420 完成，准备进入 ARC-430）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -39,6 +39,8 @@
 | Phase 3 / ARC-351 | 非阻塞验证债务（最迟 Phase 10） | Windows/macOS 真实平台上的路径、symlink、文件锁与 Git worktree 差异；先运行 `workspace-runtime` 轻量 CI pilot，根据实测磁盘峰值选择 hosted 或 self-hosted runner，不阻塞 Phase 4 |
 | Phase 3 Gate | 通过（2026-08-05） | 并行 child 默认完全隔离；父 workspace 在 merge 前逐字节不变；异常退出后 registry/worktree 可恢复或安全清理；workspace 全量测试与 architecture gate 通过 |
 | Phase 4 / ARC-400 | 完成（复验 2026-08-06） | `docs/refactor/phase4-change-tracker.md`；`change-tracker` crate（仅依赖 workspace-runtime）：单 actor fs event service、bounded debounce、dynamic directory 补扫、rename/root/ignore 边界、watch budget fail-closed、带 root/sequence 的 Git HEAD/index/lock 元数据事件，24 个测试覆盖 |
+| Phase 4 / ARC-410 | 完成（复验 2026-08-06） | `docs/refactor/phase4-hunk-tracker.md`；baseline→current HunkTracker actor、receipt/event 因果关联、稳定 HunkId、来源归因、bounded diff/content/history、accept/reject plan 与 creation/deletion/empty-file fail-closed 语义；45 个 `change-tracker` 测试通过 |
+| Phase 4 / ARC-420 | 完成（复验 2026-08-06） | `docs/refactor/phase4-review-domain.md`；统一 list/open/accept/reject/discard API、typed receipt 直连 filesystem tools、共享 Review DTO、live Review product event、Desktop/CLI projection 与 capability/revision/target 复验；coding-agent 178、Desktop 303 测试通过，workspace/release API/architecture/clippy Gate 通过 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -544,6 +546,9 @@ Phase 3 Gate：完成（2026-08-05）。并行 child 默认完全隔离；父 wo
 - 保存 turn/session snapshot、before/after revision 和 bounded unified diff。
 
 ### ARC-420 Review domain/API
+
+执行状态：完成（复验 2026-08-06）。完成证据见
+`docs/refactor/phase4-review-domain.md`。
 
 - changed-file snapshot 填充真实 diff、first changed line、added/removed lines 和 source attribution。
 - 新增 list changes、open change、accept/reject hunk、accept/reject file、discard child proposal operation。

@@ -30,7 +30,6 @@ enum WireContentBlock {
         mime_type: String,
     },
 }
-
 #[derive(Debug, Clone, Serialize, PartialEq)]
 struct WireUsageCost {
     #[serde(skip_serializing_if = "wire_is_true")]
@@ -926,7 +925,8 @@ impl CodingProtocolEventAdapter {
             | CodingAgentProductEventKind::Diagnostic(
                 CodingAgentDiagnosticProductEvent::Diagnostic { .. },
             )
-            | CodingAgentProductEventKind::Merge(_) => Vec::new(),
+            | CodingAgentProductEventKind::Merge(_)
+            | CodingAgentProductEventKind::Review(_) => Vec::new(),
             CodingAgentProductEventKind::Session(CodingAgentSessionProductEvent::WriteFailed {
                 operation_id,
                 reason,

@@ -1,4 +1,5 @@
 use crate::mutex::MutexExt;
+use crate::services::review::MutationTracking;
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem::bounded::read_target_bytes;
 use crate::tools::filesystem::mutation_receipt::{
@@ -57,8 +58,16 @@ struct PlannedPatch {
     receipt: ChangeReceipt,
 }
 
+#[cfg(test)]
 pub(crate) fn apply_patch_runtime_tool(
     filesystem: WorkspaceAccessHandle,
+) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
+    apply_patch_runtime_tool_with_tracking(filesystem, None)
+}
+
+pub(crate) fn apply_patch_runtime_tool_with_tracking(
+    filesystem: WorkspaceAccessHandle,
+    tracking: Option<MutationTracking>,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("apply_patch").expect("static tool id is valid"),
@@ -84,7 +93,10 @@ pub(crate) fn apply_patch_runtime_tool(
         definition,
         move |context, args| {
             let filesystem = filesystem.clone();
-            Box::pin(async move { execute_patch(&filesystem, &context, args).await }) as ToolFuture
+            let tracking = tracking.clone();
+            Box::pin(
+                async move { execute_patch(&filesystem, &context, args, tracking.as_ref()).await },
+            ) as ToolFuture
         },
     )?))
 }
@@ -93,6 +105,7 @@ async fn execute_patch(
     filesystem: &WorkspaceAccessHandle,
     context: &ToolCallContext,
     args: ApplyPatchArgs,
+    tracking: Option<&MutationTracking>,
 ) -> Result<ToolOutput, ToolError> {
     let parsed = parse_patch(&args.patch)
         .map_err(|error| ToolError::new(ToolErrorKind::InvalidArguments, error.to_string()))?;
@@ -163,6 +176,27 @@ async fn execute_patch(
                     "stateUncertain": true,
                 }));
                 return Err(error);
+            }
+        }
+    }
+    if let Some(tracking) = tracking {
+        for (index, receipt) in receipts.iter().enumerate() {
+            if let Err(error) = tracking.record(&context.call_id, receipt.clone()).await {
+                let mut tool_error = ToolError::new(
+                    ToolErrorKind::Execution,
+                    format!(
+                        "apply_patch: mutation committed but change tracking failed; reconcile required: {error}"
+                    ),
+                );
+                tool_error.details = Some(serde_json::json!({
+                    "code": "partial_tracking_commit",
+                    "committedReceipts": receipts,
+                    "trackedReceipts": &receipts[..index],
+                    "untrackedReceipts": &receipts[index..],
+                    "failedPath": receipt.path,
+                    "stateUncertain": true,
+                }));
+                return Err(tool_error);
             }
         }
     }
@@ -289,7 +323,7 @@ async fn preflight(mut entry: BoundPatch) -> Result<PlannedPatch, String> {
         path.clone(),
         entry.target.target_fingerprint().to_owned(),
         before.as_deref(),
-        after.as_deref().unwrap_or_default(),
+        after.as_deref(),
         "apply_patch",
         unified_diff,
     );
@@ -394,6 +428,13 @@ mod tests {
             receipts
                 .iter()
                 .all(|receipt| receipt["unified_diff"].as_str().is_some())
+        );
+        assert_eq!(
+            receipts
+                .iter()
+                .find(|receipt| receipt["path"] == "deleted.txt")
+                .unwrap()["after_exists"],
+            false
         );
     }
 

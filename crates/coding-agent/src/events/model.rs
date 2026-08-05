@@ -14,6 +14,7 @@ impl CodingAgentProductEventKind {
             Self::Workflow(_) => CodingAgentProductEventFamily::Workflow,
             Self::Diagnostic(_) => CodingAgentProductEventFamily::Diagnostic,
             Self::Capability(_) => CodingAgentProductEventFamily::Capability,
+            Self::Review(_) => CodingAgentProductEventFamily::Review,
         }
     }
 
@@ -126,6 +127,7 @@ impl CodingAgentProductEventKind {
             }
             Self::Diagnostic(CodingAgentDiagnosticProductEvent::Diagnostic { .. }) => "diagnostic",
             Self::Capability(CodingAgentCapabilityProductEvent::Changed { .. }) => "changed",
+            Self::Review(CodingAgentReviewProductEvent::Changed { .. }) => "changed",
         }
     }
 }

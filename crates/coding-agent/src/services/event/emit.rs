@@ -1,6 +1,12 @@
 use super::*;
 
 impl EventService {
+    pub(crate) fn emit_review_changes(
+        &self,
+        changes: Vec<crate::events::CodingAgentReviewChange>,
+    ) -> Result<ProductEvent, CodingSessionError> {
+        self.publish_without_root_terminal(crate::events::review::changed_draft(changes))
+    }
     pub(crate) fn emit_tool_authorization_required(
         &self,
         request: crate::authorization::ToolAuthorizationRequest,

@@ -117,7 +117,8 @@ pub mod api {
     pub mod review {
         pub use crate::runtime::facade::{
             CodingAgentExternalEditorTarget, CodingAgentFileChangeIdentity, CodingAgentFileReview,
-            CodingAgentFileReviewRequest, CodingAgentFileRevision,
+            CodingAgentFileReviewActionRequest, CodingAgentFileReviewRequest,
+            CodingAgentFileRevision, CodingAgentHunkReviewActionRequest,
         };
     }
 
@@ -157,12 +158,12 @@ pub mod api {
             CodingAgentProductEventProfileKind, CodingAgentProductEventReceiver,
             CodingAgentProductEventReplacement, CodingAgentProductEventTerminalOperation,
             CodingAgentProductEventTerminalOperationKind, CodingAgentProductEventTerminalStatus,
-            CodingAgentProductEventUsage, CodingAgentRecoveryResolution,
-            CodingAgentRuntimeProductEvent, CodingAgentSessionProductEvent,
-            CodingAgentSessionWriteFailureReason, CodingAgentSessionWriteFailureStatus,
-            CodingAgentSubmittedEventDurability, CodingAgentTeamProductEvent,
-            CodingAgentToolProductEvent, CodingAgentWorkflowProductEvent,
-            PRODUCT_EVENT_PROTOCOL_VERSION,
+            CodingAgentProductEventUsage, CodingAgentRecoveryResolution, CodingAgentReviewChange,
+            CodingAgentReviewHunk, CodingAgentReviewProductEvent, CodingAgentRuntimeProductEvent,
+            CodingAgentSessionProductEvent, CodingAgentSessionWriteFailureReason,
+            CodingAgentSessionWriteFailureStatus, CodingAgentSubmittedEventDurability,
+            CodingAgentTeamProductEvent, CodingAgentToolProductEvent,
+            CodingAgentWorkflowProductEvent, PRODUCT_EVENT_PROTOCOL_VERSION,
         };
     }
 
@@ -181,8 +182,9 @@ pub mod api {
             CodingAgentControlRejectionReason, CodingAgentDelegationSnapshot,
             CodingAgentDetachOutcome, CodingAgentDraft, CodingAgentDraftId, CodingAgentDraftKind,
             CodingAgentFileChangeSnapshot, CodingAgentFreshSnapshotRecovery,
-            CodingAgentLifecycleRejection, CodingAgentMutationRejection,
-            CodingAgentOperationControl, CodingAgentOperationSnapshot, CodingAgentOperationStatus,
+            CodingAgentHunkChangeSnapshot, CodingAgentLifecycleRejection,
+            CodingAgentMutationRejection, CodingAgentOperationControl,
+            CodingAgentOperationSnapshot, CodingAgentOperationStatus,
             CodingAgentOutcomeAcknowledgementId, CodingAgentPreparedSubmission,
             CodingAgentPromptControl, CodingAgentReconnect, CodingAgentReconnectDelivery,
             CodingAgentReconnectReceiver, CodingAgentRecoveryPending, CodingAgentRecoveryReason,

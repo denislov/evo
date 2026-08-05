@@ -116,13 +116,13 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
     );
     let (commands, mut events, shutdown) = bridge.into_parts();
     commands
-        .try_review_changed_file(5, "missing-session", &review)
+        .try_open_change(5, "missing-session", &review)
         .unwrap();
     assert!(matches!(
         events.next_update().await,
         Some(DesktopRuntimeUpdate::CommandRejected {
             command_id: 5,
-            command: DesktopRuntimeCommandKind::ReviewChangedFile,
+            command: DesktopRuntimeCommandKind::OpenChange,
             code,
             message,
         }) if code == "session_target" && message == "session missing-session is not open"
@@ -338,15 +338,13 @@ async fn changed_file_review_command_is_typed_and_preserves_product_error_codes(
         CodingAgentFileRevision::new(7),
     );
 
-    commands
-        .try_review_changed_file(41, &session_id, &request)
-        .unwrap();
+    commands.try_open_change(41, &session_id, &request).unwrap();
     let update = events.next_update().await.unwrap();
     assert!(matches!(
         update,
         DesktopRuntimeUpdate::CommandRejected {
             command_id: 41,
-            command: DesktopRuntimeCommandKind::ReviewChangedFile,
+            command: DesktopRuntimeCommandKind::OpenChange,
             code,
             ..
         } if code == "file_review_change_unauthorized"
@@ -355,7 +353,7 @@ async fn changed_file_review_command_is_typed_and_preserves_product_error_codes(
     let mut oversized = request;
     oversized.change.path = "x".repeat(MAX_FILE_REVIEW_PATH_BYTES + 1);
     assert!(matches!(
-        commands.try_review_changed_file(42, &session_id, &oversized),
+        commands.try_open_change(42, &session_id, &oversized),
         Err(DesktopCommandAdmissionError::InvalidFileReview { .. })
     ));
 

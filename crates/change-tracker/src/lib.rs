@@ -18,7 +18,7 @@ pub use event::{FsChangeKind, FsEvent, GitEvent, GitMetaEvent, SemanticEvent};
 pub use hunk::{
     ChangeFactSnapshot, ChangeSource, HunkId, HunkRange, HunkSnapshot, HunkTracker,
     HunkTrackerHandle, HunkTrackerOptions, HunkTrackerSnapshot, HunkTrackingService,
-    ReconcileState, TrackedFileSnapshot, TrackingContext,
+    ReconcileState, RejectPlan, RejectReplacement, TrackedFileSnapshot, TrackingContext,
 };
 pub use receipt::ChangeReceipt;
 pub use watch::{FsEventService, WatchOptions};

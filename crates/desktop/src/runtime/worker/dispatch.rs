@@ -357,13 +357,13 @@ async fn dispatch_command_inner(
                 recovery,
             })
         }
-        DesktopRuntimeCommand::ReviewChangedFile {
+        DesktopRuntimeCommand::OpenChange {
             session_id,
             request,
             ..
         } => {
             let session_id = resolve_idle_target(state, active, Some(&session_id))?;
-            let review = state.review_changed_file(&session_id, request).await?;
+            let review = state.open_change(&session_id, request).await?;
             Ok(DesktopRuntimeUpdate::FileReviewed { command_id, review })
         }
         DesktopRuntimeCommand::OpenExternalEditor {

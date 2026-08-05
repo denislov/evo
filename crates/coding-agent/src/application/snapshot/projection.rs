@@ -1,6 +1,16 @@
 use super::*;
 
 impl SnapshotCoordinator {
+    pub(crate) fn replace_review_changes(
+        &self,
+        changes: Vec<crate::runtime::client::context::UiFileChangeProjection>,
+    ) -> Result<(), CodingSessionError> {
+        self.lock_state()?
+            .context_projection
+            .replace_review_changes(changes);
+        Ok(())
+    }
+
     pub(crate) fn install_projection(
         &self,
         session: CodingAgentSessionView,
