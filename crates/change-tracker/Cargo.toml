@@ -1,0 +1,18 @@
+[package]
+name = "change-tracker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ignore = "0.4"
+notify = "7"
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util.workspace = true
+workspace-runtime = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

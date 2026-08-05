@@ -3,6 +3,7 @@ agent-core	ai-protocol
 agent-core	tool-contract
 agent-core	tool-runtime
 ai	ai-protocol
+change-tracker	workspace-runtime
 cli	coding-agent
 cli	tui
 coding-agent	agent-core
