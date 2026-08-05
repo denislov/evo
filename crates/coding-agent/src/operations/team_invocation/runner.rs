@@ -29,6 +29,10 @@ use crate::public_error::CodingAgentPublicDiagnostic;
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
 
+#[cfg(test)]
+#[path = "runner_tests.rs"]
+mod tests;
+
 #[derive(Debug, Clone)]
 pub struct AgentTeamOptions {
     team_id: ProfileId,
@@ -125,11 +129,11 @@ impl AgentTeamRunner {
             ctx.start_team()?;
             Self::check_cancellation(&cancellation)?;
             ctx.plan_subtasks()?;
-            ctx.run_member_agents().await?;
+            ctx.run_member_agents(cancellation.as_ref()).await?;
             Self::check_cancellation(&cancellation)?;
             ctx.collect_member_result()?;
             Self::check_cancellation(&cancellation)?;
-            ctx.merge_or_reject_result().await?;
+            ctx.merge_or_reject_result(cancellation.as_ref()).await?;
             Self::check_cancellation(&cancellation)?;
             ctx.finalize_team()?;
             Ok(())
@@ -332,7 +336,10 @@ impl AgentTeamContext {
         Ok(())
     }
 
-    async fn run_member_agents(&mut self) -> Result<(), CodingSessionError> {
+    async fn run_member_agents(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), CodingSessionError> {
         let members = self.member_profiles.clone();
         let task = self.options.task.clone();
         let concurrency = self.team_member_concurrency(members.len());
@@ -343,8 +350,9 @@ impl AgentTeamContext {
                 worker.member_results.clear();
                 worker.pending_delegation_confirmations.clear();
                 let task = task.clone();
+                let cancellation = cancellation.cloned();
                 async move {
-                    let result = worker.run_profile_child(&profile, task).await;
+                    let result = worker.run_profile_child(&profile, task, cancellation).await;
                     (
                         index,
                         result,
@@ -393,10 +401,15 @@ impl AgentTeamContext {
         Ok(())
     }
 
-    async fn merge_or_reject_result(&mut self) -> Result<(), CodingSessionError> {
+    async fn merge_or_reject_result(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), CodingSessionError> {
         if let Some(supervisor) = self.supervisor_profile.clone() {
             let prompt = self.supervisor_prompt();
-            let result = self.run_profile_child(&supervisor, prompt).await?;
+            let result = self
+                .run_profile_child(&supervisor, prompt, cancellation.cloned())
+                .await?;
             self.final_text = Some(result.final_text.clone());
             self.supervisor_result = Some(result);
         } else {
@@ -435,6 +448,7 @@ impl AgentTeamContext {
         &mut self,
         profile: &AgentProfile,
         prompt_text: String,
+        cancellation: Option<CancellationToken>,
     ) -> Result<AgentTeamMemberOutcome, CodingSessionError> {
         let mut ids = SystemIdGenerator;
         let child_operation_id = OperationScheduler::allocate_child_operation_id();
@@ -446,18 +460,23 @@ impl AgentTeamContext {
             }
         })?;
         let policy = ChildWorkspacePolicy::decide(parent, profile);
-        let cancellation = CancellationToken::new();
+        let worktree_cancellation = cancellation.unwrap_or_default();
         let binding = match bind_child_workspace(
             &self.operation_control,
             parent,
             &child_operation_id,
             None,
-            &cancellation,
+            &worktree_cancellation,
             policy,
         )
         .await?
         {
             Some(lease) => {
+                if worktree_cancellation.is_cancelled() {
+                    let mut lease = lease;
+                    lease.release()?;
+                    return Err(CodingSessionError::Cancelled);
+                }
                 let handle = lease.handle()?;
                 self.child_worktree = Some(lease);
                 ChildWorkspaceBinding::Managed(handle)

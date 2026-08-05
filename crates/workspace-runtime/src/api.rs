@@ -14,8 +14,8 @@ pub use crate::process::{
     ProgramKind, path_exists, resolve_shell_path, run,
 };
 pub use crate::worktree::registry::{
-    GcOptions, GcRemovedWorktree, GcReport, RecoveryReport, RegistryError, WorktreeRecord,
-    WorktreeRegistry,
+    GcOptions, GcRemovedWorktree, GcReport, RecoveryReport, RegistryError,
+    StartupMaintenanceReport, WorktreeRecord, WorktreeRegistry,
 };
 pub use crate::worktree::{
     ManagedWorktree, WorkingTreeMode, WorktreeBuilder, WorktreeCreationMode, WorktreeError,

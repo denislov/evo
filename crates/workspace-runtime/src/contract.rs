@@ -173,6 +173,7 @@ pub(crate) fn valid_lifecycle_transition(from: WorkspaceLifecycle, to: Workspace
     matches!(
         (from, to),
         (WorkspaceLifecycle::Creating, WorkspaceLifecycle::Ready)
+            | (WorkspaceLifecycle::Ready, WorkspaceLifecycle::Discarded)
             | (WorkspaceLifecycle::Ready, WorkspaceLifecycle::Active)
             | (WorkspaceLifecycle::Active, WorkspaceLifecycle::MergePending)
             | (WorkspaceLifecycle::Active, WorkspaceLifecycle::Discarded)

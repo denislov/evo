@@ -288,7 +288,11 @@ fn recover_removes_interrupted_and_stale_but_keeps_orphans() {
         .expect("loads")
         .expect("present");
     interrupted_record.lifecycle = WorkspaceLifecycle::Creating;
-    registry.register(&interrupted_record).expect("re-register");
+    super::write_record_atomic(
+        &registry.record_path(&interrupted_record.id),
+        &interrupted_record,
+    )
+    .expect("re-register");
 
     let stale = registered_worktree(&registry, source_dir.path(), "op-2");
     fs::remove_dir_all(&stale.dest).expect("drop directory");
@@ -318,6 +322,45 @@ fn recover_removes_interrupted_and_stale_but_keeps_orphans() {
 }
 
 #[test]
+fn startup_maintenance_collects_dead_process_records_but_keeps_live_records() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let dead = registered_worktree(&registry, source_dir.path(), "op-dead");
+    let live = registered_worktree(&registry, source_dir.path(), "op-live");
+
+    let mut dead_record = registry
+        .load(&dead.id)
+        .expect("load dead")
+        .expect("dead record");
+    dead_record.owner_pid = 0;
+    super::write_record_atomic(&registry.record_path(&dead.id), &dead_record)
+        .expect("write dead owner");
+
+    let report = registry.startup_maintenance().expect("maintenance runs");
+    assert_eq!(report.gc.removed.len(), 1);
+    assert_eq!(report.gc.removed[0].id, dead.id);
+    assert!(registry.load(&dead.id).expect("load dead after").is_none());
+    assert!(registry.load(&live.id).expect("load live after").is_some());
+    assert!(live.dest.exists(), "live process worktree must remain");
+}
+
+#[test]
+fn recover_cleans_a_cleaning_record_after_interrupted_discard() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let record = registered_worktree(&registry, source_dir.path(), "op-cleaning");
+    let mut cleaning = registry.load(&record.id).expect("load").expect("record");
+    cleaning.lifecycle = WorkspaceLifecycle::Cleaning;
+    super::write_record_atomic(&registry.record_path(&record.id), &cleaning)
+        .expect("write cleaning state");
+
+    let report = registry.recover().expect("recover runs");
+    assert_eq!(report.interrupted, vec![cleaning]);
+    assert!(!record.dest.exists());
+    assert!(registry.load(&record.id).expect("load after").is_none());
+}
+
+#[test]
 fn gc_removes_only_dead_owners_past_max_age() {
     let (registry_dir, source_dir) = registry_root();
     let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
@@ -339,7 +382,7 @@ fn gc_removes_only_dead_owners_past_max_age() {
         now: now_seconds() + 10_000,
         max_age_seconds: 5_000,
         disk_budget_bytes: None,
-        owner_liveness: Box::new(|owner| owner == "op-alive"),
+        owner_liveness: Box::new(|record| record.owner_operation == "op-alive"),
         dry_run: false,
     };
     let report = registry.gc(&options).expect("gc runs");
@@ -489,7 +532,7 @@ fn symlink_parent_cannot_pass_destination_containment() {
 }
 
 #[test]
-fn failed_creation_leaves_recoverable_creating_record() {
+fn cancelled_creation_removes_creating_record() {
     let (registry_dir, source_dir) = registry_root();
     fs::create_dir_all(source_dir.path()).expect("source dir");
     fs::write(source_dir.path().join("file.txt"), "v1").expect("source file");
@@ -508,15 +551,12 @@ fn failed_creation_leaves_recoverable_creating_record() {
         )
         .expect_err("cancelled creation fails");
     assert!(matches!(error, super::RegistryError::Worktree(_)));
-    let records = registry.load_all().expect("load creating record");
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].lifecycle, WorkspaceLifecycle::Creating);
-    registry.recover().expect("recover creating record");
     assert!(
         registry
-            .load(&records[0].id)
-            .expect("load after recover")
-            .is_none()
+            .load_all()
+            .expect("load after cancellation")
+            .is_empty(),
+        "normal cancellation must not leave a durable Creating record"
     );
 }
 

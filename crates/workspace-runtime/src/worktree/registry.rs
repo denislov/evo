@@ -21,11 +21,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::git::run_git;
 use super::{ManagedWorktree, WorkingTreeMode, WorktreeBuilder, WorktreeCreationMode};
 use crate::contract::{
     WorkspaceHandle, WorkspaceId, WorkspaceKind, WorkspaceLifecycle, valid_lifecycle_transition,
 };
+
+mod cleanup;
+use cleanup::{dir_size, remove_materialization};
 
 const REGISTRY_DIRECTORY: &str = "registry";
 const WORKTREES_DIRECTORY: &str = "worktrees";
@@ -46,6 +48,8 @@ pub struct WorktreeRecord {
     /// Absolute child worktree directory.
     pub dest: PathBuf,
     pub owner_operation: String,
+    /// Process that created the record; used to identify owners after restart.
+    pub owner_pid: u32,
     pub parent_session: Option<String>,
     pub base_revision: Option<String>,
     pub creation_mode: WorktreeCreationMode,
@@ -63,6 +67,7 @@ impl WorktreeRecord {
             source: source.to_path_buf(),
             dest: managed.root().to_path_buf(),
             owner_operation: managed.lease().owner_operation().to_owned(),
+            owner_pid: std::process::id(),
             parent_session: managed.lease().parent_session().map(str::to_owned),
             base_revision: managed.lease().base_revision().map(str::to_owned),
             creation_mode: managed.creation_mode(),
@@ -179,6 +184,7 @@ impl WorktreeRegistry {
             source: source_root.clone(),
             dest: dest.clone(),
             owner_operation: owner_operation.to_owned(),
+            owner_pid: std::process::id(),
             parent_session: parent_session.map(str::to_owned),
             base_revision: None,
             creation_mode: if fs::symlink_metadata(source.root().join(".git")).is_ok() {
@@ -196,15 +202,32 @@ impl WorktreeRegistry {
             .worktree_id(id)
             .working_tree_mode(mode)
             .cancellation_token(cancellation.clone())
-            .create()
-            .map_err(RegistryError::Worktree)?;
+            .create();
+        let managed = match managed {
+            Ok(managed) => managed,
+            Err(error @ super::WorktreeError::Cancelled) => {
+                // A normal cancellation has already cleaned the materialization;
+                // remove its durable Creating record immediately. If the process
+                // crashes instead, startup recovery still handles the record.
+                self.remove_unlocked(&creating.id)?;
+                return Err(RegistryError::Worktree(error));
+            }
+            Err(error) => return Err(RegistryError::Worktree(error)),
+        };
         let record = WorktreeRecord::from_managed(&managed, &source_root, now);
         self.register_unlocked(&record)?;
         Ok(record)
     }
 
-    pub fn register(&self, record: &WorktreeRecord) -> Result<(), RegistryError> {
+    #[cfg(test)]
+    pub(crate) fn register(&self, record: &WorktreeRecord) -> Result<(), RegistryError> {
         let _writer = self.acquire_writer()?;
+        validate_record(record, &self.root)?;
+        if self.record_path(&record.id).exists() {
+            return Err(RegistryError::AlreadyRegistered {
+                id: record.id.clone(),
+            });
+        }
         self.register_unlocked(record)
     }
 
@@ -220,8 +243,25 @@ impl WorktreeRegistry {
             return Ok(());
         };
         validate_record(&record, &self.root)?;
+        if record.lifecycle == WorkspaceLifecycle::Removed {
+            return self.remove_unlocked(&record.id);
+        }
+        if matches!(
+            record.lifecycle,
+            WorkspaceLifecycle::Ready
+                | WorkspaceLifecycle::Active
+                | WorkspaceLifecycle::MergePending
+        ) {
+            record.transition(WorkspaceLifecycle::Discarded, unix_seconds())?;
+            write_record_atomic(&self.record_path(&record.id), &record)?;
+        }
+        if record.lifecycle == WorkspaceLifecycle::Discarded {
+            record.transition(WorkspaceLifecycle::Cleaning, unix_seconds())?;
+            write_record_atomic(&self.record_path(&record.id), &record)?;
+        }
         remove_materialization(self, &record)?;
-        record.lifecycle = WorkspaceLifecycle::Removed;
+        record.transition(WorkspaceLifecycle::Removed, unix_seconds())?;
+        write_record_atomic(&self.record_path(&record.id), &record)?;
         self.remove_unlocked(&record.id)
     }
 
@@ -304,7 +344,8 @@ impl WorktreeRegistry {
         Ok(record)
     }
 
-    pub fn remove(&self, id: &str) -> Result<(), RegistryError> {
+    #[cfg(test)]
+    pub(crate) fn remove(&self, id: &str) -> Result<(), RegistryError> {
         let _writer = self.acquire_writer()?;
         self.remove_unlocked(id)
     }
@@ -372,6 +413,13 @@ pub struct RecoveryReport {
     pub interrupted: Vec<WorktreeRecord>,
 }
 
+/// Result of the safe startup maintenance pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartupMaintenanceReport {
+    pub recovery: RecoveryReport,
+    pub gc: GcReport,
+}
+
 impl WorktreeRegistry {
     /// Reconcile the registry after startup: remove interrupted worktrees and
     /// stale records, and report orphan directories for human review.
@@ -390,6 +438,21 @@ impl WorktreeRegistry {
             self.remove_unlocked(&record.id)?;
         }
         Ok(report)
+    }
+
+    /// Reconcile interrupted state and collect records owned by dead
+    /// processes. Live-process records are retained because another session
+    /// may still be using the shared registry.
+    pub fn startup_maintenance(&self) -> Result<StartupMaintenanceReport, RegistryError> {
+        let recovery = self.recover()?;
+        let gc = self.gc(&GcOptions {
+            now: unix_seconds(),
+            max_age_seconds: 0,
+            disk_budget_bytes: None,
+            owner_liveness: Box::new(owner_process_is_alive),
+            dry_run: false,
+        })?;
+        Ok(StartupMaintenanceReport { recovery, gc })
     }
 
     fn scan_unlocked(&self) -> Result<RecoveryReport, RegistryError> {
@@ -433,9 +496,9 @@ pub struct GcOptions {
     pub max_age_seconds: u64,
     /// Stop removing once at least this many bytes are reclaimed.
     pub disk_budget_bytes: Option<u64>,
-    /// Returns whether the worktree's owner operation is still alive. A
-    /// worktree whose owner is alive is never a candidate.
-    pub owner_liveness: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    /// Returns whether the worktree's owner is still alive. A worktree whose
+    /// owner is alive is never a candidate.
+    pub owner_liveness: Box<dyn Fn(&WorktreeRecord) -> bool + Send + Sync>,
     /// Report candidates without removing anything.
     pub dry_run: bool,
 }
@@ -471,7 +534,7 @@ impl WorktreeRegistry {
                         | WorkspaceLifecycle::Discarded
                 )
             })
-            .filter(|record| !(options.owner_liveness)(&record.owner_operation))
+            .filter(|record| !(options.owner_liveness)(record))
             .filter(|record| {
                 options.now.saturating_sub(record.updated_at) >= options.max_age_seconds
             })
@@ -520,6 +583,8 @@ pub enum RegistryError {
     InvalidRecord { message: String },
     #[error("worktree is not registered: {id}")]
     UnknownWorktree { id: String },
+    #[error("worktree is already registered: {id}")]
+    AlreadyRegistered { id: String },
     #[error("invalid lifecycle transition: {from:?} -> {to:?}")]
     InvalidTransition {
         from: WorkspaceLifecycle,
@@ -562,6 +627,34 @@ fn unix_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0)
+}
+
+fn owner_process_is_alive(record: &WorktreeRecord) -> bool {
+    process_is_alive(record.owner_pid)
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    if pid == 0 {
+        return false;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    unsafe { CloseHandle(handle) };
+    true
 }
 
 fn parse_registry_id(id: &str) -> Result<WorkspaceId, RegistryError> {
@@ -794,104 +887,6 @@ fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, RegistryError> {
         })?;
     entries.sort_by_key(|entry| entry.file_name());
     Ok(entries)
-}
-
-/// Remove one recorded worktree's materialization, verifying its identity
-/// against the record before touching the directory.
-fn remove_materialization(
-    registry: &WorktreeRegistry,
-    record: &WorktreeRecord,
-) -> Result<(), RegistryError> {
-    validate_record(record, registry.root())?;
-    if record.creation_mode == WorktreeCreationMode::GitLinked && record.source.is_dir() {
-        let registered = super::git_worktree_registration_exists(&record.source, &record.dest)
-            .map_err(RegistryError::Worktree)?;
-        if registered {
-            run_git(
-                &record.source,
-                &["worktree", "remove", "--force"],
-                Some(&record.dest),
-                &CancellationToken::new(),
-            )
-            .map_err(RegistryError::Worktree)?;
-        }
-    }
-    match fs::symlink_metadata(&record.dest) {
-        Ok(metadata) if metadata.is_dir() => {
-            fs::remove_dir_all(&record.dest).map_err(|error| RegistryError::Io {
-                message: format!(
-                    "cannot remove worktree directory {}: {error}",
-                    record.dest.display()
-                ),
-            })?;
-        }
-        Ok(_) => {
-            fs::remove_file(&record.dest).map_err(|error| RegistryError::Io {
-                message: format!(
-                    "cannot remove worktree path {}: {error}",
-                    record.dest.display()
-                ),
-            })?;
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(RegistryError::Io {
-                message: format!(
-                    "cannot inspect worktree directory {}: {error}",
-                    record.dest.display()
-                ),
-            });
-        }
-    }
-    if record.creation_mode == WorktreeCreationMode::GitLinked && record.source.is_dir() {
-        run_git(
-            &record.source,
-            &["worktree", "prune", "--expire", "now"],
-            None,
-            &CancellationToken::new(),
-        )
-        .map_err(RegistryError::Worktree)?;
-        if super::git_worktree_registration_exists(&record.source, &record.dest)
-            .map_err(RegistryError::Worktree)?
-        {
-            return Err(RegistryError::Worktree(super::WorktreeError::GitFailed {
-                message: format!(
-                    "git worktree registration remains for {}",
-                    record.dest.display()
-                ),
-            }));
-        }
-    }
-    Ok(())
-}
-
-/// Recursive byte size of `path`; missing paths count as zero.
-fn dir_size(path: &Path) -> Result<u64, io::Error> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.is_dir() => return Ok(metadata.len()),
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    }
-    let mut total = 0u64;
-    let mut pending = vec![path.to_path_buf()];
-    while let Some(current) = pending.pop() {
-        let entries = match fs::read_dir(&current) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        for entry in entries {
-            let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
-            if metadata.is_dir() {
-                pending.push(entry.path());
-            } else {
-                total = total.saturating_add(metadata.len());
-            }
-        }
-    }
-    Ok(total)
 }
 
 #[cfg(test)]

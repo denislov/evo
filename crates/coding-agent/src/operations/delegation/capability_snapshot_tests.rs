@@ -235,6 +235,16 @@ fn policy_decide_isolates_write_children_and_shares_for_read_only() {
         ChildWorkspacePolicy::ReadOnlyShared
     );
 
+    let read_only_parent = OperationCapabilitySnapshot {
+        tools: ToolCapabilitySet::from_ids([ToolId::new("read").unwrap()]),
+        ..parent.clone()
+    };
+    assert_eq!(
+        ChildWorkspacePolicy::decide(&read_only_parent, &write_profile),
+        ChildWorkspacePolicy::ReadOnlyShared,
+        "a profile tool that the parent did not grant must not trigger isolation"
+    );
+
     let mut projectless_parent = parent_snapshot(temp.path());
     projectless_parent.workspace = None;
     assert_eq!(

@@ -1,6 +1,6 @@
 # Phase 3 / ARC-330：Child capability 隔离
 
-> 状态：完成（2026-08-06）
+> 状态：完成（2026-08-05）
 > 前序：ARC-300 `workspace-runtime`、ARC-310 WorktreeBuilder、ARC-320 Registry/恢复/GC
 > 目标：任何 delegation/team child 都不再直接写父 workspace
 
@@ -8,7 +8,7 @@
 
 - **写权限 child 必须申请 managed worktree**：`ChildWorkspacePolicy::decide` 依据
   parent capability 与 child profile 工具集判定三种策略：
-  - `Managed`：child 持有 write/edit/hashline_edit/apply_patch/bash 任一工具 → 必须
+  - `Managed`：parent 与 child profile 的有效工具交集持有 write/edit/hashline_edit/apply_patch/bash 任一工具 → 必须
     申请独立 managed worktree，child filesystem/shell cwd 绑定 worktree。
   - `ReadOnlyShared`：child 仅只读工具（read/ls/find/grep）→ 共享父 read path；
     工具集本身就是只读护栏，无写路径可逃逸。
@@ -27,8 +27,12 @@
   admission 前把 child turn 的 cwd/workspace 指向 worktree；root admission 路径
   不受影响（child 不走 `snapshot_input_for_operation`）。
 - **生命周期**：`ChildWorktreeLease` 持有 registry + record；child 到达任何
-  terminal（成功/失败/取消）后 `release()`（transition → discard：删 git 注册、
-  目录、prune、记录），失败仅记录 diagnostic；`Drop` 兜底重试，panic 也不泄漏。
+  terminal（成功/失败/取消）后 `release()`，discard 持久化
+  `Ready/Active/MergePending -> Discarded -> Cleaning -> Removed`，再删 git 注册、
+  目录、prune、记录；release 失败不会提前标记 released，`Drop` 会再次尝试，panic 也不泄漏。
+- **取消传播**：team runner 将父/team cancellation token 传入每个成员和 supervisor 的
+  worktree provisioning；取消期间不会使用脱离父生命周期的临时 token。正常取消创建会
+  清理 `Creating` record，进程崩溃则由 ARC-320 startup maintenance 恢复。
 - **并发上限**：删除 `MAX_TEAM_MEMBER_CONCURRENCY = 2`。team member 并发由
   `WorktreeRegistry` 容量决定（`open_with_capacity`，产品默认 4）：
   `team_member_concurrency = min(capacity, member_count)`；容量耗尽时 worktree
@@ -51,17 +55,17 @@
 
 ```text
 cargo test --locked -p workspace-runtime --all-features
-63 passed（新增 capacity / discard / 身份防伪测试）
+65 passed（新增 capacity / discard / lifecycle recovery / startup owner liveness / 身份防伪测试）
 
 cargo test --locked -p coding-agent --all-features
-158 passed（新增 worktree_tests 6 个：e2e 写 child 隔离、fail-closed、容量耗尽、
+159 passed（含 worktree policy、agent e2e 写 child 隔离、team cancellation、fail-closed、容量耗尽、
 read-only/projectless 策略、Drop 兜底回收、typed handle）
 
 cargo test --workspace --all-features
 全部通过
 
 bash scripts/gate.sh
-architecture_gate rust_files=600 dependency_edges=15 oversized_debts=32 execution_debts=0 mode=incremental
+architecture_gate rust_files=602 dependency_edges=15 oversized_debts=32 execution_debts=0 mode=incremental
 ```
 
 e2e 覆盖的隔离证据：child 完成一次真实 write 后，父 workspace 逐字节不变、

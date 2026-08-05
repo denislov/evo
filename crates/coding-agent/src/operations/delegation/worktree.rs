@@ -42,7 +42,12 @@ impl ChildWorkspacePolicy {
         if parent.workspace.is_none() {
             return Self::Projectless;
         }
-        if profile.tools.iter().any(tool_writes_workspace) {
+        if profile
+            .tools
+            .iter()
+            .filter(|id| parent.tools.allows(id))
+            .any(tool_writes_workspace)
+        {
             Self::Managed
         } else {
             Self::ReadOnlyShared
@@ -112,12 +117,13 @@ impl ChildWorktreeLease {
         if self.released {
             return Ok(());
         }
-        self.released = true;
         self.registry
             .discard(&self.record.id)
             .map_err(|error| CodingSessionError::Resource {
                 message: format!("cannot release child worktree {}: {error}", self.record.id),
-            })
+            })?;
+        self.released = true;
+        Ok(())
     }
 }
 
@@ -163,8 +169,13 @@ pub(crate) async fn acquire_child_worktree(
     .map_err(|error| CodingSessionError::Session {
         message: format!("worktree creation worker failed: {error}"),
     })?
-    .map_err(|error| CodingSessionError::Resource {
-        message: format!("cannot acquire child worktree: {error}"),
+    .map_err(|error| match error {
+        workspace_runtime::api::RegistryError::Worktree(
+            workspace_runtime::api::WorktreeError::Cancelled,
+        ) => CodingSessionError::Cancelled,
+        error => CodingSessionError::Resource {
+            message: format!("cannot acquire child worktree: {error}"),
+        },
     })?;
     Ok(ChildWorktreeLease {
         registry,

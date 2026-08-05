@@ -372,12 +372,17 @@ fn worktree_registry_for(
     cwd: &Path,
 ) -> Result<Arc<workspace_runtime::api::WorktreeRegistry>, CodingSessionError> {
     let root = worktree_registry_dir_for(options, cwd);
-    workspace_runtime::api::WorktreeRegistry::open_with_capacity(
+    let registry = workspace_runtime::api::WorktreeRegistry::open_with_capacity(
         root,
         Some(DEFAULT_WORKTREE_CAPACITY),
     )
-    .map(Arc::new)
     .map_err(|error| CodingSessionError::Resource {
         message: format!("cannot open managed worktree registry: {error}"),
-    })
+    })?;
+    registry
+        .startup_maintenance()
+        .map_err(|error| CodingSessionError::Resource {
+            message: format!("cannot recover managed worktree registry: {error}"),
+        })?;
+    Ok(Arc::new(registry))
 }
