@@ -38,7 +38,7 @@
 | Phase 3 / ARC-350 | 完成（复验 2026-08-05） | `docs/refactor/phase3-worktree-test-matrix.md`；双 child、dirty baseline、symlink、rename/delete、binary、large file、create cancel、真实 registry reopen、确定性 ENOSPC partial-apply/journal rollback、GC crash 边界均已固定 |
 | Phase 3 / ARC-351 | 非阻塞验证债务（最迟 Phase 10） | Windows/macOS 真实平台上的路径、symlink、文件锁与 Git worktree 差异；先运行 `workspace-runtime` 轻量 CI pilot，根据实测磁盘峰值选择 hosted 或 self-hosted runner，不阻塞 Phase 4 |
 | Phase 3 Gate | 通过（2026-08-05） | 并行 child 默认完全隔离；父 workspace 在 merge 前逐字节不变；异常退出后 registry/worktree 可恢复或安全清理；workspace 全量测试与 architecture gate 通过 |
-| Phase 4 / ARC-400 | 完成（复验 2026-08-06） | `docs/refactor/phase4-change-tracker.md`；`change-tracker` crate（仅依赖 workspace-runtime）：单 actor fs event service、bounded debounce、dynamic directory 补扫、rename/ignore 边界、watch budget fail-closed、带 root/sequence 的 Git HEAD/index/lock 元数据事件，22 个测试覆盖 |
+| Phase 4 / ARC-400 | 完成（复验 2026-08-06） | `docs/refactor/phase4-change-tracker.md`；`change-tracker` crate（仅依赖 workspace-runtime）：单 actor fs event service、bounded debounce、dynamic directory 补扫、rename/root/ignore 边界、watch budget fail-closed、带 root/sequence 的 Git HEAD/index/lock 元数据事件，24 个测试覆盖 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 

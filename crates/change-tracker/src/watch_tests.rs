@@ -479,6 +479,109 @@ fn rename_across_ignore_boundary_degrades_to_remove_and_create() {
 }
 
 #[test]
+fn fragmented_rename_across_roots_degrades_to_remove_and_create() {
+    use notify::event::{ModifyKind, RenameMode};
+
+    let first = tempfile::tempdir().expect("first");
+    let second = tempfile::tempdir().expect("second");
+    let options = WatchOptions {
+        max_roots: 2,
+        ..WatchOptions::default()
+    };
+    let handle = workspace_runtime::api::WorkspaceHandle::new(
+        workspace_runtime::api::WorkspaceKind::Source,
+        first.path(),
+    )
+    .expect("first handle");
+    let service = FsEventService::start(&handle, options).expect("service starts");
+    let mut events = service.events();
+    let second_handle = workspace_runtime::api::WorkspaceHandle::new(
+        workspace_runtime::api::WorkspaceKind::ManagedChild,
+        second.path(),
+    )
+    .expect("second handle");
+    service.add_root(&second_handle).expect("second root added");
+
+    for event in [
+        notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::From,
+        )))
+        .add_path(first.path().join("old.txt"))
+        .set_tracker(7),
+        notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path(second.path().join("new.txt"))
+            .set_tracker(7),
+    ] {
+        service
+            .command
+            .lock()
+            .expect("command channel")
+            .try_send(Incoming::Event(event))
+            .expect("raw event accepted");
+    }
+
+    thread::sleep(Duration::from_millis(100));
+    let seen = collect_quiet(&mut events, Duration::from_millis(150));
+    let workspace = workspace_events(&seen);
+    assert!(workspace.iter().any(|event| {
+        event.root == std::fs::canonicalize(first.path()).expect("canonical first")
+            && event.path == Path::new("old.txt")
+            && event.kind == FsChangeKind::Removed
+    }));
+    assert!(workspace.iter().any(|event| {
+        event.root == std::fs::canonicalize(second.path()).expect("canonical second")
+            && event.path == Path::new("new.txt")
+            && event.kind == FsChangeKind::Created
+    }));
+    assert!(
+        workspace
+            .iter()
+            .all(|event| event.kind != FsChangeKind::Renamed),
+        "cross-root fragments must not become a single-root rename"
+    );
+}
+
+#[test]
+fn modification_in_the_same_window_preserves_rename_identity() {
+    use notify::event::{DataChange, ModifyKind, RenameMode};
+
+    let root = tempfile::tempdir().expect("root");
+    let (service, mut events) = start(root.path());
+    for event in [
+        notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(root.path().join("old.txt"))
+        .add_path(root.path().join("new.txt")),
+        notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(
+            DataChange::Content,
+        )))
+        .add_path(root.path().join("new.txt")),
+    ] {
+        service
+            .command
+            .lock()
+            .expect("command channel")
+            .try_send(Incoming::Event(event))
+            .expect("raw event accepted");
+    }
+
+    let seen = recv_until(&mut events, Duration::from_secs(5), |event| {
+        matches!(
+            event,
+            FsEvent::Workspace(semantic)
+                if semantic.path == Path::new("new.txt")
+        )
+    });
+    let renamed = workspace_events(&seen)
+        .into_iter()
+        .find(|event| event.path == Path::new("new.txt"))
+        .expect("new path event");
+    assert_eq!(renamed.kind, FsChangeKind::Renamed);
+    assert_eq!(renamed.from.as_deref(), Some(Path::new("old.txt")));
+}
+
+#[test]
 fn git_events_identify_their_root_in_a_mixed_multi_root_service() {
     let plain = tempfile::tempdir().expect("plain root");
     let repository = tempfile::tempdir().expect("repository root");
@@ -705,6 +808,10 @@ fn invalid_watch_options_return_structured_errors() {
         },
         WatchOptions {
             debounce: Duration::ZERO,
+            ..WatchOptions::default()
+        },
+        WatchOptions {
+            debounce: Duration::MAX,
             ..WatchOptions::default()
         },
     ] {

@@ -542,6 +542,19 @@ impl Worker {
         to_root: &Path,
         to_rel: PathBuf,
     ) {
+        if from_root != to_root {
+            merge_pending(
+                &mut self.pending,
+                (from_root.to_path_buf(), from_rel),
+                FsChangeKind::Removed,
+            );
+            merge_pending(
+                &mut self.pending,
+                (to_root.to_path_buf(), to_rel),
+                FsChangeKind::Created,
+            );
+            return;
+        }
         self.pending
             .remove(&(from_root.to_path_buf(), from_rel.clone()));
         self.pending.insert(
@@ -655,6 +668,11 @@ fn validate_options(options: &WatchOptions) -> Result<(), ChangeTrackerError> {
             message: "debounce must be greater than zero".into(),
         });
     }
+    if Instant::now().checked_add(options.debounce).is_none() {
+        return Err(ChangeTrackerError::InvalidOptions {
+            message: "debounce is too large for the platform clock".into(),
+        });
+    }
     Ok(())
 }
 
@@ -698,7 +716,8 @@ fn path_is_directory(kind: &EventKind, path: &Path) -> Option<bool> {
 
 /// Merge a new change into the debounce window. Creation survives later
 /// modification within the same window; removal followed by creation wins
-/// with `Created`; everything else collapses to the latest change.
+/// with `Created`; a rename survives a later modification because the consumer
+/// can recover current content but cannot reconstruct the lost source path.
 fn merge_pending(
     pending: &mut BTreeMap<(PathBuf, PathBuf), FsChangeKind>,
     key: (PathBuf, PathBuf),
@@ -706,6 +725,7 @@ fn merge_pending(
 ) {
     let kind = match (pending.get(&key).copied(), incoming) {
         (Some(FsChangeKind::Created), FsChangeKind::Modified) => FsChangeKind::Created,
+        (Some(FsChangeKind::Renamed), FsChangeKind::Modified) => FsChangeKind::Renamed,
         (Some(FsChangeKind::Removed), FsChangeKind::Created) => FsChangeKind::Created,
         (_, incoming) => incoming,
     };

@@ -20,11 +20,13 @@
   - 路径相对化到 watch root；`rename` 按 backend tracker id 配对
     （`RenameFrom`/`RenameTo` 同 id，`Both` 直接成对），配对窗口内
     未配对片段保守降级为 `Removed`/`Created`；rename 两端分别经过 Git、
-    root 与 ignore 判定，跨 root 或 ignore 边界不伪造单 root rename。
+    root 与 ignore 判定，`Both` 和 fragment 两种上报形态在跨 root 或 ignore
+    边界时都不伪造单 root rename。
   - bounded debounce 窗口内同路径合并，首个 buffered event 固定 flush deadline，
     持续事件流不能无限延后交付；合并优先级
-    `Removed` 可被后续 `Created` 覆盖、`Created` 不被 `Modified` 降级，
-    保证"新建即写入"仍以 `Created` 语义出现。
+    `Removed` 可被后续 `Created` 覆盖、`Created` 不被 `Modified` 降级、
+    `Renamed` 不被目标路径的后续 `Modified` 抹除，保证消费者不会丢失
+    无法从当前文件状态重建的 source path。
   - recursive backend 新增目录时立即补扫一次子树，关闭 backend 安装子目录 watch
     前的快速建树竞态；补扫仍复用同一 ignore/debounce 管线且不跟随 symlink。
   - `.git` 目录（含 worktree `gitdir:` 文件解析出的外部 gitdir）完全排除出
@@ -38,7 +40,8 @@
 - **budget fail-closed**：`max_roots` 限制多 root 复用同一 watcher 的上限，
   超限 `WatchFailed` 报错且不注册；raw event 通道满时丢弃并累计
   `WatchGap { lost }`（slow consumer 的责任显式化），broadcast 满则丢事件
-  并 `Lagged` 告知消费者；零 root/queue/debounce 配置在启动前结构化拒绝。
+  并 `Lagged` 告知消费者；零 root/queue/debounce 以及平台时钟无法表示的
+  debounce 配置在启动前结构化拒绝。
 - **Grok `xai-fsnotify` 落点**：保留 semantic stream、debounce、watch budget、
   Git operation state 四要素，按 Evo 的 actor/typed contract 重建，不搬运
   notify backend 选择逻辑。
@@ -57,7 +60,7 @@
 
 ```text
 cargo test --locked -p change-tracker --all-features
-22 passed（create/modify/remove、rename 配对与 ignore 边界降级、bounded debounce、
+24 passed（create/modify/remove、rename 配对、跨 root/ignore 边界降级、bounded debounce、
 dynamic directory、gitignore 目录/rename 过滤、Git add/commit/ref/lock、普通 repo 与
 linked worktree 的 root 归属、.git 不泄漏、多 root/嵌套 root、budget fail-closed、
 WatchGap、启动订阅窗口、sequence 单调、非法配置、shutdown 幂等与即时唤醒）
