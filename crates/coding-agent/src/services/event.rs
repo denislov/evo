@@ -10,6 +10,7 @@ use crate::events::capability::CapabilityEvent;
 use crate::events::delegation::{DelegationEvent, DelegationEventContext};
 use crate::events::diagnostic::DiagnosticEvent;
 use crate::events::emission::ProductEventDraft;
+use crate::events::merge::MergeEvent;
 use crate::events::outbox::DurableOutboxRecord;
 use crate::events::prompt::PromptEvent;
 use crate::events::prompt_stream::PromptStreamEvent;

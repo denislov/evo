@@ -105,6 +105,10 @@ pub(crate) enum CodingSessionError {
     Lifecycle {
         reason: CodingAgentLifecycleRejection,
     },
+    #[error("operation conflict: {message}")]
+    Conflict { message: String },
+    #[error("stale precondition: {message}")]
+    Stale { message: String },
 }
 
 impl CodingSessionError {
@@ -132,6 +136,8 @@ impl CodingSessionError {
             Self::SubmissionDraftMismatch => "submission_draft_mismatch",
             Self::ClientCapacityExceeded { .. } => "client_capacity_exceeded",
             Self::Lifecycle { reason } => reason.code(),
+            Self::Conflict { .. } => "conflict",
+            Self::Stale { .. } => "stale",
         }
     }
 }

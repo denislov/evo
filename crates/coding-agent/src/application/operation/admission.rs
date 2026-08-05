@@ -52,7 +52,9 @@ impl CodingAgentSession {
             | CodingAgentOperation::SetSessionTreeLabel { .. }
             | CodingAgentOperation::SetSessionName { .. }
             | CodingAgentOperation::ExportCurrent
-            | CodingAgentOperation::ExportCurrentHtml(_) => {}
+            | CodingAgentOperation::ExportCurrentHtml(_)
+            | CodingAgentOperation::MergeChildWorktree { .. }
+            | CodingAgentOperation::DiscardChildWorktree { .. } => {}
         }
         Ok(())
     }

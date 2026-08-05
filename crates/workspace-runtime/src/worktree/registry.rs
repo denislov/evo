@@ -255,7 +255,10 @@ impl WorktreeRegistry {
             record.transition(WorkspaceLifecycle::Discarded, unix_seconds())?;
             write_record_atomic(&self.record_path(&record.id), &record)?;
         }
-        if record.lifecycle == WorkspaceLifecycle::Discarded {
+        if matches!(
+            record.lifecycle,
+            WorkspaceLifecycle::Discarded | WorkspaceLifecycle::Merged
+        ) {
             record.transition(WorkspaceLifecycle::Cleaning, unix_seconds())?;
             write_record_atomic(&self.record_path(&record.id), &record)?;
         }

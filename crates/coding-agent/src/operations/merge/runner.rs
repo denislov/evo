@@ -1,0 +1,192 @@
+use std::path::Path;
+use std::sync::Arc;
+
+use workspace_runtime::api::{ChangeEntry, WorktreeRegistry, apply_merge};
+
+use crate::kernel::error::CodingSessionError;
+use crate::services::event::EventService;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergeOutcome {
+    pub(crate) worktree_id: String,
+    pub(crate) applied: usize,
+    pub(crate) entries: Vec<ChangeEntry>,
+}
+
+/// Merge a `MergePending` worktree into the current session's parent workspace.
+///
+/// The parent must be the worktree record's source (authorization scope), the
+/// parent must still sit on the child's base revision, and no parent-side
+/// change may overlap the child's changes. Every outcome publishes a merge
+/// event; a failed merge leaves the parent and the record untouched so the
+/// proposal can be retried or discarded.
+pub(crate) async fn merge_worktree(
+    events: &EventService,
+    registry: &Arc<WorktreeRegistry>,
+    parent_workspace_root: &Path,
+    operation_id: &str,
+    worktree_id: &str,
+) -> Result<MergeOutcome, CodingSessionError> {
+    let record = registry
+        .load(worktree_id)
+        .map_err(|error| CodingSessionError::Resource {
+            message: format!("cannot load worktree {worktree_id}: {error}"),
+        })?
+        .ok_or_else(|| CodingSessionError::Input {
+            message: format!("worktree {worktree_id} is not registered"),
+        })?;
+    verify_owner(&record, parent_workspace_root, worktree_id)?;
+    drop(record);
+
+    let registry = registry.clone();
+    let worktree_id = worktree_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    let registry_for_merge = registry.clone();
+    let worktree_id_for_merge = worktree_id.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        apply_merge(&registry_for_merge, &worktree_id_for_merge)
+    })
+        .await
+        .map_err(|error| CodingSessionError::Session {
+            message: format!("merge worker failed: {error}"),
+        })?
+        .map_err(|error| match error {
+            workspace_runtime::api::MergeError::Conflict { paths } => {
+                let paths = paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                events
+                    .emit_merge_conflicted(&operation_id, &worktree_id, paths.clone())
+                    .ok();
+                CodingSessionError::Conflict {
+                    message: format!(
+                        "merge of {} conflicts with parent-side changes on {paths:?}",
+                        worktree_id
+                    ),
+                }
+            }
+            workspace_runtime::api::MergeError::StaleParent {
+                expected,
+                actual,
+            } => {
+                events
+                    .emit_merge_stale_parent(
+                        &operation_id,
+                        &worktree_id,
+                        expected.clone(),
+                        actual.clone(),
+                    )
+                    .ok();
+                CodingSessionError::Stale {
+                    message: format!(
+                        "parent moved past child base revision for {worktree_id} (expected {expected:?}, found {actual:?}); refresh and retry"
+                    ),
+                }
+            }
+            other => {
+                events
+                    .emit_merge_failed(&operation_id, &worktree_id, &CodingSessionError::Resource {
+                        message: other.to_string(),
+                    })
+                    .ok();
+                CodingSessionError::Resource {
+                    message: format!("cannot merge {worktree_id}: {other}"),
+                }
+            }
+        })?;
+
+    events
+        .emit_merge_applied(&operation_id, &worktree_id, report.applied)
+        .map_err(|error| CodingSessionError::Session {
+            message: format!("cannot publish merge event: {error}"),
+        })?;
+    discard_after_merge(
+        events,
+        &registry,
+        parent_workspace_root,
+        &operation_id,
+        &worktree_id,
+    )?;
+    Ok(MergeOutcome {
+        worktree_id,
+        applied: report.applied,
+        entries: report.entries,
+    })
+}
+
+/// Discard a `MergePending`/`Merged` worktree without merging it.
+pub(crate) fn discard_worktree(
+    events: &EventService,
+    registry: &Arc<WorktreeRegistry>,
+    parent_workspace_root: &Path,
+    operation_id: &str,
+    worktree_id: &str,
+) -> Result<(), CodingSessionError> {
+    let record = registry
+        .load(worktree_id)
+        .map_err(|error| CodingSessionError::Resource {
+            message: format!("cannot load worktree {worktree_id}: {error}"),
+        })?
+        .ok_or_else(|| CodingSessionError::Input {
+            message: format!("worktree {worktree_id} is not registered"),
+        })?;
+    verify_owner(&record, parent_workspace_root, worktree_id)?;
+    registry
+        .discard(worktree_id)
+        .map_err(|error| CodingSessionError::Resource {
+            message: format!("cannot discard worktree {worktree_id}: {error}"),
+        })?;
+    events
+        .emit_merge_discarded(operation_id, worktree_id)
+        .map_err(|error| CodingSessionError::Session {
+            message: format!("cannot publish discard event: {error}"),
+        })
+}
+
+fn verify_owner(
+    record: &workspace_runtime::api::WorktreeRecord,
+    parent_workspace_root: &Path,
+    worktree_id: &str,
+) -> Result<(), CodingSessionError> {
+    let parent = std::path::absolute(parent_workspace_root).map_err(|error| {
+        CodingSessionError::Resource {
+            message: format!(
+                "cannot resolve session workspace {}: {error}",
+                parent_workspace_root.display()
+            ),
+        }
+    })?;
+    if record.source != parent {
+        return Err(CodingSessionError::UnsupportedCapability {
+            capability: format!(
+                "worktree {worktree_id} belongs to {}, not the current session workspace {}",
+                record.source.display(),
+                parent.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn discard_after_merge(
+    events: &EventService,
+    registry: &Arc<WorktreeRegistry>,
+    parent_workspace_root: &Path,
+    operation_id: &str,
+    worktree_id: &str,
+) -> Result<(), CodingSessionError> {
+    if let Err(error) = discard_worktree(
+        events,
+        registry,
+        parent_workspace_root,
+        operation_id,
+        worktree_id,
+    ) {
+        events.emit_diagnostic(
+            Some(operation_id.to_owned()),
+            format!("merged worktree cleanup failed: {error}"),
+        )?;
+    }
+    Ok(())
+}

@@ -129,10 +129,26 @@ impl AgentInvocationRunner {
         .await;
         if let Err(error) = &result {
             ctx.record_failure_terminal(error)?;
-        }
-        if let Err(error) = ctx.release_child_worktree() {
-            ctx.event_service
-                .emit_diagnostic(Some(ctx.operation_id.clone()), error.to_string())?;
+            if let Err(error) = ctx.release_child_worktree() {
+                ctx.event_service
+                    .emit_diagnostic(Some(ctx.operation_id.clone()), error.to_string())?;
+            }
+        } else {
+            match ctx.promote_child_worktree() {
+                Ok(Some(worktree_id)) => {
+                    ctx.event_service.emit_merge_proposal_created(
+                        ctx.operation_id.clone(),
+                        worktree_id,
+                        ctx.child_operation_id.clone(),
+                    )?;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = ctx.release_child_worktree();
+                    ctx.event_service
+                        .emit_diagnostic(Some(ctx.operation_id.clone()), error.to_string())?;
+                }
+            }
         }
         result
     }
@@ -388,6 +404,19 @@ impl AgentInvocationContext {
             lease.release()?;
         }
         Ok(())
+    }
+
+    /// Keep a successful child's worktree for review and merge.
+    ///
+    /// Returns the worktree id when a managed worktree was provisioned, `None`
+    /// for projectless/read-only children that never had one.
+    fn promote_child_worktree(&mut self) -> Result<Option<String>, CodingSessionError> {
+        if let Some(lease) = self.child_worktree.as_mut() {
+            lease.promote_to_merge_pending()?;
+            Ok(Some(lease.record_id().to_owned()))
+        } else {
+            Ok(None)
+        }
     }
 
     fn prepare_child_prompt(&mut self) -> Result<(), CodingSessionError> {

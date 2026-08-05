@@ -206,6 +206,13 @@ impl EventService {
         self.publish_without_root_terminal(event.into_product_draft())
     }
 
+    pub(super) fn publish_merge_event(
+        &self,
+        event: crate::events::merge::MergeEvent,
+    ) -> Result<ProductEvent, CodingSessionError> {
+        self.publish_without_root_terminal(event.into_product_draft())
+    }
+
     pub(super) fn publish(
         &self,
         draft: ProductEventDraft,

@@ -171,4 +171,11 @@ pub(crate) enum OperationOutcome {
         updated_at: String,
     },
     Export(ExportOutcome),
+    MergeApplied {
+        worktree_id: String,
+        applied: usize,
+    },
+    WorktreeDiscarded {
+        worktree_id: String,
+    },
 }

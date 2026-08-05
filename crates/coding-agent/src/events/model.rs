@@ -10,6 +10,7 @@ impl CodingAgentProductEventKind {
             Self::Tool(_) => CodingAgentProductEventFamily::Tool,
             Self::Runtime(_) => CodingAgentProductEventFamily::Runtime,
             Self::Delegation(_) => CodingAgentProductEventFamily::Delegation,
+            Self::Merge(_) => CodingAgentProductEventFamily::Merge,
             Self::Workflow(_) => CodingAgentProductEventFamily::Workflow,
             Self::Diagnostic(_) => CodingAgentProductEventFamily::Diagnostic,
             Self::Capability(_) => CodingAgentProductEventFamily::Capability,
@@ -83,6 +84,12 @@ impl CodingAgentProductEventKind {
             Self::Delegation(CodingAgentDelegationProductEvent::Started { .. }) => "started",
             Self::Delegation(CodingAgentDelegationProductEvent::Completed { .. }) => "completed",
             Self::Delegation(CodingAgentDelegationProductEvent::Failed { .. }) => "failed",
+            Self::Merge(CodingAgentMergeProductEvent::ProposalCreated { .. }) => "proposal_created",
+            Self::Merge(CodingAgentMergeProductEvent::Applied { .. }) => "applied",
+            Self::Merge(CodingAgentMergeProductEvent::Conflicted { .. }) => "conflicted",
+            Self::Merge(CodingAgentMergeProductEvent::StaleParent { .. }) => "stale_parent",
+            Self::Merge(CodingAgentMergeProductEvent::Discarded { .. }) => "discarded",
+            Self::Merge(CodingAgentMergeProductEvent::Failed { .. }) => "failed",
             Self::Workflow(CodingAgentWorkflowProductEvent::SelfHealingEditStarted { .. }) => {
                 "self_healing_edit_started"
             }

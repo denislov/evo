@@ -3,6 +3,7 @@ pub(crate) mod branch_summary;
 pub(crate) mod compaction;
 pub(crate) mod delegation;
 pub(crate) mod export;
+pub(crate) mod merge;
 pub(crate) mod prompt;
 pub(crate) mod self_healing_edit;
 pub(crate) mod session_naming;

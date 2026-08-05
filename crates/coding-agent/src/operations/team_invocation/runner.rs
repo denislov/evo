@@ -626,7 +626,21 @@ impl AgentTeamContext {
                     final_text.clone(),
                 )?;
                 drop(child_admission);
-                self.release_child_worktree_diagnostic(&child_operation_id)?;
+                match self.promote_child_worktree() {
+                    Ok(Some(worktree_id)) => {
+                        self.event_service.emit_merge_proposal_created(
+                            self.operation_id.clone(),
+                            worktree_id,
+                            child_operation_id.clone(),
+                        )?;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = self.release_child_worktree();
+                        self.event_service
+                            .emit_diagnostic(Some(child_operation_id.clone()), error.to_string())?;
+                    }
+                }
                 Ok(AgentTeamMemberOutcome {
                     profile_id: profile.id.clone(),
                     operation_id: child_operation_id.clone(),
@@ -653,6 +667,23 @@ impl AgentTeamContext {
                 self.release_child_worktree_diagnostic(&child_operation_id)?;
                 Err(error)
             }
+        }
+    }
+
+    fn release_child_worktree(&mut self) -> Result<(), CodingSessionError> {
+        if let Some(lease) = self.child_worktree.as_mut() {
+            lease.release()?;
+        }
+        Ok(())
+    }
+
+    /// Keep a successful member's worktree for review and merge.
+    fn promote_child_worktree(&mut self) -> Result<Option<String>, CodingSessionError> {
+        if let Some(lease) = self.child_worktree.as_mut() {
+            lease.promote_to_merge_pending()?;
+            Ok(Some(lease.record_id().to_owned()))
+        } else {
+            Ok(None)
         }
     }
 

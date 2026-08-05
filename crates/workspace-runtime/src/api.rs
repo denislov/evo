@@ -13,6 +13,9 @@ pub use crate::process::{
     EnvPolicy, OutputBudget, ProcessOutcome, ProcessOutput, ProcessSpec, ProcessUpdateCallback,
     ProgramKind, path_exists, resolve_shell_path, run,
 };
+pub use crate::worktree::merge::{
+    ChangeEntry, ChangeKind, ChangeSet, MergeError, MergeReport, apply_merge, build_changeset,
+};
 pub use crate::worktree::registry::{
     GcOptions, GcRemovedWorktree, GcReport, RecoveryReport, RegistryError,
     StartupMaintenanceReport, WorktreeRecord, WorktreeRegistry,

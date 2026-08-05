@@ -245,12 +245,92 @@ async fn write_child_gets_its_own_worktree_and_releases_it_on_success() {
         "parent workspace must stay byte-identical during child isolation"
     );
     assert!(
-        !child_root.exists(),
-        "child worktree must be released after the child reaches a terminal state"
+        child_root.exists(),
+        "successful child worktree must be retained for review and merge"
     );
+    let records = registry.load_all().expect("registry load");
+    assert_eq!(
+        records.len(),
+        1,
+        "successful child leaves one durable record"
+    );
+    assert_eq!(
+        records[0].lifecycle,
+        workspace_runtime::api::WorkspaceLifecycle::MergePending,
+        "successful child worktree awaits an explicit merge or discard"
+    );
+}
+
+#[tokio::test]
+async fn failed_child_releases_its_worktree() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    std::fs::write(workspace.join("file.txt"), "v1").expect("source file");
+
+    let registry = WorktreeRegistry::open_with_capacity(temp.path().join("registry"), Some(4))
+        .expect("registry opens");
+    let control = control_with_registry(registry.clone());
+    let event_service =
+        EventService::with_snapshot_coordinator(Arc::new(SnapshotCoordinator::default()));
+    let parent = parent_snapshot(&workspace);
+
+    let api = "worktree-isolation-failure";
+    let provider_guard = ProviderGuard::register(
+        api,
+        Arc::new(FauxProvider::with_call_queue(vec![
+            FauxProvider::text_call("will not finish", StopReason::ToolUse),
+        ])),
+    );
+    let prompt_options = PromptTurnOptions::from_prompt_runtime_options(PromptRuntimeOptions {
+        model: model(api),
+        api_key: None,
+        auth_diagnostics: Vec::new(),
+        system_prompt: Some("system".into()),
+        max_turns: Some(1),
+        tools: Vec::new(),
+        register_builtins: true,
+        ai_client: Some(provider_guard.ai_client()),
+        session: Some(SessionRunOptions::enabled(workspace.clone())),
+        session_target: None,
+        session_name: None,
+        thinking_level: None,
+        tool_execution: None,
+        resources: AgentResources::default(),
+        settings: None,
+        invocation: PromptInvocation::Text("unfinished".into()),
+    });
+    let profiles = profile_registry_with_writer(temp.path());
+    let _parent_guard = control
+        .begin_root_with_capability_generation(
+            crate::application::operation::OperationClass::NonSessionRoot,
+            crate::kernel::operation::OperationKind::Prompt,
+            "parent-operation".into(),
+            CapabilityGeneration::new(1),
+        )
+        .expect("parent operation is active");
+    let mut context = AgentInvocationContext::new(
+        AgentInvocationOptions::new(ProfileId::from("writer"), "unfinished", prompt_options),
+        profiles,
+        event_service,
+        control,
+        "parent-operation".into(),
+    )
+    .with_parent_capability_snapshot(parent);
+
+    let error = AgentInvocationRunner::new()
+        .expect("runner")
+        .run_typed(&mut context, None)
+        .await
+        .expect_err("child turn without a terminal assistant message fails");
+    assert!(
+        error.to_string().contains("tool") || error.to_string().contains("assistant"),
+        "failure must surface the child turn error, got: {error}"
+    );
+
     assert!(
         registry.load_all().expect("registry load").is_empty(),
-        "released worktree leaves no durable record"
+        "failed child must release its worktree instead of retaining it"
     );
 }
 

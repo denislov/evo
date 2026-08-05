@@ -925,7 +925,8 @@ impl CodingProtocolEventAdapter {
             )
             | CodingAgentProductEventKind::Diagnostic(
                 CodingAgentDiagnosticProductEvent::Diagnostic { .. },
-            ) => Vec::new(),
+            )
+            | CodingAgentProductEventKind::Merge(_) => Vec::new(),
             CodingAgentProductEventKind::Session(CodingAgentSessionProductEvent::WriteFailed {
                 operation_id,
                 reason,

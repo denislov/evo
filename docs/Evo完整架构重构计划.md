@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～2、Phase 3 / ARC-300～330 完成，准备进入 ARC-340）
+> 状态：执行中（Phase 0～2、Phase 3 / ARC-300～340 完成，准备进入 ARC-350）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -34,7 +34,8 @@
 | Phase 3 / ARC-310 | 完成 | `docs/refactor/phase3-worktree-builder.md`；managed identity、Git worktree + copy/reflink fallback、fail-closed dirty/untracked sync、process-tree cancellation、ignore/path policy 已落地并测试 |
 | Phase 3 / ARC-320 | 完成 | `docs/refactor/phase3-worktree-registry.md`；原子文件 registry、owner process identity、启动 maintenance（interrupted/stale/dead-owner 清理 + orphan 保留）、GC（age/owner liveness/disk budget/dry-run）已落地并测试 |
 | Phase 3 / ARC-330 | 完成 | `docs/refactor/phase3-child-isolation.md`；写权限有效交集 child 申请独立 managed worktree、不再 clone 父 capability、projectless/read-only/显式 shared-cwd 分别定义策略、team 并发上限改由 worktree capacity 决定（固定 `2` 已删除） |
-| Phase 3 / ARC-340～350 | 未开始 | 前序 Gate 通过后进入 |
+| Phase 3 / ARC-340 | 完成 | `docs/refactor/phase3-merge-protocol.md`；ChangeSet/MergeProposal、乐观 base revision 校验、conflict/stale parent 检测、Merge/Discard 为 admitted operation（session workspace 授权）、merge 事件与结构化错误 |
+| Phase 3 / ARC-350 | 未开始 | 前序 Gate 通过后进入 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -476,6 +477,8 @@ Phase 2 Gate：完成。builtin、custom injected 与 delegation tools 全部由
 - 并发上限由资源预算和 worktree capacity 决定，删除固定 `2` 的产品常量。
 
 ### ARC-340 Merge protocol
+
+执行状态：完成（2026-08-05）。完成证据见 `docs/refactor/phase3-merge-protocol.md`。
 
 - child terminal 不直接写回父目录，只产生 `ChangeSet` 和 `MergeProposal`。
 - merge 以 parent base revision + child base revision 做乐观校验。

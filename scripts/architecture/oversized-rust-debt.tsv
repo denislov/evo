@@ -13,7 +13,7 @@ production	900	1373	Phase 9	crates/cli/src/interactive/prompt_task.rs
 production	900	1342	Phase 9	crates/desktop/src/ui/conversation/model.rs
 production	900	1302	Phase 9	crates/cli/src/interactive/transcript.rs
 production	900	1273	Phase 9	crates/cli/src/rpc/prompt.rs
-production	900	1254	Phase 9	crates/cli/src/protocol/events.rs
+production	900	1255	Phase 9	crates/cli/src/protocol/events.rs
 production	900	1243	Phase 9	crates/tui/src/component/markdown.rs
 production	900	1205	Phase 9	crates/cli/src/protocol/types.rs
 production	900	1199	Phase 5	crates/agent-core/src/agent/turn/nodes.rs

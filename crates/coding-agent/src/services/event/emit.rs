@@ -534,6 +534,90 @@ impl EventService {
         }))
     }
 
+    pub(crate) fn emit_merge_proposal_created(
+        &self,
+        operation_id: impl Into<String>,
+        worktree_id: impl Into<String>,
+        child_operation_id: impl Into<String>,
+    ) -> Result<(), CodingSessionError> {
+        self.publish_merge_event(MergeEvent::ProposalCreated {
+            operation_id: operation_id.into(),
+            worktree_id: worktree_id.into(),
+            child_operation_id: child_operation_id.into(),
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn emit_merge_applied(
+        &self,
+        operation_id: impl Into<String>,
+        worktree_id: impl Into<String>,
+        applied: usize,
+    ) -> Result<(), CodingSessionError> {
+        self.publish_merge_event(MergeEvent::Applied {
+            operation_id: operation_id.into(),
+            worktree_id: worktree_id.into(),
+            applied,
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn emit_merge_conflicted(
+        &self,
+        operation_id: impl Into<String>,
+        worktree_id: impl Into<String>,
+        paths: Vec<String>,
+    ) -> Result<(), CodingSessionError> {
+        self.publish_merge_event(MergeEvent::Conflicted {
+            operation_id: operation_id.into(),
+            worktree_id: worktree_id.into(),
+            paths,
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn emit_merge_stale_parent(
+        &self,
+        operation_id: impl Into<String>,
+        worktree_id: impl Into<String>,
+        expected: Option<String>,
+        actual: Option<String>,
+    ) -> Result<(), CodingSessionError> {
+        self.publish_merge_event(MergeEvent::StaleParent {
+            operation_id: operation_id.into(),
+            worktree_id: worktree_id.into(),
+            expected,
+            actual,
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn emit_merge_discarded(
+        &self,
+        operation_id: impl Into<String>,
+        worktree_id: impl Into<String>,
+    ) -> Result<(), CodingSessionError> {
+        self.publish_merge_event(MergeEvent::Discarded {
+            operation_id: operation_id.into(),
+            worktree_id: worktree_id.into(),
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn emit_merge_failed(
+        &self,
+        operation_id: impl Into<String>,
+        worktree_id: impl Into<String>,
+        error: &CodingSessionError,
+    ) -> Result<(), CodingSessionError> {
+        self.publish_merge_event(MergeEvent::Failed {
+            operation_id: operation_id.into(),
+            worktree_id: worktree_id.into(),
+            error: error.clone(),
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn emit_self_healing_edit_started(
         &self,
         operation_id: impl Into<String>,

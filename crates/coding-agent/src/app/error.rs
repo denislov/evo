@@ -39,7 +39,9 @@ impl From<crate::kernel::error::CodingSessionError> for ApplicationError {
             | CodingSessionError::SelfHealingEditFailed { message, .. }
             | CodingSessionError::Provider { message }
             | CodingSessionError::Tool { message }
-            | CodingSessionError::Workflow { message } => Self::SessionFailure(message),
+            | CodingSessionError::Workflow { message }
+            | CodingSessionError::Conflict { message }
+            | CodingSessionError::Stale { message } => Self::SessionFailure(message),
             CodingSessionError::PartialCommit {
                 operation_id,
                 message,

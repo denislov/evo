@@ -92,6 +92,10 @@ impl ChildWorktreeLease {
         self.record.dest.as_path()
     }
 
+    pub(crate) fn record_id(&self) -> &str {
+        &self.record.id
+    }
+
     /// The handle identity bound to this worktree (id == directory == record).
     pub(crate) fn handle(&self) -> Result<WorkspaceHandle, CodingSessionError> {
         let id =
@@ -124,6 +128,39 @@ impl ChildWorktreeLease {
             })?;
         self.released = true;
         Ok(())
+    }
+
+    /// Keep the worktree for review and merge (ARC-340).
+    ///
+    /// A successfully finished child's worktree is promoted to `MergePending`
+    /// instead of being reclaimed; the merge/discard decision belongs to the
+    /// product operation layer afterwards.
+    pub(crate) fn promote_to_merge_pending(&mut self) -> Result<(), CodingSessionError> {
+        if self.released {
+            return Err(CodingSessionError::Resource {
+                message: format!("child worktree {} was already released", self.record.id),
+            });
+        }
+        self.registry
+            .transition(
+                &self.record.id,
+                workspace_runtime::api::WorkspaceLifecycle::Active,
+                unix_seconds(),
+            )
+            .and_then(|_| {
+                self.registry.transition(
+                    &self.record.id,
+                    workspace_runtime::api::WorkspaceLifecycle::MergePending,
+                    unix_seconds(),
+                )
+            })
+            .map(|record| self.record = record)
+            .map_err(|error| CodingSessionError::Resource {
+                message: format!(
+                    "cannot promote child worktree {} to MergePending: {error}",
+                    self.record.id
+                ),
+            })
     }
 }
 
@@ -182,6 +219,13 @@ pub(crate) async fn acquire_child_worktree(
         record,
         released: false,
     })
+}
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 /// Resolve a child workspace binding for the given policy, acquiring a

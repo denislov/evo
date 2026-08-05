@@ -261,9 +261,21 @@ impl From<&CodingSessionError> for CodingAgentPublicError {
                 CodingAgentErrorContext::None,
             ),
             CodingSessionError::Workflow { .. } => (
+                CodingAgentErrorCategory::Session,
+                true,
+                "The workflow operation failed.",
+                CodingAgentErrorContext::None,
+            ),
+            CodingSessionError::Conflict { .. } => (
                 CodingAgentErrorCategory::Workflow,
                 false,
                 "The product workflow failed.",
+                CodingAgentErrorContext::None,
+            ),
+            CodingSessionError::Stale { .. } => (
+                CodingAgentErrorCategory::Workflow,
+                true,
+                "The operation precondition is stale; refresh and retry.",
                 CodingAgentErrorContext::None,
             ),
             CodingSessionError::Cancelled => (

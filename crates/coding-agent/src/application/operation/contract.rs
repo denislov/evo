@@ -82,6 +82,14 @@ pub enum CodingAgentOperation {
     },
     ExportCurrent,
     ExportCurrentHtml(PathBuf),
+    /// Apply a `MergePending` child worktree's changes into the parent workspace.
+    MergeChildWorktree {
+        worktree_id: String,
+    },
+    /// Discard a `MergePending` child worktree without merging it.
+    DiscardChildWorktree {
+        worktree_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -109,6 +117,13 @@ pub enum CodingAgentOperationOutcome {
     },
     Export(CodingAgentSessionExport),
     ExportHtml(PathBuf),
+    MergeApplied {
+        worktree_id: String,
+        applied: usize,
+    },
+    WorktreeDiscarded {
+        worktree_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -364,7 +379,9 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::Export => return None,
+        | OperationKind::Export
+        | OperationKind::MergeChildWorktree
+        | OperationKind::DiscardChildWorktree => return None,
     };
     if !permitted.contains(&evidence) {
         return None;
@@ -385,7 +402,11 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::Export => unreachable!("non-terminal operation kind filtered above"),
+        | OperationKind::Export
+        | OperationKind::MergeChildWorktree
+        | OperationKind::DiscardChildWorktree => {
+            unreachable!("non-terminal operation kind filtered above")
+        }
     };
     Some(CodingAgentProductEventTerminalOperation { kind, status })
 }
@@ -409,7 +430,9 @@ pub(crate) fn terminal_operation_kind(
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::Export => None,
+        | OperationKind::Export
+        | OperationKind::MergeChildWorktree
+        | OperationKind::DiscardChildWorktree => None,
     }
 }
 
@@ -447,7 +470,9 @@ fn recovery_terminal_operation_kind(
         | OperationKind::ForkSession
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
-        | OperationKind::SetSessionName => return None,
+        | OperationKind::SetSessionName
+        | OperationKind::MergeChildWorktree
+        | OperationKind::DiscardChildWorktree => return None,
     })
 }
 
@@ -478,7 +503,9 @@ pub(crate) fn descriptor_for_child_kind(kind: OperationKind) -> Option<Operation
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::Export => return None,
+        | OperationKind::Export
+        | OperationKind::MergeChildWorktree
+        | OperationKind::DiscardChildWorktree => return None,
     };
     contract.descriptor().for_child()
 }
@@ -614,6 +641,22 @@ impl OperationContract {
         OperationTerminalPolicy::OutcomeAcknowledgement,
         &[],
     );
+    const MERGE_CHILD_WORKTREE: Self = Self::new(
+        OperationKind::MergeChildWorktree,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::MergeApplied,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const DISCARD_CHILD_WORKTREE: Self = Self::new(
+        OperationKind::DiscardChildWorktree,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::WorktreeDiscarded,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
 
     fn descriptor(self) -> OperationDescriptor {
         let Self {
@@ -707,6 +750,8 @@ impl CodingAgentOperation {
             Self::SetSessionName { .. } => OperationContract::SET_SESSION_NAME,
             Self::ExportCurrent => OperationContract::EXPORT_CURRENT,
             Self::ExportCurrentHtml(_) => OperationContract::EXPORT_CURRENT_HTML,
+            Self::MergeChildWorktree { .. } => OperationContract::MERGE_CHILD_WORKTREE,
+            Self::DiscardChildWorktree { .. } => OperationContract::DISCARD_CHILD_WORKTREE,
         }
     }
 
@@ -752,7 +797,9 @@ impl CodingAgentOperation {
             | Self::SetSessionTreeLabel { .. }
             | Self::SetSessionName { .. }
             | Self::ExportCurrent
-            | Self::ExportCurrentHtml(_) => None,
+            | Self::ExportCurrentHtml(_)
+            | Self::MergeChildWorktree { .. }
+            | Self::DiscardChildWorktree { .. } => None,
         }
     }
 
@@ -780,7 +827,9 @@ impl CodingAgentOperation {
             | Self::SetSessionTreeLabel { .. }
             | Self::SetSessionName { .. }
             | Self::ExportCurrent
-            | Self::ExportCurrentHtml(_) => None,
+            | Self::ExportCurrentHtml(_)
+            | Self::MergeChildWorktree { .. }
+            | Self::DiscardChildWorktree { .. } => None,
         }
     }
 

@@ -30,6 +30,7 @@ const MAX_STATUS_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REVISION_BYTES: usize = 1024;
 
 mod git;
+pub(crate) mod merge;
 pub(crate) mod registry;
 use git::{git_capture, run_git};
 

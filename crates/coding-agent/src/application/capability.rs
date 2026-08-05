@@ -98,7 +98,10 @@ impl CapabilitySnapshotService {
                 .filter(|id| input.profile_tools.iter().any(|allowed| allowed == id))
                 .collect::<Vec<_>>()
         };
-        let needs_workspace = allowed_tools
+        let needs_workspace = matches!(
+            input.operation_kind,
+            OperationKind::MergeChildWorktree | OperationKind::DiscardChildWorktree
+        ) || allowed_tools
             .iter()
             .any(|id| tool_uses_filesystem(id) || id.as_str() == "bash");
         let identity = match (input.workspace_handle, input.cwd) {

@@ -47,6 +47,16 @@ impl CodingAgentOperationOutcome {
                 Some(path) => Self::ExportHtml(path),
                 None => Self::Export(outcome.export),
             },
+            OperationOutcome::MergeApplied {
+                worktree_id,
+                applied,
+            } => Self::MergeApplied {
+                worktree_id,
+                applied,
+            },
+            OperationOutcome::WorktreeDiscarded { worktree_id } => {
+                Self::WorktreeDiscarded { worktree_id }
+            }
         }
     }
 

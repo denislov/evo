@@ -5,6 +5,7 @@ pub(crate) mod capability;
 pub(crate) mod delegation;
 pub(crate) mod diagnostic;
 pub(crate) mod emission;
+pub(crate) mod merge;
 pub(crate) mod message;
 pub(crate) mod outbox;
 pub(crate) mod prompt;
@@ -51,6 +52,7 @@ pub enum CodingAgentProductEventFamily {
     Tool,
     Runtime,
     Delegation,
+    Merge,
     Workflow,
     Diagnostic,
     Capability,
@@ -75,6 +77,7 @@ impl CodingAgentProductEventFamily {
             Self::Tool => "tool",
             Self::Runtime => "runtime",
             Self::Delegation => "delegation",
+            Self::Merge => "merge",
             Self::Workflow => "workflow",
             Self::Diagnostic => "diagnostic",
             Self::Capability => "capability",
@@ -478,6 +481,35 @@ pub struct CodingAgentDelegationEventContext {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CodingAgentMergeProductEvent {
+    ProposalCreated {
+        worktree_id: String,
+        child_operation_id: String,
+    },
+    Applied {
+        worktree_id: String,
+        applied: usize,
+    },
+    Conflicted {
+        worktree_id: String,
+        paths: Vec<String>,
+    },
+    StaleParent {
+        worktree_id: String,
+        expected: Option<String>,
+        actual: Option<String>,
+    },
+    Discarded {
+        worktree_id: String,
+    },
+    Failed {
+        worktree_id: String,
+        error: CodingAgentProductEventError,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CodingAgentDelegationProductEvent {
     Requested {
         context: CodingAgentDelegationEventContext,
@@ -627,6 +659,7 @@ pub enum CodingAgentProductEventKind {
     Tool(CodingAgentToolProductEvent),
     Runtime(CodingAgentRuntimeProductEvent),
     Delegation(CodingAgentDelegationProductEvent),
+    Merge(CodingAgentMergeProductEvent),
     Workflow(CodingAgentWorkflowProductEvent),
     Diagnostic(CodingAgentDiagnosticProductEvent),
     Capability(CodingAgentCapabilityProductEvent),

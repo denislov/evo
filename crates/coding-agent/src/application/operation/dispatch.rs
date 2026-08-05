@@ -523,6 +523,68 @@ impl CodingAgentSession {
                     )
                     .await
                     .map(OperationOutcome::AgentTeam),
+                    CodingAgentOperation::MergeChildWorktree { worktree_id } => {
+                        let workspace_root = snapshot
+                            .workspace
+                            .as_ref()
+                            .ok_or_else(|| CodingSessionError::UnsupportedCapability {
+                                capability: "merge requires the session workspace authority"
+                                    .into(),
+                            })?
+                            .cwd()
+                            .to_path_buf();
+                        let registry = self
+                            .runtime_host
+                            .operation_supervisor
+                            .control
+                            .worktree_registry()
+                            .cloned()
+                            .ok_or_else(|| CodingSessionError::UnsupportedCapability {
+                                capability: "merge requires a managed worktree registry".into(),
+                            })?;
+                        crate::operations::merge::runner::merge_worktree(
+                            &self.runtime_host.events,
+                            &registry,
+                            &workspace_root,
+                            &snapshot.operation_id,
+                            &worktree_id,
+                        )
+                        .await
+                        .map(|outcome| {
+                            OperationOutcome::MergeApplied {
+                                worktree_id: outcome.worktree_id,
+                                applied: outcome.applied,
+                            }
+                        })
+                    }
+                    CodingAgentOperation::DiscardChildWorktree { worktree_id } => {
+                        let workspace_root = snapshot
+                            .workspace
+                            .as_ref()
+                            .ok_or_else(|| CodingSessionError::UnsupportedCapability {
+                                capability: "discard requires the session workspace authority"
+                                    .into(),
+                            })?
+                            .cwd()
+                            .to_path_buf();
+                        let registry = self
+                            .runtime_host
+                            .operation_supervisor
+                            .control
+                            .worktree_registry()
+                            .cloned()
+                            .ok_or_else(|| CodingSessionError::UnsupportedCapability {
+                                capability: "discard requires a managed worktree registry".into(),
+                            })?;
+                        crate::operations::merge::runner::discard_worktree(
+                            &self.runtime_host.events,
+                            &registry,
+                            &workspace_root,
+                            &snapshot.operation_id,
+                            &worktree_id,
+                        )?;
+                        Ok(OperationOutcome::WorktreeDiscarded { worktree_id })
+                    }
                     CodingAgentOperation::ApproveDelegation {
                         operation_id,
                         tool_call_id,
