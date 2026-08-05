@@ -46,7 +46,8 @@ impl fmt::Display for WorkspaceId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkspaceKind {
     Source,
     ManagedChild,
@@ -94,6 +95,22 @@ impl WorkspaceHandle {
         Ok(Self { id, kind, root })
     }
 
+    /// Construct a handle from a fully-formed id, rejecting ids whose kind
+    /// prefix does not match `kind`.
+    pub fn with_explicit_id(
+        id: WorkspaceId,
+        kind: WorkspaceKind,
+        root: impl Into<PathBuf>,
+    ) -> Result<Self, WorkspaceIdentityError> {
+        let root = root.into();
+        validate_root(&root)?;
+        let prefix = format!("{}-", kind.tag());
+        if !id.as_str().starts_with(&prefix) {
+            return Err(WorkspaceIdentityError::InvalidId);
+        }
+        Ok(Self { id, kind, root })
+    }
+
     pub fn id(&self) -> &WorkspaceId {
         &self.id
     }
@@ -107,7 +124,8 @@ impl WorkspaceHandle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkspaceLifecycle {
     Creating,
     Ready,
@@ -117,6 +135,29 @@ pub enum WorkspaceLifecycle {
     Discarded,
     Cleaning,
     Removed,
+}
+
+/// The single legal lifecycle transition table for managed workspaces.
+///
+/// Shared by the in-memory [`WorkspaceLease`] and the durable registry so a
+/// persisted record can never be transitioned into a state the lease would
+/// reject.
+pub(crate) fn valid_lifecycle_transition(from: WorkspaceLifecycle, to: WorkspaceLifecycle) -> bool {
+    matches!(
+        (from, to),
+        (WorkspaceLifecycle::Creating, WorkspaceLifecycle::Ready)
+            | (WorkspaceLifecycle::Ready, WorkspaceLifecycle::Active)
+            | (WorkspaceLifecycle::Active, WorkspaceLifecycle::MergePending)
+            | (WorkspaceLifecycle::Active, WorkspaceLifecycle::Discarded)
+            | (WorkspaceLifecycle::MergePending, WorkspaceLifecycle::Merged)
+            | (
+                WorkspaceLifecycle::MergePending,
+                WorkspaceLifecycle::Discarded
+            )
+            | (WorkspaceLifecycle::Merged, WorkspaceLifecycle::Cleaning)
+            | (WorkspaceLifecycle::Discarded, WorkspaceLifecycle::Cleaning)
+            | (WorkspaceLifecycle::Cleaning, WorkspaceLifecycle::Removed)
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,22 +210,7 @@ impl WorkspaceLease {
     }
 
     pub fn transition(&mut self, next: WorkspaceLifecycle) -> Result<(), WorkspaceLeaseError> {
-        let valid = matches!(
-            (self.lifecycle, next),
-            (WorkspaceLifecycle::Creating, WorkspaceLifecycle::Ready)
-                | (WorkspaceLifecycle::Ready, WorkspaceLifecycle::Active)
-                | (WorkspaceLifecycle::Active, WorkspaceLifecycle::MergePending)
-                | (WorkspaceLifecycle::Active, WorkspaceLifecycle::Discarded)
-                | (WorkspaceLifecycle::MergePending, WorkspaceLifecycle::Merged)
-                | (
-                    WorkspaceLifecycle::MergePending,
-                    WorkspaceLifecycle::Discarded
-                )
-                | (WorkspaceLifecycle::Merged, WorkspaceLifecycle::Cleaning)
-                | (WorkspaceLifecycle::Discarded, WorkspaceLifecycle::Cleaning)
-                | (WorkspaceLifecycle::Cleaning, WorkspaceLifecycle::Removed)
-        );
-        if !valid {
+        if !valid_lifecycle_transition(self.lifecycle, next) {
             return Err(WorkspaceLeaseError::InvalidTransition {
                 from: self.lifecycle,
                 to: next,
@@ -264,6 +290,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(projectless.id().as_str(), "projectless-draft-1");
+    }
+
+    #[test]
+    fn explicit_id_must_match_its_kind_prefix() {
+        let root = PathBuf::from("/tmp/evo-child");
+        let ok =
+            WorkspaceId::user_supplied(WorkspaceKind::ManagedChild, "abc123").expect("valid id");
+        assert!(WorkspaceHandle::with_explicit_id(ok, WorkspaceKind::ManagedChild, &root).is_ok());
+        let wrong_kind =
+            WorkspaceId::user_supplied(WorkspaceKind::Source, "abc123").expect("valid id");
+        assert!(
+            WorkspaceHandle::with_explicit_id(wrong_kind, WorkspaceKind::ManagedChild, &root)
+                .is_err()
+        );
     }
 
     #[test]

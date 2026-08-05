@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～2、Phase 3 / ARC-300～310 完成，准备进入 ARC-320）
+> 状态：执行中（Phase 0～2、Phase 3 / ARC-300～320 完成，准备进入 ARC-330）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -32,7 +32,8 @@
 | Phase 2 Gate | 完成 | coding-agent/agent-core/tool-runtime tests、workspace check、release API、architecture 与 core perf Gate 全部通过 |
 | Phase 3 / ARC-300 | 完成 | `docs/refactor/phase3-workspace-runtime.md`；identity/lease/opaque access handle、filesystem capability、path binding、mutation fence、process primitive 全部进入 `workspace-runtime`，coding-agent 仅持 workspace handle |
 | Phase 3 / ARC-310 | 完成 | `docs/refactor/phase3-worktree-builder.md`；managed identity、Git worktree + copy/reflink fallback、fail-closed dirty/untracked sync、process-tree cancellation、ignore/path policy 已落地并测试 |
-| Phase 3 / ARC-320～350 | 未开始 | 前序 Gate 通过后进入 |
+| Phase 3 / ARC-320 | 完成 | `docs/refactor/phase3-worktree-registry.md`；原子文件 registry、create_managed、启动 recover（interrupted/stale 清理 + orphan 保留）、GC（age/owner liveness/disk budget/dry-run）已落地并测试 |
+| Phase 3 / ARC-330～350 | 未开始 | 前序 Gate 通过后进入 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -456,6 +457,8 @@ Phase 2 Gate：完成。builtin、custom injected 与 delegation tools 全部由
 - `WorktreeBuilder` 只接受 typed source handle，成功返回绑定 `WorkspaceLease` 与 creation report 的 `ManagedWorktree`；不完整 snapshot、未验证清理或不安全 destination 均 fail-closed。
 
 ### ARC-320 Registry、恢复与 GC
+
+执行状态：完成（2026-08-06）。完成证据见 `docs/refactor/phase3-worktree-registry.md`。
 
 - registry 可先使用原子文件/JSONL；需要并发查询后再引入 SQLite + `sqlite-journal`。
 - lifecycle：Creating -> Ready -> Active -> MergePending -> Merged/Discarded -> Cleaning -> Removed。

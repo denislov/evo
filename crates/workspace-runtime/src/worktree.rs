@@ -21,8 +21,8 @@ use std::path::{Component, Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 use crate::contract::{
-    WorkspaceHandle, WorkspaceIdentityError, WorkspaceKind, WorkspaceLease, WorkspaceLeaseError,
-    WorkspaceLifecycle,
+    WorkspaceHandle, WorkspaceId, WorkspaceIdentityError, WorkspaceKind, WorkspaceLease,
+    WorkspaceLeaseError, WorkspaceLifecycle,
 };
 
 const CANCEL_POLL_ENTRIES: usize = 64;
@@ -30,6 +30,7 @@ const MAX_STATUS_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REVISION_BYTES: usize = 1024;
 
 mod git;
+pub(crate) mod registry;
 use git::{git_capture, run_git};
 
 /// How much of the source working tree the child worktree should preserve.
@@ -44,7 +45,8 @@ pub enum WorkingTreeMode {
 }
 
 /// How a child worktree was materialized.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorktreeCreationMode {
     /// `git worktree add` on the source repository, plus dirty sync.
     GitLinked,
@@ -131,6 +133,7 @@ pub struct WorktreeBuilder {
     dest: PathBuf,
     owner_operation: String,
     parent_session: Option<String>,
+    worktree_id: Option<WorkspaceId>,
     mode: WorkingTreeMode,
     cancellation: CancellationToken,
 }
@@ -146,6 +149,7 @@ impl WorktreeBuilder {
             dest: dest.into(),
             owner_operation: owner_operation.into(),
             parent_session: None,
+            worktree_id: None,
             mode: WorkingTreeMode::PreserveWorkingTree,
             cancellation: CancellationToken::new(),
         }
@@ -153,6 +157,15 @@ impl WorktreeBuilder {
 
     pub fn parent_session(mut self, parent_session: Option<String>) -> Self {
         self.parent_session = parent_session;
+        self
+    }
+
+    /// Pin the managed worktree identity. When omitted, the identity is
+    /// derived from the destination directory name (with a `ManagedChild`
+    /// prefix). The registry uses this to keep the record id, the directory
+    /// name, and the handle id aligned.
+    pub fn worktree_id(mut self, id: WorkspaceId) -> Self {
+        self.worktree_id = Some(id);
         self
     }
 
@@ -213,7 +226,25 @@ impl WorktreeBuilder {
         dest: &Path,
         report: WorktreeReport,
     ) -> Result<ManagedWorktree, WorktreeError> {
-        let handle = WorkspaceHandle::new(WorkspaceKind::ManagedChild, dest)?;
+        let handle = match &self.worktree_id {
+            Some(id) => {
+                WorkspaceHandle::with_explicit_id(id.clone(), WorkspaceKind::ManagedChild, dest)?
+            }
+            None => {
+                // The destination's directory name is the worktree identity
+                // when no explicit id was pinned.
+                let value = dest
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| WorktreeError::InvalidDestinationName {
+                        message: format!(
+                            "worktree destination has no valid id name: {}",
+                            dest.display()
+                        ),
+                    })?;
+                WorkspaceHandle::with_user_id(WorkspaceKind::ManagedChild, value, dest)?
+            }
+        };
         let mut lease = WorkspaceLease::new(
             handle,
             self.owner_operation.clone(),
@@ -357,6 +388,8 @@ pub enum WorktreeError {
     CopyFailed { path: PathBuf, message: String },
     #[error("worktree creation was cancelled")]
     Cancelled,
+    #[error("worktree destination name is invalid: {message}")]
+    InvalidDestinationName { message: String },
     #[error("workspace identity is invalid: {0}")]
     Identity(#[from] WorkspaceIdentityError),
     #[error("workspace lease is invalid: {0}")]
