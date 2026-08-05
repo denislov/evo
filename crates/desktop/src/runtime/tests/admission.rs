@@ -147,6 +147,47 @@ async fn sessionless_startup_supports_project_commands_and_rejects_session_comma
         }) if code == "session" && message == "desktop runtime has no idle session owner"
     ));
 
+    commands
+        .try_list_merge_proposals(7, "missing-session")
+        .unwrap();
+    assert!(matches!(
+        events.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 7,
+            command: DesktopRuntimeCommandKind::ListMergeProposals,
+            code,
+            message,
+        }) if code == "session_target" && message == "session missing-session is not open"
+    ));
+    commands
+        .try_merge_child_worktree(8, "missing-session", "worktree-1")
+        .unwrap();
+    assert!(matches!(
+        events.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 8,
+            command: DesktopRuntimeCommandKind::MergeChildWorktree,
+            code,
+            ..
+        }) if code == "session_target"
+    ));
+    commands
+        .try_discard_child_worktree(9, "missing-session", "worktree-1")
+        .unwrap();
+    assert!(matches!(
+        events.next_update().await,
+        Some(DesktopRuntimeUpdate::CommandRejected {
+            command_id: 9,
+            command: DesktopRuntimeCommandKind::DiscardChildWorktree,
+            code,
+            ..
+        }) if code == "session_target"
+    ));
+    assert!(matches!(
+        commands.try_merge_child_worktree(10, "missing-session", ""),
+        Err(DesktopCommandAdmissionError::InvalidSelectionId { .. })
+    ));
+
     assert!(!sessions_dir.exists());
     drop(commands);
     shutdown.shutdown(&mut events).await.unwrap();

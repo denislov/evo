@@ -10,17 +10,19 @@
   立即回收，而是 `Active -> MergePending` 保留，并发布
   `MergeProposalCreated` 事件；失败/取消的 child 仍立即 discard。父 workspace
   在 merge 前逐字节不变。
-- **乐观 merge**：`apply_merge` 要求父 workspace 仍停在 child 的 base revision
-  （`git rev-parse HEAD == base_revision`），否则 `StaleParent`；
+- **乐观 merge**：`apply_merge` 要求 Git 父 workspace 仍停在 child 的 base revision
+  （`git rev-parse HEAD == base_revision`），否则 `StaleParent`；copy-mode 使用
+  creation-time baseline 的内容 identity，不依赖 Git HEAD。
   父侧变更与 child 变更的文件集合有交集时 `Conflict`。两类失败都在写任何
   文件之前检测，父目录保持 byte-identical，proposal 保留 `MergePending`
   可重试。
-- **ChangeSet**：`git diff --name-status/--numstat base` + `ls-files --others`
-  采集 child 相对 base 的变更（含 untracked 新文件），条目上限
-  `MAX_CHANGESET_ENTRIES`，超限截断并报告。
-- **copy-mode 拒绝**：copy worktree 没有 base snapshot，merge 显式拒绝
-  （`CopyWorktreeUnsupported`），执行债务：Phase 4 `change-tracker` 提供
-  base snapshot 后收敛。
+- **ChangeSet**：registry 在 child 创建时保存不可变 creation-time baseline，之后
+  以受 cancellation 保护的 filesystem snapshot/hash 比较 child 与 baseline，包含
+  dirty tracked、staged、untracked、删除、rename 结果和 symlink；条目上限
+  `MAX_CHANGESET_ENTRIES` 超限直接返回 `ChangeSetTooLarge`，不截断、不应用、不转
+  `Merged`。
+- **copy-mode**：copy/reflink worktree 与 Git worktree 统一使用 creation-time
+  baseline，支持 clean apply、conflict、stale、retry 和 discard。
 - **Merge/Discard 是 admitted operation**：`MergeChildWorktree` /
   `DiscardChildWorktree` 为 root operation（SessionWriteRoot + Async），
   admission 时强制 workspace capability（不再依赖工具集推断）；runner 校验
@@ -33,9 +35,12 @@
   Discarded / Failed` 进入 product event stream（新 family `Merge`）。
   冲突/过期以结构化错误 `CodingSessionError::Conflict / Stale` 上抛，
   CLI/desktop 可据此提供 retry 路径。
-- **crash recovery**：merge 中断在 apply 与 transition 之间时，记录停在
-  `MergePending`，父目录可能部分应用 —— 执行债务：Phase 4 change-tracker
-  事务性 review 收敛（ARC-340 的 apply 是逐文件 copy，尚无统一事务边界）。
+- **事务与 crash recovery**：merge 在 apply 前把父 workspace（跳过 `.git`）备份到
+  `transactions/<worktree-id>/backup`，fsync `prepared` journal 后才写父目录；
+  每次写入均先在同目录临时路径 stage，再安全 rename，取消或失败恢复 backup。
+  startup 会回滚 `Prepared`、补齐 `Applied` 的 `MergePending -> Merged` transition，
+  并清理 journal；无 journal 的不完整 backup 会安全删除。Merge/Discard 的
+  operation recovery contract 同样提供可解析的终态。
 
 ## 落点
 
@@ -49,28 +54,34 @@
 | admission 强制 workspace | `coding-agent/src/application/capability.rs` |
 | `CodingSessionError::Conflict / Stale` | `coding-agent/src/kernel/error.rs` |
 
-## 验证
+## 产品入口与验证
 
 ```text
 cargo test --locked -p workspace-runtime --all-features
-71 passed（新增 merge 6 个：changeset 采集、clean apply、conflict、stale、
-copy 拒绝、非 MergePending 拒绝）
+79 passed + 3 API contract tests（含 baseline、copy-mode、symlink、untracked 冲突、
+fail-closed limit、取消、Prepared/Applied/incomplete transaction recovery）
 
 cargo test --locked -p coding-agent --all-features
-166 passed（新增 worktree promote 语义、失败释放、merge operation 5 个、
-session dispatch e2e 2 个）
+167 passed + 2 API contract + module layering tests（含 lease handoff、完整 proposal
+DTO、Merge/Discard/List operation contract、cancellation 和 recovery resolution）
 
-cargo test --locked --workspace --all-features
-1015 passed
+cargo test --locked -p cli
+106 passed
+
+cargo test --locked -p desktop --all-features
+303 passed，5 ignored，dependency boundary 11 passed
 
 bash scripts/gate.sh
-architecture_gate rust_files=608 dependency_edges=15 oversized_debts=32 execution_debts=0 mode=incremental
+architecture gate 必须保持 `execution_debts=0`；workspace 全量门禁在提交前运行。
 ```
 
-## 后续
+## 产品接线
 
-- CLI/desktop 接线：`CodingAgentOperation::MergeChildWorktree /
-  DiscardChildWorktree` 已通过 `prepare_client_submission` 通道可用，
-  交互入口与 merge 工具（Team supervisor 选择 proposal）留待 ARC-350/Phase 4
-  产品层。
-- ARC-350 worktree 测试矩阵补齐 merge crash / 并发 merge 场景。
+- CLI 提供 `/proposals`、`/merge <worktree-id>` 和 `/discard <worktree-id>`，复用
+  prepared submission/abortable operation 通道并逐文件显示 `+ / ~ / -` 与统计。
+- Desktop Inspector 的 Changes 区提供 proposal 列表、刷新、Merge、Discard；
+  command admission 绑定当前 idle session，活跃 prompt 时 fail closed。
+- Team supervisor 只能通过当前 session 的 `ListMergeProposals` 选择 proposal，
+  后续 Merge/Discard 仍走同一 workspace authority 和 operation contract，不能直接
+  写父目录。
+- ARC-350 继续扩展跨平台、并发和故障注入矩阵，但不再承担 ARC-340 的功能债务。

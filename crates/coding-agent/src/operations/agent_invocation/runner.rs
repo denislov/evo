@@ -135,12 +135,10 @@ impl AgentInvocationRunner {
             }
         } else {
             match ctx.promote_child_worktree() {
-                Ok(Some(worktree_id)) => {
-                    ctx.event_service.emit_merge_proposal_created(
-                        ctx.operation_id.clone(),
-                        worktree_id,
-                        ctx.child_operation_id.clone(),
-                    )?;
+                Ok(Some(proposal)) => {
+                    ctx.event_service
+                        .emit_merge_proposal_created(ctx.operation_id.clone(), proposal)?;
+                    ctx.retain_child_worktree_for_merge();
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -410,12 +408,21 @@ impl AgentInvocationContext {
     ///
     /// Returns the worktree id when a managed worktree was provisioned, `None`
     /// for projectless/read-only children that never had one.
-    fn promote_child_worktree(&mut self) -> Result<Option<String>, CodingSessionError> {
+    fn promote_child_worktree(
+        &mut self,
+    ) -> Result<Option<workspace_runtime::api::MergeProposal>, CodingSessionError> {
         if let Some(lease) = self.child_worktree.as_mut() {
-            lease.promote_to_merge_pending()?;
-            Ok(Some(lease.record_id().to_owned()))
+            Ok(Some(
+                lease.promote_to_merge_pending(&self.child_operation_id)?,
+            ))
         } else {
             Ok(None)
+        }
+    }
+
+    fn retain_child_worktree_for_merge(&mut self) {
+        if let Some(lease) = self.child_worktree.as_mut() {
+            lease.retain_for_merge();
         }
     }
 

@@ -147,7 +147,8 @@ pub mod api {
         pub use crate::runtime::facade::{
             CodingAgentAgentProductEvent, CodingAgentCapabilityProductEvent,
             CodingAgentDelegationEventContext, CodingAgentDelegationProductEvent,
-            CodingAgentDiagnosticProductEvent, CodingAgentImageContent,
+            CodingAgentDiagnosticProductEvent, CodingAgentImageContent, CodingAgentMergeChange,
+            CodingAgentMergeChangeKind, CodingAgentMergeProductEvent, CodingAgentMergeProposal,
             CodingAgentMessageProductEvent, CodingAgentProductEvent,
             CodingAgentProductEventCapabilityRevocation, CodingAgentProductEventCheckOutput,
             CodingAgentProductEventDeliveryClass, CodingAgentProductEventDiagnostic,

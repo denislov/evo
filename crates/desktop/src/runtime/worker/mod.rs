@@ -382,6 +382,79 @@ impl RuntimeState {
         Ok((name, updated_at))
     }
 
+    pub(super) async fn list_merge_proposals(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Vec<coding_agent::api::event::CodingAgentMergeProposal>, DesktopBridgeError> {
+        let session = &mut self
+            .workspaces
+            .get_mut(session_id)
+            .ok_or_else(|| DesktopBridgeError::Busy {
+                operation: "desktop_list_merge_proposals".into(),
+            })?
+            .session;
+        let outcome = session
+            .run(CodingAgentOperation::ListMergeProposals)
+            .await?;
+        let CodingAgentOperationOutcome::MergeProposals(proposals) = outcome else {
+            return Err(DesktopBridgeError::Session {
+                message: "listing merge proposals returned an unexpected outcome".into(),
+            });
+        };
+        Ok(proposals)
+    }
+
+    pub(super) async fn merge_child_worktree(
+        &mut self,
+        session_id: &str,
+        worktree_id: String,
+    ) -> Result<(String, usize), DesktopBridgeError> {
+        let session = &mut self
+            .workspaces
+            .get_mut(session_id)
+            .ok_or_else(|| DesktopBridgeError::Busy {
+                operation: "desktop_merge_child_worktree".into(),
+            })?
+            .session;
+        let outcome = session
+            .run(CodingAgentOperation::MergeChildWorktree { worktree_id })
+            .await?;
+        let CodingAgentOperationOutcome::MergeApplied {
+            worktree_id,
+            applied,
+            ..
+        } = outcome
+        else {
+            return Err(DesktopBridgeError::Session {
+                message: "merging a child worktree returned an unexpected outcome".into(),
+            });
+        };
+        Ok((worktree_id, applied))
+    }
+
+    pub(super) async fn discard_child_worktree(
+        &mut self,
+        session_id: &str,
+        worktree_id: String,
+    ) -> Result<String, DesktopBridgeError> {
+        let session = &mut self
+            .workspaces
+            .get_mut(session_id)
+            .ok_or_else(|| DesktopBridgeError::Busy {
+                operation: "desktop_discard_child_worktree".into(),
+            })?
+            .session;
+        let outcome = session
+            .run(CodingAgentOperation::DiscardChildWorktree { worktree_id })
+            .await?;
+        let CodingAgentOperationOutcome::WorktreeDiscarded { worktree_id } = outcome else {
+            return Err(DesktopBridgeError::Session {
+                message: "discarding a child worktree returned an unexpected outcome".into(),
+            });
+        };
+        Ok(worktree_id)
+    }
+
     pub(super) async fn create_session(
         &mut self,
         open_session_count: usize,

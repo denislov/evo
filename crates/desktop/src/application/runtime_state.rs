@@ -405,6 +405,16 @@ impl<Presentation: RuntimeWorkspacePresentation>
         }
     }
 
+    pub(crate) fn set_merge_proposals(
+        &mut self,
+        owner: &WorkspaceKey,
+        proposals: Vec<coding_agent::api::event::CodingAgentMergeProposal>,
+    ) {
+        if let Some(workspace) = self.workspaces.get_mut(owner) {
+            workspace.merge_proposals = Arc::new(proposals);
+        }
+    }
+
     pub(crate) fn apply_model_thinking_selection(
         &mut self,
         owner: &WorkspaceKey,

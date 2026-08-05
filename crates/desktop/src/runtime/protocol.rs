@@ -7,7 +7,9 @@ use coding_agent::api::client::{
 use coding_agent::api::embedding::{CodingAgentEmbeddingSnapshot, CodingAgentThinkingLevel};
 use coding_agent::api::embedding::{CodingAgentWorkspaceSelection, global_config_directory};
 use coding_agent::api::error::CodingAgentPublicError;
-use coding_agent::api::event::{CodingAgentProductEvent, CodingAgentRecoveryResolution};
+use coding_agent::api::event::{
+    CodingAgentMergeProposal, CodingAgentProductEvent, CodingAgentRecoveryResolution,
+};
 use coding_agent::api::review::{
     CodingAgentExternalEditorTarget, CodingAgentFileReview, CodingAgentFileReviewRequest,
 };
@@ -128,6 +130,20 @@ pub(super) enum DesktopRuntimeCommand {
         command_id: u64,
         session_id: String,
         target: CodingAgentExternalEditorTarget,
+    },
+    ListMergeProposals {
+        command_id: u64,
+        session_id: String,
+    },
+    MergeChildWorktree {
+        command_id: u64,
+        session_id: String,
+        worktree_id: String,
+    },
+    DiscardChildWorktree {
+        command_id: u64,
+        session_id: String,
+        worktree_id: String,
     },
 }
 
@@ -266,7 +282,10 @@ impl DesktopRuntimeCommand {
             | Self::RetryRecovery { command_id, .. }
             | Self::ResolveRecovery { command_id, .. }
             | Self::ReviewChangedFile { command_id, .. }
-            | Self::OpenExternalEditor { command_id, .. } => *command_id,
+            | Self::OpenExternalEditor { command_id, .. }
+            | Self::ListMergeProposals { command_id, .. }
+            | Self::MergeChildWorktree { command_id, .. }
+            | Self::DiscardChildWorktree { command_id, .. } => *command_id,
         }
     }
 
@@ -293,6 +312,9 @@ impl DesktopRuntimeCommand {
             Self::ResolveRecovery { .. } => DesktopRuntimeCommandKind::ResolveRecovery,
             Self::ReviewChangedFile { .. } => DesktopRuntimeCommandKind::ReviewChangedFile,
             Self::OpenExternalEditor { .. } => DesktopRuntimeCommandKind::OpenExternalEditor,
+            Self::ListMergeProposals { .. } => DesktopRuntimeCommandKind::ListMergeProposals,
+            Self::MergeChildWorktree { .. } => DesktopRuntimeCommandKind::MergeChildWorktree,
+            Self::DiscardChildWorktree { .. } => DesktopRuntimeCommandKind::DiscardChildWorktree,
         }
     }
 
@@ -307,7 +329,10 @@ impl DesktopRuntimeCommand {
             | Self::SelectSessionProfile { target, .. } => target.session_id(),
             Self::SubmitPrompt { target, .. } => target.existing_session_id(),
             Self::ReviewChangedFile { session_id, .. }
-            | Self::OpenExternalEditor { session_id, .. } => Some(session_id),
+            | Self::OpenExternalEditor { session_id, .. }
+            | Self::ListMergeProposals { session_id, .. }
+            | Self::MergeChildWorktree { session_id, .. }
+            | Self::DiscardChildWorktree { session_id, .. } => Some(session_id),
             Self::Resync { session_id, .. }
             | Self::Abort { session_id, .. }
             | Self::Steer { session_id, .. }
@@ -341,6 +366,9 @@ pub enum DesktopRuntimeCommandKind {
     ResolveRecovery,
     ReviewChangedFile,
     OpenExternalEditor,
+    ListMergeProposals,
+    MergeChildWorktree,
+    DiscardChildWorktree,
 }
 
 #[derive(Debug, Clone)]
@@ -587,6 +615,19 @@ pub enum DesktopRuntimeUpdate {
         command_id: u64,
         target: CodingAgentExternalEditorTarget,
     },
+    MergeProposalsListed {
+        command_id: u64,
+        proposals: Vec<CodingAgentMergeProposal>,
+    },
+    ChildWorktreeMerged {
+        command_id: u64,
+        worktree_id: String,
+        applied: usize,
+    },
+    ChildWorktreeDiscarded {
+        command_id: u64,
+        worktree_id: String,
+    },
     PromptFinished {
         command_id: u64,
         operation_id: String,
@@ -637,6 +678,9 @@ impl DesktopRuntimeUpdate {
             Self::RecoveryChanged { .. } => "recovery_changed",
             Self::FileReviewed { .. } => "file_reviewed",
             Self::ExternalEditorTargetValidated { .. } => "external_editor_target_validated",
+            Self::MergeProposalsListed { .. } => "merge_proposals_listed",
+            Self::ChildWorktreeMerged { .. } => "child_worktree_merged",
+            Self::ChildWorktreeDiscarded { .. } => "child_worktree_discarded",
             Self::PromptFinished { .. } => "prompt_finished",
             Self::CommandRejected { .. } => "command_rejected",
             Self::RuntimeFailed { .. } => "runtime_failed",

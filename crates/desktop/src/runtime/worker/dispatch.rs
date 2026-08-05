@@ -375,6 +375,42 @@ async fn dispatch_command_inner(
                 .await?;
             Ok(DesktopRuntimeUpdate::ExternalEditorTargetValidated { command_id, target })
         }
+        DesktopRuntimeCommand::ListMergeProposals { session_id, .. } => {
+            let session_id = resolve_idle_target(state, active, Some(&session_id))?;
+            let proposals = state.list_merge_proposals(&session_id).await?;
+            Ok(DesktopRuntimeUpdate::MergeProposalsListed {
+                command_id,
+                proposals,
+            })
+        }
+        DesktopRuntimeCommand::MergeChildWorktree {
+            session_id,
+            worktree_id,
+            ..
+        } => {
+            let session_id = resolve_idle_target(state, active, Some(&session_id))?;
+            let (worktree_id, applied) =
+                state.merge_child_worktree(&session_id, worktree_id).await?;
+            Ok(DesktopRuntimeUpdate::ChildWorktreeMerged {
+                command_id,
+                worktree_id,
+                applied,
+            })
+        }
+        DesktopRuntimeCommand::DiscardChildWorktree {
+            session_id,
+            worktree_id,
+            ..
+        } => {
+            let session_id = resolve_idle_target(state, active, Some(&session_id))?;
+            let worktree_id = state
+                .discard_child_worktree(&session_id, worktree_id)
+                .await?;
+            Ok(DesktopRuntimeUpdate::ChildWorktreeDiscarded {
+                command_id,
+                worktree_id,
+            })
+        }
         command @ (DesktopRuntimeCommand::Abort { .. }
         | DesktopRuntimeCommand::Steer { .. }
         | DesktopRuntimeCommand::FollowUp { .. }

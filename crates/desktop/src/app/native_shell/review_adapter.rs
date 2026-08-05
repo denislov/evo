@@ -4,6 +4,124 @@ use super::{
 };
 
 impl NativeShell {
+    pub(super) fn refresh_merge_proposals(&mut self, cx: &mut Context<Self>) {
+        let intent = DesktopCommandIntent::ListMergeProposals;
+        self.submit_merge_proposal_command(intent, None, cx);
+    }
+
+    pub(super) fn decide_merge_proposal(
+        &mut self,
+        worktree_id: String,
+        merge: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let exists = self
+            .app
+            .workspaces
+            .active()
+            .merge_proposals
+            .iter()
+            .any(|proposal| proposal.worktree_id == worktree_id);
+        if !exists {
+            self.app
+                .workspaces
+                .active_mut()
+                .set_preference_notice("Refresh merge proposals before deciding this item.".into());
+            self.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
+            cx.notify();
+            return;
+        }
+        let intent = if merge {
+            DesktopCommandIntent::MergeProposal {
+                worktree_id: worktree_id.clone(),
+            }
+        } else {
+            DesktopCommandIntent::DiscardProposal {
+                worktree_id: worktree_id.clone(),
+            }
+        };
+        self.submit_merge_proposal_command(intent, Some(worktree_id), cx);
+    }
+
+    fn submit_merge_proposal_command(
+        &mut self,
+        intent: DesktopCommandIntent,
+        worktree_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_command_contains_where(|pending| {
+            matches!(
+                pending,
+                DesktopCommandIntent::ListMergeProposals
+                    | DesktopCommandIntent::MergeProposal { .. }
+                    | DesktopCommandIntent::DiscardProposal { .. }
+            )
+        }) {
+            self.app
+                .workspaces
+                .active_mut()
+                .set_preference_notice("Another merge proposal operation is pending.".into());
+            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
+            cx.notify();
+            return;
+        }
+        let Some(command_id) = self.reserve_command(intent.clone()) else {
+            self.refresh_views(UiChangeSet::one(UiRegion::Toast), cx);
+            cx.notify();
+            return;
+        };
+        let Some(session_id) = self
+            .app
+            .workspaces
+            .active()
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot().session.session_id.clone())
+        else {
+            self.complete_active_command(command_id, &intent);
+            self.app
+                .workspaces
+                .active_mut()
+                .set_preference_notice("Merge proposal review requires an open session.".into());
+            self.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
+            cx.notify();
+            return;
+        };
+        let admission = self
+            .connection
+            .runtime_client
+            .as_ref()
+            .ok_or_else(|| "desktop runtime is unavailable".to_owned())
+            .and_then(|runtime| match (&intent, worktree_id.as_deref()) {
+                (DesktopCommandIntent::ListMergeProposals, _) => runtime
+                    .try_list_merge_proposals(command_id, &session_id)
+                    .map_err(|error| error.to_string()),
+                (DesktopCommandIntent::MergeProposal { .. }, Some(worktree_id)) => runtime
+                    .try_merge_child_worktree(command_id, &session_id, worktree_id)
+                    .map_err(|error| error.to_string()),
+                (DesktopCommandIntent::DiscardProposal { .. }, Some(worktree_id)) => runtime
+                    .try_discard_child_worktree(command_id, &session_id, worktree_id)
+                    .map_err(|error| error.to_string()),
+                _ => Err("invalid merge proposal command".into()),
+            });
+        match admission {
+            Ok(()) => self
+                .app
+                .workspaces
+                .active_mut()
+                .set_preference_notice("Merge proposal operation submitted.".into()),
+            Err(message) => {
+                self.complete_active_command(command_id, &intent);
+                self.app
+                    .workspaces
+                    .active_mut()
+                    .set_preference_notice(message);
+            }
+        }
+        self.refresh_views(UiChangeSet::one(UiRegion::Inspector), cx);
+        cx.notify();
+    }
+
     pub(super) fn request_file_review(
         &mut self,
         request: CodingAgentFileReviewRequest,

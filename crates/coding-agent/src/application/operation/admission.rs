@@ -53,6 +53,7 @@ impl CodingAgentSession {
             | CodingAgentOperation::SetSessionName { .. }
             | CodingAgentOperation::ExportCurrent
             | CodingAgentOperation::ExportCurrentHtml(_)
+            | CodingAgentOperation::ListMergeProposals
             | CodingAgentOperation::MergeChildWorktree { .. }
             | CodingAgentOperation::DiscardChildWorktree { .. } => {}
         }

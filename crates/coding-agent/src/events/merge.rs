@@ -1,5 +1,8 @@
 use super::emission::ProductEventDraft;
-use super::{CodingAgentMergeProductEvent, CodingAgentProductEventDurability};
+use super::{
+    CodingAgentMergeChange, CodingAgentMergeChangeKind, CodingAgentMergeProductEvent,
+    CodingAgentMergeProposal, CodingAgentProductEventDurability,
+};
 use crate::kernel::error::CodingSessionError;
 
 /// Internal merge event for one managed child worktree proposal (ARC-340).
@@ -8,8 +11,7 @@ pub(crate) enum MergeEvent {
     /// A child finished successfully and its worktree awaits merge/discard.
     ProposalCreated {
         operation_id: String,
-        worktree_id: String,
-        child_operation_id: String,
+        proposal: workspace_runtime::api::MergeProposal,
     },
     /// The proposal was applied to the parent workspace.
     Applied {
@@ -48,12 +50,10 @@ impl MergeEvent {
         let (event, operation_id) = match self {
             Self::ProposalCreated {
                 operation_id,
-                worktree_id,
-                child_operation_id,
+                proposal,
             } => (
                 CodingAgentMergeProductEvent::ProposalCreated {
-                    worktree_id,
-                    child_operation_id,
+                    proposal: proposal.into(),
                 },
                 operation_id,
             ),
@@ -110,10 +110,43 @@ impl MergeEvent {
         };
         ProductEventDraft {
             event: super::CodingAgentProductEventKind::Merge(event),
-            operation_id: Some(operation_id),
+            operation_id: Some(operation_id.clone()),
             session_id: None,
             terminal_status: None,
-            durability: CodingAgentProductEventDurability::LiveOnly,
+            durability: CodingAgentProductEventDurability::PendingSessionWrite {
+                operation_id: operation_id.clone(),
+            },
+        }
+    }
+}
+
+impl From<workspace_runtime::api::MergeProposal> for CodingAgentMergeProposal {
+    fn from(proposal: workspace_runtime::api::MergeProposal) -> Self {
+        Self {
+            worktree_id: proposal.worktree_id,
+            child_operation_id: proposal.child_operation_id,
+            base_revision: proposal.changeset.base_revision,
+            changes: proposal
+                .changeset
+                .entries
+                .into_iter()
+                .map(|entry| CodingAgentMergeChange {
+                    path: entry.path.to_string_lossy().into_owned(),
+                    kind: match entry.kind {
+                        workspace_runtime::api::ChangeKind::Added => {
+                            CodingAgentMergeChangeKind::Added
+                        }
+                        workspace_runtime::api::ChangeKind::Modified => {
+                            CodingAgentMergeChangeKind::Modified
+                        }
+                        workspace_runtime::api::ChangeKind::Deleted => {
+                            CodingAgentMergeChangeKind::Deleted
+                        }
+                    },
+                    additions: entry.additions,
+                    deletions: entry.deletions,
+                })
+                .collect(),
         }
     }
 }

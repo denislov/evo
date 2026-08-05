@@ -57,6 +57,7 @@ impl CodingAgentOperationOutcome {
             OperationOutcome::WorktreeDiscarded { worktree_id } => {
                 Self::WorktreeDiscarded { worktree_id }
             }
+            OperationOutcome::MergeProposals(proposals) => Self::MergeProposals(proposals),
         }
     }
 
@@ -137,6 +138,15 @@ impl CodingAgentOperationOutcome {
     pub fn into_session_name_changed(self) -> Result<(Option<String>, String), Self> {
         match self {
             Self::SessionNameChanged { name, updated_at } => Ok((name, updated_at)),
+            other => Err(other),
+        }
+    }
+
+    pub fn into_merge_proposals(
+        self,
+    ) -> Result<Vec<crate::events::CodingAgentMergeProposal>, Self> {
+        match self {
+            Self::MergeProposals(proposals) => Ok(proposals),
             other => Err(other),
         }
     }

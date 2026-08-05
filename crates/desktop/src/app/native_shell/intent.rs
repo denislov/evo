@@ -70,6 +70,9 @@ pub(super) enum UiIntent {
     CopyReviewPath,
     CopyFileReview,
     OpenExternalEditor,
+    RefreshMergeProposals,
+    MergeProposal(String),
+    DiscardProposal(String),
     SelectInspectorSection(InspectorSection),
     ExecutePalette(DesktopPaletteCommand),
     DecideAuthorization {
@@ -178,6 +181,13 @@ impl From<&InspectorPaneEvent> for UiIntent {
             InspectorPaneEvent::CopyReviewPath => Self::CopyReviewPath,
             InspectorPaneEvent::CopyFileReview => Self::CopyFileReview,
             InspectorPaneEvent::OpenExternalEditor => Self::OpenExternalEditor,
+            InspectorPaneEvent::RefreshMergeProposals => Self::RefreshMergeProposals,
+            InspectorPaneEvent::MergeProposal(worktree_id) => {
+                Self::MergeProposal(worktree_id.clone())
+            }
+            InspectorPaneEvent::DiscardProposal(worktree_id) => {
+                Self::DiscardProposal(worktree_id.clone())
+            }
             InspectorPaneEvent::Recovery { identity, action } => Self::Recovery {
                 identity: identity.clone(),
                 action: *action,

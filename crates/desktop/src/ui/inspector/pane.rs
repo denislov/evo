@@ -1,4 +1,7 @@
-use coding_agent::api::review::CodingAgentFileReviewRequest;
+use coding_agent::api::{
+    event::{CodingAgentMergeChangeKind, CodingAgentMergeProposal},
+    review::CodingAgentFileReviewRequest,
+};
 use desktop::projection::DesktopRecoveryStatus;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
 use desktop::ui::inspector::review::{DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES};
@@ -36,6 +39,9 @@ pub(crate) enum InspectorPaneEvent {
     CopyReviewPath,
     CopyFileReview,
     OpenExternalEditor,
+    RefreshMergeProposals,
+    MergeProposal(String),
+    DiscardProposal(String),
     SelectSection(InspectorSection),
     Recovery {
         identity: DesktopRecoveryIdentity,
@@ -84,6 +90,8 @@ pub(crate) struct InspectorPaneViewModel {
     pub(crate) changed_files: Vec<InspectorChangedFileView>,
     pub(crate) change_count: usize,
     pub(crate) file_review: Arc<DesktopFileReviewState>,
+    pub(crate) merge_proposals: Arc<Vec<CodingAgentMergeProposal>>,
+    pub(crate) merge_proposal_pending: bool,
     pub(crate) runtime_attention_count: usize,
     pub(crate) task_state: String,
     pub(crate) active_operation: String,
@@ -141,6 +149,8 @@ pub(crate) fn view_model(
             changed_files: Vec::new(),
             change_count: 0,
             file_review: Arc::clone(&workspace.file_review),
+            merge_proposals: Arc::clone(&workspace.merge_proposals),
+            merge_proposal_pending: false,
             runtime_attention_count: project.diagnostics.len(),
             task_state: "ready".into(),
             active_operation: "—".into(),
@@ -264,6 +274,15 @@ pub(crate) fn view_model(
         changed_files,
         change_count: snapshot.context.changes.len(),
         file_review: Arc::clone(&workspace.file_review),
+        merge_proposals: Arc::clone(&workspace.merge_proposals),
+        merge_proposal_pending: pending(|intent| {
+            matches!(
+                intent,
+                DesktopCommandIntent::ListMergeProposals
+                    | DesktopCommandIntent::MergeProposal { .. }
+                    | DesktopCommandIntent::DiscardProposal { .. }
+            )
+        }),
         runtime_attention_count,
         task_state: runtime_state_label(projection.lifecycle(), composer_running).to_owned(),
         active_operation: snapshot
@@ -359,6 +378,7 @@ impl Render for InspectorPane {
         let recovery_pending = view_model.recovery_pending;
         let file_review_pending = view_model.file_review_pending;
         let external_editor_pending = view_model.external_editor_pending;
+        let merge_proposal_pending = view_model.merge_proposal_pending;
         let change_count = view_model.change_count;
         let selected_review_request = match view_model.file_review.as_ref() {
             DesktopFileReviewState::Empty => None,
@@ -567,6 +587,103 @@ impl Render for InspectorPane {
                     )
             }
         };
+        let proposal_rows = view_model
+            .merge_proposals
+            .iter()
+            .enumerate()
+            .map(|(index, proposal)| {
+                let merge_id = proposal.worktree_id.clone();
+                let discard_id = proposal.worktree_id.clone();
+                let changes = proposal
+                    .changes
+                    .iter()
+                    .take(MAX_VISIBLE_FILE_CHANGES)
+                    .map(|change| {
+                        let marker = match change.kind {
+                            CodingAgentMergeChangeKind::Added => "+",
+                            CodingAgentMergeChangeKind::Modified => "~",
+                            CodingAgentMergeChangeKind::Deleted => "-",
+                        };
+                        div()
+                            .text_color(rgb(theme.muted_text.value()))
+                            .child(format!(
+                                "{marker} {}  +{} -{}",
+                                truncate_label(&change.path, 42),
+                                change.additions,
+                                change.deletions
+                            ))
+                    })
+                    .collect::<Vec<_>>();
+                let omitted = proposal.changes.len().saturating_sub(changes.len());
+                div()
+                    .id(("merge-proposal-row", index))
+                    .py_token(DesignSpace::Sm)
+                    .border_b_1()
+                    .border_color(rgb(theme.divider.value()))
+                    .flex()
+                    .flex_col()
+                    .gap_token(DesignSpace::Xs)
+                    .child(format!(
+                        "{} · {} change(s)",
+                        truncate_label(&proposal.worktree_id, 30),
+                        proposal.changes.len()
+                    ))
+                    .child(format!(
+                        "child {}",
+                        truncate_label(&proposal.child_operation_id, 36)
+                    ))
+                    .children(changes)
+                    .when(omitted > 0, |row| {
+                        row.child(
+                            div()
+                                .text_color(rgb(theme.warning.value()))
+                                .child(format!("+ {omitted} more change(s) omitted")),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .gap_token(DesignSpace::Sm)
+                            .child(
+                                Button::new(("merge-child-worktree", index))
+                                    .compact()
+                                    .label("Merge")
+                                    .tooltip("Apply this reviewed proposal to the parent workspace")
+                                    .disabled(
+                                        composer_running
+                                            || awaiting_prompt_start
+                                            || merge_proposal_pending,
+                                    )
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(InspectorPaneEvent::MergeProposal(
+                                            merge_id.clone(),
+                                        ));
+                                    })),
+                            )
+                            .child(
+                                DesktopCriticalButton::new(
+                                    ("discard-child-worktree", index),
+                                    "Discard",
+                                    "Permanently discard this child proposal",
+                                    DesktopCriticalTone::Dangerous,
+                                )
+                                .disabled(
+                                    composer_running
+                                        || awaiting_prompt_start
+                                        || merge_proposal_pending,
+                                )
+                                .build()
+                                .on_click(cx.listener(
+                                    move |_, _, _, cx| {
+                                        cx.emit(InspectorPaneEvent::DiscardProposal(
+                                            discard_id.clone(),
+                                        ));
+                                    },
+                                )),
+                            ),
+                    )
+            })
+            .collect::<Vec<_>>();
         let latest_recovery = view_model.latest_recovery;
         let latest_diagnostic = view_model.latest_diagnostic;
         let latest_config_diagnostic = view_model.latest_config_diagnostic;
@@ -714,6 +831,40 @@ impl Render for InspectorPane {
                     .gap_token(DesignSpace::Md)
                     .when(selected_section == InspectorSection::Changes, |panel| {
                         panel
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(section("CHILD PROPOSALS", theme))
+                                    .child(
+                                        DesktopIconButton::new(
+                                            "refresh-merge-proposals",
+                                            DesktopIcon::Refresh,
+                                            "Refresh pending child merge proposals",
+                                        )
+                                        .busy(merge_proposal_pending)
+                                        .build()
+                                        .disabled(
+                                            composer_running
+                                                || awaiting_prompt_start
+                                                || merge_proposal_pending,
+                                        )
+                                        .on_click(
+                                            cx.listener(|_, _, _, cx| {
+                                                cx.emit(InspectorPaneEvent::RefreshMergeProposals);
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .when(view_model.merge_proposals.is_empty(), |panel| {
+                                panel.child(
+                                    div()
+                                        .text_color(rgb(theme.muted_text.value()))
+                                        .child("No child proposals awaiting review."),
+                                )
+                            })
+                            .children(proposal_rows)
                             .child(section("CHANGES", theme))
                             .child(format!("changed files {change_count}"))
                             .when(change_count == 0, |panel| {

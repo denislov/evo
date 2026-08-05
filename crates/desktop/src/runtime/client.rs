@@ -867,6 +867,48 @@ impl RuntimeCommandClient {
         })
     }
 
+    pub fn try_list_merge_proposals(
+        &self,
+        command_id: u64,
+        session_id: &str,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        self.try_send(DesktopRuntimeCommand::ListMergeProposals {
+            command_id,
+            session_id: session_id.to_owned(),
+        })
+    }
+
+    pub fn try_merge_child_worktree(
+        &self,
+        command_id: u64,
+        session_id: &str,
+        worktree_id: &str,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        validate_selection_id("worktree", worktree_id)?;
+        self.try_send(DesktopRuntimeCommand::MergeChildWorktree {
+            command_id,
+            session_id: session_id.to_owned(),
+            worktree_id: worktree_id.to_owned(),
+        })
+    }
+
+    pub fn try_discard_child_worktree(
+        &self,
+        command_id: u64,
+        session_id: &str,
+        worktree_id: &str,
+    ) -> Result<(), DesktopCommandAdmissionError> {
+        validate_session_id(session_id)?;
+        validate_selection_id("worktree", worktree_id)?;
+        self.try_send(DesktopRuntimeCommand::DiscardChildWorktree {
+            command_id,
+            session_id: session_id.to_owned(),
+            worktree_id: worktree_id.to_owned(),
+        })
+    }
+
     fn try_send(&self, command: DesktopRuntimeCommand) -> Result<(), DesktopCommandAdmissionError> {
         self.commands
             .try_send(command)

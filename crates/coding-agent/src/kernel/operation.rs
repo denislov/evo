@@ -12,6 +12,7 @@ pub(crate) enum OperationKind {
     SetSessionTreeLabel,
     SetSessionName,
     SelfHealingEdit,
+    ListMergeProposals,
     MergeChildWorktree,
     DiscardChildWorktree,
 }
@@ -31,6 +32,7 @@ impl OperationKind {
             Self::SetSessionTreeLabel => "set_session_tree_label",
             Self::SetSessionName => "set_session_name",
             Self::SelfHealingEdit => "self_healing_edit",
+            Self::ListMergeProposals => "list_merge_proposals",
             Self::MergeChildWorktree => "merge_child_worktree",
             Self::DiscardChildWorktree => "discard_child_worktree",
         }
@@ -50,6 +52,7 @@ impl OperationKind {
             "set_session_tree_label" => Self::SetSessionTreeLabel,
             "set_session_name" => Self::SetSessionName,
             "self_healing_edit" => Self::SelfHealingEdit,
+            "list_merge_proposals" => Self::ListMergeProposals,
             "merge_child_worktree" => Self::MergeChildWorktree,
             "discard_child_worktree" => Self::DiscardChildWorktree,
             _ => return None,
@@ -108,6 +111,7 @@ pub(crate) enum OperationOutcomeFamily {
     ExportHtml,
     MergeApplied,
     WorktreeDiscarded,
+    MergeProposals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

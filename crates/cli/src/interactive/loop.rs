@@ -15,7 +15,7 @@ use crate::interactive::root::{
     InteractiveAction, InteractiveRoot, InteractiveStatus, PendingAgentInvocationRequest,
     PendingAgentTeamRequest, PendingBranchSummaryRequest, PendingDelegationConfirmationCommand,
     PendingDelegationConfirmationSelection, PendingForkRequest, PendingInteractiveCommand,
-    PendingSelfHealingEditRequest, TransientOverlayRole,
+    PendingMergeReviewRequest, PendingSelfHealingEditRequest, TransientOverlayRole,
 };
 use crate::interactive::session_actions::{
     SessionChoiceKind, hydrate_existing_session_target, hydrated_session_from_snapshot,
@@ -31,7 +31,7 @@ use coding_agent::api::embedding::{
 use coding_agent::api::error::CodingAgentPublicError;
 use coding_agent::api::event::CodingAgentProductEvent as ProductEvent;
 use coding_agent::api::operation::{
-    BranchSummaryReusePolicy, PromptInvocation, PromptTurnOutcome,
+    BranchSummaryReusePolicy, CodingAgentOperation, PromptInvocation, PromptTurnOutcome,
     SelfHealingEditModelRepairOptions, SelfHealingEditRequest,
 };
 use coding_agent::api::runtime::{CodingAgentSession, CodingAgentSessionBootstrap};
@@ -893,6 +893,7 @@ async fn handle_input_event<T: Terminal>(
         tool_authorization_decision,
         self_healing_edit_request,
         fork_request,
+        merge_review_request,
         mut render_request,
     ) = {
         let root = root_mut(tui, root_id)?;
@@ -906,6 +907,7 @@ async fn handle_input_event<T: Terminal>(
         let mut agent_team_request = None;
         let mut self_healing_edit_request = None;
         let mut fork_request = None;
+        let mut merge_review_request = None;
         if let Some(command) = root.take_pending_command() {
             debug_assert_eq!(action, command.action());
             match command {
@@ -933,6 +935,9 @@ async fn handle_input_event<T: Terminal>(
                 }
                 PendingInteractiveCommand::SelfHealingEdit(request) => {
                     self_healing_edit_request = Some(request);
+                }
+                PendingInteractiveCommand::MergeReview(request) => {
+                    merge_review_request = Some(request);
                 }
                 PendingInteractiveCommand::UseAgentProfile(profile_id) => {
                     selected_agent_profile_id = Some(profile_id);
@@ -976,6 +981,7 @@ async fn handle_input_event<T: Terminal>(
             tool_authorization_decision,
             self_healing_edit_request,
             fork_request,
+            merge_review_request,
             RenderRequest::changed(before != after),
         )
     };
@@ -1283,6 +1289,23 @@ async fn handle_input_event<T: Terminal>(
             )?);
             Ok(LoopControl::Continue(RenderRequest::FORCE))
         }
+        InteractiveAction::MergeReview => {
+            if running.is_some() {
+                return Ok(LoopControl::Continue(render_request));
+            }
+            let Some(request) = merge_review_request else {
+                return Ok(LoopControl::Continue(render_request));
+            };
+            start_merge_review_task(
+                tui,
+                root_id,
+                request,
+                prompt_context,
+                running,
+                coding_session,
+            )?;
+            Ok(LoopControl::Continue(RenderRequest::FORCE))
+        }
         InteractiveAction::DelegationConfirmation => {
             if running.is_some() {
                 return Ok(LoopControl::Continue(render_request));
@@ -1543,6 +1566,37 @@ fn start_tree_label_task<T: Terminal>(
     *running = Some(PromptTask::spawn_session_tree_label(
         session, entry_id, label,
     )?);
+    if prompt_context.show_progress() {
+        set_terminal_progress(tui, true)?;
+    }
+    Ok(())
+}
+
+fn start_merge_review_task<T: Terminal>(
+    tui: &mut Tui<T>,
+    root_id: usize,
+    request: PendingMergeReviewRequest,
+    prompt_context: &PromptContext,
+    running: &mut Option<PromptTask>,
+    coding_session: &mut Option<CodingAgentSession>,
+) -> Result<(), CliError> {
+    let Some(session) = coding_session.take() else {
+        root_mut(tui, root_id)?
+            .transcript
+            .push(TranscriptItem::system("No active coding session."));
+        return Ok(());
+    };
+    let operation = match request {
+        PendingMergeReviewRequest::List => CodingAgentOperation::ListMergeProposals,
+        PendingMergeReviewRequest::Merge(worktree_id) => {
+            CodingAgentOperation::MergeChildWorktree { worktree_id }
+        }
+        PendingMergeReviewRequest::Discard(worktree_id) => {
+            CodingAgentOperation::DiscardChildWorktree { worktree_id }
+        }
+    };
+    root_mut(tui, root_id)?.set_status(InteractiveStatus::Running);
+    *running = Some(PromptTask::spawn_merge_review(session, operation)?);
     if prompt_context.show_progress() {
         set_terminal_progress(tui, true)?;
     }
@@ -2258,6 +2312,10 @@ fn finish_prompt<T: Terminal>(
             };
             root.apply_tree_label_update(&result.entry_id, result.label, result.updated_at);
             root.transcript.push(TranscriptItem::system(notice));
+            *coding_session = Some(result.session);
+        }
+        PromptTaskCompletion::Completed(PromptTaskResult::MergeReview(result)) => {
+            root.transcript.push(TranscriptItem::system(result.message));
             *coding_session = Some(result.session);
         }
         PromptTaskCompletion::Completed(PromptTaskResult::DelegationRejection(result)) => {

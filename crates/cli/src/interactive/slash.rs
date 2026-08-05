@@ -57,6 +57,18 @@ pub(super) fn builtin_slash_commands() -> Vec<BuiltinSlashCommand> {
             description: "Approve or reject a delegation confirmation".into(),
         },
         BuiltinSlashCommand {
+            name: "proposals".into(),
+            description: "Review child worktree merge proposals".into(),
+        },
+        BuiltinSlashCommand {
+            name: "merge".into(),
+            description: "Merge a reviewed child worktree proposal".into(),
+        },
+        BuiltinSlashCommand {
+            name: "discard".into(),
+            description: "Discard a child worktree proposal".into(),
+        },
+        BuiltinSlashCommand {
             name: "scoped-models".into(),
             description: "Enable or disable models for cycling".into(),
         },

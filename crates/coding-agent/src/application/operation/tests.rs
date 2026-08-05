@@ -12,10 +12,13 @@ use super::contract::{
     BranchSummaryReusePolicy, CodingAgentOperation, OPERATION_DESCRIPTOR_REVISION,
     OperationCancellation, OperationCapacity, OperationChildPolicy, OperationLineage,
     OperationOutcomeFamily, OperationPriority, OperationRuntimeAccess, OperationSessionAccess,
-    OperationTerminalPolicy,
+    OperationTerminalPolicy, recovery_resolution_terminal_operation,
 };
 use super::{OperationClass, OperationDispatchMode};
 use crate::app::bootstrap::PromptInvocation;
+use crate::events::{
+    CodingAgentProductEventTerminalOperationKind, CodingAgentProductEventTerminalStatus,
+};
 use crate::kernel::operation::OperationKind;
 use crate::operations::agent_invocation::runner::AgentInvocationOptions;
 use crate::operations::prompt::context::PromptTurnOptions;
@@ -233,6 +236,46 @@ fn contract_table() -> Vec<(&'static str, CodingAgentOperation, ExpectedContract
                 has_root_evidence: false,
             },
         ),
+        (
+            "ListMergeProposals",
+            CodingAgentOperation::ListMergeProposals,
+            ExpectedContract {
+                kind: OperationKind::ListMergeProposals,
+                class: OperationClass::ReadOnly,
+                dispatch: OperationDispatchMode::Async,
+                outcome_family: OperationOutcomeFamily::MergeProposals,
+                terminal_policy: OperationTerminalPolicy::OutcomeAcknowledgement,
+                has_root_evidence: false,
+            },
+        ),
+        (
+            "MergeChildWorktree",
+            CodingAgentOperation::MergeChildWorktree {
+                worktree_id: "worktree-1".into(),
+            },
+            ExpectedContract {
+                kind: OperationKind::MergeChildWorktree,
+                class: OperationClass::SessionWriteRoot,
+                dispatch: OperationDispatchMode::Async,
+                outcome_family: OperationOutcomeFamily::MergeApplied,
+                terminal_policy: OperationTerminalPolicy::OutcomeAcknowledgement,
+                has_root_evidence: false,
+            },
+        ),
+        (
+            "DiscardChildWorktree",
+            CodingAgentOperation::DiscardChildWorktree {
+                worktree_id: "worktree-1".into(),
+            },
+            ExpectedContract {
+                kind: OperationKind::DiscardChildWorktree,
+                class: OperationClass::SessionWriteRoot,
+                dispatch: OperationDispatchMode::Async,
+                outcome_family: OperationOutcomeFamily::WorktreeDiscarded,
+                terminal_policy: OperationTerminalPolicy::OutcomeAcknowledgement,
+                has_root_evidence: false,
+            },
+        ),
     ]
 }
 
@@ -393,7 +436,7 @@ fn priority_cancellation_and_child_policy_follow_kind_and_dispatch() {
 /// contract review.
 #[test]
 fn every_operation_variant_is_covered() {
-    const PUBLIC_VARIANT_COUNT: usize = 14;
+    const PUBLIC_VARIANT_COUNT: usize = 17;
 
     let table = contract_table();
     assert_eq!(
@@ -407,6 +450,31 @@ fn every_operation_variant_is_covered() {
     let unique = names.len();
     names.dedup();
     assert_eq!(names.len(), unique, "contract table has duplicate rows");
+}
+
+#[test]
+fn merge_and_discard_recovery_resolutions_have_terminal_kinds() {
+    for (kind, expected) in [
+        (
+            OperationKind::MergeChildWorktree,
+            CodingAgentProductEventTerminalOperationKind::MergeChildWorktree,
+        ),
+        (
+            OperationKind::DiscardChildWorktree,
+            CodingAgentProductEventTerminalOperationKind::DiscardChildWorktree,
+        ),
+    ] {
+        let terminal = recovery_resolution_terminal_operation(
+            kind,
+            CodingAgentProductEventTerminalStatus::Aborted,
+        )
+        .expect("merge recovery must be resolvable");
+        assert_eq!(terminal.kind, expected);
+        assert_eq!(
+            terminal.status,
+            CodingAgentProductEventTerminalStatus::Aborted
+        );
+    }
 }
 
 /// Export is the only public operation whose submitted shape differs from the

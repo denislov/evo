@@ -92,10 +92,6 @@ impl ChildWorktreeLease {
         self.record.dest.as_path()
     }
 
-    pub(crate) fn record_id(&self) -> &str {
-        &self.record.id
-    }
-
     /// The handle identity bound to this worktree (id == directory == record).
     pub(crate) fn handle(&self) -> Result<WorkspaceHandle, CodingSessionError> {
         let id =
@@ -135,7 +131,10 @@ impl ChildWorktreeLease {
     /// A successfully finished child's worktree is promoted to `MergePending`
     /// instead of being reclaimed; the merge/discard decision belongs to the
     /// product operation layer afterwards.
-    pub(crate) fn promote_to_merge_pending(&mut self) -> Result<(), CodingSessionError> {
+    pub(crate) fn promote_to_merge_pending(
+        &mut self,
+        child_operation_id: &str,
+    ) -> Result<workspace_runtime::api::MergeProposal, CodingSessionError> {
         if self.released {
             return Err(CodingSessionError::Resource {
                 message: format!("child worktree {} was already released", self.record.id),
@@ -160,7 +159,25 @@ impl ChildWorktreeLease {
                     "cannot promote child worktree {} to MergePending: {error}",
                     self.record.id
                 ),
-            })
+            })?;
+        let changeset = workspace_runtime::api::build_changeset(&self.registry, &self.record.id)
+            .map_err(|error| CodingSessionError::Resource {
+                message: format!(
+                    "cannot build merge proposal for {}: {error}",
+                    self.record.id
+                ),
+            })?;
+        Ok(workspace_runtime::api::MergeProposal {
+            worktree_id: self.record.id.clone(),
+            child_operation_id: child_operation_id.to_owned(),
+            changeset,
+        })
+    }
+
+    /// Transfer cleanup ownership from this in-memory guard to the durable
+    /// registry after the proposal event has been published successfully.
+    pub(crate) fn retain_for_merge(&mut self) {
+        self.released = true;
     }
 }
 

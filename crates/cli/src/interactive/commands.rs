@@ -10,7 +10,7 @@ use crate::interactive::root::{
     InteractiveAction, InteractiveRoot, InteractiveStatus, PendingAgentInvocationRequest,
     PendingAgentTeamRequest, PendingBranchSummaryRequest, PendingDelegationConfirmationCommand,
     PendingDelegationConfirmationSelection, PendingForkRequest, PendingInteractiveCommand,
-    PendingSelfHealingEditModelRepair, PendingSelfHealingEditRequest,
+    PendingMergeReviewRequest, PendingSelfHealingEditModelRepair, PendingSelfHealingEditRequest,
 };
 use crate::interactive::session_actions::{
     SessionChoiceKind, clone_rust_native_choice, export_rust_native_choice,
@@ -44,6 +44,11 @@ pub(super) fn handle_slash_command(root: &mut InteractiveRoot, command: ParsedSl
         }
         "delegations" => handle_delegations_command(root, &command.args),
         "delegation" => handle_delegation_command(root, &command.args),
+        "proposals" => {
+            handle_merge_review_command(root, PendingMergeReviewRequest::List, &command.args)
+        }
+        "merge" => handle_merge_id_command(root, &command.args, false),
+        "discard" => handle_merge_id_command(root, &command.args, true),
         "resume" => handle_resume_command(root, &command.args),
         "export" => handle_export_command(root, &command.args),
         "import" => handle_import_command(root, &command.args),
@@ -79,6 +84,50 @@ pub(super) fn handle_slash_command(root: &mut InteractiveRoot, command: ParsedSl
             }
         }
     }
+}
+
+fn handle_merge_review_command(
+    root: &mut InteractiveRoot,
+    request: PendingMergeReviewRequest,
+    args: &str,
+) {
+    if root.status == InteractiveStatus::Running {
+        root.transcript.push(TranscriptItem::system(
+            "Wait for the current operation to finish before reviewing merge proposals.",
+        ));
+        return;
+    }
+    if !args.trim().is_empty() {
+        root.transcript
+            .push(TranscriptItem::system("Usage: /proposals"));
+        return;
+    }
+    root.queue_command(PendingInteractiveCommand::MergeReview(request));
+}
+
+fn handle_merge_id_command(root: &mut InteractiveRoot, args: &str, discard: bool) {
+    if root.status == InteractiveStatus::Running {
+        root.transcript.push(TranscriptItem::system(
+            "Wait for the current operation to finish before handling a merge proposal.",
+        ));
+        return;
+    }
+    let worktree_id = args.trim();
+    if worktree_id.is_empty() || worktree_id.chars().any(char::is_whitespace) {
+        let usage = if discard {
+            "Usage: /discard <worktree-id>"
+        } else {
+            "Usage: /merge <worktree-id>"
+        };
+        root.transcript.push(TranscriptItem::system(usage));
+        return;
+    }
+    let request = if discard {
+        PendingMergeReviewRequest::Discard(worktree_id.to_owned())
+    } else {
+        PendingMergeReviewRequest::Merge(worktree_id.to_owned())
+    };
+    root.queue_command(PendingInteractiveCommand::MergeReview(request));
 }
 
 fn handle_agents_command(root: &mut InteractiveRoot) {

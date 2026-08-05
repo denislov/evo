@@ -95,6 +95,7 @@ pub(super) enum InteractiveAction {
     AgentProfileUse,
     AgentInvocation,
     AgentTeam,
+    MergeReview,
     AbortRunning,
     NewSession,
     ReloadResources,
@@ -118,6 +119,7 @@ pub(super) enum PendingInteractiveCommand {
     AgentInvocation(PendingAgentInvocationRequest),
     AgentTeam(PendingAgentTeamRequest),
     SelfHealingEdit(PendingSelfHealingEditRequest),
+    MergeReview(PendingMergeReviewRequest),
     UseAgentProfile(ProfileId),
 }
 
@@ -132,9 +134,17 @@ impl PendingInteractiveCommand {
             Self::AgentInvocation(_) => InteractiveAction::AgentInvocation,
             Self::AgentTeam(_) => InteractiveAction::AgentTeam,
             Self::SelfHealingEdit(_) => InteractiveAction::SelfHealingEdit,
+            Self::MergeReview(_) => InteractiveAction::MergeReview,
             Self::UseAgentProfile(_) => InteractiveAction::AgentProfileUse,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PendingMergeReviewRequest {
+    List,
+    Merge(String),
+    Discard(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

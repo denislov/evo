@@ -74,7 +74,32 @@ pub(super) fn remove_materialization(
             }));
         }
     }
+    remove_auxiliary_directory(&registry.baseline_dir(&record.id))?;
+    remove_auxiliary_directory(&registry.transaction_dir(&record.id))?;
     Ok(())
+}
+
+fn remove_auxiliary_directory(path: &Path) -> Result<(), RegistryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(path).map_err(|error| RegistryError::Io {
+                message: format!(
+                    "cannot remove auxiliary directory {}: {error}",
+                    path.display()
+                ),
+            })
+        }
+        Ok(_) => Err(RegistryError::InvalidRecord {
+            message: format!("auxiliary path is not a directory: {}", path.display()),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RegistryError::Io {
+            message: format!(
+                "cannot inspect auxiliary directory {}: {error}",
+                path.display()
+            ),
+        }),
+    }
 }
 
 /// Recursive byte size of `path`; missing paths count as zero.

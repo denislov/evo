@@ -1,7 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use workspace_runtime::api::{ChangeEntry, WorktreeRegistry, apply_merge};
+use tokio_util::sync::CancellationToken;
+use workspace_runtime::api::{ChangeEntry, WorktreeRegistry, apply_merge_cancellable};
 
 use crate::kernel::error::CodingSessionError;
 use crate::services::event::EventService;
@@ -11,6 +12,61 @@ pub(crate) struct MergeOutcome {
     pub(crate) worktree_id: String,
     pub(crate) applied: usize,
     pub(crate) entries: Vec<ChangeEntry>,
+}
+
+pub(crate) async fn list_proposals(
+    registry: &Arc<WorktreeRegistry>,
+    parent_workspace_root: &Path,
+    cancellation: CancellationToken,
+) -> Result<Vec<crate::events::CodingAgentMergeProposal>, CodingSessionError> {
+    let parent = std::path::absolute(parent_workspace_root).map_err(|error| {
+        CodingSessionError::Resource {
+            message: format!(
+                "cannot resolve session workspace {}: {error}",
+                parent_workspace_root.display()
+            ),
+        }
+    })?;
+    let registry = registry.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut proposals = Vec::new();
+        for record in registry
+            .load_all()
+            .map_err(|error| CodingSessionError::Resource {
+                message: format!("cannot list merge proposals: {error}"),
+            })?
+        {
+            if record.source != parent
+                || record.lifecycle != workspace_runtime::api::WorkspaceLifecycle::MergePending
+            {
+                continue;
+            }
+            if cancellation.is_cancelled() {
+                return Err(CodingSessionError::Cancelled);
+            }
+            let changeset = workspace_runtime::api::build_changeset_cancellable(
+                &registry,
+                &record.id,
+                &cancellation,
+            )
+            .map_err(|error| CodingSessionError::Resource {
+                message: format!("cannot review proposal {}: {error}", record.id),
+            })?;
+            proposals.push(
+                workspace_runtime::api::MergeProposal {
+                    worktree_id: record.id,
+                    child_operation_id: record.owner_operation,
+                    changeset,
+                }
+                .into(),
+            );
+        }
+        Ok(proposals)
+    })
+    .await
+    .map_err(|error| CodingSessionError::Session {
+        message: format!("merge proposal worker failed: {error}"),
+    })?
 }
 
 /// Merge a `MergePending` worktree into the current session's parent workspace.
@@ -26,6 +82,7 @@ pub(crate) async fn merge_worktree(
     parent_workspace_root: &Path,
     operation_id: &str,
     worktree_id: &str,
+    cancellation: CancellationToken,
 ) -> Result<MergeOutcome, CodingSessionError> {
     let record = registry
         .load(worktree_id)
@@ -43,8 +100,13 @@ pub(crate) async fn merge_worktree(
     let operation_id = operation_id.to_owned();
     let registry_for_merge = registry.clone();
     let worktree_id_for_merge = worktree_id.clone();
+    let merge_cancellation = cancellation.clone();
     let report = tokio::task::spawn_blocking(move || {
-        apply_merge(&registry_for_merge, &worktree_id_for_merge)
+        apply_merge_cancellable(
+            &registry_for_merge,
+            &worktree_id_for_merge,
+            &merge_cancellation,
+        )
     })
         .await
         .map_err(|error| CodingSessionError::Session {
@@ -84,6 +146,7 @@ pub(crate) async fn merge_worktree(
                     ),
                 }
             }
+            workspace_runtime::api::MergeError::Cancelled => CodingSessionError::Cancelled,
             other => {
                 events
                     .emit_merge_failed(&operation_id, &worktree_id, &CodingSessionError::Resource {

@@ -537,13 +537,11 @@ impl EventService {
     pub(crate) fn emit_merge_proposal_created(
         &self,
         operation_id: impl Into<String>,
-        worktree_id: impl Into<String>,
-        child_operation_id: impl Into<String>,
+        proposal: workspace_runtime::api::MergeProposal,
     ) -> Result<(), CodingSessionError> {
         self.publish_merge_event(MergeEvent::ProposalCreated {
             operation_id: operation_id.into(),
-            worktree_id: worktree_id.into(),
-            child_operation_id: child_operation_id.into(),
+            proposal,
         })?;
         Ok(())
     }

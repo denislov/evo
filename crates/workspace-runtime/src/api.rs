@@ -14,7 +14,8 @@ pub use crate::process::{
     ProgramKind, path_exists, resolve_shell_path, run,
 };
 pub use crate::worktree::merge::{
-    ChangeEntry, ChangeKind, ChangeSet, MergeError, MergeReport, apply_merge, build_changeset,
+    ChangeEntry, ChangeKind, ChangeSet, MergeError, MergeProposal, MergeReport, apply_merge,
+    apply_merge_cancellable, build_changeset, build_changeset_cancellable,
 };
 pub use crate::worktree::registry::{
     GcOptions, GcRemovedWorktree, GcReport, RecoveryReport, RegistryError,

@@ -733,6 +733,13 @@ impl NativeShell {
             UiIntent::CopyReviewPath => self.copy_review_path(cx),
             UiIntent::CopyFileReview => self.copy_file_review(cx),
             UiIntent::OpenExternalEditor => self.open_review_in_external_editor(cx),
+            UiIntent::RefreshMergeProposals => self.refresh_merge_proposals(cx),
+            UiIntent::MergeProposal(worktree_id) => {
+                self.decide_merge_proposal(worktree_id, true, cx);
+            }
+            UiIntent::DiscardProposal(worktree_id) => {
+                self.decide_merge_proposal(worktree_id, false, cx);
+            }
             UiIntent::SelectInspectorSection(section) => {
                 self.app
                     .workspaces

@@ -523,6 +523,36 @@ impl CodingAgentSession {
                     )
                     .await
                     .map(OperationOutcome::AgentTeam),
+                    CodingAgentOperation::ListMergeProposals => {
+                        let workspace_root = snapshot
+                            .workspace
+                            .as_ref()
+                            .ok_or_else(|| CodingSessionError::UnsupportedCapability {
+                                capability: "proposal review requires the session workspace authority"
+                                    .into(),
+                            })?
+                            .cwd()
+                            .to_path_buf();
+                        let registry = self
+                            .runtime_host
+                            .operation_supervisor
+                            .control
+                            .worktree_registry()
+                            .cloned()
+                            .ok_or_else(|| CodingSessionError::UnsupportedCapability {
+                                capability: "proposal review requires a managed worktree registry"
+                                    .into(),
+                            })?;
+                        crate::operations::merge::runner::list_proposals(
+                            &registry,
+                            &workspace_root,
+                            operation_cancellation
+                                .clone()
+                            .unwrap_or_default(),
+                        )
+                        .await
+                        .map(OperationOutcome::MergeProposals)
+                    }
                     CodingAgentOperation::MergeChildWorktree { worktree_id } => {
                         let workspace_root = snapshot
                             .workspace
@@ -548,6 +578,9 @@ impl CodingAgentSession {
                             &workspace_root,
                             &snapshot.operation_id,
                             &worktree_id,
+                            operation_cancellation
+                                .clone()
+                            .unwrap_or_default(),
                         )
                         .await
                         .map(|outcome| {

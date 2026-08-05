@@ -178,4 +178,5 @@ pub(crate) enum OperationOutcome {
     WorktreeDiscarded {
         worktree_id: String,
     },
+    MergeProposals(Vec<crate::events::CodingAgentMergeProposal>),
 }

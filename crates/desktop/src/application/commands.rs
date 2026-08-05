@@ -46,6 +46,13 @@ pub(crate) enum DesktopCommandIntent {
     FileReview {
         request: CodingAgentFileReviewRequest,
     },
+    ListMergeProposals,
+    MergeProposal {
+        worktree_id: String,
+    },
+    DiscardProposal {
+        worktree_id: String,
+    },
     ExternalEditor {
         project_relative_path: String,
     },
@@ -82,6 +89,9 @@ impl DesktopCommandIntent {
                 ..
             } => DesktopRuntimeCommandKind::ResolveRecovery,
             Self::FileReview { .. } => DesktopRuntimeCommandKind::ReviewChangedFile,
+            Self::ListMergeProposals => DesktopRuntimeCommandKind::ListMergeProposals,
+            Self::MergeProposal { .. } => DesktopRuntimeCommandKind::MergeChildWorktree,
+            Self::DiscardProposal { .. } => DesktopRuntimeCommandKind::DiscardChildWorktree,
             Self::ExternalEditor { .. } => DesktopRuntimeCommandKind::OpenExternalEditor,
         }
     }

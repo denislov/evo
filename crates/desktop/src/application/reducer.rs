@@ -56,6 +56,9 @@ pub(crate) enum RuntimeUpdateKind {
     AuthorizationDecisionAccepted,
     RecoveryChanged,
     FileReviewed,
+    MergeProposalsListed,
+    ChildWorktreeMerged,
+    ChildWorktreeDiscarded,
     ExternalEditorTargetValidated,
     PromptFinished,
     CommandRejected,
@@ -65,7 +68,7 @@ pub(crate) enum RuntimeUpdateKind {
 
 impl RuntimeUpdateKind {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 24] = [
+    pub(crate) const ALL: [Self; 27] = [
         Self::Reloaded,
         Self::Resynced,
         Self::SessionChanged,
@@ -85,6 +88,9 @@ impl RuntimeUpdateKind {
         Self::AuthorizationDecisionAccepted,
         Self::RecoveryChanged,
         Self::FileReviewed,
+        Self::MergeProposalsListed,
+        Self::ChildWorktreeMerged,
+        Self::ChildWorktreeDiscarded,
         Self::ExternalEditorTargetValidated,
         Self::PromptFinished,
         Self::CommandRejected,
@@ -114,6 +120,9 @@ impl RuntimeUpdateKind {
             Self::AuthorizationDecisionAccepted => "authorization_decision_accepted",
             Self::RecoveryChanged => "recovery_changed",
             Self::FileReviewed => "file_reviewed",
+            Self::MergeProposalsListed => "merge_proposals_listed",
+            Self::ChildWorktreeMerged => "child_worktree_merged",
+            Self::ChildWorktreeDiscarded => "child_worktree_discarded",
             Self::ExternalEditorTargetValidated => "external_editor_target_validated",
             Self::PromptFinished => "prompt_finished",
             Self::CommandRejected => "command_rejected",
@@ -150,6 +159,13 @@ pub(crate) const fn runtime_update_kind(update: &DesktopRuntimeUpdate) -> Runtim
         }
         DesktopRuntimeUpdate::RecoveryChanged { .. } => RuntimeUpdateKind::RecoveryChanged,
         DesktopRuntimeUpdate::FileReviewed { .. } => RuntimeUpdateKind::FileReviewed,
+        DesktopRuntimeUpdate::MergeProposalsListed { .. } => {
+            RuntimeUpdateKind::MergeProposalsListed
+        }
+        DesktopRuntimeUpdate::ChildWorktreeMerged { .. } => RuntimeUpdateKind::ChildWorktreeMerged,
+        DesktopRuntimeUpdate::ChildWorktreeDiscarded { .. } => {
+            RuntimeUpdateKind::ChildWorktreeDiscarded
+        }
         DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. } => {
             RuntimeUpdateKind::ExternalEditorTargetValidated
         }
@@ -191,6 +207,9 @@ pub(crate) fn runtime_update_hydrated_snapshot(
         | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
         | DesktopRuntimeUpdate::RecoveryChanged { .. }
         | DesktopRuntimeUpdate::FileReviewed { .. }
+        | DesktopRuntimeUpdate::MergeProposalsListed { .. }
+        | DesktopRuntimeUpdate::ChildWorktreeMerged { .. }
+        | DesktopRuntimeUpdate::ChildWorktreeDiscarded { .. }
         | DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. }
         | DesktopRuntimeUpdate::CommandRejected { .. }
         | DesktopRuntimeUpdate::RuntimeFailed { .. }
@@ -216,6 +235,9 @@ pub(crate) const fn runtime_update_command_id(update: &DesktopRuntimeUpdate) -> 
         | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { command_id, .. }
         | DesktopRuntimeUpdate::RecoveryChanged { command_id, .. }
         | DesktopRuntimeUpdate::FileReviewed { command_id, .. }
+        | DesktopRuntimeUpdate::MergeProposalsListed { command_id, .. }
+        | DesktopRuntimeUpdate::ChildWorktreeMerged { command_id, .. }
+        | DesktopRuntimeUpdate::ChildWorktreeDiscarded { command_id, .. }
         | DesktopRuntimeUpdate::ExternalEditorTargetValidated { command_id, .. }
         | DesktopRuntimeUpdate::PromptFinished { command_id, .. }
         | DesktopRuntimeUpdate::CommandRejected { command_id, .. } => Some(*command_id),
@@ -270,6 +292,9 @@ pub(crate) fn runtime_update_observed_workspace_key(
         | DesktopRuntimeUpdate::ControlAccepted { .. }
         | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
         | DesktopRuntimeUpdate::FileReviewed { .. }
+        | DesktopRuntimeUpdate::MergeProposalsListed { .. }
+        | DesktopRuntimeUpdate::ChildWorktreeMerged { .. }
+        | DesktopRuntimeUpdate::ChildWorktreeDiscarded { .. }
         | DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. }
         | DesktopRuntimeUpdate::CommandRejected { .. }
         | DesktopRuntimeUpdate::RuntimeFailed { .. }
@@ -523,6 +548,96 @@ fn reduce_runtime_update<Presentation: RuntimeWorkspacePresentation>(
             let foreground = state.workspaces.active_key().clone();
             return workspace_update_transition(&foreground, &owner, changes);
         }
+        DesktopRuntimeUpdate::MergeProposalsListed {
+            command_id,
+            proposals,
+        } => {
+            let owner = state
+                .commands
+                .owner(command_id)
+                .cloned()
+                .unwrap_or(target.clone());
+            if state.complete_runtime_command(
+                command_id,
+                &owner,
+                &DesktopCommandIntent::ListMergeProposals,
+            ) {
+                let count = proposals.len();
+                state.set_merge_proposals(&owner, proposals);
+                state.set_runtime_notice(&owner, format!("Loaded {count} merge proposal(s)."));
+                changes.insert(UiRegion::Inspector);
+            }
+            let foreground = state.workspaces.active_key().clone();
+            return workspace_update_transition(&foreground, &owner, changes);
+        }
+        DesktopRuntimeUpdate::ChildWorktreeMerged {
+            command_id,
+            worktree_id,
+            applied,
+        } => {
+            let owner = state
+                .commands
+                .owner(command_id)
+                .cloned()
+                .unwrap_or(target.clone());
+            let intent = DesktopCommandIntent::MergeProposal {
+                worktree_id: worktree_id.clone(),
+            };
+            if state.complete_runtime_command(command_id, &owner, &intent) {
+                let proposals = state
+                    .workspaces
+                    .get(&owner)
+                    .map(|workspace| {
+                        workspace
+                            .merge_proposals
+                            .iter()
+                            .filter(|proposal| proposal.worktree_id != worktree_id)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                state.set_merge_proposals(&owner, proposals);
+                state.set_runtime_notice(
+                    &owner,
+                    format!("Merged {worktree_id}; applied {applied} change(s)."),
+                );
+                changes.insert(UiRegion::Inspector);
+            }
+            let foreground = state.workspaces.active_key().clone();
+            return workspace_update_transition(&foreground, &owner, changes);
+        }
+        DesktopRuntimeUpdate::ChildWorktreeDiscarded {
+            command_id,
+            worktree_id,
+        } => {
+            let owner = state
+                .commands
+                .owner(command_id)
+                .cloned()
+                .unwrap_or(target.clone());
+            let intent = DesktopCommandIntent::DiscardProposal {
+                worktree_id: worktree_id.clone(),
+            };
+            if state.complete_runtime_command(command_id, &owner, &intent) {
+                let proposals = state
+                    .workspaces
+                    .get(&owner)
+                    .map(|workspace| {
+                        workspace
+                            .merge_proposals
+                            .iter()
+                            .filter(|proposal| proposal.worktree_id != worktree_id)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                state.set_merge_proposals(&owner, proposals);
+                state.set_runtime_notice(&owner, format!("Discarded {worktree_id}."));
+                changes.insert(UiRegion::Inspector);
+            }
+            let foreground = state.workspaces.active_key().clone();
+            return workspace_update_transition(&foreground, &owner, changes);
+        }
         DesktopRuntimeUpdate::ExternalEditorTargetValidated {
             command_id,
             target: validated_target,
@@ -743,6 +858,9 @@ pub(crate) fn projection_event(update: DesktopRuntimeUpdate) -> Option<Projectio
         | DesktopRuntimeUpdate::ControlAccepted { .. }
         | DesktopRuntimeUpdate::AuthorizationDecisionAccepted { .. }
         | DesktopRuntimeUpdate::FileReviewed { .. }
+        | DesktopRuntimeUpdate::MergeProposalsListed { .. }
+        | DesktopRuntimeUpdate::ChildWorktreeMerged { .. }
+        | DesktopRuntimeUpdate::ChildWorktreeDiscarded { .. }
         | DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. } => None,
     }
 }
@@ -1037,6 +1155,9 @@ fn reduce_pre_projection_update<Presentation: RuntimeWorkspacePresentation>(
         | DesktopRuntimeUpdate::ResyncRequired { .. }
         | DesktopRuntimeUpdate::RecoveryChanged { .. }
         | DesktopRuntimeUpdate::FileReviewed { .. }
+        | DesktopRuntimeUpdate::MergeProposalsListed { .. }
+        | DesktopRuntimeUpdate::ChildWorktreeMerged { .. }
+        | DesktopRuntimeUpdate::ChildWorktreeDiscarded { .. }
         | DesktopRuntimeUpdate::ExternalEditorTargetValidated { .. }
         | DesktopRuntimeUpdate::ControlAccepted { .. } => {}
     }
@@ -1125,6 +1246,18 @@ fn reduce_command_rejected<Presentation: RuntimeWorkspacePresentation>(
                 );
                 changes.insert(UiRegion::Inspector);
             }
+        }
+        DesktopRuntimeCommandKind::ListMergeProposals
+        | DesktopRuntimeCommandKind::MergeChildWorktree
+        | DesktopRuntimeCommandKind::DiscardChildWorktree => {
+            state.set_runtime_notice(
+                target,
+                format!(
+                    "Merge proposal operation failed ({}).",
+                    truncate_label(code, 32)
+                ),
+            );
+            changes.insert(UiRegion::Inspector);
         }
         DesktopRuntimeCommandKind::OpenExternalEditor => {
             state.set_runtime_notice(
@@ -1983,7 +2116,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_update_coverage_table_registers_all_twenty_four_protocol_variants() {
+    fn runtime_update_coverage_table_registers_all_twenty_seven_protocol_variants() {
         let labels = RuntimeUpdateKind::ALL.map(RuntimeUpdateKind::label);
         assert_eq!(
             labels,
@@ -2007,6 +2140,9 @@ mod tests {
                 "authorization_decision_accepted",
                 "recovery_changed",
                 "file_reviewed",
+                "merge_proposals_listed",
+                "child_worktree_merged",
+                "child_worktree_discarded",
                 "external_editor_target_validated",
                 "prompt_finished",
                 "command_rejected",

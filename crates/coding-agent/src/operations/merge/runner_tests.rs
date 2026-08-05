@@ -85,6 +85,7 @@ async fn merge_applies_into_the_session_workspace_and_cleans_up() {
         &source,
         "op-merge",
         &id,
+        CancellationToken::new(),
     )
     .await
     .expect("merge applies");
@@ -121,6 +122,7 @@ async fn merge_refuses_worktrees_owned_by_another_workspace() {
         &stranger,
         "op-merge",
         &id,
+        CancellationToken::new(),
     )
     .await
     .expect_err("foreign worktree rejected");
@@ -148,6 +150,7 @@ async fn merge_conflicts_surface_and_keep_the_proposal_retryable() {
         &source,
         "op-merge",
         &id,
+        CancellationToken::new(),
     )
     .await
     .expect_err("conflict detected");
@@ -194,6 +197,7 @@ async fn merge_stale_parent_surfaces_retryable_error() {
         &source,
         "op-merge",
         &id,
+        CancellationToken::new(),
     )
     .await
     .expect_err("stale parent detected");

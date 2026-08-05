@@ -29,6 +29,7 @@ pub(super) enum PromptTaskResult {
     SessionTreeLabel(SessionTreeLabelTaskResult),
     DelegationRejection(DelegationRejectionTaskResult),
     ForkSession(ForkSessionTaskResult),
+    MergeReview(MergeReviewTaskResult),
 }
 
 #[allow(
@@ -88,6 +89,11 @@ pub(super) struct DelegationRejectionTaskResult {
 pub(super) struct SelfHealingEditTaskResult {
     pub(super) session: CodingAgentSession,
     pub(super) outcome: SelfHealingEditOutcome,
+}
+
+pub(super) struct MergeReviewTaskResult {
+    pub(super) session: CodingAgentSession,
+    pub(super) message: String,
 }
 
 enum PromptTaskControlHandle {
@@ -188,6 +194,13 @@ impl PromptTask {
             entry_id,
             label,
         ))
+    }
+
+    pub(super) fn spawn_merge_review(
+        existing_session: CodingAgentSession,
+        operation: CodingAgentOperation,
+    ) -> Result<Self, CliError> {
+        Ok(Self::spawn_coding_merge_review(existing_session, operation))
     }
 
     pub(super) fn spawn_delegation_rejection(
@@ -475,6 +488,29 @@ impl PromptTask {
                 abort_rx,
             )
             .await;
+            let _ = done_tx.send(result);
+        });
+
+        Self {
+            control: PromptTaskControlHandle::AbortOnly(Some(abort_tx)),
+            connection_handoff: Some(connection_rx),
+            done: done_rx,
+            abort_requested: false,
+        }
+    }
+
+    fn spawn_coding_merge_review(
+        existing_session: CodingAgentSession,
+        operation: CodingAgentOperation,
+    ) -> Self {
+        let (connection_tx, connection_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel();
+        let (abort_tx, abort_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let result =
+                run_coding_merge_review_task(existing_session, operation, connection_tx, abort_rx)
+                    .await;
             let _ = done_tx.send(result);
         });
 
@@ -1152,6 +1188,67 @@ async fn run_coding_session_tree_label_task(
             label,
             updated_at,
         })
+    })
+}
+
+async fn run_coding_merge_review_task(
+    mut session: CodingAgentSession,
+    operation: CodingAgentOperation,
+    connection_tx: oneshot::Sender<Result<Option<CodingAgentClientConnection>, CliError>>,
+    mut abort_rx: oneshot::Receiver<()>,
+) -> PromptTaskCompletion {
+    let result = async {
+        let (submission, connection) =
+            prepare_interactive_submission(connection_tx, &mut session, None, operation)?;
+        let outcome =
+            run_abortable_submission(&mut session, submission, &connection, &mut abort_rx).await?;
+        let message = match outcome {
+            CodingAgentOperationOutcome::MergeProposals(proposals) => {
+                if proposals.is_empty() {
+                    "No pending merge proposals.".to_string()
+                } else {
+                    let mut lines = Vec::new();
+                    for proposal in proposals {
+                        lines.push(format!(
+                            "Proposal {} from {} ({} changes)",
+                            proposal.worktree_id,
+                            proposal.child_operation_id,
+                            proposal.changes.len()
+                        ));
+                        for change in proposal.changes {
+                            let marker = match change.kind {
+                                coding_agent::api::event::CodingAgentMergeChangeKind::Added => "+",
+                                coding_agent::api::event::CodingAgentMergeChangeKind::Modified => {
+                                    "~"
+                                }
+                                coding_agent::api::event::CodingAgentMergeChangeKind::Deleted => {
+                                    "-"
+                                }
+                            };
+                            lines.push(format!(
+                                "  {marker} {} (+{}/-{})",
+                                change.path, change.additions, change.deletions
+                            ));
+                        }
+                    }
+                    lines.join("\n")
+                }
+            }
+            CodingAgentOperationOutcome::MergeApplied {
+                worktree_id,
+                applied,
+            } => format!("Merged {worktree_id}: {applied} changes applied."),
+            CodingAgentOperationOutcome::WorktreeDiscarded { worktree_id } => {
+                format!("Discarded merge proposal {worktree_id}.")
+            }
+            _ => unreachable!("merge review operation returned a different public outcome"),
+        };
+        Ok(message)
+    }
+    .await;
+
+    complete_owned_task(session, result, |session, message| {
+        PromptTaskResult::MergeReview(MergeReviewTaskResult { session, message })
     })
 }
 

@@ -218,7 +218,8 @@ async fn write_child_gets_its_own_worktree_and_releases_it_on_success() {
         .workspace
         .as_ref()
         .expect("child has an isolated workspace")
-        .cwd();
+        .cwd()
+        .to_path_buf();
     assert!(
         child_root.starts_with(registry.worktrees_root()),
         "child workspace {} must live under the registry worktrees root",
@@ -238,7 +239,7 @@ async fn write_child_gets_its_own_worktree_and_releases_it_on_success() {
         .expect("child runtime")
         .cwd()
         .expect("child runtime bound to worktree");
-    assert_eq!(child_cwd, child_root);
+    assert_eq!(child_cwd, child_root.as_path());
 
     assert!(
         !workspace.join("isolated.txt").exists(),
@@ -258,6 +259,19 @@ async fn write_child_gets_its_own_worktree_and_releases_it_on_success() {
         records[0].lifecycle,
         workspace_runtime::api::WorkspaceLifecycle::MergePending,
         "successful child worktree awaits an explicit merge or discard"
+    );
+    drop(context);
+    assert!(
+        child_root.exists(),
+        "proposal ownership must survive invocation context drop"
+    );
+    assert_eq!(
+        registry
+            .load_all()
+            .expect("registry after context drop")
+            .len(),
+        1,
+        "durable proposal must survive its in-memory lease"
     );
 }
 

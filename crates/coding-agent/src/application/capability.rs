@@ -100,7 +100,9 @@ impl CapabilitySnapshotService {
         };
         let needs_workspace = matches!(
             input.operation_kind,
-            OperationKind::MergeChildWorktree | OperationKind::DiscardChildWorktree
+            OperationKind::ListMergeProposals
+                | OperationKind::MergeChildWorktree
+                | OperationKind::DiscardChildWorktree
         ) || allowed_tools
             .iter()
             .any(|id| tool_uses_filesystem(id) || id.as_str() == "bash");

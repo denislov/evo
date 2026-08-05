@@ -122,6 +122,8 @@ pub enum CodingAgentProductEventTerminalOperationKind {
     SelfHealingEdit,
     Compact,
     Export,
+    MergeChildWorktree,
+    DiscardChildWorktree,
 }
 
 impl CodingAgentProductEventTerminalOperationKind {
@@ -134,6 +136,8 @@ impl CodingAgentProductEventTerminalOperationKind {
             Self::SelfHealingEdit => "self_healing_edit",
             Self::Compact => "compact",
             Self::Export => "export",
+            Self::MergeChildWorktree => "merge_child_worktree",
+            Self::DiscardChildWorktree => "discard_child_worktree",
         }
     }
 }
@@ -483,8 +487,7 @@ pub struct CodingAgentDelegationEventContext {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CodingAgentMergeProductEvent {
     ProposalCreated {
-        worktree_id: String,
-        child_operation_id: String,
+        proposal: CodingAgentMergeProposal,
     },
     Applied {
         worktree_id: String,
@@ -506,6 +509,30 @@ pub enum CodingAgentMergeProductEvent {
         worktree_id: String,
         error: CodingAgentProductEventError,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CodingAgentMergeProposal {
+    pub worktree_id: String,
+    pub child_operation_id: String,
+    pub base_revision: Option<String>,
+    pub changes: Vec<CodingAgentMergeChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CodingAgentMergeChange {
+    pub path: String,
+    pub kind: CodingAgentMergeChangeKind,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingAgentMergeChangeKind {
+    Added,
+    Modified,
+    Deleted,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

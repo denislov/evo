@@ -626,13 +626,11 @@ impl AgentTeamContext {
                     final_text.clone(),
                 )?;
                 drop(child_admission);
-                match self.promote_child_worktree() {
-                    Ok(Some(worktree_id)) => {
-                        self.event_service.emit_merge_proposal_created(
-                            self.operation_id.clone(),
-                            worktree_id,
-                            child_operation_id.clone(),
-                        )?;
+                match self.promote_child_worktree(&child_operation_id) {
+                    Ok(Some(proposal)) => {
+                        self.event_service
+                            .emit_merge_proposal_created(self.operation_id.clone(), proposal)?;
+                        self.retain_child_worktree_for_merge();
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -678,12 +676,20 @@ impl AgentTeamContext {
     }
 
     /// Keep a successful member's worktree for review and merge.
-    fn promote_child_worktree(&mut self) -> Result<Option<String>, CodingSessionError> {
+    fn promote_child_worktree(
+        &mut self,
+        child_operation_id: &str,
+    ) -> Result<Option<workspace_runtime::api::MergeProposal>, CodingSessionError> {
         if let Some(lease) = self.child_worktree.as_mut() {
-            lease.promote_to_merge_pending()?;
-            Ok(Some(lease.record_id().to_owned()))
+            Ok(Some(lease.promote_to_merge_pending(child_operation_id)?))
         } else {
             Ok(None)
+        }
+    }
+
+    fn retain_child_worktree_for_merge(&mut self) {
+        if let Some(lease) = self.child_worktree.as_mut() {
+            lease.retain_for_merge();
         }
     }
 

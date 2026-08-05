@@ -82,6 +82,8 @@ pub enum CodingAgentOperation {
     },
     ExportCurrent,
     ExportCurrentHtml(PathBuf),
+    /// List reviewable child worktree proposals for the current workspace.
+    ListMergeProposals,
     /// Apply a `MergePending` child worktree's changes into the parent workspace.
     MergeChildWorktree {
         worktree_id: String,
@@ -124,6 +126,7 @@ pub enum CodingAgentOperationOutcome {
     WorktreeDiscarded {
         worktree_id: String,
     },
+    MergeProposals(Vec<crate::events::CodingAgentMergeProposal>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -380,6 +383,7 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
         | OperationKind::Export
+        | OperationKind::ListMergeProposals
         | OperationKind::MergeChildWorktree
         | OperationKind::DiscardChildWorktree => return None,
     };
@@ -403,6 +407,7 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
         | OperationKind::Export
+        | OperationKind::ListMergeProposals
         | OperationKind::MergeChildWorktree
         | OperationKind::DiscardChildWorktree => {
             unreachable!("non-terminal operation kind filtered above")
@@ -431,6 +436,7 @@ pub(crate) fn terminal_operation_kind(
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
         | OperationKind::Export
+        | OperationKind::ListMergeProposals
         | OperationKind::MergeChildWorktree
         | OperationKind::DiscardChildWorktree => None,
     }
@@ -471,8 +477,13 @@ fn recovery_terminal_operation_kind(
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::MergeChildWorktree
-        | OperationKind::DiscardChildWorktree => return None,
+        | OperationKind::ListMergeProposals => return None,
+        OperationKind::MergeChildWorktree => {
+            CodingAgentProductEventTerminalOperationKind::MergeChildWorktree
+        }
+        OperationKind::DiscardChildWorktree => {
+            CodingAgentProductEventTerminalOperationKind::DiscardChildWorktree
+        }
     })
 }
 
@@ -504,6 +515,7 @@ pub(crate) fn descriptor_for_child_kind(kind: OperationKind) -> Option<Operation
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
         | OperationKind::Export
+        | OperationKind::ListMergeProposals
         | OperationKind::MergeChildWorktree
         | OperationKind::DiscardChildWorktree => return None,
     };
@@ -649,6 +661,14 @@ impl OperationContract {
         OperationTerminalPolicy::OutcomeAcknowledgement,
         &[],
     );
+    const LIST_MERGE_PROPOSALS: Self = Self::new(
+        OperationKind::ListMergeProposals,
+        OperationClass::ReadOnly,
+        OperationDispatchMode::Async,
+        OperationOutcomeFamily::MergeProposals,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
     const DISCARD_CHILD_WORKTREE: Self = Self::new(
         OperationKind::DiscardChildWorktree,
         OperationClass::SessionWriteRoot,
@@ -750,6 +770,7 @@ impl CodingAgentOperation {
             Self::SetSessionName { .. } => OperationContract::SET_SESSION_NAME,
             Self::ExportCurrent => OperationContract::EXPORT_CURRENT,
             Self::ExportCurrentHtml(_) => OperationContract::EXPORT_CURRENT_HTML,
+            Self::ListMergeProposals => OperationContract::LIST_MERGE_PROPOSALS,
             Self::MergeChildWorktree { .. } => OperationContract::MERGE_CHILD_WORKTREE,
             Self::DiscardChildWorktree { .. } => OperationContract::DISCARD_CHILD_WORKTREE,
         }
@@ -798,6 +819,7 @@ impl CodingAgentOperation {
             | Self::SetSessionName { .. }
             | Self::ExportCurrent
             | Self::ExportCurrentHtml(_)
+            | Self::ListMergeProposals
             | Self::MergeChildWorktree { .. }
             | Self::DiscardChildWorktree { .. } => None,
         }
@@ -828,6 +850,7 @@ impl CodingAgentOperation {
             | Self::SetSessionName { .. }
             | Self::ExportCurrent
             | Self::ExportCurrentHtml(_)
+            | Self::ListMergeProposals
             | Self::MergeChildWorktree { .. }
             | Self::DiscardChildWorktree { .. } => None,
         }

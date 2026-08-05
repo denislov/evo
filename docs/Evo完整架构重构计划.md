@@ -34,7 +34,7 @@
 | Phase 3 / ARC-310 | 完成 | `docs/refactor/phase3-worktree-builder.md`；managed identity、Git worktree + copy/reflink fallback、fail-closed dirty/untracked sync、process-tree cancellation、ignore/path policy 已落地并测试 |
 | Phase 3 / ARC-320 | 完成 | `docs/refactor/phase3-worktree-registry.md`；原子文件 registry、owner process identity、启动 maintenance（interrupted/stale/dead-owner 清理 + orphan 保留）、GC（age/owner liveness/disk budget/dry-run）已落地并测试 |
 | Phase 3 / ARC-330 | 完成 | `docs/refactor/phase3-child-isolation.md`；写权限有效交集 child 申请独立 managed worktree、不再 clone 父 capability、projectless/read-only/显式 shared-cwd 分别定义策略、team 并发上限改由 worktree capacity 决定（固定 `2` 已删除） |
-| Phase 3 / ARC-340 | 完成 | `docs/refactor/phase3-merge-protocol.md`；ChangeSet/MergeProposal、乐观 base revision 校验、conflict/stale parent 检测、Merge/Discard 为 admitted operation（session workspace 授权）、merge 事件与结构化错误 |
+| Phase 3 / ARC-340 | 完成（复验 2026-08-05） | `docs/refactor/phase3-merge-protocol.md`；creation-time baseline、Git/copy-mode ChangeSet/MergeProposal、fail-closed 4096 limit、parent untracked/symlink conflict、事务 journal 与 startup recovery、可取消 Merge/Discard admitted operation、CLI/Desktop/Team supervisor 产品入口 |
 | Phase 3 / ARC-350 | 未开始 | 前序 Gate 通过后进入 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
@@ -485,6 +485,8 @@ Phase 2 Gate：完成。builtin、custom injected 与 delegation tools 全部由
 - 支持 clean apply、conflict、stale parent、discard 和 retry。
 - merge 本身是 admitted durable operation，有 authorization、events、cancel fence 和 crash recovery。
 - Team supervisor 只能选择提议，不能绕过 review/mutation capability。
+- proposal event 携带完整、可审阅的 `ChangeSet` DTO；CLI 与 Desktop 使用同一产品 DTO，
+  Team supervisor 复用当前 session authority。
 
 ### ARC-350 Worktree 测试矩阵
 

@@ -8,6 +8,7 @@ use coding_agent::api::{
         CodingAgentEmbeddingSnapshot, CodingAgentModelChoice, CodingAgentThinkingLevel,
         CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
     },
+    event::CodingAgentMergeProposal,
     review::CodingAgentFileReviewRequest,
 };
 use desktop::preferences::DesktopThinkingLevel;
@@ -49,6 +50,7 @@ pub(crate) struct WorkspaceState<Presentation> {
     pub(crate) thinking_selection: DesktopThinkingLevel,
     pub(crate) thinking_hint: Option<Arc<str>>,
     pub(crate) file_review: Arc<DesktopFileReviewState>,
+    pub(crate) merge_proposals: Arc<Vec<CodingAgentMergeProposal>>,
     pub(crate) presentation: Presentation,
 }
 
@@ -76,6 +78,7 @@ impl<Presentation> WorkspaceState<Presentation> {
             thinking_hint: thinking_fallback
                 .then(|| Arc::from("Thinking reset to Auto for the selected model.")),
             file_review: Arc::new(DesktopFileReviewState::default()),
+            merge_proposals: Arc::new(Vec::new()),
             presentation,
         }
     }

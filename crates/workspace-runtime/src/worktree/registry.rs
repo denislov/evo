@@ -6,6 +6,8 @@
 //! <root>/
 //!   registry/<id>.json     one atomic record per worktree
 //!   worktrees/<id>/        the materialized worktree directory
+//!   baselines/<id>/        immutable creation-time merge baseline
+//!   transactions/<id>/     recoverable merge journal and backups
 //! ```
 //!
 //! Records are written atomically (temp file + rename). Startup recovery
@@ -14,7 +16,7 @@
 //! verified. GC only ever deletes directories that match a validated record.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -27,15 +29,19 @@ use crate::contract::{
 };
 
 mod cleanup;
+mod storage;
 use cleanup::{dir_size, remove_materialization};
+pub(super) use storage::write_record_atomic;
+use storage::{deserialize_record, read_directory};
 
 const REGISTRY_DIRECTORY: &str = "registry";
 const WORKTREES_DIRECTORY: &str = "worktrees";
+const BASELINES_DIRECTORY: &str = "baselines";
+const TRANSACTIONS_DIRECTORY: &str = "transactions";
 const WRITER_LOCK_FILE: &str = ".writer.lock";
 const ID_HASH_BYTES: usize = 16;
 
 static WORKTREE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Durable facts of one managed worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +136,12 @@ impl WorktreeRegistry {
         fs::create_dir_all(Self::worktrees_dir(&root)).map_err(|error| RegistryError::Io {
             message: format!("cannot create worktrees directory: {error}"),
         })?;
+        fs::create_dir_all(Self::baselines_dir(&root)).map_err(|error| RegistryError::Io {
+            message: format!("cannot create baselines directory: {error}"),
+        })?;
+        fs::create_dir_all(Self::transactions_dir(&root)).map_err(|error| RegistryError::Io {
+            message: format!("cannot create transactions directory: {error}"),
+        })?;
         Ok(Self { root, capacity })
     }
 
@@ -215,6 +227,13 @@ impl WorktreeRegistry {
             Err(error) => return Err(RegistryError::Worktree(error)),
         };
         let record = WorktreeRecord::from_managed(&managed, &source_root, now);
+        if let Err(error) = super::merge::create_baseline(self, &record, cancellation) {
+            let _ = remove_materialization(self, &record);
+            let _ = self.remove_unlocked(&creating.id);
+            return Err(RegistryError::Io {
+                message: format!("cannot create merge baseline: {error}"),
+            });
+        }
         self.register_unlocked(&record)?;
         Ok(record)
     }
@@ -295,7 +314,7 @@ impl WorktreeRegistry {
         self.load_unlocked(parsed.as_str())
     }
 
-    fn load_unlocked(&self, id: &str) -> Result<Option<WorktreeRecord>, RegistryError> {
+    pub(super) fn load_unlocked(&self, id: &str) -> Result<Option<WorktreeRecord>, RegistryError> {
         let parsed = parse_registry_id(id)?;
         let path = self.record_path(parsed.as_str());
         match fs::read(&path) {
@@ -353,7 +372,7 @@ impl WorktreeRegistry {
         self.remove_unlocked(id)
     }
 
-    fn remove_unlocked(&self, id: &str) -> Result<(), RegistryError> {
+    pub(super) fn remove_unlocked(&self, id: &str) -> Result<(), RegistryError> {
         let parsed = parse_registry_id(id)?;
         match fs::remove_file(self.record_path(parsed.as_str())) {
             Ok(()) => Ok(()),
@@ -364,7 +383,7 @@ impl WorktreeRegistry {
         }
     }
 
-    fn record_path(&self, id: &str) -> PathBuf {
+    pub(super) fn record_path(&self, id: &str) -> PathBuf {
         WorktreeRegistry::registry_dir(&self.root).join(format!("{id}.json"))
     }
 
@@ -381,7 +400,23 @@ impl WorktreeRegistry {
         root.join(WORKTREES_DIRECTORY)
     }
 
-    fn acquire_writer(&self) -> Result<RegistryWriteGuard, RegistryError> {
+    fn baselines_dir(root: &Path) -> PathBuf {
+        root.join(BASELINES_DIRECTORY)
+    }
+
+    fn transactions_dir(root: &Path) -> PathBuf {
+        root.join(TRANSACTIONS_DIRECTORY)
+    }
+
+    pub(super) fn baseline_dir(&self, id: &str) -> PathBuf {
+        Self::baselines_dir(&self.root).join(id)
+    }
+
+    pub(super) fn transaction_dir(&self, id: &str) -> PathBuf {
+        Self::transactions_dir(&self.root).join(id)
+    }
+
+    pub(super) fn acquire_writer(&self) -> Result<RegistryWriteGuard, RegistryError> {
         let path = Self::registry_dir(&self.root).join(WRITER_LOCK_FILE);
         let file = OpenOptions::new()
             .create(true)
@@ -400,7 +435,7 @@ impl WorktreeRegistry {
 }
 
 #[derive(Debug)]
-struct RegistryWriteGuard {
+pub(super) struct RegistryWriteGuard {
     _file: File,
 }
 
@@ -414,6 +449,10 @@ pub struct RecoveryReport {
     pub stale_records: Vec<WorktreeRecord>,
     /// Records stuck in Creating/Cleaning (a previous run crashed mid-way).
     pub interrupted: Vec<WorktreeRecord>,
+    /// Prepared merge transactions restored to their pre-merge parent bytes.
+    pub merges_rolled_back: Vec<String>,
+    /// Fully applied transactions whose durable Merged transition was completed.
+    pub merges_completed: Vec<String>,
 }
 
 /// Result of the safe startup maintenance pass.
@@ -431,7 +470,10 @@ impl WorktreeRegistry {
     /// callers can audit which records were cleaned.
     pub fn recover(&self) -> Result<RecoveryReport, RegistryError> {
         let _writer = self.acquire_writer()?;
-        let report = self.scan_unlocked()?;
+        let (merges_rolled_back, merges_completed) = super::merge::recover_transactions(self)?;
+        let mut report = self.scan_unlocked()?;
+        report.merges_rolled_back = merges_rolled_back;
+        report.merges_completed = merges_completed;
         for record in &report.interrupted {
             remove_materialization(self, record)?;
             self.remove_unlocked(&record.id)?;
@@ -800,96 +842,6 @@ fn resolve_registry_path(path: &Path) -> Result<PathBuf, RegistryError> {
             }
         }
     }
-}
-
-fn deserialize_record(bytes: &[u8]) -> Result<WorktreeRecord, RegistryError> {
-    serde_json::from_slice(bytes).map_err(|error| RegistryError::InvalidRecord {
-        message: format!("cannot decode record: {error}"),
-    })
-}
-
-fn write_record_atomic(path: &Path, record: &WorktreeRecord) -> Result<(), RegistryError> {
-    let bytes = serde_json::to_vec(record).map_err(|error| RegistryError::Io {
-        message: format!("cannot encode record: {error}"),
-    })?;
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), sequence));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&tmp)
-        .map_err(|error| RegistryError::Io {
-            message: format!("cannot create record temp file: {error}"),
-        })?;
-    let result = file.write_all(&bytes).and_then(|()| file.sync_all());
-    drop(file);
-    let result = result
-        .and_then(|()| replace_record_file(&tmp, path))
-        .and_then(|()| sync_parent_directory(path));
-    result.map_err(|error| {
-        let _ = fs::remove_file(&tmp);
-        RegistryError::Io {
-            message: format!("cannot commit record: {error}"),
-        }
-    })
-}
-
-#[cfg(not(windows))]
-fn replace_record_file(tmp: &Path, path: &Path) -> io::Result<()> {
-    fs::rename(tmp, path)
-}
-
-#[cfg(windows)]
-fn replace_record_file(tmp: &Path, path: &Path) -> io::Result<()> {
-    use std::iter;
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW};
-    let from = tmp
-        .as_os_str()
-        .encode_wide()
-        .chain(iter::once(0))
-        .collect::<Vec<_>>();
-    let to = path
-        .as_os_str()
-        .encode_wide()
-        .chain(iter::once(0))
-        .collect::<Vec<_>>();
-    unsafe {
-        if MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING) == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(path: &Path) -> io::Result<()> {
-    File::open(path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "record has no parent directory",
-        )
-    })?)
-    .and_then(|directory| directory.sync_all())
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, RegistryError> {
-    let mut entries = fs::read_dir(path)
-        .map_err(|error| RegistryError::Io {
-            message: format!("cannot read directory {}: {error}", path.display()),
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| RegistryError::Io {
-            message: format!("cannot read directory entry: {error}"),
-        })?;
-    entries.sort_by_key(|entry| entry.file_name());
-    Ok(entries)
 }
 
 #[cfg(test)]
