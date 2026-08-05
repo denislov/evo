@@ -328,14 +328,25 @@ fn startup_maintenance_collects_dead_process_records_but_keeps_live_records() {
     let dead = registered_worktree(&registry, source_dir.path(), "op-dead");
     let live = registered_worktree(&registry, source_dir.path(), "op-live");
 
+    let mut exited_owner =
+        std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("owner process starts");
+    let exited_pid = exited_owner.id();
+    assert!(exited_owner.wait().expect("owner process exits").success());
     let mut dead_record = registry
         .load(&dead.id)
         .expect("load dead")
         .expect("dead record");
-    dead_record.owner_pid = 0;
+    dead_record.owner_pid = exited_pid;
     super::write_record_atomic(&registry.record_path(&dead.id), &dead_record)
         .expect("write dead owner");
 
+    drop(registry);
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry reopens");
     let report = registry.startup_maintenance().expect("maintenance runs");
     assert_eq!(report.gc.removed.len(), 1);
     assert_eq!(report.gc.removed[0].id, dead.id);
@@ -640,10 +651,13 @@ fn gc_crash_midway_is_retried_and_converges_on_the_next_pass() {
     let (registry_dir, source_dir) = registry_root();
     let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
     let record = registered_worktree(&registry, source_dir.path(), "op-gc-crash");
-    // A crash inside remove_materialization leaves the destination partially
-    // removed while the durable record is still Ready. The next GC pass must
-    // retry removal and converge instead of leaking the record.
-    fs::remove_file(record.dest.join("file.txt")).expect("partial removal");
+    // Simulate a crash at GC's exact durable boundary: materialization and
+    // auxiliary state are gone, while the Ready record has not been deleted.
+    super::remove_materialization(&registry, &record).expect("materialization removed");
+    assert!(!record.dest.exists());
+    assert!(registry.load(&record.id).expect("load").is_some());
+    drop(registry);
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry reopens");
 
     let report = registry
         .gc(&GcOptions {

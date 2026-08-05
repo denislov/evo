@@ -35,7 +35,8 @@
 | Phase 3 / ARC-320 | 完成 | `docs/refactor/phase3-worktree-registry.md`；原子文件 registry、owner process identity、启动 maintenance（interrupted/stale/dead-owner 清理 + orphan 保留）、GC（age/owner liveness/disk budget/dry-run）已落地并测试 |
 | Phase 3 / ARC-330 | 完成 | `docs/refactor/phase3-child-isolation.md`；写权限有效交集 child 申请独立 managed worktree、不再 clone 父 capability、projectless/read-only/显式 shared-cwd 分别定义策略、team 并发上限改由 worktree capacity 决定（固定 `2` 已删除） |
 | Phase 3 / ARC-340 | 完成（复验 2026-08-05） | `docs/refactor/phase3-merge-protocol.md`；creation-time baseline、Git/copy-mode ChangeSet/MergeProposal、fail-closed 4096 limit、parent untracked/symlink conflict、事务 journal 与 startup recovery、可取消 Merge/Discard admitted operation、CLI/Desktop/Team supervisor 产品入口 |
-| Phase 3 / ARC-350 | 完成（2026-08-05） | `docs/refactor/phase3-worktree-test-matrix.md`；双 child 不同文件/同文件不同 hunk/同一 hunk、dirty tracked/untracked、symlink、rename/delete、binary、large file、create cancel、merge crash、apply 失败回滚、GC crash 收敛均已固定；Unix/Windows 路径差异推迟到真实平台测试 |
+| Phase 3 / ARC-350 | 完成（复验 2026-08-05） | `docs/refactor/phase3-worktree-test-matrix.md`；双 child、dirty baseline、symlink、rename/delete、binary、large file、create cancel、真实 registry reopen、确定性 ENOSPC partial-apply/journal rollback、GC crash 边界均已固定 |
+| Phase 3 / ARC-351 | 非阻塞验证债务（最迟 Phase 10） | Windows/macOS 真实平台上的路径、symlink、文件锁与 Git worktree 差异；先运行 `workspace-runtime` 轻量 CI pilot，根据实测磁盘峰值选择 hosted 或 self-hosted runner，不阻塞 Phase 4 |
 | Phase 3 Gate | 通过（2026-08-05） | 并行 child 默认完全隔离；父 workspace 在 merge 前逐字节不变；异常退出后 registry/worktree 可恢复或安全清理；workspace 全量测试与 architecture gate 通过 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
@@ -491,12 +492,28 @@ Phase 2 Gate：完成。builtin、custom injected 与 delegation tools 全部由
 
 ### ARC-350 Worktree 测试矩阵
 
-执行状态：完成（2026-08-05）。完成证据见 `docs/refactor/phase3-worktree-test-matrix.md`。
+执行状态：完成（复验 2026-08-05）。完成证据见 `docs/refactor/phase3-worktree-test-matrix.md`。
 
 - 两个 child 修改不同文件、同一文件不同 hunk、同一 hunk。
 - dirty tracked/untracked source、symlink、rename/delete、binary、large file。
 - create cancel、process crash、merge crash、GC crash、disk full。
-- Unix/Windows 路径和 Git worktree 差异：推迟到真实平台测试，不在本地交叉编译 target 上验证。
+- 当前 Linux 平台与平台中立协议语义由 ARC-350 阻塞验收；跨平台差异转入 ARC-351。
+
+### ARC-351 跨平台 Worktree 验证债务（非阻塞）
+
+执行状态：待清偿，不阻塞 Phase 4；最迟在 Phase 10 Final Gate 前完成并删除本债务。
+
+- 在真实 Windows 与 macOS runner 上验证路径、symlink 权限、文件锁、rename/delete、
+  Git worktree create/discard/GC 和 crash-reopen；交叉编译不能替代运行测试。
+- CI 先只运行 `workspace-runtime`：关闭 incremental，不上传或缓存 `target/`，执行
+  `cargo check --locked -p workspace-runtime --all-targets --all-features` 与
+  `cargo test --locked -p workspace-runtime --all-features`。
+- 当前本地全 workspace `target/` 约 35 GiB（`deps` 约 20 GiB、`incremental` 约
+  14 GiB），因此不直接复制全量 `scripts/gate.sh` 到 hosted 三平台。pilot 必须记录
+  clean build 磁盘峰值；峰值超过 runner 启动可用空间的 70% 时改用 self-hosted runner，
+  否则才固化 hosted CI。
+- 债务清偿证据包括真实平台命令结果、磁盘峰值、Git/symlink/文件锁差异修复，以及
+  可重复的 CI workflow 或 self-hosted runner 操作说明。
 
 Phase 3 Gate：完成（2026-08-05）。并行 child 默认完全隔离；父 workspace 在 merge 前逐字节不变；异常退出后 registry/worktree 可恢复或安全清理。
 

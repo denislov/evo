@@ -403,6 +403,8 @@ fn startup_recovery_rolls_back_a_prepared_partial_merge() {
         .expect("transaction prepared");
     fs::write(source_dir.path().join("tracked.txt"), "partial-child\n").expect("partial apply");
 
+    drop(registry);
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry reopens");
     let report = registry.recover().expect("recovery succeeds");
     assert_eq!(report.merges_rolled_back, vec![record.id.clone()]);
     assert_eq!(
@@ -427,6 +429,8 @@ fn startup_recovery_removes_an_incomplete_transaction_without_a_journal() {
     fs::create_dir_all(transaction.join("backup")).expect("partial backup directory");
     fs::write(transaction.join("backup/tracked.txt"), "v1\n").expect("partial backup");
 
+    drop(registry);
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry reopens");
     let report = registry.recover().expect("recovery succeeds");
     assert!(report.merges_rolled_back.is_empty());
     assert!(report.merges_completed.is_empty());
@@ -456,6 +460,8 @@ fn startup_recovery_completes_an_applied_transaction() {
         .expect("entries applied");
     super::mark_transaction_applied(&registry, &record).expect("transaction applied");
 
+    drop(registry);
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry reopens");
     let report = registry.recover().expect("recovery succeeds");
     assert_eq!(report.merges_completed, vec![record.id.clone()]);
     assert!(report.merges_rolled_back.is_empty());
@@ -698,55 +704,58 @@ fn dirty_parent_merge_stays_clean_when_child_paths_are_disjoint() {
     );
 }
 
-#[cfg(unix)]
 #[test]
-fn apply_failure_rolls_back_parent_and_keeps_proposal() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn dirty_tracked_and_untracked_source_are_creation_baseline_state() {
     let (registry_dir, source_dir) = registry_root();
-    fs::create_dir_all(source_dir.path()).expect("source dir");
-    fs::write(source_dir.path().join("tracked.txt"), "v1").expect("source file");
-    fs::create_dir(source_dir.path().join("sub")).expect("parent sub dir");
+    git_source(source_dir.path());
+    fs::write(source_dir.path().join("tracked.txt"), "dirty-tracked\n")
+        .expect("dirty tracked source");
+    fs::write(source_dir.path().join("untracked.txt"), "dirty-untracked\n")
+        .expect("dirty untracked source");
     let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
-    let handle = WorkspaceHandle::new(WorkspaceKind::Source, source_dir.path()).expect("handle");
-    let record = registry
-        .create_managed(
-            &handle,
-            "op-fault",
-            None,
-            WorkingTreeMode::PreserveWorkingTree,
-            &CancellationToken::new(),
-        )
-        .expect("copy worktree");
-    fs::create_dir_all(record.dest.join("sub")).expect("child sub dir");
-    fs::write(record.dest.join("sub/new.txt"), "child\n").expect("child add");
-    registry
-        .transition(&record.id, WorkspaceLifecycle::Active, now_seconds())
-        .expect("active");
-    registry
-        .transition(&record.id, WorkspaceLifecycle::MergePending, now_seconds())
-        .expect("merge pending");
-    // Simulate a full write volume: the parent directory that must receive
-    // the staged child file is not writable, so the stage step fails. The
-    // directory is empty, so rollback can still remove and restore it.
-    fs::set_permissions(
-        source_dir.path().join("sub"),
-        fs::Permissions::from_mode(0o555),
-    )
-    .expect("block parent write");
+    let record = pending_worktree(&registry, source_dir.path(), "op-dirty-baseline", |child| {
+        fs::write(child.join("child.txt"), "child\n").expect("child add");
+    });
 
-    let error = apply_merge(&registry, &record.id).expect_err("apply failure surfaces");
+    let changeset = build_changeset(&registry, &record.id).expect("changeset");
+    assert_eq!(changeset.entries.len(), 1);
+    assert_eq!(changeset.entries[0].path, Path::new("child.txt"));
+    apply_merge(&registry, &record.id).expect("merge applies");
+    assert_eq!(
+        fs::read_to_string(source_dir.path().join("tracked.txt")).unwrap(),
+        "dirty-tracked\n"
+    );
+    assert_eq!(
+        fs::read_to_string(source_dir.path().join("untracked.txt")).unwrap(),
+        "dirty-untracked\n"
+    );
+}
+
+#[test]
+fn enospc_after_partial_apply_rolls_back_parent_and_keeps_proposal() {
+    let (registry_dir, source_dir) = registry_root();
+    git_source(source_dir.path());
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let record = pending_worktree(&registry, source_dir.path(), "op-enospc", |child| {
+        fs::write(child.join("first.txt"), "first\n").expect("first child add");
+        fs::write(child.join("second.txt"), "second\n").expect("second child add");
+    });
+    let _fault = super::fault_injection::inject_apply_enospc_after(1);
+
+    let error = apply_merge(&registry, &record.id).expect_err("injected ENOSPC surfaces");
     assert!(
         matches!(error, MergeError::ApplyFailed { .. }),
         "got {error:?}"
     );
+    assert!(error.to_string().contains("ENOSPC"));
     assert!(
-        !source_dir.path().join("sub/new.txt").exists(),
-        "rollback must not leave a partial write"
+        !source_dir.path().join("first.txt").exists(),
+        "rollback removes the entry applied before ENOSPC"
     );
+    assert!(!source_dir.path().join("second.txt").exists());
     assert_eq!(
         fs::read_to_string(source_dir.path().join("tracked.txt")).unwrap(),
-        "v1",
+        "v1\n",
         "rollback restores the parent byte for byte"
     );
     assert_eq!(
@@ -758,4 +767,25 @@ fn apply_failure_rolls_back_parent_and_keeps_proposal() {
         !registry.transaction_dir(&record.id).exists(),
         "rollback cleans the transaction journal"
     );
+}
+
+#[test]
+fn enospc_while_marking_applied_rolls_back_parent_and_keeps_proposal() {
+    let (registry_dir, source_dir) = registry_root();
+    git_source(source_dir.path());
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let record = pending_worktree(&registry, source_dir.path(), "op-journal-enospc", |child| {
+        fs::write(child.join("new.txt"), "child\n").expect("child add");
+    });
+    let _fault = super::fault_injection::inject_journal_enospc(super::TransactionPhase::Applied);
+
+    let error = apply_merge(&registry, &record.id).expect_err("journal ENOSPC surfaces");
+    assert!(matches!(error, MergeError::RecoveryFailed { .. }));
+    assert!(error.to_string().contains("ENOSPC"));
+    assert!(!source_dir.path().join("new.txt").exists());
+    assert_eq!(
+        registry.load(&record.id).unwrap().unwrap().lifecycle,
+        WorkspaceLifecycle::MergePending
+    );
+    assert!(!registry.transaction_dir(&record.id).exists());
 }

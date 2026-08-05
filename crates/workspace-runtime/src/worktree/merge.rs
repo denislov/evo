@@ -275,14 +275,18 @@ pub fn apply_merge_cancellable(
     check_cancelled(cancellation)?;
 
     prepare_transaction(registry, &record, cancellation)?;
-    let apply_result = apply_entries(&record, &changeset.entries, cancellation);
-    if let Err(error) = apply_result {
+    if let Err(error) = apply_entries(&record, &changeset.entries, cancellation) {
         rollback_transaction(registry, &record).map_err(|rollback| MergeError::RecoveryFailed {
             message: format!("{error}; rollback also failed: {rollback}"),
         })?;
         return Err(error);
     }
-    mark_transaction_applied(registry, &record)?;
+    if let Err(error) = mark_transaction_applied(registry, &record) {
+        rollback_transaction(registry, &record).map_err(|rollback| MergeError::RecoveryFailed {
+            message: format!("{error}; rollback also failed: {rollback}"),
+        })?;
+        return Err(error);
+    }
     record.transition(WorkspaceLifecycle::Merged, unix_seconds())?;
     write_record_atomic(&registry.record_path(&record.id), &record)?;
     remove_path(&registry.transaction_dir(&record.id)).map_err(|message| {
@@ -376,6 +380,8 @@ fn apply_entries(
 
     for entry in removals {
         check_cancelled(cancellation)?;
+        #[cfg(test)]
+        fault_injection::maybe_fail_apply(&entry.path)?;
         remove_path(&record.source.join(&entry.path)).map_err(|message| {
             MergeError::ApplyFailed {
                 path: entry.path.clone(),
@@ -385,6 +391,8 @@ fn apply_entries(
     }
     for entry in writes {
         check_cancelled(cancellation)?;
+        #[cfg(test)]
+        fault_injection::maybe_fail_apply(&entry.path)?;
         replace_from_child(&record.source, &record.dest, &entry.path).map_err(|message| {
             MergeError::ApplyFailed {
                 path: entry.path.clone(),
@@ -484,6 +492,8 @@ fn write_transaction(directory: &Path, transaction: &MergeTransaction) -> Result
         .map_err(|error| MergeError::RecoveryFailed {
             message: format!("cannot create merge journal: {error}"),
         })?;
+    #[cfg(test)]
+    fault_injection::maybe_fail_journal_write(transaction.phase)?;
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
         .map_err(|error| MergeError::RecoveryFailed {
@@ -875,6 +885,9 @@ fn unix_seconds() -> u64 {
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod fault_injection;
 
 #[cfg(test)]
 #[path = "merge_tests.rs"]
