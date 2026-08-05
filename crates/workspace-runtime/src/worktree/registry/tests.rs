@@ -634,3 +634,27 @@ fn gc_size_does_not_follow_child_symlinks() {
         .expect("gc runs");
     assert!(report.removed[0].bytes_reclaimed < 16 * 1024);
 }
+
+#[test]
+fn gc_crash_midway_is_retried_and_converges_on_the_next_pass() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    let record = registered_worktree(&registry, source_dir.path(), "op-gc-crash");
+    // A crash inside remove_materialization leaves the destination partially
+    // removed while the durable record is still Ready. The next GC pass must
+    // retry removal and converge instead of leaking the record.
+    fs::remove_file(record.dest.join("file.txt")).expect("partial removal");
+
+    let report = registry
+        .gc(&GcOptions {
+            now: now_seconds() + 10_000,
+            max_age_seconds: 1,
+            disk_budget_bytes: None,
+            owner_liveness: Box::new(|_| false),
+            dry_run: false,
+        })
+        .expect("gc retries and converges");
+    assert_eq!(report.removed.len(), 1);
+    assert!(!record.dest.exists());
+    assert!(registry.load(&record.id).expect("load").is_none());
+}
