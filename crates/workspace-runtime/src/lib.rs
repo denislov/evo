@@ -12,6 +12,7 @@ mod resource;
 
 mod fs;
 mod process;
+mod worktree;
 
 /// Stable workspace ownership, lifecycle, and capability facade.
 pub mod api;

@@ -13,3 +13,6 @@ pub use crate::process::{
     EnvPolicy, OutputBudget, ProcessOutcome, ProcessOutput, ProcessSpec, ProcessUpdateCallback,
     ProgramKind, path_exists, resolve_shell_path, run,
 };
+pub use crate::worktree::{
+    WorkingTreeMode, WorktreeBuilder, WorktreeCreationMode, WorktreeError, WorktreeReport,
+};
