@@ -535,6 +535,9 @@ Phase 3 Gate：完成（2026-08-05）。并行 child 默认完全隔离；父 wo
 
 ### ARC-410 HunkTracker actor
 
+执行状态：完成（复验 2026-08-06）。完成证据见
+`docs/refactor/phase4-hunk-tracker.md`。
+
 - 来源类型至少包括 AgentEdit、ExternalEditOnAgentFile、ExternalEdit、MergeApply、HookEdit。
 - 使用 edit `ChangeReceipt` 与 fs event 因果窗口关联，不只依赖路径和时间戳猜测。
 - hunk identity 支持内容+位置漂移匹配，保留稳定 HunkId。

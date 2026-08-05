@@ -1,9 +1,12 @@
 use crate::mutex::MutexExt;
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem::bounded::read_target_bytes;
-use crate::tools::filesystem::mutation_receipt::{content_revision, receipt, validate_fence};
+use crate::tools::filesystem::mutation_receipt::{
+    bounded_diff, content_revision, receipt, validate_fence,
+};
 use crate::tools::filesystem::patch::{FilePatch, PatchOperation, apply_file, parse_patch};
 use crate::tools::filesystem_target_for_runtime_execution;
+use change_tracker::ChangeReceipt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -14,9 +17,7 @@ use tool_contract::api::definition::{
     AuthorizationRisk, ToolBehaviorVersion, ToolCapabilities, ToolDefinition, ToolExecutionMode,
     ToolId, ToolKind, ToolRequirement,
 };
-use tool_contract::api::output::{
-    ChangeReceipt, ToolContent, ToolError, ToolErrorKind, ToolOutput,
-};
+use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
 use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolCallContext, ToolFuture, TypedTool};
 use workspace_runtime::api::WorkspaceAccessHandle;
@@ -272,13 +273,25 @@ async fn preflight(mut entry: BoundPatch) -> Result<PlannedPatch, String> {
             crate::platform::io::output::format_size(crate::limits::MAX_EDIT_RESULT_BYTES)
         ));
     }
+    let before_text = before
+        .as_deref()
+        .map_or(Some(""), |bytes| std::str::from_utf8(bytes).ok());
+    let after_text = after
+        .as_deref()
+        .map_or(Some(""), |bytes| std::str::from_utf8(bytes).ok());
+    let unified_diff = before_text
+        .zip(after_text)
+        .map(|(before, after)| {
+            crate::tools::filesystem::diff::generate_unified_patch(&path, before, after)
+        })
+        .and_then(bounded_diff);
     let change_receipt = receipt(
         path.clone(),
         entry.target.target_fingerprint().to_owned(),
         before.as_deref(),
         after.as_deref().unwrap_or_default(),
         "apply_patch",
-        None,
+        unified_diff,
     );
     Ok(PlannedPatch {
         path,
@@ -374,12 +387,13 @@ mod tests {
             "created\n"
         );
         assert!(!temp.path().join("deleted.txt").exists());
-        assert_eq!(
-            output.details.unwrap()["changeReceipts"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
+        let details = output.details.unwrap();
+        let receipts = details["changeReceipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 3);
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt["unified_diff"].as_str().is_some())
         );
     }
 

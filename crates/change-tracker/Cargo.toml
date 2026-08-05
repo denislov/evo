@@ -9,10 +9,13 @@ license.workspace = true
 ignore = "0.4"
 notify = "7"
 serde.workspace = true
+sha2 = "0.10"
+similar = "2"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util.workspace = true
 workspace-runtime = { workspace = true }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true

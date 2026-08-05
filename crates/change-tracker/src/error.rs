@@ -11,6 +11,10 @@ pub enum ChangeTrackerError {
     InvalidRoot { message: String },
     #[error("cannot watch path: {message}")]
     WatchFailed { message: String },
+    #[error("change fact is invalid: {message}")]
+    InvalidFact { message: String },
+    #[error("change tracker budget exceeded: {message}")]
+    BudgetExceeded { message: String },
     #[error("the change tracker has shut down")]
     Shutdown,
 }

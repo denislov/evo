@@ -1,6 +1,5 @@
+use change_tracker::ChangeReceipt;
 use sha2::{Digest, Sha256};
-use std::io::{self, Read};
-use tool_contract::api::output::ChangeReceipt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContentRevision {
@@ -57,35 +56,6 @@ pub(crate) fn revision(bytes: &[u8]) -> ContentRevision {
         bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
         lines: line_count(bytes),
     }
-}
-
-pub(crate) fn revision_from_reader<R: Read>(mut reader: R) -> io::Result<ContentRevision> {
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut bytes = 0_u64;
-    let mut lines = 0_i64;
-    let mut last_byte = None;
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        bytes = bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        lines = lines.saturating_add(
-            i64::try_from(buffer[..read].iter().filter(|byte| **byte == b'\n').count())
-                .unwrap_or(i64::MAX),
-        );
-        last_byte = buffer[..read].last().copied();
-    }
-    if bytes > 0 && last_byte != Some(b'\n') {
-        lines = lines.saturating_add(1);
-    }
-    Ok(ContentRevision {
-        hash: format!("{:x}", hasher.finalize()),
-        bytes,
-        lines,
-    })
 }
 
 pub(crate) fn receipt(

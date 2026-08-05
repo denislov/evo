@@ -9,8 +9,16 @@
 mod error;
 mod event;
 mod git;
+mod hunk;
+mod receipt;
 mod watch;
 
 pub use error::ChangeTrackerError;
 pub use event::{FsChangeKind, FsEvent, GitEvent, GitMetaEvent, SemanticEvent};
+pub use hunk::{
+    ChangeFactSnapshot, ChangeSource, HunkId, HunkRange, HunkSnapshot, HunkTracker,
+    HunkTrackerHandle, HunkTrackerOptions, HunkTrackerSnapshot, HunkTrackingService,
+    ReconcileState, TrackedFileSnapshot, TrackingContext,
+};
+pub use receipt::ChangeReceipt;
 pub use watch::{FsEventService, WatchOptions};

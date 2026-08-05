@@ -9,6 +9,7 @@ cli	tui
 coding-agent	agent-core
 coding-agent	ai
 coding-agent	ai-protocol
+coding-agent	change-tracker
 coding-agent	event-journal
 coding-agent	tool-contract
 coding-agent	tool-runtime

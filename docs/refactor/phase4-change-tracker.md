@@ -71,9 +71,7 @@ architecture gate 必须保持 execution_debts=0
 
 ## 后续
 
-- ARC-410 HunkTracker actor：消费 `SemanticEvent` 与 edit `ChangeReceipt` 因果
-  关联，引入 stable hunk 与来源归因；gitignore 热更新与 shared `commondir`
-  ref topology 在该步按实际 consumer 需求补充。
+- ARC-410 HunkTracker actor 已完成，见 `docs/refactor/phase4-hunk-tracker.md`。
 - ARC-420 Review domain：`FsEventService` 接入 `coding-agent` 后，review 不再
   由 tool event 投影推导。
 - `notify` 平台差异（macOS FSEvents rename 形态、Windows 路径）沿用

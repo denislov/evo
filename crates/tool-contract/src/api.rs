@@ -10,7 +10,5 @@ pub mod schema {
 }
 
 pub mod output {
-    pub use crate::contract::{
-        ChangeReceipt, ToolContent, ToolError, ToolErrorKind, ToolOutput, ToolProgress,
-    };
+    pub use crate::contract::{ToolContent, ToolError, ToolErrorKind, ToolOutput, ToolProgress};
 }

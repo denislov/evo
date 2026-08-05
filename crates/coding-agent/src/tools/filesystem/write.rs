@@ -1,12 +1,12 @@
 use crate::mutex::MutexExt;
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem::mutation_receipt::{
-    receipt_from_revisions, revision, revision_from_reader, validate_fence,
+    bounded_diff, receipt_from_revisions, revision, validate_fence,
 };
 use futures::future::{BoxFuture, FutureExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 use tool_contract::api::definition::{
     AuthorizationRisk, ToolBehaviorVersion, ToolCapabilities, ToolDefinition, ToolExecutionMode,
@@ -155,16 +155,15 @@ async fn write_target_with_operations(
         }
         file.seek(SeekFrom::Start(0))
             .map_err(|error| format!("write: cannot seek revision source: {error}"))?;
-        Some(
-            revision_from_reader(&mut *file).map_err(|error| {
-                format!("write: cannot read current revision for {path}: {error}")
-            })?,
-        )
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        file.read_to_end(&mut bytes)
+            .map_err(|error| format!("write: cannot read current revision for {path}: {error}"))?;
+        Some((revision(&bytes), bytes))
     };
     validate_fence(
         expected_revision,
         expected_target_fingerprint,
-        before.as_ref().map(|revision| revision.hash.as_str()),
+        before.as_ref().map(|(revision, _)| revision.hash.as_str()),
         target.target_fingerprint(),
         &path,
     )?;
@@ -172,13 +171,20 @@ async fn write_target_with_operations(
     ops.write_file(&target, content.as_bytes(), mutation)
         .await?;
     let after = revision(content.as_bytes());
+    let unified_diff = before
+        .as_ref()
+        .map_or(Some(""), |(_, bytes)| std::str::from_utf8(bytes).ok())
+        .map(|before| {
+            crate::tools::filesystem::diff::generate_unified_patch(&path, before, &content)
+        })
+        .and_then(bounded_diff);
     let receipt = receipt_from_revisions(
         path.clone(),
         target.target_fingerprint().to_owned(),
-        before.as_ref(),
+        before.as_ref().map(|(revision, _)| revision),
         &after,
         "write",
-        None,
+        unified_diff,
     );
     Ok(ToolOutput {
         content: vec![ToolContent::Text {
@@ -367,6 +373,11 @@ mod tests {
         assert_eq!(receipt["before_revision"].as_str().unwrap().len(), 64);
         assert_eq!(receipt["after_revision"].as_str().unwrap().len(), 64);
         assert_eq!(receipt["byte_delta"], 0);
+        assert!(
+            receipt["unified_diff"]
+                .as_str()
+                .is_some_and(|diff| diff.contains("-initial") && diff.contains("+updated"))
+        );
 
         let stale = write_target_with_operations(
             &target,

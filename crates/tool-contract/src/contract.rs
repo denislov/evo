@@ -238,24 +238,6 @@ pub struct ToolProgress {
     pub details: Option<serde_json::Value>,
 }
 
-/// Durable description of one successful filesystem mutation.
-///
-/// `before_revision` is absent when a vacant target was created. The revision
-/// values are content hashes, while `target_fingerprint` identifies the object
-/// that was actually opened through the capability layer. Consumers can reject
-/// stale edit proposals without reopening an ambient path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChangeReceipt {
-    pub path: String,
-    pub target_fingerprint: String,
-    pub before_revision: Option<String>,
-    pub after_revision: String,
-    pub byte_delta: i64,
-    pub line_delta: i64,
-    pub origin: String,
-    pub unified_diff: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolErrorKind {
@@ -374,24 +356,5 @@ mod tests {
             requirements: Vec::new(),
         };
         assert_eq!(definition.validate().unwrap_err().field(), "parameters");
-    }
-
-    #[test]
-    fn change_receipt_round_trips_with_optional_creation_revision() {
-        let receipt = ChangeReceipt {
-            path: "notes.txt".into(),
-            target_fingerprint: "target".into(),
-            before_revision: None,
-            after_revision: "after".into(),
-            byte_delta: 5,
-            line_delta: 1,
-            origin: "write".into(),
-            unified_diff: None,
-        };
-        let value = serde_json::to_value(&receipt).expect("receipt serializes");
-        assert_eq!(
-            serde_json::from_value::<ChangeReceipt>(value).expect("receipt round trips"),
-            receipt
-        );
     }
 }
