@@ -87,14 +87,31 @@ impl WorktreeRecord {
 }
 
 /// File-based registry of managed worktrees.
+///
+/// The registry enforces a concurrency budget: at most `capacity` managed
+/// worktrees may be live (`Ready`/`Active`/`MergePending`) at any moment.
+/// `capacity = None` disables the limit.
 #[derive(Debug, Clone)]
 pub struct WorktreeRegistry {
     root: PathBuf,
+    capacity: Option<usize>,
 }
 
 impl WorktreeRegistry {
-    /// Open (creating on first use) a registry at `root`.
+    /// Open (creating on first use) a registry at `root` with no capacity limit.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, RegistryError> {
+        Self::open_with_capacity(root, None)
+    }
+
+    /// Open a registry at `root` with an explicit live-worktree capacity.
+    ///
+    /// `capacity` bounds how many managed worktrees can exist concurrently;
+    /// `None` means unlimited. This is the budget consumers rely on to bound
+    /// parallel child agents without hard-coded product constants.
+    pub fn open_with_capacity(
+        root: impl Into<PathBuf>,
+        capacity: Option<usize>,
+    ) -> Result<Self, RegistryError> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(|error| RegistryError::Io {
             message: format!("cannot create registry root: {error}"),
@@ -108,11 +125,16 @@ impl WorktreeRegistry {
         fs::create_dir_all(Self::worktrees_dir(&root)).map_err(|error| RegistryError::Io {
             message: format!("cannot create worktrees directory: {error}"),
         })?;
-        Ok(Self { root })
+        Ok(Self { root, capacity })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The live-worktree capacity budget, or `None` when unlimited.
+    pub fn capacity(&self) -> Option<usize> {
+        self.capacity
     }
 
     /// The directory under which managed worktrees are materialized.
@@ -140,6 +162,7 @@ impl WorktreeRegistry {
         cancellation: &CancellationToken,
     ) -> Result<WorktreeRecord, RegistryError> {
         let _writer = self.acquire_writer()?;
+        self.check_capacity_unlocked()?;
         let value = unique_worktree_value(source, owner_operation);
         let id = crate::contract::WorkspaceId::user_supplied(WorkspaceKind::ManagedChild, value)
             .map_err(|error| RegistryError::InvalidRecord {
@@ -183,6 +206,45 @@ impl WorktreeRegistry {
     pub fn register(&self, record: &WorktreeRecord) -> Result<(), RegistryError> {
         let _writer = self.acquire_writer()?;
         self.register_unlocked(record)
+    }
+
+    /// Remove a managed worktree and its record after re-validating identity.
+    ///
+    /// The materialization is removed (git registration, directory, prune) and
+    /// the durable record is deleted only when identity checks pass. Missing
+    /// records are idempotent no-ops; anything else is fail-closed.
+    pub fn discard(&self, id: &str) -> Result<(), RegistryError> {
+        let _writer = self.acquire_writer()?;
+        let parsed = parse_registry_id(id)?;
+        let Some(mut record) = self.load_unlocked(parsed.as_str())? else {
+            return Ok(());
+        };
+        validate_record(&record, &self.root)?;
+        remove_materialization(self, &record)?;
+        record.lifecycle = WorkspaceLifecycle::Removed;
+        self.remove_unlocked(&record.id)
+    }
+
+    fn check_capacity_unlocked(&self) -> Result<(), RegistryError> {
+        let Some(capacity) = self.capacity else {
+            return Ok(());
+        };
+        let active = self
+            .load_all()?
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    record.lifecycle,
+                    WorkspaceLifecycle::Ready
+                        | WorkspaceLifecycle::Active
+                        | WorkspaceLifecycle::MergePending
+                )
+            })
+            .count();
+        if active >= capacity {
+            return Err(RegistryError::CapacityExhausted { active, capacity });
+        }
+        Ok(())
     }
 
     pub fn load(&self, id: &str) -> Result<Option<WorktreeRecord>, RegistryError> {
@@ -463,6 +525,8 @@ pub enum RegistryError {
         from: WorkspaceLifecycle,
         to: WorkspaceLifecycle,
     },
+    #[error("managed worktree capacity exhausted: {active}/{capacity} live")]
+    CapacityExhausted { active: usize, capacity: usize },
     #[error("worktree creation failed: {0}")]
     Worktree(#[from] super::WorktreeError),
 }

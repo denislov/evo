@@ -9,6 +9,9 @@ use crate::application::operation::control::OperationControl;
 use crate::kernel::capability::ActorId;
 use crate::kernel::error::CodingSessionError;
 use crate::kernel::operation::OperationKind;
+use crate::operations::delegation::worktree::{
+    ChildWorkspaceBinding, ChildWorkspacePolicy, ChildWorktreeLease, bind_child_workspace,
+};
 use crate::operations::delegation::{
     DelegationAuthorizationDecision, DelegationLineageEntry, PendingDelegationConfirmationState,
     capability_snapshot_for_delegated_profile, delegation_lineage_for_request,
@@ -25,8 +28,6 @@ use crate::profiles::{
 use crate::public_error::CodingAgentPublicDiagnostic;
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
-
-const MAX_TEAM_MEMBER_CONCURRENCY: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct AgentTeamOptions {
@@ -168,6 +169,7 @@ pub(crate) struct AgentTeamContext {
     final_text: Option<String>,
     parent_capability_snapshot: Option<OperationCapabilitySnapshot>,
     child_capability_snapshot: Option<OperationCapabilitySnapshot>,
+    child_worktree: Option<ChildWorktreeLease>,
     pending_delegation_confirmations: Vec<PendingDelegationConfirmationState>,
     failure_terminal_recorded: bool,
     defer_terminal_publication: bool,
@@ -196,6 +198,7 @@ impl AgentTeamContext {
             final_text: None,
             parent_capability_snapshot: None,
             child_capability_snapshot: None,
+            child_worktree: None,
             pending_delegation_confirmations: Vec::new(),
             failure_terminal_recorded: false,
             defer_terminal_publication: false,
@@ -332,6 +335,7 @@ impl AgentTeamContext {
     async fn run_member_agents(&mut self) -> Result<(), CodingSessionError> {
         let members = self.member_profiles.clone();
         let task = self.options.task.clone();
+        let concurrency = self.team_member_concurrency(members.len());
         let base = self.clone();
         let mut completed =
             futures::stream::iter(members.into_iter().enumerate().map(|(index, profile)| {
@@ -349,7 +353,7 @@ impl AgentTeamContext {
                     )
                 }
             }))
-            .buffer_unordered(MAX_TEAM_MEMBER_CONCURRENCY)
+            .buffer_unordered(concurrency)
             .collect::<Vec<_>>()
             .await;
         completed.sort_by_key(|(index, _, _, _)| *index);
@@ -361,6 +365,23 @@ impl AgentTeamContext {
             self.member_results.push(result?);
         }
         Ok(())
+    }
+
+    /// Concurrency budget for parallel members.
+    ///
+    /// The bound comes from the managed-worktree registry capacity, never a
+    /// hard-coded product constant: every write-capable member needs its own
+    /// isolated worktree, so registry capacity is the natural concurrency
+    /// budget. Without a configured registry the member count is used and
+    /// provisioning fails closed per member.
+    fn team_member_concurrency(&self, member_count: usize) -> usize {
+        let capacity = self
+            .operation_control
+            .worktree_registry()
+            .and_then(|registry| registry.capacity());
+        capacity.map_or(member_count.max(1), |capacity| {
+            capacity.min(member_count.max(1))
+        })
     }
 
     fn collect_member_result(&mut self) -> Result<(), CodingSessionError> {
@@ -418,6 +439,37 @@ impl AgentTeamContext {
         let mut ids = SystemIdGenerator;
         let child_operation_id = OperationScheduler::allocate_child_operation_id();
         let turn_id = ids.next_turn_id();
+        let parent = self.parent_capability_snapshot.as_ref().ok_or_else(|| {
+            CodingSessionError::UnsupportedCapability {
+                capability: "team child operation requires an admitted parent capability snapshot"
+                    .into(),
+            }
+        })?;
+        let policy = ChildWorkspacePolicy::decide(parent, profile);
+        let cancellation = CancellationToken::new();
+        let binding = match bind_child_workspace(
+            &self.operation_control,
+            parent,
+            &child_operation_id,
+            None,
+            &cancellation,
+            policy,
+        )
+        .await?
+        {
+            Some(lease) => {
+                let handle = lease.handle()?;
+                self.child_worktree = Some(lease);
+                ChildWorkspaceBinding::Managed(handle)
+            }
+            None => match policy {
+                ChildWorkspacePolicy::Projectless => ChildWorkspaceBinding::None,
+                ChildWorkspacePolicy::ReadOnlyShared => ChildWorkspaceBinding::ReadOnlyShared,
+                ChildWorkspacePolicy::Managed => {
+                    unreachable!("managed policy always returns a lease or fails closed")
+                }
+            },
+        };
         self.event_service.emit_agent_team_member_started(
             self.operation_id.clone(),
             child_operation_id.clone(),
@@ -437,6 +489,11 @@ impl AgentTeamContext {
             return Err(CodingSessionError::Config {
                 message: "agent team options do not include a runtime snapshot".into(),
             });
+        }
+        if let Some(handle) = binding.as_managed()
+            && let Some(lease) = self.child_worktree.as_ref()
+        {
+            prompt_options.bind_child_workspace(lease.root().to_path_buf(), handle.clone())?;
         }
 
         let mut child_context = PromptTurnContext::new(
@@ -460,7 +517,8 @@ impl AgentTeamContext {
             child_operation_id.clone(),
             profile,
             ActorId::ChildOperation(parent.operation_id.clone()),
-        );
+            binding,
+        )?;
         let child_admission = OperationScheduler::admit_child(
             &self.operation_control,
             OperationKind::Prompt,
@@ -549,6 +607,7 @@ impl AgentTeamContext {
                     final_text.clone(),
                 )?;
                 drop(child_admission);
+                self.release_child_worktree_diagnostic(&child_operation_id)?;
                 Ok(AgentTeamMemberOutcome {
                     profile_id: profile.id.clone(),
                     operation_id: child_operation_id.clone(),
@@ -563,17 +622,34 @@ impl AgentTeamContext {
             }
             InternalPromptTurnOutcome::Aborted { reason, .. } => {
                 self.event_service
-                    .emit_prompt_aborted(child_operation_id, reason.clone())?;
+                    .emit_prompt_aborted(child_operation_id.clone(), reason.clone())?;
                 drop(child_admission);
+                self.release_child_worktree_diagnostic(&child_operation_id)?;
                 Err(CodingSessionError::Cancelled)
             }
             InternalPromptTurnOutcome::Failed { error, .. } => {
                 self.event_service
-                    .emit_prompt_failed(child_operation_id, error.clone())?;
+                    .emit_prompt_failed(child_operation_id.clone(), error.clone())?;
                 drop(child_admission);
+                self.release_child_worktree_diagnostic(&child_operation_id)?;
                 Err(error)
             }
         }
+    }
+
+    fn release_child_worktree_diagnostic(
+        &mut self,
+        child_operation_id: &str,
+    ) -> Result<(), CodingSessionError> {
+        if let Some(lease) = self.child_worktree.as_mut()
+            && let Err(error) = lease.release()
+        {
+            self.event_service.emit_diagnostic(
+                Some(child_operation_id.to_owned()),
+                format!("child worktree release failed: {error}"),
+            )?;
+        }
+        Ok(())
     }
 
     async fn execute_authorized_delegations(

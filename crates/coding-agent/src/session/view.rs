@@ -23,6 +23,7 @@ pub struct CodingAgentSessionOptions {
     default_agent_profile_id: Option<ProfileId>,
     ai_client: Option<AiClient>,
     tool_authorization_mode: ToolAuthorizationMode,
+    worktree_registry_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for CodingAgentSessionOptions {
@@ -99,6 +100,15 @@ impl CodingAgentSessionOptions {
         self
     }
 
+    /// Pin the managed-worktree registry root.
+    ///
+    /// Defaults to the user-global config directory's `worktrees` directory.
+    /// Tests override this to keep child worktrees out of real user state.
+    pub fn with_worktree_registry_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.worktree_registry_dir = Some(dir.into());
+        self
+    }
+
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
@@ -137,6 +147,10 @@ impl CodingAgentSessionOptions {
 
     pub(crate) fn tool_authorization_mode(&self) -> ToolAuthorizationMode {
         self.tool_authorization_mode
+    }
+
+    pub(crate) fn worktree_registry_dir(&self) -> Option<&Path> {
+        self.worktree_registry_dir.as_deref()
     }
 }
 

@@ -27,6 +27,9 @@ mod capability_snapshot_tests;
 pub(crate) mod confirmation;
 pub(crate) mod execution;
 mod tool;
+pub(crate) mod worktree;
+#[cfg(test)]
+mod worktree_tests;
 pub(crate) use tool::delegation_tools;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -92,7 +95,8 @@ pub(crate) fn capability_snapshot_for_delegated_profile(
     operation_id: impl Into<String>,
     profile: &AgentProfile,
     actor: ActorId,
-) -> OperationCapabilitySnapshot {
+    binding: crate::operations::delegation::worktree::ChildWorkspaceBinding,
+) -> Result<OperationCapabilitySnapshot, CodingSessionError> {
     let mut released_tools = profile
         .tools
         .iter()
@@ -116,7 +120,36 @@ pub(crate) fn capability_snapshot_for_delegated_profile(
     let releases_workspace = released_tools
         .iter()
         .any(|id| tool_uses_filesystem(id) || id.as_str() == "bash");
-    OperationCapabilitySnapshot {
+    let workspace = match binding {
+        crate::operations::delegation::worktree::ChildWorkspaceBinding::None => None,
+        crate::operations::delegation::worktree::ChildWorkspaceBinding::ReadOnlyShared => {
+            parent.workspace.clone().filter(|_| releases_workspace)
+        }
+        crate::operations::delegation::worktree::ChildWorkspaceBinding::Managed(handle)
+            if releases_workspace =>
+        {
+            let shell_path = parent
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.shell_path().map(str::to_owned));
+            let command_prefix = parent
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.command_prefix().map(str::to_owned));
+            Some(
+                workspace_runtime::api::WorkspaceAccessHandle::open(
+                    handle,
+                    shell_path,
+                    command_prefix,
+                )
+                .map_err(|error| CodingSessionError::Resource {
+                    message: format!("cannot open child worktree capability: {error}"),
+                })?,
+            )
+        }
+        crate::operations::delegation::worktree::ChildWorkspaceBinding::Managed(_) => None,
+    };
+    Ok(OperationCapabilitySnapshot {
         generation: parent.generation,
         operation_id: operation_id.into(),
         actor,
@@ -125,11 +158,11 @@ pub(crate) fn capability_snapshot_for_delegated_profile(
         }),
         tools: ToolCapabilitySet::from_ids(released_tools),
         commands: Default::default(),
-        workspace: parent.workspace.clone().filter(|_| releases_workspace),
+        workspace,
         session_read: None,
         session_write: None,
         ui: None,
-    }
+    })
 }
 
 pub(crate) fn capability_snapshot_for_child_operation(

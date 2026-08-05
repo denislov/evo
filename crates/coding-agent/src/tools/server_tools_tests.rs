@@ -241,7 +241,9 @@ mod delegation {
     use crate::kernel::capability::{
         ActorId, CapabilityGeneration, CommandCapabilitySet, ToolCapabilitySet,
     };
-    use crate::operations::delegation::capability_snapshot_for_delegated_profile;
+    use crate::operations::delegation::{
+        capability_snapshot_for_delegated_profile, worktree::ChildWorkspaceBinding,
+    };
     use crate::profiles::{AgentProfile, DelegationPolicy, ProfileId, ProfileSource};
     use tool_contract::api::definition::ToolId;
 
@@ -290,7 +292,9 @@ mod delegation {
             "child-op",
             &profile(&["read"]),
             ActorId::Client,
-        );
+            ChildWorkspaceBinding::None,
+        )
+        .expect("snapshot");
         assert!(released.tools.allows(&ToolId::new("read").unwrap()));
         assert!(
             released.tools.allows(&ToolId::new("web_search").unwrap()),
@@ -310,7 +314,9 @@ mod delegation {
             "child-op",
             &profile(&["read"]),
             ActorId::Client,
-        );
+            ChildWorkspaceBinding::None,
+        )
+        .expect("snapshot");
         assert!(
             !released.tools.allows(&ToolId::new("web_search").unwrap()),
             "a parent without web_search must not hand it to a child"
@@ -325,7 +331,9 @@ mod delegation {
             "child-op",
             &profile(&[]),
             ActorId::Client,
-        );
+            ChildWorkspaceBinding::None,
+        )
+        .expect("snapshot");
         assert!(!released.tools.allows(&ToolId::new("web_search").unwrap()));
         assert!(!released.tools.allows(&ToolId::new("read").unwrap()));
     }

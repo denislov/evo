@@ -79,6 +79,108 @@ fn register_and_load_round_trip() {
 }
 
 #[test]
+fn capacity_bounds_concurrent_live_worktrees() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry =
+        WorktreeRegistry::open_with_capacity(registry_dir.path(), Some(2)).expect("registry opens");
+    assert_eq!(registry.capacity(), Some(2));
+    let handle = WorkspaceHandle::new(WorkspaceKind::Source, source_dir.path()).expect("handle");
+    fs::create_dir_all(source_dir.path()).expect("source dir");
+
+    let create = || {
+        registry
+            .create_managed(
+                &handle,
+                "op-capacity",
+                None,
+                WorkingTreeMode::PreserveWorkingTree,
+                &CancellationToken::new(),
+            )
+            .expect("worktree within capacity")
+    };
+    let first = create();
+    let second = create();
+    let error = registry
+        .create_managed(
+            &handle,
+            "op-capacity-over",
+            None,
+            WorkingTreeMode::PreserveWorkingTree,
+            &CancellationToken::new(),
+        )
+        .expect_err("capacity exhausted");
+    assert!(matches!(
+        error,
+        super::RegistryError::CapacityExhausted {
+            active: 2,
+            capacity: 2
+        }
+    ));
+
+    registry
+        .transition(&first.id, WorkspaceLifecycle::Active, now_seconds())
+        .expect("active");
+    registry
+        .transition(&first.id, WorkspaceLifecycle::Discarded, now_seconds())
+        .expect("discarded");
+    registry
+        .discard(&first.id)
+        .expect("discarded worktree is reclaimed");
+    let third = create();
+    assert_ne!(third.id, second.id);
+}
+
+#[test]
+fn discard_removes_materialization_record_and_registration() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    git_source(source_dir.path());
+    let record = registered_worktree(&registry, source_dir.path(), "op-finished");
+    assert!(record.dest.exists(), "worktree materialized");
+
+    registry.discard(&record.id).expect("discard succeeds");
+    assert!(
+        registry
+            .load(&record.id)
+            .expect("load after discard")
+            .is_none(),
+        "record removed"
+    );
+    assert!(!record.dest.exists(), "materialization removed");
+    registry.discard(&record.id).expect("discard is idempotent");
+}
+
+#[test]
+fn discard_rejects_unverified_identities() {
+    let (registry_dir, source_dir) = registry_root();
+    let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");
+    git_source(source_dir.path());
+    let record = registered_worktree(&registry, source_dir.path(), "op-finished");
+
+    let victim = registry_dir.path().join("victim.json");
+    fs::write(&victim, b"must survive").expect("victim file");
+    let error = registry
+        .discard("../victim")
+        .expect_err("path traversal rejected");
+    assert!(matches!(error, super::RegistryError::InvalidRecord { .. }));
+    assert!(victim.exists(), "outside file must not be deleted");
+    assert!(record.dest.exists(), "worktree untouched");
+
+    let mut forged = record.clone();
+    forged.dest = registry_dir.path().join("registry").join("forged");
+    fs::write(
+        registry.record_path(&record.id),
+        serde_json::to_vec(&forged).expect("encode forged record"),
+    )
+    .expect("write forged record");
+    let error = registry
+        .discard(&record.id)
+        .expect_err("forged destination rejected");
+    assert!(matches!(error, super::RegistryError::InvalidRecord { .. }));
+    assert!(record.dest.exists(), "worktree still untouched");
+}
+
+#[test]
 fn ids_are_unique_across_creations() {
     let (registry_dir, source_dir) = registry_root();
     let registry = WorktreeRegistry::open(registry_dir.path()).expect("registry opens");

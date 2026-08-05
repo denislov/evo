@@ -9,6 +9,9 @@ use crate::kernel::capability::ActorId;
 use crate::kernel::control::PromptControlReceiver;
 use crate::kernel::error::CodingSessionError;
 use crate::kernel::operation::OperationKind;
+use crate::operations::delegation::worktree::{
+    ChildWorkspaceBinding, ChildWorkspacePolicy, ChildWorktreeLease, bind_child_workspace,
+};
 use crate::operations::delegation::{
     DelegationAuthorizationDecision, DelegationLineageEntry, PendingDelegationConfirmationState,
     capability_snapshot_for_delegated_profile, delegation_lineage_for_request,
@@ -110,6 +113,7 @@ impl AgentInvocationRunner {
             ctx.start_agent_invocation()?;
             Self::check_cancellation(&cancellation)?;
             ctx.resolve_agent_profile()?;
+            ctx.provision_child_workspace(cancellation.as_ref()).await?;
             Self::check_cancellation(&cancellation)?;
             ctx.prepare_child_prompt()?;
             if let Some(token) = cancellation.as_ref()
@@ -125,6 +129,10 @@ impl AgentInvocationRunner {
         .await;
         if let Err(error) = &result {
             ctx.record_failure_terminal(error)?;
+        }
+        if let Err(error) = ctx.release_child_worktree() {
+            ctx.event_service
+                .emit_diagnostic(Some(ctx.operation_id.clone()), error.to_string())?;
         }
         result
     }
@@ -157,6 +165,8 @@ pub(crate) struct AgentInvocationContext {
     parent_capability_snapshot: Option<OperationCapabilitySnapshot>,
     child_capability_snapshot: Option<OperationCapabilitySnapshot>,
     child_admission: Option<crate::application::operation::permit::OperationPermit>,
+    child_workspace_binding: Option<ChildWorkspaceBinding>,
+    child_worktree: Option<ChildWorktreeLease>,
     pending_delegation_confirmations: Vec<PendingDelegationConfirmationState>,
     failure_terminal_recorded: bool,
     defer_terminal_publication: bool,
@@ -187,6 +197,8 @@ impl AgentInvocationContext {
             parent_capability_snapshot: None,
             child_capability_snapshot: None,
             child_admission: None,
+            child_workspace_binding: None,
+            child_worktree: None,
             pending_delegation_confirmations: Vec::new(),
             failure_terminal_recorded: false,
             defer_terminal_publication: false,
@@ -252,6 +264,16 @@ impl AgentInvocationContext {
         self.prompt_control_receiver = Some(receiver);
     }
 
+    #[cfg(test)]
+    pub(crate) fn child_capability_snapshot(&self) -> Option<&OperationCapabilitySnapshot> {
+        self.child_capability_snapshot.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn child_context(&self) -> Option<&PromptTurnContext> {
+        self.child_context.as_ref()
+    }
+
     pub(crate) fn finish_success(&self) -> Result<AgentInvocationOutcome, CodingSessionError> {
         let outcome = self
             .prompt_outcome
@@ -312,6 +334,62 @@ impl AgentInvocationContext {
         Ok(())
     }
 
+    /// Provision the child's isolated workspace before admission.
+    ///
+    /// Write-capable children get a managed worktree bound to their own
+    /// capability snapshot; read-only children share the parent read path;
+    /// projectless children carry no workspace. The lease is released on every
+    /// terminal path of [`AgentInvocationRunner::run_typed`].
+    async fn provision_child_workspace(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), CodingSessionError> {
+        let parent = self.parent_capability_snapshot.as_ref().ok_or_else(|| {
+            CodingSessionError::UnsupportedCapability {
+                capability: "agent child operation requires an admitted parent capability snapshot"
+                    .into(),
+            }
+        })?;
+        let profile = self
+            .profile
+            .as_ref()
+            .ok_or_else(|| CodingSessionError::Session {
+                message: "agent invocation cannot provision a workspace before profile resolution"
+                    .into(),
+            })?;
+        let policy = ChildWorkspacePolicy::decide(parent, profile);
+        let Some(lease) = bind_child_workspace(
+            &self.operation_control,
+            parent,
+            &self.child_operation_id,
+            None,
+            cancellation.unwrap_or(&CancellationToken::new()),
+            policy,
+        )
+        .await?
+        else {
+            self.child_workspace_binding = Some(match policy {
+                ChildWorkspacePolicy::Projectless => ChildWorkspaceBinding::None,
+                ChildWorkspacePolicy::ReadOnlyShared => ChildWorkspaceBinding::ReadOnlyShared,
+                ChildWorkspacePolicy::Managed => {
+                    unreachable!("managed policy always returns a lease or fails closed")
+                }
+            });
+            return Ok(());
+        };
+        let handle = lease.handle()?;
+        self.child_worktree = Some(lease);
+        self.child_workspace_binding = Some(ChildWorkspaceBinding::Managed(handle));
+        Ok(())
+    }
+
+    fn release_child_worktree(&mut self) -> Result<(), CodingSessionError> {
+        if let Some(lease) = self.child_worktree.as_mut() {
+            lease.release()?;
+        }
+        Ok(())
+    }
+
     fn prepare_child_prompt(&mut self) -> Result<(), CodingSessionError> {
         let profile = self
             .profile
@@ -332,6 +410,25 @@ impl AgentInvocationContext {
                 message: "agent invocation options do not include a runtime snapshot".into(),
             });
         }
+        let parent = self.parent_capability_snapshot.as_ref().ok_or_else(|| {
+            CodingSessionError::UnsupportedCapability {
+                capability: "agent child operation requires an admitted parent capability snapshot"
+                    .into(),
+            }
+        })?;
+        let binding =
+            self.child_workspace_binding
+                .as_ref()
+                .ok_or_else(|| CodingSessionError::Session {
+                    message:
+                        "agent invocation cannot prepare child prompt before workspace provisioning"
+                            .into(),
+                })?;
+        if let Some(handle) = binding.as_managed()
+            && let Some(lease) = self.child_worktree.as_ref()
+        {
+            prompt_options.bind_child_workspace(lease.root().to_path_buf(), handle.clone())?;
+        }
         let mut child_context = PromptTurnContext::new(
             PromptTurnIds::new(self.child_operation_id.clone(), self.turn_id.clone()),
             prompt_options,
@@ -347,18 +444,13 @@ impl AgentInvocationContext {
         if let Some(service) = self.authorization_service.clone() {
             child_context.set_authorization_service(service);
         }
-        let parent = self.parent_capability_snapshot.as_ref().ok_or_else(|| {
-            CodingSessionError::UnsupportedCapability {
-                capability: "agent child operation requires an admitted parent capability snapshot"
-                    .into(),
-            }
-        })?;
         let capability_snapshot = capability_snapshot_for_delegated_profile(
             parent,
             self.child_operation_id.clone(),
             profile,
             ActorId::ChildOperation(parent.operation_id.clone()),
-        );
+            binding.clone(),
+        )?;
         let child_admission = OperationScheduler::admit_child(
             &self.operation_control,
             OperationKind::Prompt,

@@ -156,6 +156,22 @@ impl PromptTurnOptions {
         self.invocation = invocation;
     }
 
+    /// Redirect this child turn into an isolated managed worktree.
+    pub(crate) fn bind_child_workspace(
+        &mut self,
+        cwd: std::path::PathBuf,
+        handle: workspace_runtime::api::WorkspaceHandle,
+    ) -> Result<(), CodingSessionError> {
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or_else(|| CodingSessionError::Config {
+                message: "prompt turn options do not include a runtime snapshot".into(),
+            })?;
+        runtime.bind_child_workspace(cwd, handle);
+        Ok(())
+    }
+
     pub(crate) fn apply_agent_profile(
         &mut self,
         profile: &AgentProfile,
@@ -357,6 +373,14 @@ pub(crate) struct RuntimeSnapshot {
     profile_skill_allowlist: Option<Vec<String>>,
     profile_diagnostics: Vec<CodingDiagnostic>,
     provider_streamer: Option<ProviderStreamer>,
+    child_workspace: Option<ChildWorkspaceContext>,
+}
+
+/// The isolated directory a child operation executes in.
+#[derive(Debug, Clone)]
+pub(crate) struct ChildWorkspaceContext {
+    pub(crate) cwd: std::path::PathBuf,
+    pub(crate) handle: workspace_runtime::api::WorkspaceHandle,
 }
 
 impl std::fmt::Debug for RuntimeSnapshot {
@@ -450,6 +474,7 @@ impl RuntimeSnapshot {
                     });
                 provider_streamer
             }),
+            child_workspace: None,
         }
     }
 
@@ -616,16 +641,35 @@ impl RuntimeSnapshot {
     }
 
     pub(crate) fn cwd(&self) -> Option<&std::path::Path> {
-        self.session_run_options
+        self.child_workspace
             .as_ref()
-            .map(|options| options.cwd.as_path())
+            .map(|workspace| workspace.cwd.as_path())
+            .or_else(|| {
+                self.session_run_options
+                    .as_ref()
+                    .map(|options| options.cwd.as_path())
+            })
     }
 
     pub(crate) fn workspace_handle(&self) -> Option<&workspace_runtime::api::WorkspaceHandle> {
-        self.session_run_options
+        self.child_workspace
             .as_ref()
-            .and_then(|options| options.workspace.as_ref())
-            .map(|workspace| &workspace.runtime_handle)
+            .map(|workspace| &workspace.handle)
+            .or_else(|| {
+                self.session_run_options
+                    .as_ref()
+                    .and_then(|options| options.workspace.as_ref())
+                    .map(|workspace| &workspace.runtime_handle)
+            })
+    }
+
+    /// Redirect this runtime into an isolated child worktree.
+    pub(crate) fn bind_child_workspace(
+        &mut self,
+        cwd: std::path::PathBuf,
+        handle: workspace_runtime::api::WorkspaceHandle,
+    ) {
+        self.child_workspace = Some(ChildWorkspaceContext { cwd, handle });
     }
 
     pub(crate) fn profile_id(&self) -> Option<&ProfileId> {

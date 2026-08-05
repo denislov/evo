@@ -7,7 +7,19 @@ impl OperationControl {
         Self {
             state: OperationState::with_snapshot_coordinator(snapshot_coordinator),
             prompt_control: PromptControlState::new(),
+            worktree_registry: None,
         }
+    }
+
+    /// Attach the managed-worktree registry used to isolate child agents.
+    ///
+    /// Without a registry, delegation and team child operations fail closed.
+    pub(crate) fn with_worktree_registry(
+        mut self,
+        registry: Arc<workspace_runtime::api::WorktreeRegistry>,
+    ) -> Self {
+        self.worktree_registry = Some(registry);
+        self
     }
 
     pub(crate) fn activity(&self) -> Result<OperationActivity, CodingSessionError> {

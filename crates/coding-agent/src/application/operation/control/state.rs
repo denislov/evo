@@ -251,4 +251,13 @@ impl OperationState {
 pub(crate) struct OperationControl {
     pub(super) state: OperationState,
     pub(super) prompt_control: PromptControlState,
+    pub(super) worktree_registry: Option<Arc<workspace_runtime::api::WorktreeRegistry>>,
+}
+
+impl OperationControl {
+    pub(crate) fn worktree_registry(
+        &self,
+    ) -> Option<&Arc<workspace_runtime::api::WorktreeRegistry>> {
+        self.worktree_registry.as_ref()
+    }
 }

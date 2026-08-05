@@ -20,12 +20,14 @@ impl CodingAgentSession {
         let project_root = session_project_root(&options, Some(&session_service));
         let profile_registry = profile_registry_for_options(&options, Some(&session_service))?;
         let runtime_service = runtime_service_for_options(&options);
+        let worktree_registry = worktree_registry_for(&options, &project_root)?;
         Self::from_services(
             session_service,
             profile_registry,
             runtime_service,
             options.tool_authorization_mode(),
             project_root,
+            worktree_registry,
         )
     }
 
@@ -46,12 +48,14 @@ impl CodingAgentSession {
         let project_root = session_project_root(&options, Some(&session_service));
         let profile_registry = profile_registry_for_options(&options, Some(&session_service))?;
         let runtime_service = runtime_service_for_options(&options);
+        let worktree_registry = worktree_registry_for(&options, &project_root)?;
         Self::from_services(
             session_service,
             profile_registry,
             runtime_service,
             options.tool_authorization_mode(),
             project_root,
+            worktree_registry,
         )
     }
 
@@ -74,12 +78,14 @@ impl CodingAgentSession {
         let project_root = session_project_root(&options, Some(&session_service));
         let profile_registry = profile_registry_for_options(&options, Some(&session_service))?;
         let runtime_service = runtime_service_for_options(&options);
+        let worktree_registry = worktree_registry_for(&options, &project_root)?;
         Self::from_services(
             session_service,
             profile_registry,
             runtime_service,
             options.tool_authorization_mode(),
             project_root,
+            worktree_registry,
         )
     }
 
@@ -100,12 +106,14 @@ impl CodingAgentSession {
             });
         }
         let project_root = session_project_root(&options, None);
+        let worktree_registry = worktree_registry_for(&options, &project_root)?;
         Self::from_transient(
             TransientSessionState::new(option_default_agent_profile_id(&options)),
             profile_registry_for_options(&options, None)?,
             runtime_service_for_options(&options),
             options.tool_authorization_mode(),
             project_root,
+            worktree_registry,
         )
     }
 
@@ -181,6 +189,7 @@ impl CodingAgentSession {
         runtime_service: RuntimeService,
         tool_authorization_mode: crate::authorization::ToolAuthorizationMode,
         project_root: PathBuf,
+        worktree_registry: Arc<workspace_runtime::api::WorktreeRegistry>,
     ) -> Result<Self, CodingSessionError> {
         let mut session_service = session_service;
         let replay_state = replay_derived_owner_state(&mut session_service)?;
@@ -199,7 +208,8 @@ impl CodingAgentSession {
                 operation_supervisor: crate::runtime::owners::OperationSupervisor {
                     control: OperationControl::with_snapshot_coordinator(
                         snapshot_coordinator.clone(),
-                    ),
+                    )
+                    .with_worktree_registry(worktree_registry),
                     capabilities: CapabilitySnapshotService::with_snapshot_coordinator(
                         snapshot_coordinator.clone(),
                     ),
@@ -247,6 +257,7 @@ impl CodingAgentSession {
         runtime_service: RuntimeService,
         tool_authorization_mode: crate::authorization::ToolAuthorizationMode,
         project_root: PathBuf,
+        worktree_registry: Arc<workspace_runtime::api::WorktreeRegistry>,
     ) -> Result<Self, CodingSessionError> {
         let snapshot_coordinator = SnapshotCoordinator::new();
         let client_service = ClientService::new(snapshot_coordinator.clone());
@@ -261,7 +272,8 @@ impl CodingAgentSession {
                 operation_supervisor: crate::runtime::owners::OperationSupervisor {
                     control: OperationControl::with_snapshot_coordinator(
                         snapshot_coordinator.clone(),
-                    ),
+                    )
+                    .with_worktree_registry(worktree_registry),
                     capabilities: CapabilitySnapshotService::with_snapshot_coordinator(
                         snapshot_coordinator.clone(),
                     ),
@@ -334,4 +346,38 @@ fn runtime_service_for_options(options: &CodingAgentSessionOptions) -> RuntimeSe
         .cloned()
         .map(RuntimeService::with_ai_client)
         .unwrap_or_else(RuntimeService::new)
+}
+
+/// The managed-worktree registry root for a session.
+///
+/// An explicit option wins; otherwise the user-global config directory's
+/// `worktrees` directory is used (honoring `EVO_DIR`).
+fn worktree_registry_dir_for(options: &CodingAgentSessionOptions, cwd: &Path) -> PathBuf {
+    options
+        .worktree_registry_dir()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| {
+            crate::config::resolve_paths(cwd)
+                .global_dir
+                .join("worktrees")
+        })
+}
+
+/// Default live-worktree capacity: the concurrency budget for parallel child
+/// agents when the product does not configure a different bound.
+const DEFAULT_WORKTREE_CAPACITY: usize = 4;
+
+fn worktree_registry_for(
+    options: &CodingAgentSessionOptions,
+    cwd: &Path,
+) -> Result<Arc<workspace_runtime::api::WorktreeRegistry>, CodingSessionError> {
+    let root = worktree_registry_dir_for(options, cwd);
+    workspace_runtime::api::WorktreeRegistry::open_with_capacity(
+        root,
+        Some(DEFAULT_WORKTREE_CAPACITY),
+    )
+    .map(Arc::new)
+    .map_err(|error| CodingSessionError::Resource {
+        message: format!("cannot open managed worktree registry: {error}"),
+    })
 }
