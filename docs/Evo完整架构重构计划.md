@@ -31,7 +31,7 @@
 | Phase 2 / ARC-250 | 完成 | custom/delegation/builtin 全部进入 typed runtime；`AgentTool`、`add_tool`、Legacy dispatch、marker/facade 与重复 schema validator 已物理删除 |
 | Phase 2 Gate | 完成 | coding-agent/agent-core/tool-runtime tests、workspace check、release API、architecture 与 core perf Gate 全部通过 |
 | Phase 3 / ARC-300 | 完成 | `docs/refactor/phase3-workspace-runtime.md`；identity/lease/opaque access handle、filesystem capability、path binding、mutation fence、process primitive 全部进入 `workspace-runtime`，coding-agent 仅持 workspace handle |
-| Phase 3 / ARC-310 | 完成 | `docs/refactor/phase3-worktree-builder.md`；Git worktree + copy/reflink fallback、dirty/untracked sync、cancellation、ignore policy 已落地并测试 |
+| Phase 3 / ARC-310 | 完成 | `docs/refactor/phase3-worktree-builder.md`；managed identity、Git worktree + copy/reflink fallback、fail-closed dirty/untracked sync、process-tree cancellation、ignore/path policy 已落地并测试 |
 | Phase 3 / ARC-320～350 | 未开始 | 前序 Gate 通过后进入 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
@@ -453,6 +453,7 @@ Phase 2 Gate：完成。builtin、custom injected 与 delegation tools 全部由
 - 不实现 overlay/Btrfs，除非基准证明 copy/reflink 无法满足性能目标。
 - 支持 cancellation、dirty source snapshot、untracked 文件同步和 ignore policy。
 - worktree identity 包含 owner operation、parent session、base revision、creation mode 和 lifecycle state。
+- `WorktreeBuilder` 只接受 typed source handle，成功返回绑定 `WorkspaceLease` 与 creation report 的 `ManagedWorktree`；不完整 snapshot、未验证清理或不安全 destination 均 fail-closed。
 
 ### ARC-320 Registry、恢复与 GC
 

@@ -14,13 +14,23 @@
 //! Creation is cancellable; a cancelled or failed create removes the
 //! destination so no half-materialized worktree survives.
 
+use std::ffi::OsString;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use tokio_util::sync::CancellationToken;
 
+use crate::contract::{
+    WorkspaceHandle, WorkspaceIdentityError, WorkspaceKind, WorkspaceLease, WorkspaceLeaseError,
+    WorkspaceLifecycle,
+};
+
 const CANCEL_POLL_ENTRIES: usize = 64;
 const MAX_STATUS_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REVISION_BYTES: usize = 1024;
+
+mod git;
+use git::{git_capture, run_git};
 
 /// How much of the source working tree the child worktree should preserve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,19 +55,70 @@ pub enum WorktreeCreationMode {
 /// Result of a successful [`WorktreeBuilder::create`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeReport {
-    /// Absolute path of the materialized child worktree.
-    pub worktree_path: PathBuf,
     /// HEAD commit of the source repository, when the source is git-managed.
-    pub commit: Option<String>,
+    commit: Option<String>,
     /// How the worktree was materialized.
-    pub creation_mode: WorktreeCreationMode,
-    pub files_copied: u64,
-    pub dirs_created: u64,
-    pub symlinks_copied: u64,
-    pub files_deleted: u64,
-    /// Non-fatal issues encountered while syncing (e.g. a file that vanished
-    /// between status and copy).
-    pub issues: Vec<String>,
+    creation_mode: WorktreeCreationMode,
+    files_copied: u64,
+    dirs_created: u64,
+    symlinks_copied: u64,
+    files_deleted: u64,
+}
+
+impl WorktreeReport {
+    pub fn commit(&self) -> Option<&str> {
+        self.commit.as_deref()
+    }
+
+    pub const fn creation_mode(&self) -> WorktreeCreationMode {
+        self.creation_mode
+    }
+
+    pub const fn files_copied(&self) -> u64 {
+        self.files_copied
+    }
+
+    pub const fn dirs_created(&self) -> u64 {
+        self.dirs_created
+    }
+
+    pub const fn symlinks_copied(&self) -> u64 {
+        self.symlinks_copied
+    }
+
+    pub const fn files_deleted(&self) -> u64 {
+        self.files_deleted
+    }
+}
+
+/// A materialized child workspace whose report and lifecycle identity cannot
+/// drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedWorktree {
+    lease: WorkspaceLease,
+    report: WorktreeReport,
+}
+
+impl ManagedWorktree {
+    pub fn lease(&self) -> &WorkspaceLease {
+        &self.lease
+    }
+
+    pub fn report(&self) -> &WorktreeReport {
+        &self.report
+    }
+
+    pub fn root(&self) -> &Path {
+        self.lease.handle().root()
+    }
+
+    pub const fn creation_mode(&self) -> WorktreeCreationMode {
+        self.report.creation_mode
+    }
+
+    pub fn transition(&mut self, next: WorkspaceLifecycle) -> Result<(), WorkspaceLeaseError> {
+        self.lease.transition(next)
+    }
 }
 
 /// Builder for one managed child worktree.
@@ -66,20 +127,33 @@ pub struct WorktreeReport {
 /// run it with `spawn_blocking`.
 #[derive(Clone)]
 pub struct WorktreeBuilder {
-    source: PathBuf,
+    source: WorkspaceHandle,
     dest: PathBuf,
+    owner_operation: String,
+    parent_session: Option<String>,
     mode: WorkingTreeMode,
     cancellation: CancellationToken,
 }
 
 impl WorktreeBuilder {
-    pub fn new(source: impl Into<PathBuf>, dest: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        source: WorkspaceHandle,
+        dest: impl Into<PathBuf>,
+        owner_operation: impl Into<String>,
+    ) -> Self {
         Self {
-            source: source.into(),
+            source,
             dest: dest.into(),
+            owner_operation: owner_operation.into(),
+            parent_session: None,
             mode: WorkingTreeMode::PreserveWorkingTree,
             cancellation: CancellationToken::new(),
         }
+    }
+
+    pub fn parent_session(mut self, parent_session: Option<String>) -> Self {
+        self.parent_session = parent_session;
+        self
     }
 
     pub fn working_tree_mode(mut self, mode: WorkingTreeMode) -> Self {
@@ -96,65 +170,106 @@ impl WorktreeBuilder {
     ///
     /// The destination must not exist and must not be inside the source
     /// workspace (a nested destination would be picked up by dirty sync as an
-    /// untracked directory). On failure or cancellation the destination is
-    /// removed before the error is returned.
-    pub fn create(self) -> Result<WorktreeReport, WorktreeError> {
-        validate_source(&self.source)?;
-        if self.dest.exists() {
-            return Err(WorktreeError::DestinationExists {
-                path: self.dest.clone(),
-            });
+    /// untracked directory). On failure or cancellation, any destination
+    /// materialized by this attempt is removed before the error is returned.
+    pub fn create(self) -> Result<ManagedWorktree, WorktreeError> {
+        if self.owner_operation.is_empty() {
+            return Err(WorkspaceLeaseError::MissingOwner.into());
         }
-        if self.dest.starts_with(&self.source) {
-            return Err(WorktreeError::DestinationInsideSource {
-                source_root: self.source.clone(),
-                dest: self.dest.clone(),
-            });
-        }
-        let result = if source_is_git_repository(&self.source) {
-            self.create_git_worktree()
+        check_cancelled(&self.cancellation)?;
+        let paths = validate_paths(self.source.root(), &self.dest)?;
+        let git_linked = source_is_git_repository(&paths.source);
+        let mut git_add_attempted = false;
+        let mut materialization_attempted = false;
+        let result = if git_linked {
+            self.create_git_worktree(
+                &paths,
+                &mut git_add_attempted,
+                &mut materialization_attempted,
+            )
         } else {
-            self.create_copy_worktree()
-        };
-        if result.is_err() && self.dest.exists() {
-            // A git-linked worktree is registered in the source repository's
-            // worktree metadata; remove the registration before deleting the
-            // directory so no orphan record survives.
-            if source_is_git_repository(&self.source) {
-                let _ = std::process::Command::new("git")
-                    .args(["worktree", "remove", "--force"])
-                    .arg(&self.dest)
-                    .current_dir(&self.source)
-                    .output();
-            }
-            let _ = remove_tree_best_effort(&self.dest);
+            self.create_copy_worktree(&paths, &mut materialization_attempted)
         }
-        result
+        .and_then(|report| {
+            check_cancelled(&self.cancellation)?;
+            self.finish_managed_worktree(&paths.dest, report)
+        });
+
+        match result {
+            Ok(managed) => Ok(managed),
+            Err(cause) if !materialization_attempted => Err(cause),
+            Err(cause) => match cleanup_failed_creation(&paths, git_add_attempted) {
+                Ok(()) => Err(cause),
+                Err(cleanup_issues) => Err(WorktreeError::CleanupFailed {
+                    cause: Box::new(cause),
+                    cleanup_issues,
+                }),
+            },
+        }
     }
 
-    fn create_git_worktree(&self) -> Result<WorktreeReport, WorktreeError> {
+    fn finish_managed_worktree(
+        &self,
+        dest: &Path,
+        report: WorktreeReport,
+    ) -> Result<ManagedWorktree, WorktreeError> {
+        let handle = WorkspaceHandle::new(WorkspaceKind::ManagedChild, dest)?;
+        let mut lease = WorkspaceLease::new(
+            handle,
+            self.owner_operation.clone(),
+            self.parent_session.clone(),
+            report.commit.clone(),
+        )?;
+        lease.transition(WorkspaceLifecycle::Ready)?;
+        Ok(ManagedWorktree { lease, report })
+    }
+
+    fn create_git_worktree(
+        &self,
+        paths: &ValidatedPaths,
+        git_add_attempted: &mut bool,
+        materialization_attempted: &mut bool,
+    ) -> Result<WorktreeReport, WorktreeError> {
         check_cancelled(&self.cancellation)?;
-        let commit = git_capture(&self.source, &["rev-parse", "HEAD"])
-            .ok()
-            .map(|output| String::from_utf8_lossy(&output).trim().to_owned());
-        run_git(&self.source, &["worktree", "add", "--detach"], &self.dest)?;
+        let commit = String::from_utf8(git_capture(
+            &paths.source,
+            &["rev-parse", "HEAD"],
+            &self.cancellation,
+            MAX_REVISION_BYTES,
+        )?)
+        .map_err(|_| WorktreeError::GitFailed {
+            message: "git rev-parse returned a non-UTF-8 revision".into(),
+        })?
+        .trim()
+        .to_owned();
+        *git_add_attempted = true;
+        *materialization_attempted = true;
+        run_git(
+            &paths.source,
+            &["worktree", "add", "--detach"],
+            Some(&paths.dest),
+            &self.cancellation,
+        )?;
+        check_cancelled(&self.cancellation)?;
         let mut report = WorktreeReport {
-            worktree_path: self.dest.clone(),
-            commit,
+            commit: Some(commit),
             creation_mode: WorktreeCreationMode::GitLinked,
             files_copied: 0,
             dirs_created: 0,
             symlinks_copied: 0,
             files_deleted: 0,
-            issues: Vec::new(),
         };
         if matches!(self.mode, WorkingTreeMode::PreserveWorkingTree) {
-            self.sync_working_tree(&mut report)?;
+            self.sync_working_tree(paths, &mut report)?;
         }
         Ok(report)
     }
 
-    fn create_copy_worktree(&self) -> Result<WorktreeReport, WorktreeError> {
+    fn create_copy_worktree(
+        &self,
+        paths: &ValidatedPaths,
+        materialization_attempted: &mut bool,
+    ) -> Result<WorktreeReport, WorktreeError> {
         check_cancelled(&self.cancellation)?;
         if matches!(self.mode, WorkingTreeMode::CleanTracked) {
             return Err(WorktreeError::CopyUnavailable {
@@ -162,53 +277,59 @@ impl WorktreeBuilder {
             });
         }
         let mut report = WorktreeReport {
-            worktree_path: self.dest.clone(),
             commit: None,
             creation_mode: WorktreeCreationMode::Copy,
             files_copied: 0,
             dirs_created: 0,
             symlinks_copied: 0,
             files_deleted: 0,
-            issues: Vec::new(),
         };
-        copy_tree(&self.source, &self.dest, &self.cancellation, &mut report)?;
+        *materialization_attempted = true;
+        copy_tree(&paths.source, &paths.dest, &self.cancellation, &mut report)?;
         Ok(report)
     }
 
     /// Carry dirty tracked modifications and untracked files from the source
     /// into the (already checked-out) worktree.
-    fn sync_working_tree(&self, report: &mut WorktreeReport) -> Result<(), WorktreeError> {
+    fn sync_working_tree(
+        &self,
+        paths: &ValidatedPaths,
+        report: &mut WorktreeReport,
+    ) -> Result<(), WorktreeError> {
         check_cancelled(&self.cancellation)?;
         let status = git_capture(
-            &self.source,
+            &paths.source,
             &["status", "--porcelain", "-z", "--untracked-files=all"],
-        )
-        .map_err(|error| WorktreeError::GitFailed {
-            message: format!("cannot read source status: {error}"),
-        })?;
-        let entries = parse_status_entries(&status);
+            &self.cancellation,
+            MAX_STATUS_BYTES,
+        )?;
+        let entries = parse_status_entries(&status)?;
+
+        // Apply removals first so swaps and directory/file type changes cannot
+        // overwrite a newly copied destination later in the same status set.
         for (index, entry) in entries.iter().enumerate() {
-            if index % CANCEL_POLL_ENTRIES == 0 && self.cancellation.is_cancelled() {
-                return Err(WorktreeError::Cancelled);
+            if index.is_multiple_of(CANCEL_POLL_ENTRIES) {
+                check_cancelled(&self.cancellation)?;
             }
-            let relative = Path::new(&entry.path);
+            if let Some(previous_path) = &entry.previous_path
+                && entry.renamed
+            {
+                remove_synced_path(&paths.dest, previous_path, report)?;
+            }
             if entry.deleted {
-                let target = self.dest.join(relative);
-                match remove_path(&target) {
-                    Ok(removed) if removed => report.files_deleted += 1,
-                    Ok(_) => {}
-                    Err(error) => report.issues.push(format!(
-                        "cannot delete {} in worktree: {error}",
-                        target.display()
-                    )),
+                remove_synced_path(&paths.dest, &entry.path, report)?;
+            }
+        }
+        for (index, entry) in entries.iter().filter(|entry| !entry.deleted).enumerate() {
+            if index.is_multiple_of(CANCEL_POLL_ENTRIES) {
+                check_cancelled(&self.cancellation)?;
+            }
+            copy_entry(&paths.source, &paths.dest, &entry.path, report).map_err(|message| {
+                WorktreeError::CopyFailed {
+                    path: paths.source.join(&entry.path),
+                    message,
                 }
-                continue;
-            }
-            if let Err(error) = copy_entry(&self.source, &self.dest, relative, report) {
-                report
-                    .issues
-                    .push(format!("cannot sync {}: {error}", relative.display()));
-            }
+            })?;
         }
         Ok(())
     }
@@ -222,6 +343,10 @@ pub enum WorktreeError {
     SourceNotDirectory { path: PathBuf },
     #[error("destination already exists: {path}")]
     DestinationExists { path: PathBuf },
+    #[error("destination must be an absolute path: {path}")]
+    DestinationMustBeAbsolute { path: PathBuf },
+    #[error("destination cannot be resolved safely: {path}: {message}")]
+    DestinationUnavailable { path: PathBuf, message: String },
     #[error("destination {dest} must not be inside the source workspace {source_root}")]
     DestinationInsideSource { source_root: PathBuf, dest: PathBuf },
     #[error("copy worktree unavailable: {message}")]
@@ -232,40 +357,96 @@ pub enum WorktreeError {
     CopyFailed { path: PathBuf, message: String },
     #[error("worktree creation was cancelled")]
     Cancelled,
+    #[error("workspace identity is invalid: {0}")]
+    Identity(#[from] WorkspaceIdentityError),
+    #[error("workspace lease is invalid: {0}")]
+    Lease(#[from] WorkspaceLeaseError),
+    #[error("worktree creation failed ({cause}); cleanup was incomplete: {cleanup_issues:?}")]
+    CleanupFailed {
+        cause: Box<WorktreeError>,
+        cleanup_issues: Vec<String>,
+    },
 }
 
+#[derive(Debug)]
 struct StatusEntry {
-    path: String,
+    path: PathBuf,
+    previous_path: Option<PathBuf>,
+    renamed: bool,
     deleted: bool,
 }
 
 /// Parse `git status --porcelain -z` output. Rename/copy pairs contribute
 /// their destination path; deletions are flagged so the worktree mirrors them.
-fn parse_status_entries(output: &[u8]) -> Vec<StatusEntry> {
+fn parse_status_entries(output: &[u8]) -> Result<Vec<StatusEntry>, WorktreeError> {
     let mut entries = Vec::new();
     let mut tokens = output.split(|byte| *byte == 0);
     while let Some(header) = tokens.next() {
-        if header.len() < 3 {
+        if header.is_empty() {
             continue;
+        }
+        if header.len() < 3 {
+            return Err(invalid_status("entry header is shorter than three bytes"));
+        }
+        if header[2] != b' ' {
+            return Err(invalid_status("entry header is missing its path separator"));
         }
         let xy = &header[..2];
-        let path = String::from_utf8_lossy(&header[3..]).into_owned();
-        if path.is_empty() {
-            continue;
-        }
+        let path = status_path(&header[3..])?;
         let deleted = xy[0] == b'D' || xy[1] == b'D';
-        if xy == b"R " || xy == b"C " {
-            if let Some(new_path) = tokens.next() {
-                entries.push(StatusEntry {
-                    path: String::from_utf8_lossy(new_path).into_owned(),
-                    deleted: false,
-                });
-            }
-            continue;
-        }
-        entries.push(StatusEntry { path, deleted });
+        let renamed = xy.contains(&b'R');
+        let copied = xy.contains(&b'C');
+        let previous_path = if renamed || copied {
+            let previous = tokens
+                .next()
+                .ok_or_else(|| invalid_status("rename/copy entry is missing its source path"))?;
+            Some(status_path(previous)?)
+        } else {
+            None
+        };
+        entries.push(StatusEntry {
+            path,
+            previous_path,
+            renamed,
+            deleted: deleted && !renamed && !copied,
+        });
     }
-    entries
+    Ok(entries)
+}
+
+fn invalid_status(message: impl Into<String>) -> WorktreeError {
+    WorktreeError::GitFailed {
+        message: format!("invalid git status output: {}", message.into()),
+    }
+}
+
+fn status_path(bytes: &[u8]) -> Result<PathBuf, WorktreeError> {
+    let path = PathBuf::from(git_os_string(bytes)?);
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(invalid_status(format!(
+            "path is not a bounded repository-relative path: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn git_os_string(bytes: &[u8]) -> Result<OsString, WorktreeError> {
+    use std::os::unix::ffi::OsStringExt;
+    Ok(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn git_os_string(bytes: &[u8]) -> Result<OsString, WorktreeError> {
+    String::from_utf8(bytes.to_vec())
+        .map(OsString::from)
+        .map_err(|_| invalid_status("path is not valid UTF-8 on this platform"))
 }
 
 fn check_cancelled(token: &CancellationToken) -> Result<(), WorktreeError> {
@@ -276,63 +457,196 @@ fn check_cancelled(token: &CancellationToken) -> Result<(), WorktreeError> {
     }
 }
 
-fn run_git(source: &Path, args: &[&str], dest: &Path) -> Result<(), WorktreeError> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .arg(dest)
-        .current_dir(source)
-        .output()
-        .map_err(|error| WorktreeError::GitFailed {
-            message: format!("cannot run git: {error}"),
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(WorktreeError::GitFailed {
-            message: format!(
-                "git {} failed: {}",
-                args.join(" "),
-                stderr.trim().lines().last().unwrap_or("unknown error")
-            ),
-        });
-    }
-    Ok(())
+struct ValidatedPaths {
+    source: PathBuf,
+    dest: PathBuf,
 }
 
-fn git_capture(source: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(source)
-        .output()
-        .map_err(|error| format!("cannot run git: {error}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
-    }
-    if output.stdout.len() > MAX_STATUS_BYTES {
-        return Err("git output exceeds the status budget".into());
-    }
-    Ok(output.stdout)
-}
-
-fn validate_source(source: &Path) -> Result<(), WorktreeError> {
-    let metadata =
-        std::fs::symlink_metadata(source).map_err(|_| WorktreeError::SourceUnavailable {
+fn validate_paths(source: &Path, dest: &Path) -> Result<ValidatedPaths, WorktreeError> {
+    let source_metadata =
+        std::fs::metadata(source).map_err(|_| WorktreeError::SourceUnavailable {
             path: source.to_path_buf(),
         })?;
-    if !metadata.is_dir() {
+    if !source_metadata.is_dir() {
         return Err(WorktreeError::SourceNotDirectory {
             path: source.to_path_buf(),
         });
     }
-    Ok(())
+    let source = std::fs::canonicalize(source).map_err(|_| WorktreeError::SourceUnavailable {
+        path: source.to_path_buf(),
+    })?;
+    if !dest.is_absolute() {
+        return Err(WorktreeError::DestinationMustBeAbsolute {
+            path: dest.to_path_buf(),
+        });
+    }
+    let dest = normalize_absolute_path(dest)?;
+    match std::fs::symlink_metadata(&dest) {
+        Ok(_) => {
+            return Err(WorktreeError::DestinationExists { path: dest });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(WorktreeError::DestinationUnavailable {
+                path: dest,
+                message: error.to_string(),
+            });
+        }
+    }
+
+    let (existing_ancestor, missing_suffix) = nearest_existing_ancestor(&dest)?;
+    let canonical_ancestor = std::fs::canonicalize(&existing_ancestor).map_err(|error| {
+        WorktreeError::DestinationUnavailable {
+            path: existing_ancestor.clone(),
+            message: error.to_string(),
+        }
+    })?;
+    let resolved_dest = canonical_ancestor.join(missing_suffix);
+    if resolved_dest.starts_with(&source) {
+        return Err(WorktreeError::DestinationInsideSource {
+            source_root: source,
+            dest: resolved_dest,
+        });
+    }
+    Ok(ValidatedPaths {
+        source,
+        dest: resolved_dest,
+    })
+}
+
+fn normalize_absolute_path(path: &Path) -> Result<PathBuf, WorktreeError> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(WorktreeError::DestinationUnavailable {
+                        path: path.to_path_buf(),
+                        message: "path escapes its filesystem root".into(),
+                    });
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
+}
+
+fn nearest_existing_ancestor(dest: &Path) -> Result<(PathBuf, PathBuf), WorktreeError> {
+    let mut ancestor = dest.to_path_buf();
+    let mut suffix = PathBuf::new();
+    loop {
+        match std::fs::symlink_metadata(&ancestor) {
+            Ok(_) => return Ok((ancestor, suffix)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let name =
+                    ancestor
+                        .file_name()
+                        .ok_or_else(|| WorktreeError::DestinationUnavailable {
+                            path: dest.to_path_buf(),
+                            message: "destination has no existing filesystem ancestor".into(),
+                        })?;
+                let mut next_suffix = PathBuf::from(name);
+                next_suffix.push(&suffix);
+                suffix = next_suffix;
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| WorktreeError::DestinationUnavailable {
+                        path: dest.to_path_buf(),
+                        message: "destination has no parent".into(),
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(WorktreeError::DestinationUnavailable {
+                    path: ancestor,
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
 }
 
 fn source_is_git_repository(source: &Path) -> bool {
-    let git_dir = source.join(".git");
-    match std::fs::symlink_metadata(&git_dir) {
-        Ok(_) => true,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(_) => false,
+    std::fs::symlink_metadata(source.join(".git")).is_ok()
+}
+
+fn cleanup_failed_creation(
+    paths: &ValidatedPaths,
+    git_add_attempted: bool,
+) -> Result<(), Vec<String>> {
+    let mut issues = Vec::new();
+    if git_add_attempted {
+        let cleanup_token = CancellationToken::new();
+        let _ = run_git(
+            &paths.source,
+            &["worktree", "remove", "--force"],
+            Some(&paths.dest),
+            &cleanup_token,
+        );
     }
+    if let Err(message) = remove_path(&paths.dest) {
+        issues.push(format!(
+            "cannot remove destination {}: {message}",
+            paths.dest.display()
+        ));
+    }
+    if git_add_attempted {
+        let cleanup_token = CancellationToken::new();
+        if let Err(error) = run_git(
+            &paths.source,
+            &["worktree", "prune", "--expire", "now"],
+            None,
+            &cleanup_token,
+        ) {
+            issues.push(format!("cannot prune git worktree metadata: {error}"));
+        }
+        match git_worktree_registration_exists(&paths.source, &paths.dest) {
+            Ok(true) => issues.push(format!(
+                "git worktree registration still exists for {}",
+                paths.dest.display()
+            )),
+            Ok(false) => {}
+            Err(error) => issues.push(format!("cannot verify git worktree cleanup: {error}")),
+        }
+    }
+    match std::fs::symlink_metadata(&paths.dest) {
+        Ok(_) => issues.push(format!(
+            "destination still exists after cleanup: {}",
+            paths.dest.display()
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => issues.push(format!(
+            "cannot verify destination cleanup {}: {error}",
+            paths.dest.display()
+        )),
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(issues)
+    }
+}
+
+fn git_worktree_registration_exists(source: &Path, dest: &Path) -> Result<bool, WorktreeError> {
+    let output = git_capture(
+        source,
+        &["worktree", "list", "--porcelain", "-z"],
+        &CancellationToken::new(),
+        MAX_STATUS_BYTES,
+    )?;
+    for token in output.split(|byte| *byte == 0) {
+        if let Some(path) = token.strip_prefix(b"worktree ") {
+            let registered = PathBuf::from(git_os_string(path)?);
+            if registered == dest {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn copy_tree(
@@ -371,7 +685,11 @@ fn copy_tree(
                     path: source_entry.clone(),
                     message: format!("cannot read directory: {error}"),
                 })?;
-            for entry in read_dir.flatten() {
+            for entry in read_dir {
+                let entry = entry.map_err(|error| WorktreeError::CopyFailed {
+                    path: source_entry.clone(),
+                    message: format!("cannot read directory entry: {error}"),
+                })?;
                 pending.push(relative.join(entry.file_name()));
             }
         } else {
@@ -411,27 +729,12 @@ fn copy_file(source: &Path, dest: &Path, report: &mut WorktreeReport) -> Result<
             message: format!("cannot create parent directory: {error}"),
         })?;
     }
-    // reflink_or_copy fails with AlreadyExists when the target exists (e.g. a
-    // file already checked out by `git worktree add`), so clear it first.
-    match std::fs::symlink_metadata(dest) {
-        Ok(metadata) if metadata.file_type().is_dir() => {
-            return Err(WorktreeError::CopyFailed {
-                path: source.to_path_buf(),
-                message: format!("copy target is an existing directory: {}", dest.display()),
-            });
-        }
-        Ok(_) => std::fs::remove_file(dest).map_err(|error| WorktreeError::CopyFailed {
-            path: source.to_path_buf(),
-            message: format!("cannot replace existing copy target: {error}"),
-        })?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(WorktreeError::CopyFailed {
-                path: source.to_path_buf(),
-                message: format!("cannot inspect copy target: {error}"),
-            });
-        }
-    }
+    // reflink_or_copy requires a missing target. Removing any checked-out
+    // file/directory first also supports dirty file-type changes.
+    remove_path(dest).map_err(|message| WorktreeError::CopyFailed {
+        path: source.to_path_buf(),
+        message: format!("cannot replace existing copy target: {message}"),
+    })?;
     reflink_copy::reflink_or_copy(source, dest).map_err(|error| WorktreeError::CopyFailed {
         path: source.to_path_buf(),
         message: format!("cannot copy: {error}"),
@@ -457,12 +760,10 @@ fn copy_symlink(
             message: format!("cannot create parent directory: {error}"),
         })?;
     }
-    if dest.symlink_metadata().is_ok() {
-        std::fs::remove_file(dest).map_err(|error| WorktreeError::CopyFailed {
-            path: dest.to_path_buf(),
-            message: format!("cannot replace existing symlink target: {error}"),
-        })?;
-    }
+    remove_path(dest).map_err(|message| WorktreeError::CopyFailed {
+        path: dest.to_path_buf(),
+        message: format!("cannot replace existing symlink target: {message}"),
+    })?;
     symlink(&target, dest).map_err(|error| WorktreeError::CopyFailed {
         path: source.to_path_buf(),
         message: format!("cannot create symlink: {error}"),
@@ -475,13 +776,12 @@ fn copy_symlink(
 fn copy_symlink(
     source: &Path,
     _dest: &Path,
-    report: &mut WorktreeReport,
+    _report: &mut WorktreeReport,
 ) -> Result<(), WorktreeError> {
-    report.issues.push(format!(
-        "symlink {} is not replicated on this platform",
-        source.display()
-    ));
-    Ok(())
+    Err(WorktreeError::CopyFailed {
+        path: source.to_path_buf(),
+        message: "symlink replication is unsupported on this platform".into(),
+    })
 }
 
 fn remove_path(target: &Path) -> Result<bool, String> {
@@ -499,16 +799,19 @@ fn remove_path(target: &Path) -> Result<bool, String> {
     }
 }
 
-fn remove_tree_best_effort(target: &Path) -> Result<(), String> {
-    if let Ok(metadata) = std::fs::symlink_metadata(target) {
-        if metadata.is_dir() {
-            std::fs::remove_dir_all(target).map_err(|error| error.to_string())
-        } else {
-            std::fs::remove_file(target).map_err(|error| error.to_string())
-        }
-    } else {
-        Ok(())
+fn remove_synced_path(
+    dest_root: &Path,
+    relative: &Path,
+    report: &mut WorktreeReport,
+) -> Result<(), WorktreeError> {
+    let target = dest_root.join(relative);
+    if remove_path(&target).map_err(|message| WorktreeError::CopyFailed {
+        path: target.clone(),
+        message: format!("cannot remove path from child worktree: {message}"),
+    })? {
+        report.files_deleted += 1;
     }
+    Ok(())
 }
 
 #[cfg(test)]

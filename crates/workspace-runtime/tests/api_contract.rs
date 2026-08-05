@@ -21,3 +21,15 @@ fn facade_exposes_only_the_opaque_workspace_authority_handle() {
     assert!(!source.contains("FilesystemCapability"));
     assert!(!source.contains("ShellCapability"));
 }
+
+#[test]
+fn managed_worktree_creation_couples_identity_and_materialization_report() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let facade = fs::read_to_string(root.join("src/api.rs")).expect("read api facade");
+    let worktree = fs::read_to_string(root.join("src/worktree.rs")).expect("read worktree module");
+    assert!(facade.contains("ManagedWorktree"));
+    assert!(worktree.contains("source: WorkspaceHandle"));
+    assert!(worktree.contains("lease: WorkspaceLease"));
+    assert!(worktree.contains("report: WorktreeReport"));
+    assert!(worktree.contains("Result<ManagedWorktree, WorktreeError>"));
+}

@@ -14,5 +14,6 @@ pub use crate::process::{
     ProgramKind, path_exists, resolve_shell_path, run,
 };
 pub use crate::worktree::{
-    WorkingTreeMode, WorktreeBuilder, WorktreeCreationMode, WorktreeError, WorktreeReport,
+    ManagedWorktree, WorkingTreeMode, WorktreeBuilder, WorktreeCreationMode, WorktreeError,
+    WorktreeReport,
 };
