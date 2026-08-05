@@ -52,6 +52,7 @@ fn event(root: &Path, path: &str, kind: FsChangeKind) -> FsEvent {
         sequence: 1,
         root: std::fs::canonicalize(root).unwrap(),
         path: PathBuf::from(path),
+        is_directory: false,
         from: None,
         kind,
         at: SystemTime::now(),
@@ -63,6 +64,7 @@ fn rename_event(root: &Path, from: &str, to: &str) -> FsEvent {
         sequence: 2,
         root: std::fs::canonicalize(root).unwrap(),
         path: PathBuf::from(to),
+        is_directory: false,
         from: Some(PathBuf::from(from)),
         kind: FsChangeKind::Renamed,
         at: SystemTime::now(),
@@ -823,6 +825,54 @@ async fn combined_service_forwards_real_fs_events_into_revision_correlation() {
     assert_eq!(snapshot.pending_events, 0);
     assert_eq!(snapshot.facts.len(), 1);
     assert_eq!(snapshot.facts[0].source, ChangeSource::AgentEdit);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn directory_events_do_not_stop_file_tracking() {
+    let dir = TempDir::new().unwrap();
+    let workspace =
+        WorkspaceHandle::new(workspace_runtime::api::WorkspaceKind::Source, dir.path()).unwrap();
+    let service = HunkTrackingService::start(
+        &workspace,
+        WatchOptions {
+            debounce: Duration::from_millis(10),
+            ..WatchOptions::default()
+        },
+        HunkTrackerOptions {
+            causal_window: Duration::from_millis(40),
+            ..options()
+        },
+    )
+    .unwrap();
+    let handle = service.handle();
+
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    std::fs::write(dir.path().join("nested/notes.txt"), "external\n").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = handle.snapshot().await.unwrap();
+        if snapshot
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("nested/notes.txt"))
+        {
+            assert!(
+                snapshot
+                    .files
+                    .iter()
+                    .all(|file| file.path != Path::new("nested"))
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "directory event stopped the file event forwarder"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     service.shutdown().await.unwrap();
 }
 

@@ -179,18 +179,22 @@ impl FsEventService {
             .recv()
             .map_err(|_| ChangeTrackerError::Shutdown)?
             .map_err(|message| ChangeTrackerError::WatchFailed { message })?;
-        self.handles.lock().expect("root list").push(root);
+        let mut handles = self.handles.lock().expect("root list");
+        if !handles.iter().any(|existing| existing == &root) {
+            handles.push(root);
+        }
         Ok(())
     }
 
     /// Cancel the worker and join it. Idempotent; `Drop` calls this too.
     pub fn shutdown(&self) {
         self.shutdown.cancel();
-        let _ = self
+        let result = self
             .command
             .lock()
             .expect("command channel")
-            .try_send(Incoming::Shutdown);
+            .send(Incoming::Shutdown);
+        let _ = result;
         if let Some(thread) = self.thread.lock().expect("worker thread").take() {
             let _ = thread.join();
         }
@@ -220,6 +224,7 @@ fn spawn_worker(
         options: options.clone(),
         states: HashMap::new(),
         pending: BTreeMap::new(),
+        pending_directories: BTreeMap::new(),
         pending_renames: BTreeMap::new(),
         rename_from: HashMap::new(),
         rename_to: HashMap::new(),
@@ -249,6 +254,7 @@ struct Worker {
     options: WatchOptions,
     states: HashMap<PathBuf, RootState>,
     pending: BTreeMap<(PathBuf, PathBuf), FsChangeKind>,
+    pending_directories: BTreeMap<(PathBuf, PathBuf), bool>,
     pending_renames: BTreeMap<(PathBuf, PathBuf), PathBuf>,
     rename_from: HashMap<usize, (PathBuf, PathBuf)>,
     rename_to: HashMap<usize, (PathBuf, PathBuf)>,
@@ -391,6 +397,15 @@ impl Worker {
             self.handle_both(from, to);
             return;
         }
+        if matches!(
+            event.kind,
+            EventKind::Modify(ModifyKind::Name(
+                RenameMode::Any | RenameMode::Both | RenameMode::Other
+            ))
+        ) {
+            self.lost.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let Some(change) = classify_change(&event) else {
             return;
         };
@@ -408,16 +423,20 @@ impl Worker {
             };
             match change {
                 Change::Create(tracker) => {
-                    self.handle_new_path(&root, rel, tracker);
+                    self.handle_new_path(&root, rel, tracker, is_directory);
                     if is_directory == Some(true) {
                         self.record_created_tree(path);
                     }
                 }
-                Change::Remove(tracker) => self.handle_old_path(&root, rel, tracker),
-                Change::RenameTo(tracker) => self.handle_new_path(&root, rel, tracker),
-                Change::RenameFrom(tracker) => self.handle_old_path(&root, rel, tracker),
+                Change::Remove(tracker) => self.handle_old_path(&root, rel, tracker, is_directory),
+                Change::RenameTo(tracker) => {
+                    self.handle_new_path(&root, rel, tracker, is_directory)
+                }
+                Change::RenameFrom(tracker) => {
+                    self.handle_old_path(&root, rel, tracker, is_directory)
+                }
                 Change::Modify => {
-                    merge_pending(&mut self.pending, (root, rel), FsChangeKind::Modified);
+                    self.record_pending(root, rel, FsChangeKind::Modified, is_directory);
                 }
             }
         }
@@ -445,47 +464,51 @@ impl Worker {
             };
             let is_directory = entry.file_type().is_some_and(|kind| kind.is_dir());
             if let Some((root, rel)) = self.workspace_path(entry.path(), Some(is_directory)) {
-                self.handle_new_path(&root, rel, None);
+                self.handle_new_path(&root, rel, None, Some(is_directory));
             }
         }
     }
 
     /// A path appeared or received the destination side of a rename.
-    fn handle_new_path(&mut self, root: &Path, rel: PathBuf, tracker: Option<usize>) {
+    fn handle_new_path(
+        &mut self,
+        root: &Path,
+        rel: PathBuf,
+        tracker: Option<usize>,
+        is_directory: Option<bool>,
+    ) {
         if let Some(tracker) = tracker
             && let Some((from_root, from_rel)) = self.rename_from.remove(&tracker)
         {
-            self.record_renamed(&from_root, from_rel, root, rel);
+            self.record_renamed(&from_root, from_rel, root, rel, is_directory);
             return;
         }
         if let Some(tracker) = tracker {
             self.rename_to
                 .insert(tracker, (root.to_path_buf(), rel.clone()));
         }
-        merge_pending(
-            &mut self.pending,
-            (root.to_path_buf(), rel),
-            FsChangeKind::Created,
-        );
+        self.record_pending(root.to_path_buf(), rel, FsChangeKind::Created, is_directory);
     }
 
     /// A path disappeared or received the source side of a rename.
-    fn handle_old_path(&mut self, root: &Path, rel: PathBuf, tracker: Option<usize>) {
+    fn handle_old_path(
+        &mut self,
+        root: &Path,
+        rel: PathBuf,
+        tracker: Option<usize>,
+        is_directory: Option<bool>,
+    ) {
         if let Some(tracker) = tracker
             && let Some((to_root, to_rel)) = self.rename_to.remove(&tracker)
         {
-            self.record_renamed(root, rel, &to_root, to_rel);
+            self.record_renamed(root, rel, &to_root, to_rel, is_directory);
             return;
         }
         if let Some(tracker) = tracker {
             self.rename_from
                 .insert(tracker, (root.to_path_buf(), rel.clone()));
         }
-        merge_pending(
-            &mut self.pending,
-            (root.to_path_buf(), rel),
-            FsChangeKind::Removed,
-        );
+        self.record_pending(root.to_path_buf(), rel, FsChangeKind::Removed, is_directory);
     }
 
     fn handle_both(&mut self, from: &Path, to: &Path) {
@@ -515,21 +538,22 @@ impl Worker {
             .flatten();
         match (from_workspace, to_workspace) {
             (Some((from_root, from_rel)), Some((to_root, to_rel))) if from_root == to_root => {
-                self.record_renamed(&from_root, from_rel, &to_root, to_rel);
+                self.record_renamed(&from_root, from_rel, &to_root, to_rel, Some(is_directory));
             }
             (Some((from_root, from_rel)), Some((to_root, to_rel))) => {
-                merge_pending(
-                    &mut self.pending,
-                    (from_root, from_rel),
+                self.record_pending(
+                    from_root,
+                    from_rel,
                     FsChangeKind::Removed,
+                    Some(is_directory),
                 );
-                merge_pending(&mut self.pending, (to_root, to_rel), FsChangeKind::Created);
+                self.record_pending(to_root, to_rel, FsChangeKind::Created, Some(is_directory));
             }
             (Some((root, rel)), None) => {
-                merge_pending(&mut self.pending, (root, rel), FsChangeKind::Removed);
+                self.record_pending(root, rel, FsChangeKind::Removed, Some(is_directory));
             }
             (None, Some((root, rel))) => {
-                merge_pending(&mut self.pending, (root, rel), FsChangeKind::Created);
+                self.record_pending(root, rel, FsChangeKind::Created, Some(is_directory));
             }
             (None, None) => {}
         }
@@ -541,28 +565,63 @@ impl Worker {
         from_rel: PathBuf,
         to_root: &Path,
         to_rel: PathBuf,
+        is_directory: Option<bool>,
     ) {
         if from_root != to_root {
-            merge_pending(
-                &mut self.pending,
-                (from_root.to_path_buf(), from_rel),
+            self.record_pending(
+                from_root.to_path_buf(),
+                from_rel,
                 FsChangeKind::Removed,
+                is_directory,
             );
-            merge_pending(
-                &mut self.pending,
-                (to_root.to_path_buf(), to_rel),
+            self.record_pending(
+                to_root.to_path_buf(),
+                to_rel,
                 FsChangeKind::Created,
+                is_directory,
             );
             return;
         }
+        let source_key = (from_root.to_path_buf(), from_rel.clone());
+        let source_kind = self.pending.remove(&source_key);
+        let source_directory = self.pending_directories.remove(&source_key);
+        let original_from = if source_kind == Some(FsChangeKind::Renamed) {
+            self.pending_renames.remove(&source_key).unwrap_or(from_rel)
+        } else {
+            from_rel
+        };
+        let destination_key = (to_root.to_path_buf(), to_rel.clone());
+        let destination_directory = self.pending_directories.remove(&destination_key);
+        let is_directory = is_directory
+            .or(destination_directory)
+            .or(source_directory)
+            .unwrap_or(false);
+        self.pending_renames.remove(&destination_key);
+        if source_kind == Some(FsChangeKind::Created) {
+            self.pending.insert(destination_key, FsChangeKind::Created);
+            self.pending_directories
+                .insert((to_root.to_path_buf(), to_rel), is_directory);
+            return;
+        }
         self.pending
-            .remove(&(from_root.to_path_buf(), from_rel.clone()));
-        self.pending.insert(
-            (to_root.to_path_buf(), to_rel.clone()),
-            FsChangeKind::Renamed,
-        );
-        self.pending_renames
-            .insert((to_root.to_path_buf(), to_rel.clone()), from_rel);
+            .insert(destination_key.clone(), FsChangeKind::Renamed);
+        self.pending_directories
+            .insert(destination_key.clone(), is_directory);
+        self.pending_renames.insert(destination_key, original_from);
+    }
+
+    fn record_pending(
+        &mut self,
+        root: PathBuf,
+        path: PathBuf,
+        kind: FsChangeKind,
+        is_directory: Option<bool>,
+    ) {
+        let key = (root, path);
+        merge_pending(&mut self.pending, key.clone(), kind);
+        if let Some(is_directory) = is_directory {
+            self.pending_directories.insert(key, is_directory);
+        }
     }
 
     fn flush(&mut self) {
@@ -572,6 +631,10 @@ impl Worker {
         }
         let pending = std::mem::take(&mut self.pending);
         for ((root, rel), kind) in pending {
+            let is_directory = self
+                .pending_directories
+                .remove(&(root.clone(), rel.clone()))
+                .unwrap_or(false);
             let from = if kind == FsChangeKind::Renamed {
                 self.pending_renames.remove(&(root.clone(), rel.clone()))
             } else {
@@ -582,12 +645,14 @@ impl Worker {
                 self.sequence,
                 &root,
                 rel,
+                is_directory,
                 from,
                 kind,
             )));
         }
         self.rename_from.clear();
         self.rename_to.clear();
+        self.pending_directories.clear();
         self.pending_renames.clear();
     }
 
@@ -716,8 +781,9 @@ fn path_is_directory(kind: &EventKind, path: &Path) -> Option<bool> {
 
 /// Merge a new change into the debounce window. Creation survives later
 /// modification within the same window; removal followed by creation wins
-/// with `Created`; a rename survives a later modification because the consumer
-/// can recover current content but cannot reconstruct the lost source path.
+/// with `Created`; a rename survives all later target-side changes because the
+/// consumer can recover current content but cannot reconstruct the lost source
+/// path.
 fn merge_pending(
     pending: &mut BTreeMap<(PathBuf, PathBuf), FsChangeKind>,
     key: (PathBuf, PathBuf),
@@ -725,7 +791,7 @@ fn merge_pending(
 ) {
     let kind = match (pending.get(&key).copied(), incoming) {
         (Some(FsChangeKind::Created), FsChangeKind::Modified) => FsChangeKind::Created,
-        (Some(FsChangeKind::Renamed), FsChangeKind::Modified) => FsChangeKind::Renamed,
+        (Some(FsChangeKind::Renamed), _) => FsChangeKind::Renamed,
         (Some(FsChangeKind::Removed), FsChangeKind::Created) => FsChangeKind::Created,
         (_, incoming) => incoming,
     };

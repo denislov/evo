@@ -29,6 +29,10 @@ pub struct SemanticEvent {
     /// Workspace-relative path. For `Renamed`, this is the destination; the
     /// source is in `from`.
     pub path: PathBuf,
+    /// Whether the changed path is a directory. Directory events remain in
+    /// the semantic stream so consumers can maintain their own watch state;
+    /// file-oriented consumers may ignore them.
+    pub is_directory: bool,
     /// Workspace-relative source path, present only for `Renamed`.
     pub from: Option<PathBuf>,
     pub kind: FsChangeKind,
@@ -40,6 +44,7 @@ impl SemanticEvent {
         sequence: u64,
         root: &Path,
         path: PathBuf,
+        is_directory: bool,
         from: Option<PathBuf>,
         kind: FsChangeKind,
     ) -> Self {
@@ -47,6 +52,7 @@ impl SemanticEvent {
             sequence,
             root: root.to_path_buf(),
             path,
+            is_directory,
             from,
             kind,
             at: SystemTime::now(),
@@ -96,8 +102,9 @@ impl GitEvent {
 pub enum FsEvent {
     Workspace(SemanticEvent),
     Git(GitEvent),
-    /// The raw event channel overflowed. `lost` is the number of events that
-    /// were dropped and never normalized; consumers must reconcile.
+    /// Raw events were dropped or could not be normalized without inventing
+    /// filesystem facts. `lost` is the number of affected raw events;
+    /// consumers must reconcile.
     WatchGap {
         lost: u64,
     },

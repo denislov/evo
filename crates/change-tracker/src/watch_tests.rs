@@ -432,6 +432,32 @@ fn dynamic_directories_are_watched_recursively() {
 }
 
 #[test]
+fn directory_events_are_typed_for_file_oriented_consumers() {
+    use notify::event::CreateKind;
+
+    let root = tempfile::tempdir().expect("root");
+    let directory = root.path().join("nested");
+    std::fs::create_dir(&directory).expect("directory");
+    let (service, mut events) = start(root.path());
+    service
+        .command
+        .lock()
+        .expect("command channel")
+        .try_send(Incoming::Event(
+            notify::Event::new(notify::EventKind::Create(CreateKind::Folder)).add_path(directory),
+        ))
+        .expect("raw event accepted");
+
+    recv_until(&mut events, Duration::from_secs(1), |event| {
+        matches!(
+            event,
+            FsEvent::Workspace(semantic)
+                if semantic.path == Path::new("nested") && semantic.is_directory
+        )
+    });
+}
+
+#[test]
 fn rename_across_ignore_boundary_degrades_to_remove_and_create() {
     let root = tempfile::tempdir().expect("tempdir");
     std::fs::write(root.path().join(".gitignore"), "ignored/\n").expect("gitignore");
@@ -579,6 +605,173 @@ fn modification_in_the_same_window_preserves_rename_identity() {
         .expect("new path event");
     assert_eq!(renamed.kind, FsChangeKind::Renamed);
     assert_eq!(renamed.from.as_deref(), Some(Path::new("old.txt")));
+}
+
+#[test]
+fn rename_any_with_two_paths_requires_reconciliation() {
+    use notify::event::{ModifyKind, RenameMode};
+
+    let root = tempfile::tempdir().expect("root");
+    let (service, mut events) = start(root.path());
+    let event = notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(RenameMode::Any)))
+        .add_path(root.path().join("old.txt"))
+        .add_path(root.path().join("new.txt"));
+    service
+        .command
+        .lock()
+        .expect("command channel")
+        .try_send(Incoming::Event(event))
+        .expect("raw event accepted");
+
+    let seen = recv_until(&mut events, Duration::from_secs(1), |event| {
+        matches!(event, FsEvent::WatchGap { lost: 1 })
+    });
+    assert!(workspace_events(&seen).is_empty());
+}
+
+#[test]
+fn ambiguous_single_path_rename_requires_reconciliation() {
+    use notify::event::{ModifyKind, RenameMode};
+
+    let root = tempfile::tempdir().expect("root");
+    let (service, mut events) = start(root.path());
+    let event = notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(RenameMode::Any)))
+        .add_path(root.path().join("unknown.txt"));
+    service
+        .command
+        .lock()
+        .expect("command channel")
+        .try_send(Incoming::Event(event))
+        .expect("raw event accepted");
+
+    let seen = recv_until(&mut events, Duration::from_secs(1), |event| {
+        matches!(event, FsEvent::WatchGap { lost: 1 })
+    });
+    assert!(workspace_events(&seen).is_empty());
+}
+
+#[test]
+fn chained_renames_keep_the_original_source_path() {
+    use notify::event::{ModifyKind, RenameMode};
+
+    let root = tempfile::tempdir().expect("root");
+    let (service, mut events) = start(root.path());
+    for (from, to) in [("old.txt", "middle.txt"), ("middle.txt", "new.txt")] {
+        let event = notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(root.path().join(from))
+        .add_path(root.path().join(to));
+        service
+            .command
+            .lock()
+            .expect("command channel")
+            .try_send(Incoming::Event(event))
+            .expect("raw event accepted");
+    }
+
+    recv_until(&mut events, Duration::from_secs(1), |event| {
+        matches!(
+            event,
+            FsEvent::Workspace(semantic)
+                if semantic.kind == FsChangeKind::Renamed
+                    && semantic.path == Path::new("new.txt")
+                    && semantic.from.as_deref() == Some(Path::new("old.txt"))
+        )
+    });
+}
+
+#[test]
+fn created_file_renamed_in_one_window_stays_a_creation() {
+    use notify::event::{CreateKind, ModifyKind, RenameMode};
+
+    let root = tempfile::tempdir().expect("root");
+    let (service, mut events) = start(root.path());
+    for event in [
+        notify::Event::new(notify::EventKind::Create(CreateKind::File))
+            .add_path(root.path().join("temporary.txt")),
+        notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(root.path().join("temporary.txt"))
+        .add_path(root.path().join("final.txt")),
+    ] {
+        service
+            .command
+            .lock()
+            .expect("command channel")
+            .try_send(Incoming::Event(event))
+            .expect("raw event accepted");
+    }
+
+    let seen = recv_until(&mut events, Duration::from_secs(1), |event| {
+        matches!(
+            event,
+            FsEvent::Workspace(semantic)
+                if semantic.kind == FsChangeKind::Created
+                    && semantic.path == Path::new("final.txt")
+        )
+    });
+    assert!(workspace_events(&seen).iter().all(|event| {
+        event.path != Path::new("temporary.txt") && event.kind != FsChangeKind::Renamed
+    }));
+}
+
+#[test]
+fn target_removal_does_not_erase_pending_rename_identity() {
+    use notify::event::{ModifyKind, RemoveKind, RenameMode};
+
+    let root = tempfile::tempdir().expect("root");
+    let (service, mut events) = start(root.path());
+    for event in [
+        notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(root.path().join("old.txt"))
+        .add_path(root.path().join("new.txt")),
+        notify::Event::new(notify::EventKind::Remove(RemoveKind::File))
+            .add_path(root.path().join("new.txt")),
+    ] {
+        service
+            .command
+            .lock()
+            .expect("command channel")
+            .try_send(Incoming::Event(event))
+            .expect("raw event accepted");
+    }
+
+    recv_until(&mut events, Duration::from_secs(1), |event| {
+        matches!(
+            event,
+            FsEvent::Workspace(semantic)
+                if semantic.kind == FsChangeKind::Renamed
+                    && semantic.path == Path::new("new.txt")
+                    && semantic.from.as_deref() == Some(Path::new("old.txt"))
+        )
+    });
+}
+
+#[test]
+fn adding_the_same_root_twice_does_not_duplicate_public_roots() {
+    let first = tempfile::tempdir().expect("first");
+    let handle = workspace_runtime::api::WorkspaceHandle::new(
+        workspace_runtime::api::WorkspaceKind::Source,
+        first.path(),
+    )
+    .expect("handle");
+    let service = FsEventService::start(
+        &handle,
+        WatchOptions {
+            max_roots: 2,
+            ..WatchOptions::default()
+        },
+    )
+    .expect("service starts");
+
+    service
+        .add_root(&handle)
+        .expect("duplicate root is idempotent");
+    assert_eq!(service.handles.lock().expect("root list").len(), 1);
 }
 
 #[test]

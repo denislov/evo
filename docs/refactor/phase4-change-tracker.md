@@ -25,10 +25,16 @@
   - bounded debounce 窗口内同路径合并，首个 buffered event 固定 flush deadline，
     持续事件流不能无限延后交付；合并优先级
     `Removed` 可被后续 `Created` 覆盖、`Created` 不被 `Modified` 降级、
-    `Renamed` 不被目标路径的后续 `Modified` 抹除，保证消费者不会丢失
-    无法从当前文件状态重建的 source path。
+    `Renamed` 不被目标路径的后续 create/modify/remove 抹除；连续 rename 会合并到
+    最初 source，新建文件在窗口内 rename 仍归一化为 destination `Created`，保证
+    消费者不会丢失无法从当前文件状态重建的 source path。
+  - 只有 `RenameMode::Both` 且严格包含有序的 from/to 两条路径时才直接生成
+    `Renamed`；`Any`、`Other` 或 malformed `Both` 均以 `WatchGap` fail-closed，
+    不把无法证明的 rename 猜成 `Modified`。
   - recursive backend 新增目录时立即补扫一次子树，关闭 backend 安装子目录 watch
     前的快速建树竞态；补扫仍复用同一 ignore/debounce 管线且不跟随 symlink。
+    语义事件保留 `is_directory` 类型事实，文件型 hunk consumer 忽略目录事件而
+    不会因 `EISDIR` 退出事件 forwarder。
   - `.git` 目录（含 worktree `gitdir:` 文件解析出的外部 gitdir）完全排除出
     workspace 事件流；其内部变化独立归一化为带 workspace root 与全局 sequence
     的 `GitEvent`
@@ -38,10 +44,14 @@
     `matched_path_or_any_parents` 过滤 `Ignore` 匹配路径；gitignore 热更新
     不在本 ARC 范围（hunk tracker 接 review 时再定）。
 - **budget fail-closed**：`max_roots` 限制多 root 复用同一 watcher 的上限，
-  超限 `WatchFailed` 报错且不注册；raw event 通道满时丢弃并累计
+  重复添加同一 canonical root 幂等且不占用公开 root 集合；超限
+  `WatchFailed` 报错且不注册；raw event 通道满时丢弃并累计
   `WatchGap { lost }`（slow consumer 的责任显式化），broadcast 满则丢事件
   并 `Lagged` 告知消费者；零 root/queue/debounce 以及平台时钟无法表示的
   debounce 配置在启动前结构化拒绝。
+- **可终止性**：shutdown 先取消 token，再通过 bounded actor command channel
+  可靠送入唤醒命令并 join；即使 raw queue 正好饱和，也不会因丢失 shutdown
+  `try_send` 而等待完整 debounce 窗口。
 - **Grok `xai-fsnotify` 落点**：保留 semantic stream、debounce、watch budget、
   Git operation state 四要素，按 Evo 的 actor/typed contract 重建，不搬运
   notify backend 选择逻辑。
@@ -60,10 +70,12 @@
 
 ```text
 cargo test --locked -p change-tracker --all-features
-24 passed（create/modify/remove、rename 配对、跨 root/ignore 边界降级、bounded debounce、
-dynamic directory、gitignore 目录/rename 过滤、Git add/commit/ref/lock、普通 repo 与
-linked worktree 的 root 归属、.git 不泄漏、多 root/嵌套 root、budget fail-closed、
-WatchGap、启动订阅窗口、sequence 单调、非法配置、shutdown 幂等与即时唤醒）
+53 passed，其中 ARC-400 watcher 31 项（create/modify/remove、目录类型事实、Both rename 配对、
+ambiguous rename fail-closed、连续 rename、rename 后目标变化、新建后 rename、
+跨 root/ignore 边界降级、bounded debounce、dynamic directory、gitignore
+目录/rename 过滤、Git add/commit/ref/lock、普通 repo 与 linked worktree 的 root
+归属、.git 不泄漏、多 root/嵌套 root、root 幂等、budget fail-closed、WatchGap、
+启动订阅窗口、sequence 单调、非法配置、shutdown 幂等与即时唤醒）
 
 cargo test --locked --workspace --all-features
 全部通过

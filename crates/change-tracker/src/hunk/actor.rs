@@ -443,6 +443,9 @@ impl ActorState {
                 ),
             });
         }
+        if event.is_directory {
+            return Ok(());
+        }
         let path = normalize_relative(&event.path)?;
         if event.kind == FsChangeKind::Renamed {
             let from = event
