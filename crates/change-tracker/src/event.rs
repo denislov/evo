@@ -68,12 +68,34 @@ pub enum GitMetaEvent {
     OperationCompleted,
 }
 
+/// A normalized Git metadata fact associated with its watched workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitEvent {
+    /// Monotonic across workspace and Git facts emitted by this service.
+    pub sequence: u64,
+    /// Canonical watched workspace root that owns this Git metadata.
+    pub root: PathBuf,
+    pub kind: GitMetaEvent,
+    pub at: SystemTime,
+}
+
+impl GitEvent {
+    pub(crate) fn new(sequence: u64, root: &Path, kind: GitMetaEvent) -> Self {
+        Self {
+            sequence,
+            root: root.to_path_buf(),
+            kind,
+            at: SystemTime::now(),
+        }
+    }
+}
+
 /// One item on the change stream: either a workspace change or git metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsEvent {
     Workspace(SemanticEvent),
-    Git(GitMetaEvent),
+    Git(GitEvent),
     /// The raw event channel overflowed. `lost` is the number of events that
     /// were dropped and never normalized; consumers must reconcile.
     WatchGap {

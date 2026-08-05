@@ -5,6 +5,8 @@ use thiserror::Error;
 pub enum ChangeTrackerError {
     #[error("change tracker io error: {message}")]
     Io { message: String },
+    #[error("change tracker options are invalid: {message}")]
+    InvalidOptions { message: String },
     #[error("watch root is invalid: {message}")]
     InvalidRoot { message: String },
     #[error("cannot watch path: {message}")]

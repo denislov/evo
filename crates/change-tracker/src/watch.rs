@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ignore::Match;
 use ignore::gitignore::Gitignore;
@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use workspace_runtime::api::WorkspaceHandle;
 
 use crate::error::ChangeTrackerError;
-use crate::event::{FsChangeKind, FsEvent, GitMetaEvent, SemanticEvent};
+use crate::event::{FsChangeKind, FsEvent, GitEvent, GitMetaEvent, SemanticEvent};
 use crate::git;
 
 /// Tunables for one event service. Defaults suit interactive workspaces; the
@@ -71,6 +71,7 @@ enum Incoming {
         root: PathBuf,
         reply: SyncSender<Result<(), String>>,
     },
+    Shutdown,
 }
 
 /// One raw change classified into a semantic role. Rename fragments carry the
@@ -88,11 +89,12 @@ enum Change {
 /// Raw `notify` events are normalized on a dedicated worker thread: paths
 /// become workspace-relative, rename fragments pair into one `Renamed` event,
 /// bursts are debounced, gitignored paths are dropped, and `.git` changes are
-/// re-emitted as `GitMetaEvent`. Consumers receive only `FsEvent` values and
+/// re-emitted as root-associated `GitEvent` values. Consumers receive only `FsEvent` values and
 /// never depend on `notify` types.
 pub struct FsEventService {
     command: CommandSender,
     sender: broadcast::Sender<FsEvent>,
+    initial_receiver: Mutex<Option<broadcast::Receiver<FsEvent>>>,
     handles: Mutex<Vec<PathBuf>>,
     shutdown: CancellationToken,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -104,12 +106,13 @@ impl FsEventService {
         handle: &WorkspaceHandle,
         options: WatchOptions,
     ) -> Result<Self, ChangeTrackerError> {
+        validate_options(&options)?;
         let root = std::fs::canonicalize(handle.root()).map_err(|error| {
             ChangeTrackerError::InvalidRoot {
                 message: format!("cannot resolve {}: {error}", handle.root().display()),
             }
         })?;
-        let (sender, _) = broadcast::channel(options.event_queue);
+        let (sender, initial_receiver) = broadcast::channel(options.event_queue);
         let shutdown = CancellationToken::new();
         let worker = spawn_worker(root.clone(), &options, sender.clone(), shutdown.clone())?;
         worker
@@ -120,6 +123,7 @@ impl FsEventService {
         Ok(Self {
             command: worker.command,
             sender,
+            initial_receiver: Mutex::new(Some(initial_receiver)),
             handles: Mutex::new(vec![root]),
             shutdown,
             thread: Mutex::new(Some(worker.thread)),
@@ -128,7 +132,11 @@ impl FsEventService {
 
     /// Subscribe to the normalized change stream.
     pub fn events(&self) -> broadcast::Receiver<FsEvent> {
-        self.sender.subscribe()
+        self.initial_receiver
+            .lock()
+            .expect("initial event receiver")
+            .take()
+            .unwrap_or_else(|| self.sender.subscribe())
     }
 
     /// The first watched workspace root.
@@ -150,14 +158,23 @@ impl FsEventService {
             }
         })?;
         let (reply_tx, reply_rx) = sync_channel::<Result<(), String>>(1);
-        self.command
+        let result = self
+            .command
             .lock()
             .expect("command channel")
             .try_send(Incoming::AddRoot {
                 root: root.clone(),
                 reply: reply_tx,
-            })
-            .map_err(|_| ChangeTrackerError::Shutdown)?;
+            });
+        match result {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                return Err(ChangeTrackerError::WatchFailed {
+                    message: "change-tracker command queue is saturated".into(),
+                });
+            }
+            Err(TrySendError::Disconnected(_)) => return Err(ChangeTrackerError::Shutdown),
+        }
         reply_rx
             .recv()
             .map_err(|_| ChangeTrackerError::Shutdown)?
@@ -169,6 +186,11 @@ impl FsEventService {
     /// Cancel the worker and join it. Idempotent; `Drop` calls this too.
     pub fn shutdown(&self) {
         self.shutdown.cancel();
+        let _ = self
+            .command
+            .lock()
+            .expect("command channel")
+            .try_send(Incoming::Shutdown);
         if let Some(thread) = self.thread.lock().expect("worker thread").take() {
             let _ = thread.join();
         }
@@ -203,6 +225,7 @@ fn spawn_worker(
         rename_to: HashMap::new(),
         lost: Arc::new(AtomicU64::new(0)),
         sequence: 0,
+        flush_deadline: None,
         watcher: None,
     };
     let handle = std::thread::Builder::new()
@@ -231,6 +254,7 @@ struct Worker {
     rename_to: HashMap<usize, (PathBuf, PathBuf)>,
     lost: Arc<AtomicU64>,
     sequence: u64,
+    flush_deadline: Option<Instant>,
     watcher: Option<RecommendedWatcher>,
 }
 
@@ -249,21 +273,7 @@ impl Worker {
         let lost = Arc::clone(&self.lost);
         let command = Arc::clone(&self.command);
         let mut watcher = RecommendedWatcher::new(
-            move |result: notify::Result<notify::Event>| match result {
-                Ok(event) => {
-                    if command
-                        .lock()
-                        .expect("command channel")
-                        .try_send(Incoming::Event(event))
-                        .is_err()
-                    {
-                        lost.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                Err(_) => {
-                    lost.fetch_add(1, Ordering::Relaxed);
-                }
-            },
+            move |result| forward_raw_result(&command, &lost, result),
             notify::Config::default(),
         )
         .map_err(|error| format!("cannot create watcher: {error}"))?;
@@ -276,19 +286,44 @@ impl Worker {
     }
 
     fn step(&mut self) -> bool {
-        if self.shutdown.is_cancelled() && self.pending.is_empty() {
+        if self.shutdown.is_cancelled() {
+            self.flush();
             return false;
         }
-        match self.command_rx.recv_timeout(self.options.debounce) {
+        if self
+            .flush_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.flush();
+        }
+        let timeout = self
+            .flush_deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(self.options.debounce);
+        match self.command_rx.recv_timeout(timeout) {
             Ok(Incoming::Event(event)) => self.handle_event(event),
             Ok(Incoming::AddRoot { root, reply }) => {
                 let result = self.add_root(root).map_err(|error| error.to_string());
                 let _ = reply.send(result);
             }
+            Ok(Incoming::Shutdown) => {
+                self.flush();
+                return false;
+            }
             Err(RecvTimeoutError::Timeout) => self.flush(),
             Err(RecvTimeoutError::Disconnected) => return false,
         }
+        if self.flush_deadline.is_none() && self.has_buffered_work() {
+            self.flush_deadline = Some(Instant::now() + self.options.debounce);
+        }
         true
+    }
+
+    fn has_buffered_work(&self) -> bool {
+        !self.pending.is_empty()
+            || !self.rename_from.is_empty()
+            || !self.rename_to.is_empty()
+            || self.lost.load(Ordering::Relaxed) > 0
     }
 
     fn install_root(&mut self, root: PathBuf) -> Result<(), String> {
@@ -332,7 +367,13 @@ impl Worker {
             ));
         }
         self.watch(&root)?;
-        self.install_root(root)
+        if let Err(error) = self.install_root(root.clone()) {
+            if let Some(watcher) = self.watcher.as_mut() {
+                let _ = watcher.unwatch(&root);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn watch(&mut self, path: &Path) -> Result<(), String> {
@@ -355,26 +396,56 @@ impl Worker {
         };
         let paths = event.paths.clone();
         for path in &paths {
-            if self.inside_gitdir(path) {
-                if let Some(meta) = self.classify_git_path(path, &event.kind) {
-                    let _ = self.sender.send(FsEvent::Git(meta));
+            if let Some((root, rel)) = self.git_path(path) {
+                if let Some(kind) = git::classify(&rel, &event.kind) {
+                    self.emit_git(&root, kind);
                 }
                 continue;
             }
-            let Some((root, rel)) = self.locate(path) else {
+            let is_directory = path_is_directory(&event.kind, path);
+            let Some((root, rel)) = self.workspace_path(path, is_directory) else {
                 continue;
             };
-            if self.ignored(&root, &rel) {
-                continue;
-            }
             match change {
-                Change::Create(tracker) => self.handle_new_path(&root, rel, tracker),
+                Change::Create(tracker) => {
+                    self.handle_new_path(&root, rel, tracker);
+                    if is_directory == Some(true) {
+                        self.record_created_tree(path);
+                    }
+                }
                 Change::Remove(tracker) => self.handle_old_path(&root, rel, tracker),
                 Change::RenameTo(tracker) => self.handle_new_path(&root, rel, tracker),
                 Change::RenameFrom(tracker) => self.handle_old_path(&root, rel, tracker),
                 Change::Modify => {
                     merge_pending(&mut self.pending, (root, rel), FsChangeKind::Modified);
                 }
+            }
+        }
+    }
+
+    /// Recursive backends can report a new directory before they finish
+    /// installing watches below it. Scan the just-created subtree once to
+    /// close that race; later backend events merge into the same pending map.
+    fn record_created_tree(&mut self, directory: &Path) {
+        for entry in ignore::WalkBuilder::new(directory)
+            .standard_filters(false)
+            .follow_links(false)
+            .build()
+            .skip(1)
+        {
+            if self.shutdown.is_cancelled() {
+                break;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    self.lost.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            };
+            let is_directory = entry.file_type().is_some_and(|kind| kind.is_dir());
+            if let Some((root, rel)) = self.workspace_path(entry.path(), Some(is_directory)) {
+                self.handle_new_path(&root, rel, None);
             }
         }
     }
@@ -418,13 +489,50 @@ impl Worker {
     }
 
     fn handle_both(&mut self, from: &Path, to: &Path) {
-        let Some((from_root, from_rel)) = self.locate(from) else {
-            return;
-        };
-        let Some((to_root, to_rel)) = self.locate(to) else {
-            return;
-        };
-        self.record_renamed(&from_root, from_rel, &to_root, to_rel);
+        use notify::event::{CreateKind, RemoveKind};
+
+        let is_directory = to.is_dir();
+        let from_git = self.git_path(from);
+        let to_git = self.git_path(to);
+        if let Some((root, rel)) = &from_git
+            && let Some(kind) = git::classify(rel, &EventKind::Remove(RemoveKind::Any))
+        {
+            self.emit_git(root, kind);
+        }
+        if let Some((root, rel)) = &to_git
+            && let Some(kind) = git::classify(rel, &EventKind::Create(CreateKind::Any))
+        {
+            self.emit_git(root, kind);
+        }
+
+        let from_workspace = from_git
+            .is_none()
+            .then(|| self.workspace_path(from, Some(is_directory)))
+            .flatten();
+        let to_workspace = to_git
+            .is_none()
+            .then(|| self.workspace_path(to, Some(is_directory)))
+            .flatten();
+        match (from_workspace, to_workspace) {
+            (Some((from_root, from_rel)), Some((to_root, to_rel))) if from_root == to_root => {
+                self.record_renamed(&from_root, from_rel, &to_root, to_rel);
+            }
+            (Some((from_root, from_rel)), Some((to_root, to_rel))) => {
+                merge_pending(
+                    &mut self.pending,
+                    (from_root, from_rel),
+                    FsChangeKind::Removed,
+                );
+                merge_pending(&mut self.pending, (to_root, to_rel), FsChangeKind::Created);
+            }
+            (Some((root, rel)), None) => {
+                merge_pending(&mut self.pending, (root, rel), FsChangeKind::Removed);
+            }
+            (None, Some((root, rel))) => {
+                merge_pending(&mut self.pending, (root, rel), FsChangeKind::Created);
+            }
+            (None, None) => {}
+        }
     }
 
     fn record_renamed(
@@ -445,9 +553,9 @@ impl Worker {
     }
 
     fn flush(&mut self) {
-        let lost = self.lost.swap(0, Ordering::Relaxed);
-        if lost > 0 {
-            let _ = self.sender.send(FsEvent::WatchGap { lost });
+        self.flush_deadline = None;
+        if let Some(gap) = take_watch_gap(&self.lost) {
+            let _ = self.sender.send(gap);
         }
         let pending = std::mem::take(&mut self.pending);
         for ((root, rel), kind) in pending {
@@ -470,49 +578,121 @@ impl Worker {
         self.pending_renames.clear();
     }
 
-    fn inside_gitdir(&self, path: &Path) -> bool {
-        self.states.values().any(|state| {
-            state
-                .gitdir
-                .as_ref()
-                .is_some_and(|gitdir| path.starts_with(gitdir))
-        })
+    fn emit_git(&mut self, root: &Path, kind: GitMetaEvent) {
+        self.sequence += 1;
+        let _ = self
+            .sender
+            .send(FsEvent::Git(GitEvent::new(self.sequence, root, kind)));
     }
 
-    fn classify_git_path(&self, path: &Path, kind: &notify::EventKind) -> Option<GitMetaEvent> {
-        for state in self.states.values() {
-            let gitdir = state.gitdir.as_ref()?;
-            if let Ok(rel) = path.strip_prefix(gitdir)
-                && !rel.as_os_str().is_empty()
-            {
-                return git::classify(rel, kind);
-            }
-        }
-        None
+    fn git_path(&self, path: &Path) -> Option<(PathBuf, PathBuf)> {
+        self.states
+            .iter()
+            .filter_map(|(root, state)| {
+                let gitdir = state.gitdir.as_ref()?;
+                let rel = path.strip_prefix(gitdir).ok()?;
+                (!rel.as_os_str().is_empty())
+                    .then(|| (gitdir.components().count(), root.clone(), rel.to_path_buf()))
+            })
+            .max_by_key(|(depth, _, _)| *depth)
+            .map(|(_, root, rel)| (root, rel))
     }
 
     fn locate(&self, path: &Path) -> Option<(PathBuf, PathBuf)> {
-        for root in self.states.keys() {
-            if let Ok(rel) = path.strip_prefix(root)
-                && !rel.as_os_str().is_empty()
-            {
-                return Some((root.clone(), rel.to_path_buf()));
-            }
-        }
-        None
+        self.states
+            .keys()
+            .filter_map(|root| {
+                let rel = path.strip_prefix(root).ok()?;
+                (!rel.as_os_str().is_empty())
+                    .then(|| (root.components().count(), root.clone(), rel.to_path_buf()))
+            })
+            .max_by_key(|(depth, _, _)| *depth)
+            .map(|(_, root, rel)| (root, rel))
     }
 
-    fn ignored(&self, root: &Path, rel: &Path) -> bool {
+    fn workspace_path(
+        &self,
+        path: &Path,
+        is_directory: Option<bool>,
+    ) -> Option<(PathBuf, PathBuf)> {
+        let (root, rel) = self.locate(path)?;
+        if rel.starts_with(".git") || self.ignored(&root, &rel, is_directory) {
+            return None;
+        }
+        Some((root, rel))
+    }
+
+    fn ignored(&self, root: &Path, rel: &Path, is_directory: Option<bool>) -> bool {
         let Some(state) = self.states.get(root) else {
             return false;
         };
         let Some(ignore) = state.gitignore.as_ref() else {
             return false;
         };
-        matches!(
-            ignore.matched_path_or_any_parents(rel, false),
-            Match::Ignore(_)
-        )
+        let matched = |is_dir| {
+            matches!(
+                ignore.matched_path_or_any_parents(rel, is_dir),
+                Match::Ignore(_)
+            )
+        };
+        is_directory.map_or_else(|| matched(false) || matched(true), matched)
+    }
+}
+
+fn validate_options(options: &WatchOptions) -> Result<(), ChangeTrackerError> {
+    if options.max_roots == 0 {
+        return Err(ChangeTrackerError::InvalidOptions {
+            message: "max_roots must be at least 1".into(),
+        });
+    }
+    if options.event_queue == 0 {
+        return Err(ChangeTrackerError::InvalidOptions {
+            message: "event_queue must be at least 1".into(),
+        });
+    }
+    if options.debounce.is_zero() {
+        return Err(ChangeTrackerError::InvalidOptions {
+            message: "debounce must be greater than zero".into(),
+        });
+    }
+    Ok(())
+}
+
+fn forward_raw_result(
+    command: &CommandSender,
+    lost: &AtomicU64,
+    result: notify::Result<notify::Event>,
+) {
+    match result {
+        Ok(event) => {
+            if command
+                .lock()
+                .expect("command channel")
+                .try_send(Incoming::Event(event))
+                .is_err()
+            {
+                lost.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Err(_) => {
+            lost.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn take_watch_gap(lost: &AtomicU64) -> Option<FsEvent> {
+    let lost = lost.swap(0, Ordering::Relaxed);
+    (lost > 0).then_some(FsEvent::WatchGap { lost })
+}
+
+fn path_is_directory(kind: &EventKind, path: &Path) -> Option<bool> {
+    use notify::event::{CreateKind, RemoveKind};
+
+    match kind {
+        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) => Some(true),
+        EventKind::Create(CreateKind::File) | EventKind::Remove(RemoveKind::File) => Some(false),
+        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From)) => None,
+        _ => Some(path.is_dir()),
     }
 }
 

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use notify::event::EventKind;
+use notify::event::{EventKind, ModifyKind, RenameMode};
 
 use crate::event::GitMetaEvent;
 
@@ -38,14 +38,22 @@ pub(super) fn classify(relative: &Path, kind: &EventKind) -> Option<GitMetaEvent
         .is_some_and(|extension| extension == "lock")
     {
         return match kind {
-            EventKind::Create(_) => Some(GitMetaEvent::OperationStarted),
-            EventKind::Remove(_) => Some(GitMetaEvent::OperationCompleted),
+            EventKind::Create(_)
+            | EventKind::Modify(ModifyKind::Name(RenameMode::To | RenameMode::Any)) => {
+                Some(GitMetaEvent::OperationStarted)
+            }
+            EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                Some(GitMetaEvent::OperationCompleted)
+            }
             _ => None,
         };
     }
     match kind {
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-            let is_remove = matches!(kind, EventKind::Remove(_));
+            let is_remove = matches!(
+                kind,
+                EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From))
+            );
             if OPERATION_MARKERS.contains(&name.as_ref()) {
                 return Some(if is_remove {
                     GitMetaEvent::OperationCompleted
@@ -59,10 +67,7 @@ pub(super) fn classify(relative: &Path, kind: &EventKind) -> Option<GitMetaEvent
             if INDEX_LIKE_FILES.contains(&name.as_ref()) {
                 return Some(GitMetaEvent::IndexChanged);
             }
-            if relative
-                .parent()
-                .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "refs"))
-            {
+            if relative.starts_with("refs") {
                 return Some(GitMetaEvent::HeadMoved);
             }
             None

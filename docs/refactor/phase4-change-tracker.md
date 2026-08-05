@@ -1,6 +1,6 @@
 # Phase 4 / ARC-400：抽取 `change-tracker`
 
-> 状态：完成（2026-08-05）
+> 状态：完成（复验 2026-08-06）
 > 前序：Phase 3 Gate（worktree 隔离、merge protocol、测试矩阵）
 > 目标：把 review 从 tool event 投影升级为文件事实系统的第一层 —— 单 actor 所有权的
 > 语义化 fs event service
@@ -8,22 +8,28 @@
 ## 决策
 
 - **新 crate `change-tracker`，只依赖 `workspace-runtime`**：consumers 只看到
-  `FsEvent`（`SemanticEvent` / `GitMetaEvent` / `WatchGap`），绝不直接依赖
+  `FsEvent`（`SemanticEvent` / `GitEvent` / `WatchGap`），绝不直接依赖
   `notify` 类型；`WorkspaceHandle` 是唯一进入点，crate 不持有任何产品
   session/UI 类型。
 - **单 actor 线程模型**：`FsEventService::start` 立即返回前用 ready channel 同步
-  等待 worker 完成 watcher 注册与 root 安装，消除"start 后立刻写文件丢事件"
-  窗口；worker 独占 notify watcher、归一化、debounce 和 git 分类，命令
-  （`add_root`）经同一 actor 串行处理。`Drop`/`shutdown()` 幂等取消并 join。
+  等待 worker 完成 watcher 注册与 root 安装，并保留启动时创建的首个 receiver，
+  消除 ready 到首次订阅之间的丢事件窗口；worker 独占 notify watcher、归一化、
+  debounce 和 git 分类，命令（`add_root` / `shutdown`）经同一 actor 串行处理。
+  `Drop`/`shutdown()` 幂等取消、显式唤醒并 join。
 - **归一化规则**：
   - 路径相对化到 watch root；`rename` 按 backend tracker id 配对
     （`RenameFrom`/`RenameTo` 同 id，`Both` 直接成对），配对窗口内
-    未配对片段保守降级为 `Removed`/`Created`。
-  - debounce 窗口内同路径合并，合并优先级
+    未配对片段保守降级为 `Removed`/`Created`；rename 两端分别经过 Git、
+    root 与 ignore 判定，跨 root 或 ignore 边界不伪造单 root rename。
+  - bounded debounce 窗口内同路径合并，首个 buffered event 固定 flush deadline，
+    持续事件流不能无限延后交付；合并优先级
     `Removed` 可被后续 `Created` 覆盖、`Created` 不被 `Modified` 降级，
     保证"新建即写入"仍以 `Created` 语义出现。
+  - recursive backend 新增目录时立即补扫一次子树，关闭 backend 安装子目录 watch
+    前的快速建树竞态；补扫仍复用同一 ignore/debounce 管线且不跟随 symlink。
   - `.git` 目录（含 worktree `gitdir:` 文件解析出的外部 gitdir）完全排除出
-    workspace 事件流；其内部变化独立归一化为 `GitMetaEvent`
+    workspace 事件流；其内部变化独立归一化为带 workspace root 与全局 sequence
+    的 `GitEvent`
     （HEAD/refs → `HeadMoved`、index → `IndexChanged`、lock 与操作 marker →
     `OperationStarted/Completed`），消费者无需解析 `.git` 路径。
   - gitignore：root `.gitignore` 由 `ignore` crate 解析一次，
@@ -32,7 +38,7 @@
 - **budget fail-closed**：`max_roots` 限制多 root 复用同一 watcher 的上限，
   超限 `WatchFailed` 报错且不注册；raw event 通道满时丢弃并累计
   `WatchGap { lost }`（slow consumer 的责任显式化），broadcast 满则丢事件
-  并 `Lagged` 告知消费者。
+  并 `Lagged` 告知消费者；零 root/queue/debounce 配置在启动前结构化拒绝。
 - **Grok `xai-fsnotify` 落点**：保留 semantic stream、debounce、watch budget、
   Git operation state 四要素，按 Evo 的 actor/typed contract 重建，不搬运
   notify backend 选择逻辑。
@@ -51,9 +57,10 @@
 
 ```text
 cargo test --locked -p change-tracker --all-features
-11 passed（create/modify/remove、rename 配对、debounce 合并、gitignore 过滤、
-git add/commit 的 Index/Head 事件、lock 生命周期、.git 不泄漏进 workspace 流、
-多 root + budget fail-closed、sequence 单调、shutdown 幂等）
+22 passed（create/modify/remove、rename 配对与 ignore 边界降级、bounded debounce、
+dynamic directory、gitignore 目录/rename 过滤、Git add/commit/ref/lock、普通 repo 与
+linked worktree 的 root 归属、.git 不泄漏、多 root/嵌套 root、budget fail-closed、
+WatchGap、启动订阅窗口、sequence 单调、非法配置、shutdown 幂等与即时唤醒）
 
 cargo test --locked --workspace --all-features
 全部通过
@@ -65,8 +72,8 @@ architecture gate 必须保持 execution_debts=0
 ## 后续
 
 - ARC-410 HunkTracker actor：消费 `SemanticEvent` 与 edit `ChangeReceipt` 因果
-  关联，引入 stable hunk 与来源归因；gitignore 热更新、worktree gitdir 跟随
-  的边界语义在该步补测试。
+  关联，引入 stable hunk 与来源归因；gitignore 热更新与 shared `commondir`
+  ref topology 在该步按实际 consumer 需求补充。
 - ARC-420 Review domain：`FsEventService` 接入 `coding-agent` 后，review 不再
   由 tool event 投影推导。
 - `notify` 平台差异（macOS FSEvents rename 形态、Windows 路径）沿用

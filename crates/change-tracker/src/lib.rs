@@ -12,5 +12,5 @@ mod git;
 mod watch;
 
 pub use error::ChangeTrackerError;
-pub use event::{FsChangeKind, FsEvent, GitMetaEvent, SemanticEvent};
+pub use event::{FsChangeKind, FsEvent, GitEvent, GitMetaEvent, SemanticEvent};
 pub use watch::{FsEventService, WatchOptions};
