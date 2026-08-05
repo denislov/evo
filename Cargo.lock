@@ -1163,12 +1163,10 @@ dependencies = [
  "ai-protocol",
  "async-stream",
  "base64",
- "cap-std",
  "dirs",
  "event-journal",
  "futures",
  "globset",
- "ignore",
  "image",
  "junction",
  "libc",
@@ -1189,7 +1187,6 @@ dependencies = [
  "tool-contract",
  "tool-runtime",
  "unicode-normalization",
- "windows-sys 0.61.2",
  "workspace-runtime",
 ]
 
@@ -8999,8 +8996,15 @@ checksum = "beffa227304dbaea3ad6a06ac674f9bc83a3dec3b7f63eeb442de37e7cb6bb01"
 name = "workspace-runtime"
 version = "0.7.2"
 dependencies = [
+ "cap-std",
+ "ignore",
+ "libc",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

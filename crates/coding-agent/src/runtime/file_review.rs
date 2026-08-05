@@ -7,14 +7,14 @@ use crate::limits::{
     MAX_FILE_REVIEW_BYTES, MAX_FILE_REVIEW_CONTENT_BYTES, MAX_FILE_REVIEW_DIFF_BYTES,
 };
 use crate::mutex::MutexExt;
-use crate::platform::fs::capability::{
-    FilesystemCapability, FilesystemReviewTargetError, FilesystemTarget,
-};
 use crate::runtime::facade::{
     CodingAgentErrorCategory, CodingAgentErrorContext, CodingAgentFileChangeSnapshot,
     CodingAgentPublicError, CodingAgentSession,
 };
 use crate::runtime::intent::{IntentRouter, QueryIntent};
+use workspace_runtime::api::{
+    FilesystemReviewTargetError, FilesystemTarget, WorkspaceAccessHandle,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -148,7 +148,7 @@ async fn revalidate_external_editor_target(
     project_root: &Path,
     target: &CodingAgentExternalEditorTarget,
 ) -> Result<(), CodingAgentPublicError> {
-    let filesystem = FilesystemCapability::new(project_root.to_path_buf())
+    let filesystem = WorkspaceAccessHandle::open_source(project_root.to_path_buf())
         .map_err(|_| review_error(ReviewErrorKind::Unavailable))?;
     let current = filesystem
         .prepare_workspace_review_target(&target.project_relative_path)
@@ -168,7 +168,7 @@ async fn review_changed_file(
     request: CodingAgentFileReviewRequest,
 ) -> Result<CodingAgentFileReview, CodingAgentPublicError> {
     let change = authorize_change(changes, &request)?;
-    let filesystem = FilesystemCapability::new(project_root.to_path_buf())
+    let filesystem = WorkspaceAccessHandle::open_source(project_root.to_path_buf())
         .map_err(|_| review_error(ReviewErrorKind::Unavailable))?;
     let target = filesystem
         .prepare_workspace_review_target(&change.path)

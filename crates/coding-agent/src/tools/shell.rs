@@ -13,9 +13,9 @@ use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolCallContext, ToolFuture, TypedTool};
 
 use crate::platform::io::output::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
-use crate::platform::process::{
+use workspace_runtime::api::{
     EnvPolicy, OutputBudget, ProcessOutcome, ProcessOutput, ProcessSpec, ProcessUpdateCallback,
-    ProgramKind, ShellCapability, path_exists, resolve_shell_path, run as run_process,
+    ProgramKind, WorkspaceAccessHandle, path_exists, resolve_shell_path, run as run_process,
 };
 
 const DESCRIPTION: &str = "Execute a bash command in the working directory. Returns merged stdout and stderr. Output and progress are bounded to the last 2000 lines or 50KB. Commands time out after 120 seconds by default; the maximum is 600 seconds.";
@@ -98,7 +98,7 @@ fn is_safe_env_key(key: &str) -> bool {
 }
 
 pub(crate) fn bash_runtime_tool(
-    shell: ShellCapability,
+    shell: WorkspaceAccessHandle,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("bash").expect("static tool id is valid"),
@@ -127,24 +127,24 @@ pub(crate) fn bash_runtime_tool(
 }
 
 async fn execute_bash(
-    shell: &ShellCapability,
+    shell: &WorkspaceAccessHandle,
     context: &ToolCallContext,
     args: BashArgs,
 ) -> Result<ToolOutput, ToolError> {
     let timeout = args.validate()?;
-    if !path_exists(&shell.cwd).await {
+    if !path_exists(shell.cwd()).await {
         return Err(ToolError::new(
             ToolErrorKind::Unavailable,
             format!(
                 "bash: working directory does not exist: {}",
-                shell.cwd.display()
+                shell.cwd().display()
             ),
         ));
     }
-    let shell_path = resolve_shell_path(shell.shell_path.as_deref())
+    let shell_path = resolve_shell_path(shell.shell_path())
         .await
         .map_err(|error| ToolError::new(ToolErrorKind::Unavailable, error))?;
-    let command = match shell.command_prefix.as_deref() {
+    let command = match shell.command_prefix() {
         Some(prefix) if !prefix.is_empty() => format!("{prefix}\n{}", args.command),
         _ => args.command,
     };
@@ -162,7 +162,7 @@ async fn execute_bash(
                 command_arg: "-c".into(),
             },
             command,
-            cwd: shell.cwd.clone(),
+            cwd: shell.cwd().to_path_buf(),
             env: EnvPolicy::AllowList(safe_process_env()),
             timeout,
             output_budget: OutputBudget::new(DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES),
@@ -311,12 +311,15 @@ mod tests {
 
     use super::{bash_runtime_tool, is_safe_env_key};
     use crate::mutex::MutexExt;
-    use crate::platform::process::ShellCapability;
+    use workspace_runtime::api::WorkspaceAccessHandle;
 
     fn runtime(cwd: &Path) -> ToolRuntime {
         let mut registry = ToolRegistry::default();
         registry
-            .register(bash_runtime_tool(ShellCapability::new(cwd.to_path_buf())).unwrap())
+            .register(
+                bash_runtime_tool(WorkspaceAccessHandle::open_source(cwd.to_path_buf()).unwrap())
+                    .unwrap(),
+            )
             .unwrap();
         ToolRuntime::new(registry).unwrap()
     }
@@ -457,7 +460,7 @@ mod tests {
     #[test]
     fn typed_definition_and_safe_environment_are_fail_closed() {
         let cwd = std::env::current_dir().unwrap();
-        let tool = bash_runtime_tool(ShellCapability::new(cwd)).unwrap();
+        let tool = bash_runtime_tool(WorkspaceAccessHandle::open_source(cwd).unwrap()).unwrap();
         let definition = tool.definition();
         assert_eq!(definition.id.as_str(), "bash");
         assert_eq!(

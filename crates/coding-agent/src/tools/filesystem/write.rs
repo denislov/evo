@@ -1,6 +1,4 @@
 use crate::mutex::MutexExt;
-use crate::platform::fs::capability::FilesystemCapability;
-use crate::platform::fs::mutation::{FileMutation, MutationGuard};
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem::mutation_receipt::{
     receipt_from_revisions, revision, revision_from_reader, validate_fence,
@@ -17,6 +15,8 @@ use tool_contract::api::definition::{
 use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
 use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
+use workspace_runtime::api::WorkspaceAccessHandle;
+use workspace_runtime::api::{FileMutation, MutationGuard};
 
 const DESCRIPTION: &str = "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.";
 
@@ -190,7 +190,7 @@ async fn write_target_with_operations(
 }
 
 pub fn write_runtime_tool(
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("write").expect("static tool id is valid"),
@@ -248,9 +248,9 @@ mod tests {
     use super::{
         RealWriteOperations, WriteOperations, write_runtime_tool, write_target_with_operations,
     };
-    use crate::platform::fs::capability::FilesystemCapability;
-    use crate::platform::fs::mutation::MutationGuard;
     use crate::tools::FilesystemTarget;
+    use workspace_runtime::api::MutationGuard;
+    use workspace_runtime::api::WorkspaceAccessHandle;
 
     #[derive(Default)]
     struct BlockingWriteOperations {
@@ -293,7 +293,7 @@ mod tests {
     async fn cancelled_write_keeps_same_path_mutations_serial_until_blocking_owner_finishes() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("target.txt"), "initial").unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let target = filesystem
             .prepare_target_for_tool("write", "target.txt")
             .await
@@ -344,7 +344,7 @@ mod tests {
     async fn write_returns_change_receipt_and_rejects_a_stale_revision() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("target.txt"), "initial\n").unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let target = filesystem
             .prepare_target_for_tool("write", "target.txt")
             .await
@@ -385,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn typed_write_executes_through_the_runtime_registry() {
         let temp = tempfile::tempdir().unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(write_runtime_tool(filesystem).unwrap())

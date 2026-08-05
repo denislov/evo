@@ -5,8 +5,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
-use crate::mutex::MutexExt;
-use crate::platform::fs::capability::FilesystemTarget;
+use crate::fs::capability::FilesystemTarget;
+use crate::resource::{lock_or_recover, lock_resource};
 
 static FILE_MUTATION_QUEUES: LazyLock<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -107,8 +107,7 @@ fn is_missing_path_error(error: &io::Error) -> bool {
 }
 
 fn queue_for_key(key: &Path) -> Result<Arc<AsyncMutex<()>>, String> {
-    let mut queues = FILE_MUTATION_QUEUES
-        .lock_resource("file mutation queue registry")
+    let mut queues = lock_resource(&FILE_MUTATION_QUEUES, "file mutation queue registry")
         .map_err(|error| error.to_string())?;
     Ok(queues
         .entry(key.to_path_buf())
@@ -117,7 +116,7 @@ fn queue_for_key(key: &Path) -> Result<Arc<AsyncMutex<()>>, String> {
 }
 
 fn cleanup_queue(key: &Path, queue: &Arc<AsyncMutex<()>>) {
-    let mut queues = FILE_MUTATION_QUEUES.lock_or_recover("file mutation queue registry");
+    let mut queues = lock_or_recover(&FILE_MUTATION_QUEUES);
     if Arc::strong_count(queue) == 2
         && queues
             .get(key)
@@ -133,7 +132,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use crate::mutex::MutexExt;
+    use crate::resource::lock_or_recover;
 
     use super::{FILE_MUTATION_QUEUES, FileMutation, mutation_queue_key};
 
@@ -189,11 +188,7 @@ mod tests {
                 .unwrap();
         drop(second);
         let key = mutation_queue_key(&target).unwrap();
-        assert!(
-            !FILE_MUTATION_QUEUES
-                .lock_or_recover("test file mutation queue registry")
-                .contains_key(&key)
-        );
+        assert!(!lock_or_recover(&FILE_MUTATION_QUEUES).contains_key(&key));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -214,10 +209,6 @@ mod tests {
                 .unwrap();
         drop(second);
         let key = mutation_queue_key(&target).unwrap();
-        assert!(
-            !FILE_MUTATION_QUEUES
-                .lock_or_recover("test file mutation queue registry")
-                .contains_key(&key)
-        );
+        assert!(!lock_or_recover(&FILE_MUTATION_QUEUES).contains_key(&key));
     }
 }

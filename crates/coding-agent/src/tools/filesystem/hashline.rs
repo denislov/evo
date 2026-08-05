@@ -5,8 +5,6 @@
 //! so a stale proposal cannot silently edit an unrelated part of a file.
 
 use crate::mutex::MutexExt;
-use crate::platform::fs::capability::FilesystemCapability;
-use crate::platform::fs::mutation::FileMutation;
 use crate::tools::filesystem::bounded::read_target_bytes;
 use crate::tools::filesystem::mutation_receipt::{bounded_diff, receipt, validate_fence};
 use crate::tools::filesystem_target_for_runtime_execution;
@@ -22,6 +20,8 @@ use tool_contract::api::definition::{
 use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
 use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
+use workspace_runtime::api::FileMutation;
+use workspace_runtime::api::WorkspaceAccessHandle;
 
 pub(crate) const DEFAULT_SHIFT_WINDOW: usize = 15;
 
@@ -214,7 +214,7 @@ pub(crate) fn apply_batch(
 }
 
 pub(crate) fn hashline_edit_runtime_tool(
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("hashline_edit").expect("static tool id is valid"),
@@ -390,10 +390,10 @@ fn split_lines(content: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::fs::capability::FilesystemCapability;
     use tokio_util::sync::CancellationToken;
     use tool_contract::api::definition::ToolId;
     use tool_runtime::api::{ToolCallContext, ToolRegistry, ToolRuntime};
+    use workspace_runtime::api::WorkspaceAccessHandle;
 
     fn anchor(content: &str, line: usize) -> HashlineAnchor {
         let record = snapshot(content).remove(line - 1);
@@ -464,7 +464,7 @@ mod tests {
     async fn typed_hashline_edit_writes_from_one_snapshot() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("target.txt"), "zero\none\ntwo\nthree\n").unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let records = snapshot("one\ntwo\nthree\n");
         let mut registry = ToolRegistry::default();
         registry
@@ -505,7 +505,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let oversized = vec![b'x'; crate::limits::MAX_TOOL_EDIT_FILE_BYTES + 1];
         std::fs::write(temp.path().join("large.txt"), &oversized).unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(

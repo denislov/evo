@@ -7,30 +7,19 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::platform::io::output::{TruncationLimit, truncate_tail};
-
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
-pub(crate) type ProcessUpdateCallback = Arc<dyn Fn(String) + Send + Sync>;
+pub type ProcessUpdateCallback = Arc<dyn Fn(String) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShellCapability {
+pub(crate) struct ShellCapability {
     pub(crate) cwd: PathBuf,
     pub(crate) shell_path: Option<String>,
     pub(crate) command_prefix: Option<String>,
 }
 
 impl ShellCapability {
-    #[cfg(test)]
-    pub fn new(cwd: PathBuf) -> Self {
-        Self {
-            cwd,
-            shell_path: None,
-            command_prefix: None,
-        }
-    }
-
     pub(crate) fn with_configuration(
         cwd: PathBuf,
         shell_path: Option<String>,
@@ -45,13 +34,13 @@ impl ShellCapability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ProgramKind {
+pub enum ProgramKind {
     Shell { path: String, command_arg: String },
     Direct { program: String, args: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum EnvPolicy {
+pub enum EnvPolicy {
     // The shared contract deliberately represents inheritance even though all
     // current product call sites choose the safer allowlist policy.
     #[allow(dead_code)]
@@ -60,16 +49,16 @@ pub(crate) enum EnvPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OutputBudget {
-    pub(crate) max_bytes: usize,
-    pub(crate) max_lines: usize,
-    pub(crate) buffer_keep_bytes: usize,
-    pub(crate) update_byte_threshold: usize,
-    pub(crate) update_interval: Duration,
+pub struct OutputBudget {
+    pub max_bytes: usize,
+    pub max_lines: usize,
+    pub buffer_keep_bytes: usize,
+    pub update_byte_threshold: usize,
+    pub update_interval: Duration,
 }
 
 impl OutputBudget {
-    pub(crate) fn new(max_bytes: usize, max_lines: usize) -> Self {
+    pub fn new(max_bytes: usize, max_lines: usize) -> Self {
         Self {
             max_bytes,
             max_lines,
@@ -81,26 +70,26 @@ impl OutputBudget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProcessSpec {
-    pub(crate) program: ProgramKind,
-    pub(crate) command: String,
-    pub(crate) cwd: PathBuf,
-    pub(crate) env: EnvPolicy,
-    pub(crate) timeout: Duration,
-    pub(crate) output_budget: OutputBudget,
+pub struct ProcessSpec {
+    pub program: ProgramKind,
+    pub command: String,
+    pub cwd: PathBuf,
+    pub env: EnvPolicy,
+    pub timeout: Duration,
+    pub output_budget: OutputBudget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProcessOutput {
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
-    pub(crate) merged: String,
-    pub(crate) stdout_bytes: usize,
-    pub(crate) stderr_bytes: usize,
+pub struct ProcessOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub merged: String,
+    pub stdout_bytes: usize,
+    pub stderr_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ProcessOutcome {
+pub enum ProcessOutcome {
     Completed {
         exit_code: Option<i32>,
         output: ProcessOutput,
@@ -163,16 +152,13 @@ impl OutputTail {
 
     fn render(&self) -> String {
         let text = String::from_utf8_lossy(&self.buffer);
-        let truncation = truncate_tail(
-            &text,
-            TruncationLimit {
-                max_lines: self.budget.max_lines,
-                max_bytes: self.budget.max_bytes,
-            },
-        );
-        if !truncation.truncated && !self.overflowed {
+        if !self.overflowed
+            && self.total_lines() <= self.budget.max_lines
+            && self.total_bytes <= self.budget.max_bytes
+        {
             return text.into_owned();
         }
+        let (kept, kept_lines) = tail_text(&text, self.budget.max_lines, self.budget.max_bytes);
         let known_lines = self.total_lines();
         let byte_label = if self.budget.max_bytes.is_multiple_of(1024) {
             format!("{}KB", self.budget.max_bytes / 1024)
@@ -180,8 +166,8 @@ impl OutputTail {
             format!("{} bytes", self.budget.max_bytes)
         };
         format!(
-            "{}\n\n[Output truncated: showing last {} of {known_lines} lines ({byte_label}/{}-line limit).]",
-            truncation.content, truncation.output_lines, self.budget.max_lines
+            "{kept}\n\n[Output truncated: showing last {kept_lines} of {known_lines} lines ({byte_label}/{}-line limit).]",
+            self.budget.max_lines
         )
     }
 
@@ -261,7 +247,7 @@ enum PendingTermination {
     Failed(String),
 }
 
-pub(crate) async fn run(
+pub async fn run(
     spec: ProcessSpec,
     cancellation: &CancellationToken,
     on_update: Option<&ProcessUpdateCallback>,
@@ -453,6 +439,50 @@ fn drain_utf8_prefix(buffer: &mut Vec<u8>, keep: usize) {
     buffer.drain(..split);
 }
 
+/// Keep the last `max_lines` lines and at most `max_bytes` bytes of `content`,
+/// cutting at UTF-8 character boundaries. Returns the kept text and how many
+/// lines of the original it represents. Mirrors the tail semantics of the
+/// shared agent-core truncation helper this crate must not depend on.
+fn tail_text(content: &str, max_lines: usize, max_bytes: usize) -> (String, usize) {
+    let mut lines = content.split('\n').collect::<Vec<_>>();
+    if lines.len() > 1 && lines.last() == Some(&"") {
+        lines.pop();
+    }
+    let mut output = Vec::new();
+    let mut output_bytes = 0usize;
+    for line in lines.iter().rev() {
+        if output.len() >= max_lines {
+            break;
+        }
+        let line_bytes = line.len() + usize::from(!output.is_empty());
+        if output_bytes.saturating_add(line_bytes) > max_bytes {
+            if output.is_empty() {
+                output.push(truncate_str_from_end(line, max_bytes));
+            }
+            break;
+        }
+        output.push((*line).to_owned());
+        output_bytes += line_bytes;
+    }
+    output.reverse();
+    let kept_lines = output.len();
+    (output.join("\n"), kept_lines)
+}
+
+fn truncate_str_from_end(text: &str, max_bytes: usize) -> String {
+    let mut bytes = 0usize;
+    let mut chars = Vec::new();
+    for ch in text.chars().rev() {
+        let len = ch.len_utf8();
+        if bytes + len > max_bytes {
+            break;
+        }
+        bytes += len;
+        chars.push(ch);
+    }
+    chars.into_iter().rev().collect()
+}
+
 async fn terminate_child_process_tree(child: &mut tokio::process::Child, tree: &ProcessTree) {
     tree.terminate(child).await;
 }
@@ -590,11 +620,11 @@ impl Drop for ProcessTree {
     }
 }
 
-pub(crate) async fn path_exists(path: &std::path::Path) -> bool {
+pub async fn path_exists(path: &std::path::Path) -> bool {
     tokio::fs::try_exists(path).await.unwrap_or(false)
 }
 
-pub(crate) async fn resolve_shell_path(custom_shell_path: Option<&str>) -> Result<String, String> {
+pub async fn resolve_shell_path(custom_shell_path: Option<&str>) -> Result<String, String> {
     if let Some(shell_path) = custom_shell_path {
         if path_exists(std::path::Path::new(shell_path)).await {
             return Ok(shell_path.to_owned());
@@ -643,201 +673,4 @@ pub(crate) async fn resolve_shell_path(custom_shell_path: Option<&str>) -> Resul
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{Duration, Instant};
-
-    use tokio_util::sync::CancellationToken;
-
-    use super::{
-        EnvPolicy, OutputBudget, ProcessOutcome, ProcessSpec, ProcessUpdateCallback, ProgramKind,
-        run,
-    };
-    use crate::test_support::ProcessFixture;
-
-    fn shell_spec(command: String, timeout: Duration) -> ProcessSpec {
-        ProcessSpec {
-            program: ProgramKind::Shell {
-                path: "/bin/sh".into(),
-                command_arg: "-c".into(),
-            },
-            command,
-            cwd: std::env::current_dir().expect("current directory"),
-            env: EnvPolicy::AllowList(HashMap::from([(
-                "PATH".into(),
-                std::env::var("PATH").unwrap_or_default(),
-            )])),
-            timeout,
-            output_budget: OutputBudget::new(50 * 1024, 2_000),
-        }
-    }
-
-    #[cfg(unix)]
-    async fn wait_for_pid(path: &std::path::Path) -> u32 {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Ok(text) = tokio::fs::read_to_string(path).await
-                    && let Ok(pid) = text.parse()
-                {
-                    return pid;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("descendant pid should be written")
-    }
-
-    #[cfg(unix)]
-    async fn assert_process_stopped(pid: u32) {
-        tokio::time::timeout(Duration::from_secs(2), async move {
-            loop {
-                // A zombie has terminated and cannot execute work; on Linux it
-                // may remain visible briefly until the container init reaps it.
-                let zombie = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
-                    .await
-                    .ok()
-                    .and_then(|stat| {
-                        stat.rsplit_once(") ")
-                            .map(|(_, tail)| tail.starts_with('Z'))
-                    })
-                    .unwrap_or(false);
-                // SAFETY: signal 0 only probes a process identifier captured
-                // from the test fixture; it does not send a signal.
-                let missing = unsafe { libc::kill(pid as i32, 0) } != 0
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-                if zombie || missing {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("descendant process survived process-tree teardown");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancellation_returns_only_after_sleep_is_terminated() {
-        let fixture = ProcessFixture::new().expect("fixture");
-        let cancellation = CancellationToken::new();
-        let task_token = cancellation.clone();
-        let task = tokio::spawn(async move {
-            run(
-                shell_spec(fixture.sleep_command(), Duration::from_secs(300)),
-                &task_token,
-                None,
-            )
-            .await
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let started = Instant::now();
-        cancellation.cancel();
-        let outcome = tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .expect("cancelled runner should return")
-            .expect("runner task should join");
-        assert!(matches!(outcome, ProcessOutcome::Cancelled { .. }));
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancellation_kills_descendants_before_returning() {
-        let fixture = ProcessFixture::new().expect("fixture");
-        let command = fixture.descendant_command();
-        let pid_file = fixture.pid_file().to_path_buf();
-        let cancellation = CancellationToken::new();
-        let task_token = cancellation.clone();
-        let task = tokio::spawn(async move {
-            run(
-                shell_spec(command, Duration::from_secs(300)),
-                &task_token,
-                None,
-            )
-            .await
-        });
-        let pid = wait_for_pid(&pid_file).await;
-        cancellation.cancel();
-        let outcome = tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .expect("cancelled runner should return")
-            .expect("runner task should join");
-        assert!(matches!(outcome, ProcessOutcome::Cancelled { .. }));
-        assert_process_stopped(pid).await;
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn timeout_uses_the_same_descendant_teardown() {
-        let fixture = ProcessFixture::new().expect("fixture");
-        let command = fixture.descendant_command();
-        let pid_file = fixture.pid_file().to_path_buf();
-        let task = tokio::spawn(async move {
-            run(
-                shell_spec(command, Duration::from_millis(150)),
-                &CancellationToken::new(),
-                None,
-            )
-            .await
-        });
-        let pid = wait_for_pid(&pid_file).await;
-        let outcome = tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .expect("timed-out runner should return")
-            .expect("runner task should join");
-        assert!(matches!(outcome, ProcessOutcome::TimedOut { .. }));
-        assert_process_stopped(pid).await;
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn noisy_output_is_bounded_and_updates_are_throttled() {
-        let fixture = ProcessFixture::new().expect("fixture");
-        let updates = Arc::new(AtomicUsize::new(0));
-        let callback_updates = updates.clone();
-        let callback: ProcessUpdateCallback = Arc::new(move |_| {
-            callback_updates.fetch_add(1, Ordering::Relaxed);
-        });
-        let outcome = run(
-            shell_spec(fixture.noisy_command(), Duration::from_secs(10)),
-            &CancellationToken::new(),
-            Some(&callback),
-        )
-        .await;
-        let ProcessOutcome::Completed {
-            exit_code: Some(0),
-            output,
-        } = outcome
-        else {
-            panic!("noisy command should complete successfully: {outcome:?}");
-        };
-        assert!(output.stdout_bytes >= 16 * 1024 * 1024);
-        assert!(output.stdout.len() <= 52 * 1024);
-        assert!(output.merged.len() <= 52 * 1024);
-        assert!(output.stdout.contains("Output truncated"));
-        assert!(updates.load(Ordering::Relaxed) < 512);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn environment_is_replaced_by_the_explicit_allowlist() {
-        let mut spec = shell_spec(
-            "printf '%s:%s' \"$VISIBLE\" \"${HIDDEN-unset}\"".into(),
-            Duration::from_secs(2),
-        );
-        spec.env = EnvPolicy::AllowList(HashMap::from([("VISIBLE".into(), "ok".into())]));
-        let outcome = run(spec, &CancellationToken::new(), None).await;
-        let ProcessOutcome::Completed {
-            exit_code: Some(0),
-            output,
-        } = outcome
-        else {
-            panic!("environment probe should complete: {outcome:?}");
-        };
-        assert_eq!(output.stdout, "ok:unset");
-        assert_eq!(output.stderr, "");
-    }
-}
+mod tests_file;

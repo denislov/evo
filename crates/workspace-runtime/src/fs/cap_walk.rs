@@ -1,27 +1,27 @@
-use crate::mutex::MutexExt;
-use crate::platform::fs::capability::FilesystemTarget;
+use crate::fs::capability::FilesystemTarget;
+use crate::resource::lock_resource;
 use cap_std::fs::{Dir, File};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub(crate) const MAX_WALK_DEPTH: usize = 64;
-pub(crate) const MAX_WALK_ENTRIES: usize = 100_000;
+pub const MAX_WALK_DEPTH: usize = 64;
+pub const MAX_WALK_ENTRIES: usize = 100_000;
 const MAX_GITIGNORE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CapWalkEntryKind {
+pub enum CapWalkEntryKind {
     File,
     Directory,
     Other,
 }
 
 #[derive(Clone)]
-pub(crate) struct CapWalkEntry {
+pub struct CapWalkEntry {
     source: CapWalkEntrySource,
-    pub(crate) relative: PathBuf,
-    pub(crate) kind: CapWalkEntryKind,
+    pub relative: PathBuf,
+    pub kind: CapWalkEntryKind,
 }
 
 #[derive(Clone)]
@@ -31,16 +31,15 @@ enum CapWalkEntrySource {
 }
 
 impl CapWalkEntry {
-    pub(crate) fn read_bounded(&self, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
+    pub fn read_bounded(&self, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
         match &self.source {
             CapWalkEntrySource::Rooted { root, path } => {
                 let mut file = root.open(path)?;
                 read_file_bounded(&mut file, max_bytes)
             }
             CapWalkEntrySource::OpenedFile(file) => {
-                let mut file = file
-                    .lock_resource("filesystem walk opened file")
-                    .map_err(io::Error::other)?;
+                let mut file =
+                    lock_resource(file, "filesystem walk opened file").map_err(io::Error::other)?;
                 file.seek(SeekFrom::Start(0))?;
                 read_file_bounded(&mut file, max_bytes)
             }
@@ -65,12 +64,12 @@ fn read_file_bounded(file: &mut File, max_bytes: u64) -> io::Result<Option<Vec<u
     Ok(Some(bytes))
 }
 
-pub(crate) enum CapWalkRoot {
+pub enum CapWalkRoot {
     File(CapWalkEntry),
     Directory(Vec<CapWalkEntry>),
 }
 
-pub(crate) fn walk_target(target: &FilesystemTarget) -> Result<CapWalkRoot, String> {
+pub fn walk_target(target: &FilesystemTarget) -> Result<CapWalkRoot, String> {
     if let Ok(directory) = target.opened_directory() {
         let mut entries = Vec::new();
         walk_directory(
@@ -228,7 +227,7 @@ fn is_ignored(matchers: &[Arc<Gitignore>], relative: &Path, is_dir: bool) -> boo
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::platform::fs::capability::FilesystemCapability;
+    use crate::fs::capability::FilesystemCapability;
 
     fn fixture_fd_count(root: &Path) -> usize {
         std::fs::read_dir("/proc/self/fd")

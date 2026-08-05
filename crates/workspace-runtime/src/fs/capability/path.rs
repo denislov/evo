@@ -1,18 +1,18 @@
 use super::*;
 
-pub(super) fn ambient_parent_and_leaf(path: &Path) -> Result<(Dir, PathBuf), CodingSessionError> {
+pub(super) fn ambient_parent_and_leaf(path: &Path) -> Result<(Dir, PathBuf), WorkspaceError> {
     let leaf = path.file_name().map(PathBuf::from).ok_or_else(|| {
-        CodingSessionError::UnsupportedCapability {
+        WorkspaceError::UnsupportedCapability {
             capability: format!("filesystem target must name an entry: {}", path.display()),
         }
     })?;
     let parent_path = path
         .parent()
-        .ok_or_else(|| CodingSessionError::UnsupportedCapability {
+        .ok_or_else(|| WorkspaceError::UnsupportedCapability {
             capability: format!("filesystem target has no parent: {}", path.display()),
         })?;
     let parent = Dir::open_ambient_dir(parent_path, ambient_authority()).map_err(|error| {
-        CodingSessionError::UnsupportedCapability {
+        WorkspaceError::UnsupportedCapability {
             capability: format!(
                 "cannot open explicitly authorized external parent ({}): {error}",
                 parent_path.display()
@@ -24,15 +24,15 @@ pub(super) fn ambient_parent_and_leaf(path: &Path) -> Result<(Dir, PathBuf), Cod
 
 pub(super) fn ambient_write_parent_and_leaf(
     path: &Path,
-) -> Result<(Dir, Vec<PathBuf>, PathBuf), CodingSessionError> {
+) -> Result<(Dir, Vec<PathBuf>, PathBuf), WorkspaceError> {
     let leaf = path.file_name().map(PathBuf::from).ok_or_else(|| {
-        CodingSessionError::UnsupportedCapability {
+        WorkspaceError::UnsupportedCapability {
             capability: format!("filesystem target must name an entry: {}", path.display()),
         }
     })?;
     let mut cursor = path
         .parent()
-        .ok_or_else(|| CodingSessionError::UnsupportedCapability {
+        .ok_or_else(|| WorkspaceError::UnsupportedCapability {
             capability: format!("filesystem target has no parent: {}", path.display()),
         })?
         .to_path_buf();
@@ -45,7 +45,7 @@ pub(super) fn ambient_write_parent_and_leaf(
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 let name = cursor.file_name().map(PathBuf::from).ok_or_else(|| {
-                    CodingSessionError::UnsupportedCapability {
+                    WorkspaceError::UnsupportedCapability {
                         capability: format!(
                             "cannot find an existing external ancestor for {}",
                             path.display()
@@ -55,7 +55,7 @@ pub(super) fn ambient_write_parent_and_leaf(
                 missing_reversed.push(name);
                 cursor = cursor
                     .parent()
-                    .ok_or_else(|| CodingSessionError::UnsupportedCapability {
+                    .ok_or_else(|| WorkspaceError::UnsupportedCapability {
                         capability: format!(
                             "cannot find an existing external ancestor for {}",
                             path.display()
@@ -64,7 +64,7 @@ pub(super) fn ambient_write_parent_and_leaf(
                     .to_path_buf();
             }
             Err(error) => {
-                return Err(CodingSessionError::UnsupportedCapability {
+                return Err(WorkspaceError::UnsupportedCapability {
                     capability: format!(
                         "cannot open explicitly authorized external parent ({}): {error}",
                         cursor.display()
@@ -80,7 +80,7 @@ pub(super) fn prepare_write_leaf(
     missing_parents: Vec<PathBuf>,
     leaf: PathBuf,
     target: &FilesystemTarget,
-) -> Result<FilesystemTargetObject, CodingSessionError> {
+) -> Result<FilesystemTargetObject, WorkspaceError> {
     if !missing_parents.is_empty() {
         return Ok(FilesystemTargetObject::Vacant {
             parent,
@@ -102,20 +102,20 @@ pub(super) fn prepare_write_leaf(
                     leaf,
                 })
             }
-            Ok(_) => Err(CodingSessionError::UnsupportedCapability {
+            Ok(_) => Err(WorkspaceError::UnsupportedCapability {
                 capability: format!(
                     "write target exists but cannot be opened safely: {}",
                     target.display.display()
                 ),
             }),
-            Err(metadata_error) => Err(CodingSessionError::UnsupportedCapability {
+            Err(metadata_error) => Err(WorkspaceError::UnsupportedCapability {
                 capability: format!(
                     "write target cannot be inspected safely ({}): {metadata_error}",
                     target.display.display()
                 ),
             }),
         },
-        Err(error) => Err(CodingSessionError::UnsupportedCapability {
+        Err(error) => Err(WorkspaceError::UnsupportedCapability {
             capability: format!(
                 "write target cannot be opened safely ({}): {error}",
                 target.display.display()
@@ -126,20 +126,20 @@ pub(super) fn prepare_write_leaf(
 
 pub(super) fn target_object_fingerprint(
     object: &FilesystemTargetObject,
-) -> Result<String, CodingSessionError> {
+) -> Result<String, WorkspaceError> {
     match object {
         FilesystemTargetObject::File(file) => {
-            let file = file.lock_resource("filesystem target file")?;
+            let file = lock_resource(file, "filesystem target file")?;
             file.metadata()
                 .map(|metadata| audit_identity_fingerprint(&metadata_identity(&metadata)))
-                .map_err(|error| CodingSessionError::Resource {
+                .map_err(|error| WorkspaceError::Resource {
                     message: format!("cannot fingerprint opened filesystem file: {error}"),
                 })
         }
         FilesystemTargetObject::Directory(directory) => directory
             .dir_metadata()
             .map(|metadata| audit_identity_fingerprint(&metadata_identity(&metadata)))
-            .map_err(|error| CodingSessionError::Resource {
+            .map_err(|error| WorkspaceError::Resource {
                 message: format!("cannot fingerprint opened filesystem directory: {error}"),
             }),
         FilesystemTargetObject::Vacant {
@@ -160,7 +160,7 @@ pub(super) fn target_object_fingerprint(
                     leaf.to_string_lossy()
                 ))
             })
-            .map_err(|error| CodingSessionError::Resource {
+            .map_err(|error| WorkspaceError::Resource {
                 message: format!("cannot fingerprint filesystem creation parent: {error}"),
             }),
         FilesystemTargetObject::Unavailable(_) => Ok("unavailable".into()),

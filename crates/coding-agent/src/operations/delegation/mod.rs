@@ -113,7 +113,9 @@ pub(crate) fn capability_snapshot_for_delegated_profile(
             }
         }
     }
-    let releases_filesystem = released_tools.iter().any(tool_uses_filesystem);
+    let releases_workspace = released_tools
+        .iter()
+        .any(|id| tool_uses_filesystem(id) || id.as_str() == "bash");
     OperationCapabilitySnapshot {
         generation: parent.generation,
         operation_id: operation_id.into(),
@@ -123,11 +125,7 @@ pub(crate) fn capability_snapshot_for_delegated_profile(
         }),
         tools: ToolCapabilitySet::from_ids(released_tools),
         commands: Default::default(),
-        filesystem: parent.filesystem.clone().filter(|_| releases_filesystem),
-        shell: parent
-            .shell
-            .clone()
-            .filter(|_| profile.tools.iter().any(|id| id.as_str() == "bash")),
+        workspace: parent.workspace.clone().filter(|_| releases_workspace),
         session_read: None,
         session_write: None,
         ui: None,

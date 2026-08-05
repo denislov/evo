@@ -61,7 +61,7 @@ mod symlink_escape_tests {
         let error = capability
             .prepare_target_blocking("read", "sub/link")
             .expect_err("a workspace symlink must be rejected");
-        let CodingSessionError::UnsupportedCapability {
+        let WorkspaceError::UnsupportedCapability {
             capability: message,
         } = &error
         else {

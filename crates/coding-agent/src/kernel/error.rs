@@ -135,3 +135,16 @@ impl CodingSessionError {
         }
     }
 }
+
+impl From<workspace_runtime::api::WorkspaceError> for CodingSessionError {
+    fn from(error: workspace_runtime::api::WorkspaceError) -> Self {
+        match error {
+            workspace_runtime::api::WorkspaceError::UnsupportedCapability { capability } => {
+                Self::UnsupportedCapability { capability }
+            }
+            workspace_runtime::api::WorkspaceError::Resource { message } => {
+                Self::Resource { message }
+            }
+        }
+    }
+}

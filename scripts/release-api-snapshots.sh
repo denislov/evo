@@ -33,6 +33,9 @@ mkdir -p "${artifact_dir}"
     printf 'release_api\tpackage=event-journal\ttarget=api_contract\n'
     cargo test --locked -p event-journal
 
+    printf 'release_api\tpackage=workspace-runtime\ttarget=api_contract\n'
+    cargo test --locked -p workspace-runtime --test api_contract
+
     printf 'release_api\tpackage=coding-agent\ttarget=api_contract\n'
     cargo test --locked -p coding-agent --test api_contract
 

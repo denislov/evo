@@ -1,5 +1,3 @@
-use crate::platform::fs::cap_walk::{CapWalkEntry, CapWalkEntryKind, CapWalkRoot, walk_target};
-use crate::platform::fs::capability::FilesystemCapability;
 use crate::platform::io::output::{DEFAULT_MAX_BYTES, TruncationLimit, format_size, truncate_head};
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem_target_for_runtime_execution;
@@ -16,6 +14,8 @@ use tool_contract::api::definition::{
 use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
 use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
+use workspace_runtime::api::WorkspaceAccessHandle;
+use workspace_runtime::api::{CapWalkEntry, CapWalkEntryKind, CapWalkRoot, walk_target};
 
 const DESCRIPTION: &str = "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars.";
 const DEFAULT_LIMIT: usize = 100;
@@ -419,7 +419,7 @@ fn grep_target_blocking(input: GrepExecution) -> Result<ToolOutput, ToolError> {
 }
 
 pub fn grep_runtime_tool(
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("grep").expect("static tool id is valid"),
@@ -464,7 +464,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tool_runtime::api::{ToolCallContext, ToolRegistry, ToolRuntime};
 
-    fn runtime(filesystem: FilesystemCapability) -> ToolRuntime {
+    fn runtime(filesystem: WorkspaceAccessHandle) -> ToolRuntime {
         let mut registry = ToolRegistry::default();
         registry
             .register(grep_runtime_tool(filesystem).unwrap())
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn schema_and_runtime_share_the_context_maximum() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let tool = grep_runtime_tool(filesystem).unwrap();
         let definition = tool.definition();
         assert_eq!(definition.parameters["additionalProperties"], false);
@@ -507,7 +507,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_context_types_are_explicit_errors() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let runtime = runtime(filesystem);
         for value in [json!(-1), json!(21), json!(1.5), json!("1")] {
             let error = runtime
@@ -526,7 +526,7 @@ mod tests {
             "before\nNeedle\nafter\nother\n",
         )
         .expect("write fixture");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let output = runtime(filesystem)
             .execute(
                 context(),

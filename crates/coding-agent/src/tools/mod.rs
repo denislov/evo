@@ -6,8 +6,8 @@ use tool_contract::api::definition::{
 };
 use tool_runtime::api::ToolCallContext;
 
-pub use crate::platform::fs::capability::FilesystemCapability;
-pub use crate::platform::fs::capability::FilesystemTarget;
+pub use workspace_runtime::api::FilesystemTarget;
+pub use workspace_runtime::api::WorkspaceAccessHandle;
 
 pub(crate) mod filesystem;
 #[cfg(test)]
@@ -111,7 +111,7 @@ pub(crate) fn server_side_tools(model: &ai_protocol::api::model::Model) -> Vec<T
 }
 
 pub(crate) async fn filesystem_target_for_runtime_execution(
-    filesystem: &FilesystemCapability,
+    filesystem: &WorkspaceAccessHandle,
     context: &ToolCallContext,
     tool_name: &str,
     path: &str,

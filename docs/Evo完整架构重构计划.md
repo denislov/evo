@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～2 完成，准备进入 Phase 3）
+> 状态：执行中（Phase 0～2、Phase 3 / ARC-300 完成，准备进入 ARC-310）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -30,7 +30,8 @@
 | Phase 2 / ARC-240 | 完成 | `docs/refactor/phase2-tool-inventory.md`；profile/capability/runtime/authorization/delegation inventory 已统一使用 `ToolId` |
 | Phase 2 / ARC-250 | 完成 | custom/delegation/builtin 全部进入 typed runtime；`AgentTool`、`add_tool`、Legacy dispatch、marker/facade 与重复 schema validator 已物理删除 |
 | Phase 2 Gate | 完成 | coding-agent/agent-core/tool-runtime tests、workspace check、release API、architecture 与 core perf Gate 全部通过 |
-| Phase 3～10 | 未开始 | 前序 Gate 通过后进入 |
+| Phase 3 / ARC-300 | 完成 | `docs/refactor/phase3-workspace-runtime.md`；identity/lease/opaque access handle、filesystem capability、path binding、mutation fence、process primitive 全部进入 `workspace-runtime`，coding-agent 仅持 workspace handle |
+| Phase 3 / ARC-310～350 | 未开始 | 前序 Gate 通过后进入 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -437,8 +438,10 @@ Phase 2 Gate：完成。builtin、custom injected 与 delegation tools 全部由
 
 ### ARC-300 抽取 `workspace-runtime`
 
+执行状态：完成（2026-08-05）。完成证据见 `docs/refactor/phase3-workspace-runtime.md`。
+
 - 迁移 filesystem capability、path binding、mutation fence、process primitive 和 workspace identity。
-- `coding-agent` 仅持有 workspace handle/lease，不再知道 capability 内部 fd/handle。
+- `coding-agent` operation snapshot 仅持有 opaque workspace access handle，不再持有 filesystem/shell capability，也不知道内部 fd/process handle。
 - workspace handle 明确区分 source workspace、managed child workspace 和 projectless workspace。
 
 ### ARC-310 实现 WorktreeBuilder 最小集

@@ -89,7 +89,7 @@ impl OperationPermit {
 
 impl Drop for OperationPermit {
     fn drop(&mut self) {
-        if let Some(filesystem) = &self.execution.capability_snapshot.filesystem {
+        if let Some(filesystem) = &self.execution.capability_snapshot.workspace {
             filesystem.discard_operation_bindings(&self.execution.operation_id);
         }
         let _ = self.guard.is_some();
@@ -116,7 +116,7 @@ mod tests {
 
     fn execution(
         operation_id: &str,
-        filesystem: crate::platform::fs::capability::FilesystemCapability,
+        workspace: workspace_runtime::api::WorkspaceAccessHandle,
     ) -> OperationExecution {
         let capability_snapshot = OperationCapabilitySnapshot {
             generation: CapabilityGeneration::new(1),
@@ -125,8 +125,7 @@ mod tests {
             model: None,
             tools: ToolCapabilitySet::from_ids([ToolId::new("read").unwrap()]),
             commands: CommandCapabilitySet::default(),
-            filesystem: Some(filesystem),
-            shell: None,
+            workspace: Some(workspace),
             session_read: None,
             session_write: None,
             ui: None,
@@ -158,14 +157,13 @@ mod tests {
         std::fs::write(temp.path().join("one.txt"), "one").expect("write one");
         std::fs::write(temp.path().join("two.txt"), "two").expect("write two");
         let filesystem =
-            crate::platform::fs::capability::FilesystemCapability::new(temp.path().to_path_buf())
-                .expect("filesystem capability");
+            workspace_runtime::api::WorkspaceAccessHandle::open_source(temp.path().to_path_buf())
+                .expect("workspace access handle");
 
         filesystem
             .bind_tool_target("survivor", "call-survivor", "read", "one.txt")
             .await
             .expect("bind survivor");
-        assert_eq!(filesystem.bound_len(), 1);
         #[cfg(target_os = "linux")]
         let survivor_fd_count = workspace_fd_count(temp.path());
 
@@ -184,11 +182,8 @@ mod tests {
                     .await
                     .expect("bind terminal operation target");
             }
-            assert_eq!(filesystem.bound_len(), 3);
-
             let permit = OperationPermit::unguarded(execution(&operation_id, filesystem.clone()));
             let _ = leave_operation(permit, terminal);
-            assert_eq!(filesystem.bound_len(), 1);
             #[cfg(target_os = "linux")]
             assert_eq!(workspace_fd_count(temp.path()), survivor_fd_count);
 
@@ -203,7 +198,6 @@ mod tests {
         filesystem
             .take_bound_tool_target("survivor", "call-survivor", "read", "one.txt")
             .expect("another operation's binding must survive exact cleanup");
-        assert_eq!(filesystem.bound_len(), 0);
     }
 
     #[cfg(target_os = "linux")]

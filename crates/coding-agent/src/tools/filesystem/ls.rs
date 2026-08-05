@@ -1,4 +1,3 @@
-use crate::platform::fs::capability::FilesystemCapability;
 use crate::platform::io::output::{DEFAULT_MAX_BYTES, TruncationLimit, format_size, truncate_head};
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem_target_for_runtime_execution;
@@ -12,6 +11,7 @@ use tool_contract::api::definition::{
 use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
 use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
+use workspace_runtime::api::WorkspaceAccessHandle;
 
 const DESCRIPTION: &str = "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first).";
 const DEFAULT_LIMIT: usize = 500;
@@ -175,7 +175,7 @@ async fn ls_target(target: &FilesystemTarget, args: LsArgs) -> Result<ToolOutput
 }
 
 pub fn ls_runtime_tool(
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("ls").expect("static tool id is valid"),
@@ -219,7 +219,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tool_runtime::api::{ToolCallContext, ToolRegistry, ToolRuntime};
 
-    fn runtime(filesystem: FilesystemCapability) -> ToolRuntime {
+    fn runtime(filesystem: WorkspaceAccessHandle) -> ToolRuntime {
         let mut registry = ToolRegistry::default();
         registry
             .register(ls_runtime_tool(filesystem).unwrap())
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn typed_ls_definition_matches_limits_and_capabilities() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let tool = ls_runtime_tool(filesystem).unwrap();
         let definition = tool.definition();
         assert_eq!(definition.id.as_str(), "ls");
@@ -269,7 +269,7 @@ mod tests {
         std::fs::write(temp.path().join("zeta.txt"), "z").expect("write fixture");
         std::fs::write(temp.path().join("Alpha.txt"), "a").expect("write fixture");
         std::fs::create_dir(temp.path().join("middle")).expect("create fixture directory");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
 
         let output = runtime(filesystem)
             .execute(context(), serde_json::json!({}))
@@ -294,7 +294,7 @@ mod tests {
     #[tokio::test]
     async fn typed_ls_rejects_invalid_and_unknown_arguments_structurally() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let runtime = runtime(filesystem);
 
         let invalid_limit = runtime

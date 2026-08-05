@@ -25,13 +25,13 @@ use crate::application::operation::control::OperationCancellationHandle;
 use crate::kernel::capability::ModelCapability;
 use crate::kernel::error::CodingSessionError;
 use crate::operations::prompt::context::{PromptTurnOptions, RuntimeSnapshot};
-use crate::platform::fs::capability::{FilesystemCapability, FilesystemTarget};
 use crate::platform::io::output::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
-use crate::platform::process::{
-    EnvPolicy, OutputBudget, ProcessOutcome, ProcessSpec, ProgramKind, run as run_process,
-};
 use crate::services::runtime::stream_model_for_scoped_runtime;
 use crate::tools::shell::safe_process_env;
+use workspace_runtime::api::{
+    EnvPolicy, OutputBudget, ProcessOutcome, ProcessSpec, ProgramKind, run as run_process,
+};
+use workspace_runtime::api::{FilesystemTarget, WorkspaceAccessHandle};
 
 const DEFAULT_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
@@ -248,7 +248,7 @@ impl SelfHealingEditRepairStrategy for ModelSelfHealingEditRepairStrategy {
 
 #[derive(Clone)]
 pub(crate) struct SelfHealingEditOptions {
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
     target: Option<FilesystemTarget>,
     path: String,
     replacements: Vec<SelfHealingEditReplacement>,
@@ -266,12 +266,12 @@ impl SelfHealingEditOptions {
         path: impl Into<String>,
         replacements: Vec<SelfHealingEditReplacement>,
     ) -> Result<Self, CodingSessionError> {
-        let filesystem = FilesystemCapability::new(cwd.into())?;
+        let filesystem = WorkspaceAccessHandle::open_source(cwd.into())?;
         Ok(Self::from_filesystem(filesystem, path, replacements))
     }
 
     pub(crate) fn from_filesystem(
-        filesystem: FilesystemCapability,
+        filesystem: WorkspaceAccessHandle,
         path: impl Into<String>,
         replacements: Vec<SelfHealingEditReplacement>,
     ) -> Self {
@@ -504,7 +504,7 @@ impl SelfHealingEditContext {
             session_error("self-healing edit check command requires a check runner")
         })?;
         let output = runner
-            .run_check(&self.options.filesystem.cwd, command, cancellation)
+            .run_check(self.options.filesystem.cwd(), command, cancellation)
             .await?;
         self.check_failed = output.exit_code != 0;
         if self.check_failed {

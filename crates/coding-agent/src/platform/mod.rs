@@ -1,6 +1,6 @@
-//! Product-neutral process, filesystem, I/O, and time infrastructure.
+//! Product-neutral I/O and time infrastructure.
+//!
+//! Filesystem capability and process primitives live in `workspace-runtime`.
 
-pub(crate) mod fs;
 pub(crate) mod io;
-pub(crate) mod process;
 pub(crate) mod time;

@@ -1,5 +1,3 @@
-use crate::platform::fs::cap_walk::{CapWalkEntryKind, CapWalkRoot, walk_target};
-use crate::platform::fs::capability::FilesystemCapability;
 use crate::platform::io::output::{DEFAULT_MAX_BYTES, TruncationLimit, format_size, truncate_head};
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem_target_for_runtime_execution;
@@ -15,6 +13,8 @@ use tool_contract::api::definition::{
 use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
 use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
+use workspace_runtime::api::WorkspaceAccessHandle;
+use workspace_runtime::api::{CapWalkEntryKind, CapWalkRoot, walk_target};
 
 const DESCRIPTION: &str = "Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit first).";
 const DEFAULT_LIMIT: usize = 1000;
@@ -218,7 +218,7 @@ async fn find_target(target: &FilesystemTarget, args: FindArgs) -> Result<ToolOu
 }
 
 pub fn find_runtime_tool(
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("find").expect("static tool id is valid"),
@@ -262,7 +262,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tool_runtime::api::{ToolCallContext, ToolRegistry, ToolRuntime};
 
-    fn runtime(filesystem: FilesystemCapability) -> ToolRuntime {
+    fn runtime(filesystem: WorkspaceAccessHandle) -> ToolRuntime {
         let mut registry = ToolRegistry::default();
         registry
             .register(find_runtime_tool(filesystem).unwrap())
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn typed_find_definition_requires_pattern_and_bounds_limit() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let definition = find_runtime_tool(filesystem).unwrap().definition().clone();
         assert_eq!(definition.id.as_str(), "find");
         assert!(definition.capabilities.read_only);
@@ -312,7 +312,7 @@ mod tests {
         std::fs::write(temp.path().join("src/z.rs"), "z").expect("write fixture");
         std::fs::write(temp.path().join("src/A.rs"), "a").expect("write fixture");
         std::fs::write(temp.path().join("src/nested/deep.rs"), "d").expect("write fixture");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let output = runtime(filesystem)
             .execute(
                 context(),
@@ -340,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn typed_find_rejects_invalid_pattern_and_arguments_structurally() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let runtime = runtime(filesystem);
         let missing = runtime
             .execute(context(), serde_json::json!({}))

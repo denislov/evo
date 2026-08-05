@@ -2,7 +2,6 @@ use crate::kernel::limits::{
     MAX_IMAGE_DECODE_ALLOC_BYTES, MAX_IMAGE_DECODE_DIMENSION, MAX_INPUT_IMAGE_ENCODED_TOTAL_BYTES,
 };
 use crate::mutex::MutexExt;
-use crate::platform::fs::capability::FilesystemCapability;
 use crate::platform::io::output::{
     DEFAULT_MAX_BYTES, default_truncation_limit, format_size, truncate_head,
 };
@@ -25,6 +24,7 @@ use tool_contract::api::definition::{
 use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
 use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
+use workspace_runtime::api::WorkspaceAccessHandle;
 
 const DESCRIPTION: &str = "Read a text or supported image file. Text output is truncated to 2000 lines or 50KB (whichever is hit first); use offset/limit for large text files. JPEG, PNG, GIF, and WebP files return base64 image content.";
 const MAX_READ_FILE_BYTES: u64 = 5 * 1024 * 1024;
@@ -402,13 +402,13 @@ fn select_lines<'a>(
 }
 
 pub fn read_runtime_tool(
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     read_runtime_tool_with_operations(filesystem, Arc::new(RealReadOperations))
 }
 
 fn read_runtime_tool_with_operations(
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
     ops: Arc<dyn ReadOperations>,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn typed_read_definition_matches_runtime_limits_and_capabilities() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let tool = read_runtime_tool(filesystem).unwrap();
         let definition = tool.definition();
         assert_eq!(definition.id.as_str(), "read");
@@ -547,7 +547,7 @@ mod tests {
     async fn typed_read_returns_content_and_revision_details() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").expect("write fixture");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(read_runtime_tool(filesystem).unwrap())
@@ -610,7 +610,7 @@ mod tests {
     async fn typed_read_rejects_out_of_range_arguments_structurally() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("notes.txt"), "alpha").expect("write fixture");
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(read_runtime_tool(filesystem).unwrap())

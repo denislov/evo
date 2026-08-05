@@ -3,10 +3,9 @@ use crate::kernel::capability::{
     CapabilityGeneration, CommandCapabilitySet, SessionReadCapability, SessionWriteCapability,
     UiCapability,
 };
-use crate::platform::fs::capability::FilesystemCapability;
-use crate::platform::process::ShellCapability;
 use crate::profiles::{ProfileSource, SupervisionPolicy};
 use tool_contract::api::definition::ToolId;
+use workspace_runtime::api::WorkspaceAccessHandle;
 
 fn parent_snapshot(root: &std::path::Path) -> OperationCapabilitySnapshot {
     OperationCapabilitySnapshot {
@@ -23,10 +22,10 @@ fn parent_snapshot(root: &std::path::Path) -> OperationCapabilitySnapshot {
             ToolId::new("web_search").unwrap(),
         ]),
         commands: CommandCapabilitySet::default(),
-        filesystem: Some(
-            FilesystemCapability::new(root.to_path_buf()).expect("filesystem capability"),
+        workspace: Some(
+            WorkspaceAccessHandle::open_source(root.to_path_buf())
+                .expect("workspace access handle"),
         ),
-        shell: Some(ShellCapability::new(root.to_path_buf())),
         session_read: Some(SessionReadCapability { persistent: true }),
         session_write: Some(SessionWriteCapability { persistent: true }),
         ui: Some(UiCapability),
@@ -46,10 +45,9 @@ fn child_operation_snapshot_preserves_workspace_handles_but_drops_session_and_ui
         ActorId::ChildOperation("parent-operation".into())
     );
     assert_eq!(
-        child.filesystem.as_ref().map(|capability| &capability.cwd),
-        parent.filesystem.as_ref().map(|capability| &capability.cwd)
+        child.workspace.as_ref().map(|handle| handle.identity()),
+        parent.workspace.as_ref().map(|handle| handle.identity())
     );
-    assert_eq!(child.shell, parent.shell);
     assert!(child.session_read.is_none());
     assert!(child.session_write.is_none());
     assert!(child.ui.is_none());
@@ -97,8 +95,7 @@ fn delegated_profile_snapshot_intersects_explicit_tools_and_inherits_parent_serv
             .and_then(|model| model.profile_id.as_ref()),
         Some(&profile.id)
     );
-    assert!(child.filesystem.is_some());
-    assert!(child.shell.is_some());
+    assert!(child.workspace.is_some());
     assert!(child.session_read.is_none());
     assert!(child.session_write.is_none());
     assert!(child.ui.is_none());

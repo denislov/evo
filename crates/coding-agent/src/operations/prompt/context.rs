@@ -621,6 +621,13 @@ impl RuntimeSnapshot {
             .map(|options| options.cwd.as_path())
     }
 
+    pub(crate) fn workspace_handle(&self) -> Option<&workspace_runtime::api::WorkspaceHandle> {
+        self.session_run_options
+            .as_ref()
+            .and_then(|options| options.workspace.as_ref())
+            .map(|workspace| &workspace.runtime_handle)
+    }
+
     pub(crate) fn profile_id(&self) -> Option<&ProfileId> {
         self.profile_id.as_ref()
     }

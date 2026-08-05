@@ -8,11 +8,10 @@ use crate::kernel::capability::{
 };
 use crate::kernel::error::CodingSessionError;
 use crate::kernel::operation::OperationKind;
-use crate::platform::fs::capability::FilesystemCapability;
-use crate::platform::process::ShellCapability;
 use crate::profiles::ProfileId;
 use crate::session::event::PersistedRuntimeGenerationRef;
 use tool_contract::api::definition::ToolId;
+use workspace_runtime::api::{WorkspaceAccessHandle, WorkspaceHandle, WorkspaceKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OperationCapabilitySnapshot {
@@ -22,8 +21,7 @@ pub(crate) struct OperationCapabilitySnapshot {
     pub(crate) model: Option<ModelCapability>,
     pub(crate) tools: ToolCapabilitySet,
     pub(crate) commands: CommandCapabilitySet,
-    pub(crate) filesystem: Option<FilesystemCapability>,
-    pub(crate) shell: Option<ShellCapability>,
+    pub(crate) workspace: Option<WorkspaceAccessHandle>,
     pub(crate) session_read: Option<SessionReadCapability>,
     pub(crate) session_write: Option<SessionWriteCapability>,
     pub(crate) ui: Option<UiCapability>,
@@ -51,6 +49,7 @@ pub(crate) struct CapabilitySnapshotInput {
     pub(crate) model_profile_id: Option<ProfileId>,
     pub(crate) persistent_session: bool,
     pub(crate) cwd: Option<PathBuf>,
+    pub(crate) workspace_handle: Option<WorkspaceHandle>,
     pub(crate) shell_path: Option<String>,
     pub(crate) shell_command_prefix: Option<String>,
     pub(crate) runtime_tools: Vec<ToolId>,
@@ -99,22 +98,44 @@ impl CapabilitySnapshotService {
                 .filter(|id| input.profile_tools.iter().any(|allowed| allowed == id))
                 .collect::<Vec<_>>()
         };
-        let cwd = input.cwd;
-        let filesystem = cwd
-            .as_ref()
-            .filter(|_| allowed_tools.iter().any(tool_uses_filesystem))
-            .map(|cwd| FilesystemCapability::new(cwd.clone()))
-            .transpose()?;
-        let shell = cwd
-            .as_ref()
-            .filter(|_| allowed_tools.iter().any(|id| id.as_str() == "bash"))
-            .map(|cwd| {
-                ShellCapability::with_configuration(
-                    cwd.clone(),
-                    input.shell_path,
-                    input.shell_command_prefix,
+        let needs_workspace = allowed_tools
+            .iter()
+            .any(|id| tool_uses_filesystem(id) || id.as_str() == "bash");
+        let identity = match (input.workspace_handle, input.cwd) {
+            (Some(handle), _) => Some(handle),
+            (None, Some(cwd)) => {
+                let root =
+                    std::path::absolute(&cwd).map_err(|error| CodingSessionError::Resource {
+                        message: format!(
+                            "cannot make operation workspace root absolute ({}): {error}",
+                            cwd.display()
+                        ),
+                    })?;
+                Some(
+                    WorkspaceHandle::new(WorkspaceKind::Source, root).map_err(|error| {
+                        CodingSessionError::Resource {
+                            message: format!(
+                                "cannot construct operation workspace handle: {error}"
+                            ),
+                        }
+                    })?,
                 )
-            });
+            }
+            (None, None) => None,
+        };
+        let workspace = if needs_workspace {
+            identity
+                .map(|handle| {
+                    WorkspaceAccessHandle::open(
+                        handle,
+                        input.shell_path,
+                        input.shell_command_prefix,
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
         Ok(OperationCapabilitySnapshot {
             generation: self.current_generation()?,
             operation_id: input.operation_id,
@@ -122,8 +143,7 @@ impl CapabilitySnapshotService {
             model,
             tools: ToolCapabilitySet::from_ids(allowed_tools),
             commands: CommandCapabilitySet::default(),
-            filesystem,
-            shell,
+            workspace,
             session_read: reads_session.then_some(SessionReadCapability {
                 persistent: input.persistent_session,
             }),

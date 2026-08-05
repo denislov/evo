@@ -42,7 +42,7 @@ pub(super) async fn bind_filesystem_target(
         _ => return Ok(None),
     };
     let filesystem = snapshot
-        .filesystem
+        .workspace
         .as_ref()
         .ok_or_else(|| "filesystem capability is not granted".to_owned())?;
     filesystem
@@ -61,7 +61,7 @@ pub(super) fn discard_filesystem_binding(
     context: &BeforeToolCallContext,
     snapshot: &OperationCapabilitySnapshot,
 ) {
-    if let Some(filesystem) = snapshot.filesystem.as_ref() {
+    if let Some(filesystem) = snapshot.workspace.as_ref() {
         filesystem.discard_bound_tool_target(&snapshot.operation_id, &context.tool_call_id);
     }
 }
@@ -74,7 +74,7 @@ pub(super) fn evaluate(
     let tool_id = ToolId::new(context.tool_name.clone()).ok();
     match context.tool_name.as_str() {
         "read" | "grep" | "find" | "ls" => {
-            let Some(filesystem) = snapshot.filesystem.as_ref() else {
+            let Some(filesystem) = snapshot.workspace.as_ref() else {
                 return Err("filesystem capability is not granted".into());
             };
             let path = context
@@ -96,7 +96,7 @@ pub(super) fn evaluate(
             }
         }
         "write" | "edit" | "hashline_edit" => {
-            let Some(filesystem) = snapshot.filesystem.as_ref() else {
+            let Some(filesystem) = snapshot.workspace.as_ref() else {
                 return Err("filesystem capability is not granted".into());
             };
             let path = context
@@ -115,7 +115,7 @@ pub(super) fn evaluate(
             ))
         }
         "apply_patch" => {
-            let Some(filesystem) = snapshot.filesystem.as_ref() else {
+            let Some(filesystem) = snapshot.workspace.as_ref() else {
                 return Err("filesystem capability is not granted".into());
             };
             let patch = context
@@ -145,7 +145,7 @@ pub(super) fn evaluate(
             ))
         }
         "bash" => {
-            let Some(shell) = snapshot.shell.as_ref() else {
+            let Some(shell) = snapshot.workspace.as_ref() else {
                 return Err("shell capability is not granted".into());
             };
             let command = context
@@ -157,14 +157,14 @@ pub(super) fn evaluate(
             Ok(Evaluation::Ask {
                 risk: ToolAuthorizationRisk::ShellExecution,
                 scope: ToolAuthorizationScope::Shell {
-                    cwd: shell.cwd.to_string_lossy().into_owned(),
+                    cwd: shell.cwd().to_string_lossy().into_owned(),
                     command_fingerprint: fingerprint(command.as_bytes()),
                 },
                 preview: ToolAuthorizationPreview {
                     summary: "Execute a shell command".into(),
                     path: None,
                     command: Some(redacted),
-                    cwd: Some(shell.cwd.to_string_lossy().into_owned()),
+                    cwd: Some(shell.cwd().to_string_lossy().into_owned()),
                     content_preview: None,
                 },
             })

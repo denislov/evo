@@ -1,6 +1,4 @@
-pub use agent_core::api::execution::{
-    TruncationLimit, TruncationResult, format_size, truncate_tail,
-};
+pub use agent_core::api::execution::{TruncationLimit, TruncationResult, format_size};
 
 pub const DEFAULT_MAX_LINES: usize = 2000;
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;

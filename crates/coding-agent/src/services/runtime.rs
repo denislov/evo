@@ -130,7 +130,7 @@ impl RuntimeService {
         {
             let tool = match id.as_str() {
                 "read" => snapshot
-                    .filesystem
+                    .workspace
                     .clone()
                     .map(crate::tools::filesystem::read::read_runtime_tool)
                     .transpose()
@@ -138,7 +138,7 @@ impl RuntimeService {
                         message: error.to_string(),
                     })?,
                 "ls" => snapshot
-                    .filesystem
+                    .workspace
                     .clone()
                     .map(crate::tools::filesystem::ls::ls_runtime_tool)
                     .transpose()
@@ -146,7 +146,7 @@ impl RuntimeService {
                         message: error.to_string(),
                     })?,
                 "find" => snapshot
-                    .filesystem
+                    .workspace
                     .clone()
                     .map(crate::tools::filesystem::find::find_runtime_tool)
                     .transpose()
@@ -154,7 +154,7 @@ impl RuntimeService {
                         message: error.to_string(),
                     })?,
                 "grep" => snapshot
-                    .filesystem
+                    .workspace
                     .clone()
                     .map(crate::tools::filesystem::grep::grep_runtime_tool)
                     .transpose()
@@ -162,7 +162,7 @@ impl RuntimeService {
                         message: error.to_string(),
                     })?,
                 "write" => snapshot
-                    .filesystem
+                    .workspace
                     .clone()
                     .map(crate::tools::filesystem::write::write_runtime_tool)
                     .transpose()
@@ -170,7 +170,7 @@ impl RuntimeService {
                         message: error.to_string(),
                     })?,
                 "edit" => snapshot
-                    .filesystem
+                    .workspace
                     .clone()
                     .map(crate::tools::filesystem::edit::edit_runtime_tool)
                     .transpose()
@@ -178,7 +178,7 @@ impl RuntimeService {
                         message: error.to_string(),
                     })?,
                 "hashline_edit" => snapshot
-                    .filesystem
+                    .workspace
                     .clone()
                     .map(crate::tools::filesystem::hashline::hashline_edit_runtime_tool)
                     .transpose()
@@ -186,7 +186,7 @@ impl RuntimeService {
                         message: error.to_string(),
                     })?,
                 "apply_patch" => snapshot
-                    .filesystem
+                    .workspace
                     .clone()
                     .map(crate::tools::filesystem::apply_patch::apply_patch_runtime_tool)
                     .transpose()
@@ -194,7 +194,7 @@ impl RuntimeService {
                         message: error.to_string(),
                     })?,
                 "bash" => snapshot
-                    .shell
+                    .workspace
                     .clone()
                     .map(crate::tools::shell::bash_runtime_tool)
                     .transpose()

@@ -4,6 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+use workspace_runtime::api::{WorkspaceHandle, WorkspaceKind};
 
 const MANAGED_SCRATCH_DIRECTORY: &str = "scratch";
 const MAX_WORKSPACE_ID_BYTES: usize = 64;
@@ -54,14 +55,14 @@ impl CodingAgentWorkspaceSelection {
             Self::Project { cwd } => {
                 let cwd = normalize_project_directory(&cwd)?;
                 let scope = CodingAgentWorkspaceScope::Project { cwd: cwd.clone() };
-                Ok(CodingAgentResolvedWorkspace::new(scope, cwd))
+                CodingAgentResolvedWorkspace::new(scope, cwd)
             }
             Self::Projectless { workspace_id } => {
                 validate_workspace_id(&workspace_id)?;
                 let execution_cwd =
                     resolve_managed_scratch(global_config_dir.as_ref(), &workspace_id)?;
                 let scope = CodingAgentWorkspaceScope::Projectless { workspace_id };
-                Ok(CodingAgentResolvedWorkspace::new(scope, execution_cwd))
+                CodingAgentResolvedWorkspace::new(scope, execution_cwd)
             }
         }
     }
@@ -112,16 +113,37 @@ pub struct CodingAgentResolvedWorkspace {
     pub scope: CodingAgentWorkspaceScope,
     pub execution_cwd: PathBuf,
     pub overview: CodingAgentWorkspaceOverview,
+    pub runtime_handle: WorkspaceHandle,
 }
 
 impl CodingAgentResolvedWorkspace {
-    fn new(scope: CodingAgentWorkspaceScope, execution_cwd: PathBuf) -> Self {
+    fn new(
+        scope: CodingAgentWorkspaceScope,
+        execution_cwd: PathBuf,
+    ) -> Result<Self, CodingAgentWorkspaceResolutionError> {
         let overview = scope.overview();
-        Self {
+        let runtime_handle = match &scope {
+            CodingAgentWorkspaceScope::Project { .. } => {
+                WorkspaceHandle::new(WorkspaceKind::Source, execution_cwd.clone())
+            }
+            CodingAgentWorkspaceScope::Projectless { workspace_id } => {
+                WorkspaceHandle::with_user_id(
+                    WorkspaceKind::Projectless,
+                    workspace_id.clone(),
+                    execution_cwd.clone(),
+                )
+            }
+            CodingAgentWorkspaceScope::Legacy { .. } => {
+                WorkspaceHandle::new(WorkspaceKind::Legacy, execution_cwd.clone())
+            }
+        }
+        .map_err(|_| CodingAgentWorkspaceResolutionError::RuntimeIdentityUnavailable)?;
+        Ok(Self {
             scope,
             execution_cwd,
             overview,
-        }
+            runtime_handle,
+        })
     }
 }
 
@@ -237,6 +259,8 @@ pub enum CodingAgentWorkspaceResolutionError {
     ManagedScratchUnavailable { path: PathBuf },
     #[error("legacy workspace has no recoverable cwd")]
     LegacyCwdMissing,
+    #[error("workspace runtime identity could not be constructed")]
+    RuntimeIdentityUnavailable,
 }
 
 fn normalize_project_directory(

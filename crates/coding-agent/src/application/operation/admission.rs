@@ -159,6 +159,8 @@ impl CodingAgentSession {
             cwd: operation_runtime
                 .and_then(|runtime| runtime.cwd().map(PathBuf::from))
                 .or_else(|| self.cwd()),
+            workspace_handle: operation_runtime
+                .and_then(|runtime| runtime.workspace_handle().cloned()),
             shell_path: operation_runtime
                 .and_then(|runtime| runtime.settings())
                 .and_then(|settings| settings.shell_path.clone()),

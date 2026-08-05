@@ -1,6 +1,4 @@
 use crate::mutex::MutexExt;
-use crate::platform::fs::capability::FilesystemCapability;
-use crate::platform::fs::mutation::{FileMutation, MutationGuard};
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem::bounded::read_target_bytes;
 use crate::tools::filesystem::mutation_receipt::{content_revision, receipt, validate_fence};
@@ -21,6 +19,8 @@ use tool_contract::api::output::{
 };
 use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolCallContext, ToolFuture, TypedTool};
+use workspace_runtime::api::WorkspaceAccessHandle;
+use workspace_runtime::api::{FileMutation, MutationGuard};
 
 const DESCRIPTION: &str = "Apply a bounded Codex-style patch. Update and add operations share the filesystem mutation fence and return one ChangeReceipt per file.";
 
@@ -57,7 +57,7 @@ struct PlannedPatch {
 }
 
 pub(crate) fn apply_patch_runtime_tool(
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("apply_patch").expect("static tool id is valid"),
@@ -89,7 +89,7 @@ pub(crate) fn apply_patch_runtime_tool(
 }
 
 async fn execute_patch(
-    filesystem: &FilesystemCapability,
+    filesystem: &WorkspaceAccessHandle,
     context: &ToolCallContext,
     args: ApplyPatchArgs,
 ) -> Result<ToolOutput, ToolError> {
@@ -332,16 +332,16 @@ async fn commit(plan: PlannedPatch) -> Result<ChangeReceipt, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::fs::capability::FilesystemCapability;
     use tokio_util::sync::CancellationToken;
     use tool_runtime::api::{ToolCallContext, ToolRegistry, ToolRuntime};
+    use workspace_runtime::api::WorkspaceAccessHandle;
 
     #[tokio::test]
     async fn typed_apply_patch_updates_and_adds_files() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("target.txt"), "one\ntwo\n").unwrap();
         std::fs::write(temp.path().join("deleted.txt"), "obsolete\n").unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn typed_apply_patch_requires_read_behavior() {
         let temp = tempfile::tempdir().unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(apply_patch_runtime_tool(filesystem).unwrap())
@@ -403,7 +403,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("first.txt"), "first-before\n").unwrap();
         std::fs::write(temp.path().join("second.txt"), "second-before\n").unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(
@@ -447,7 +447,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let oversized = vec![b'x'; crate::limits::MAX_TOOL_EDIT_FILE_BYTES + 1];
         std::fs::write(temp.path().join("large.txt"), &oversized).unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(

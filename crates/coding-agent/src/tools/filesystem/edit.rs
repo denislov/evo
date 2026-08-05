@@ -1,6 +1,3 @@
-use crate::platform::fs::capability::FilesystemCapability;
-use crate::platform::fs::edit_file::OpenedEditFile as PlatformOpenedEditFile;
-use crate::platform::fs::mutation::{FileMutation, MutationGuard};
 use crate::tools::FilesystemTarget;
 use crate::tools::filesystem::diff::{
     TextReplacement, apply_replacements_preserving_unchanged_lines, generate_diff_string,
@@ -22,6 +19,9 @@ use tool_contract::api::definition::{
 use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
 use tool_contract::api::schema::schema_for;
 use tool_runtime::api::{DynamicTool, ToolFuture, TypedTool};
+use workspace_runtime::api::OpenedEditFile as PlatformOpenedEditFile;
+use workspace_runtime::api::WorkspaceAccessHandle;
+use workspace_runtime::api::{FileMutation, MutationGuard};
 
 const DESCRIPTION: &str = "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. Merge nearby changes into one edit; do not include large unchanged regions.";
 
@@ -407,7 +407,7 @@ pub(crate) async fn edit_execute_with_target(
 }
 
 pub fn edit_runtime_tool(
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
 ) -> Result<Arc<dyn DynamicTool>, tool_runtime::api::ToolRegistryError> {
     let definition = ToolDefinition {
         id: ToolId::new("edit").expect("static tool id is valid"),
@@ -461,10 +461,10 @@ mod tests {
     use super::{
         Edit, RealEditOperations, apply_edits, edit_execute_with_target, edit_runtime_tool,
     };
-    use crate::platform::fs::capability::FilesystemCapability;
     use tokio_util::sync::CancellationToken;
     use tool_contract::api::definition::ToolId;
     use tool_runtime::api::{ToolCallContext, ToolRegistry, ToolRuntime};
+    use workspace_runtime::api::WorkspaceAccessHandle;
 
     #[test]
     fn fuzzy_uniqueness_counts_in_the_same_normalized_space_as_search() {
@@ -504,7 +504,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join(name);
             std::fs::write(&path, bytes).unwrap();
-            let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+            let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
             let target = filesystem
                 .prepare_target_for_tool("edit", name)
                 .await
@@ -529,7 +529,7 @@ mod tests {
     async fn edit_returns_change_receipt_and_rejects_a_stale_revision() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("target.txt"), "before\n").unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let target = filesystem
             .prepare_target_for_tool("edit", "target.txt")
             .await
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn typed_edit_requires_read_behavior() {
         let temp = tempfile::tempdir().unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(edit_runtime_tool(filesystem).unwrap())
@@ -588,7 +588,7 @@ mod tests {
     async fn typed_edit_executes_through_contract_runtime() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("target.txt"), "before\n").unwrap();
-        let filesystem = FilesystemCapability::new(temp.path().to_path_buf()).unwrap();
+        let filesystem = WorkspaceAccessHandle::open_source(temp.path().to_path_buf()).unwrap();
         let mut registry = ToolRegistry::default();
         registry
             .register(

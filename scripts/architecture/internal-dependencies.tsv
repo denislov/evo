@@ -11,5 +11,6 @@ coding-agent	ai-protocol
 coding-agent	event-journal
 coding-agent	tool-contract
 coding-agent	tool-runtime
+coding-agent	workspace-runtime
 desktop	coding-agent
 tool-runtime	tool-contract

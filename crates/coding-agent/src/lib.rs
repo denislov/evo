@@ -63,6 +63,7 @@ pub mod api {
             CodingAgentResolvedWorkspace, CodingAgentWorkspaceResolutionError,
             CodingAgentWorkspaceScope, CodingAgentWorkspaceSelection,
         };
+        pub use workspace_runtime::api::{WorkspaceHandle, WorkspaceId, WorkspaceKind};
     }
 
     /// Bounded product runtime and adapter-presentation settings.

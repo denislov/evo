@@ -8,7 +8,6 @@ use crate::kernel::error::CodingSessionError;
 use crate::mutex::{MutexExt, report_infallible_resource_error};
 use crate::operations::delegation::{DelegationToolResult, DelegationToolResultStatus};
 use crate::operations::prompt::context::DelegationRequest;
-use crate::platform::fs::capability::{FilesystemBindingDescriptor, FilesystemCapability};
 use crate::profiles::{ProfileId, ProfileKind};
 use crate::services::event::EventService;
 use crate::services::ports::{CapabilityQuery, EventSink, SessionWriterPort};
@@ -25,6 +24,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tool_contract::api::definition::AuthorizationRisk;
 use tool_contract::api::definition::{ToolDefinition, ToolId};
+use workspace_runtime::api::{FilesystemBindingDescriptor, WorkspaceAccessHandle};
 
 const TOOL_AUTHORIZATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const TOOL_AUTHORIZATION_TIMEOUT_REASON: &str = "tool authorization timed out";
@@ -85,7 +85,7 @@ struct PendingAuthorization {
 }
 
 struct PendingFilesystemBinding {
-    filesystem: FilesystemCapability,
+    filesystem: WorkspaceAccessHandle,
     operation_id: String,
     tool_call_id: String,
 }
@@ -318,7 +318,7 @@ impl AuthorizationService {
                     sender,
                     event_writer,
                     filesystem_binding: filesystem_binding.and_then(|_| {
-                        snapshot.filesystem.as_ref().cloned().map(|filesystem| {
+                        snapshot.workspace.as_ref().cloned().map(|filesystem| {
                             PendingFilesystemBinding {
                                 filesystem,
                                 operation_id: snapshot.operation_id.clone(),
