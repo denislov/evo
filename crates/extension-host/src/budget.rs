@@ -115,6 +115,11 @@ impl BudgetTracker {
         }
     }
 
+    /// 当前预算上限（ARC-710 runner 读取 `max_run_secs`）。
+    pub fn limits(&self) -> ExtensionBudget {
+        self.limits
+    }
+
     /// 记录一次事件处理；超出调用次数上限返回 [`ExtensionError::BudgetExceeded`]。
     pub fn record_call(&mut self, session_id: &str) -> Result<(), ExtensionError> {
         let next = self.calls.get(session_id).copied().unwrap_or(0) + 1;

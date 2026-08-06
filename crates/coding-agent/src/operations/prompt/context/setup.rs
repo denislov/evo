@@ -27,6 +27,8 @@ impl PromptTurnContext {
             operation_cancellation: None,
             authorization_service: None,
             authorization_event_writer: None,
+            extension_events: None,
+            extension_workspace_root: String::new(),
             tool_session_call_ids: HashMap::new(),
             diagnostics: Vec::new(),
             requested_abort_reason: None,
@@ -57,14 +59,28 @@ impl PromptTurnContext {
         self.authorization_event_writer = Some(Arc::new(writer));
     }
 
+    pub(crate) fn set_extension_events(
+        &mut self,
+        events: Option<Arc<dyn crate::services::ports::ExtensionEventSink>>,
+    ) {
+        self.extension_events = events;
+    }
+
+    pub(crate) fn set_extension_workspace_root(&mut self, workspace_root: String) {
+        self.extension_workspace_root = workspace_root;
+    }
+
     pub(crate) fn authorization_hook_context(&self) -> Option<AuthorizationHookContext> {
         let service = self.authorization_service.as_ref()?;
         let capability_snapshot = self.capability_snapshot.as_ref()?;
+        let session_id = self.session_id()?.to_owned();
         Some(AuthorizationHookContext {
             service: service.clone(),
             turn_id: self.turn_id().to_owned(),
             capability_snapshot: capability_snapshot.clone(),
             event_writer: self.authorization_event_writer.clone(),
+            extension_events: self.extension_events.clone(),
+            extension_identity: (session_id, self.extension_workspace_root.clone()),
         })
     }
 

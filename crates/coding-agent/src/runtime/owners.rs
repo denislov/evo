@@ -13,6 +13,7 @@ use crate::services::event::EventService;
 use crate::services::ports::ExtensionHostService;
 use crate::services::review::ReviewService;
 use crate::services::runtime::RuntimeService;
+use crate::session::service::SessionPersistence;
 use std::path::PathBuf;
 
 pub(crate) struct ProjectRoot(PathBuf);
@@ -50,6 +51,18 @@ pub(crate) struct RuntimeHost {
     pub(crate) authorization_service: AuthorizationService,
     pub(crate) review_service: ReviewService,
     pub(crate) project_root: ProjectRoot,
+}
+
+impl RuntimeHost {
+    /// 当前会话身份（session id + workspace root），extension 事件信封使用。
+    pub(crate) fn session_identity(&self) -> (String, String) {
+        let session_id = match &self.session_coordinator.persistence {
+            SessionPersistence::Persistent(service) => service.session_id().to_owned(),
+            SessionPersistence::NonPersistent(state) => state.runtime_id.clone(),
+        };
+        let workspace_root = self.project_root.as_path().to_string_lossy().into_owned();
+        (session_id, workspace_root)
+    }
 }
 
 /// Admission, immutable execution, capacity, cancellation, and capability owner.

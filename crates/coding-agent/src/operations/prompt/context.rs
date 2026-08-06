@@ -761,6 +761,8 @@ pub(crate) struct PromptTurnContext {
     operation_cancellation: Option<CancellationToken>,
     authorization_service: Option<AuthorizationService>,
     authorization_event_writer: Option<SessionWriterPort>,
+    extension_events: Option<Arc<dyn crate::services::ports::ExtensionEventSink>>,
+    extension_workspace_root: String,
     tool_session_call_ids: HashMap<String, String>,
     diagnostics: Vec<CodingDiagnostic>,
     requested_abort_reason: Option<String>,

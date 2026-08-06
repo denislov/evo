@@ -24,6 +24,7 @@ pub struct CodingAgentSessionOptions {
     ai_client: Option<AiClient>,
     tool_authorization_mode: ToolAuthorizationMode,
     worktree_registry_dir: Option<PathBuf>,
+    extension_host_options: Option<extension_host::api::ExtensionHostOptions>,
 }
 
 impl std::fmt::Debug for CodingAgentSessionOptions {
@@ -38,6 +39,7 @@ impl std::fmt::Debug for CodingAgentSessionOptions {
             .field("default_agent_profile_id", &self.default_agent_profile_id)
             .field("has_scoped_ai_client", &self.ai_client.is_some())
             .field("tool_authorization_mode", &self.tool_authorization_mode)
+            .field("has_extension_host", &self.extension_host_options.is_some())
             .finish()
     }
 }
@@ -107,6 +109,25 @@ impl CodingAgentSessionOptions {
     pub fn with_worktree_registry_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.worktree_registry_dir = Some(dir.into());
         self
+    }
+
+    /// 启用真实 extension host（user hooks）。
+    ///
+    /// 默认（`None`）保持「无 host」行为（Noop 端口，与 ARC-700 一致）；
+    /// 显式传入 [`ExtensionHostOptions`] 时装配真实 host：项目/全局扩展
+    /// 目录被发现、trust 判定、事件派发与 Tool/Stop gate 全部生效。
+    pub fn with_extension_host_options(
+        mut self,
+        options: extension_host::api::ExtensionHostOptions,
+    ) -> Self {
+        self.extension_host_options = Some(options);
+        self
+    }
+
+    pub(crate) fn extension_host_options(
+        &self,
+    ) -> Option<&extension_host::api::ExtensionHostOptions> {
+        self.extension_host_options.as_ref()
     }
 
     pub fn session_id(&self) -> Option<&str> {

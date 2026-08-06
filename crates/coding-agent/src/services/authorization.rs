@@ -15,6 +15,9 @@ use crate::session::event::{PersistedToolAuthorizationResolution, SessionEventDa
 use agent_core::api::agent::{BeforeToolCallContext, BeforeToolCallResult};
 use agent_core::api::transcript::create_session_id;
 use agent_core::api::transcript::create_timestamp;
+use extension_host::api::{
+    ExtensionEventKind as ExtensionHostEventKind, ExtensionEventPayload as ExtensionHostPayload,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -68,6 +71,11 @@ pub(crate) struct AuthorizationHookContext {
     pub(crate) turn_id: String,
     pub(crate) capability_snapshot: OperationCapabilitySnapshot,
     pub(crate) event_writer: Option<SessionWriterPort>,
+    /// user hooks 事件提交（tool gate 评估 + pre/post 事件）；无 host 时
+    /// `None`（保持无 hook 行为）。
+    pub(crate) extension_events: Option<Arc<dyn crate::services::ports::ExtensionEventSink>>,
+    /// 事件信封身份（session id + workspace root）。
+    pub(crate) extension_identity: (String, String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -116,6 +124,10 @@ pub(crate) struct AuthorizationService {
     capabilities: Arc<dyn CapabilityQuery>,
     events: Arc<dyn EventSink>,
     state: Arc<Mutex<AuthorizationState>>,
+    /// user hooks 事件提交（permission_denied）；无 host 时 no-op。
+    extension_events: Option<Arc<dyn crate::services::ports::ExtensionEventSink>>,
+    /// 事件信封身份（session id + workspace root）。
+    extension_identity: (String, String),
 }
 
 struct AuthorizationWaiterGuard {
@@ -162,14 +174,25 @@ impl AuthorizationService {
         mode: ToolAuthorizationMode,
         coordinator: Arc<SnapshotCoordinator>,
         event_service: EventService,
+        extension_events: Arc<dyn crate::services::ports::ExtensionEventSink>,
+        session_id: String,
+        workspace_root: String,
     ) -> Self {
-        Self::with_ports(mode, coordinator, Arc::new(event_service))
+        Self::with_ports(
+            mode,
+            coordinator,
+            Arc::new(event_service),
+            Some(extension_events),
+            (session_id, workspace_root),
+        )
     }
 
     fn with_ports(
         mode: ToolAuthorizationMode,
         capabilities: Arc<dyn CapabilityQuery>,
         events: Arc<dyn EventSink>,
+        extension_events: Option<Arc<dyn crate::services::ports::ExtensionEventSink>>,
+        extension_identity: (String, String),
     ) -> Self {
         Self {
             capabilities,
@@ -178,7 +201,29 @@ impl AuthorizationService {
                 mode,
                 ..Default::default()
             })),
+            extension_events,
+            extension_identity,
         }
+    }
+
+    /// 提交 `permission_denied` 事件（Observe gate；无 host 时 no-op）。
+    fn emit_permission_denied(&self, tool_name: &str, reason: &str) {
+        let Some(sink) = &self.extension_events else {
+            return;
+        };
+        let Ok(tool_id) = tool_contract::api::definition::ToolId::new(tool_name) else {
+            return;
+        };
+        sink.submit(
+            ExtensionHostEventKind::PermissionDenied,
+            &self.extension_identity.0,
+            &self.extension_identity.1,
+            ExtensionHostPayload::PermissionDenied {
+                tool_name: tool_id,
+                reason: reason.into(),
+                path: None,
+            },
+        );
     }
 
     pub(crate) fn set_mode(&self, mode: ToolAuthorizationMode) -> Result<(), CodingSessionError> {
@@ -293,8 +338,9 @@ impl AuthorizationService {
                     .tool_authorization_required(request.clone())
                     .map_err(|error| error.to_string())?;
                 self.events
-                    .tool_authorization_denied(request, reason.into())
+                    .tool_authorization_denied(request.clone(), reason.into())
                     .map_err(|error| error.to_string())?;
+                self.emit_permission_denied(&request.tool_name, reason);
                 return Ok(Some(blocked(reason)));
             }
             ToolAuthorizationMode::Ask => {}
@@ -463,6 +509,7 @@ impl AuthorizationService {
                 let reason = reason
                     .clone()
                     .unwrap_or_else(|| "tool invocation denied by user".into());
+                self.emit_permission_denied(&entry.request.tool_name, &reason);
                 (
                     PendingResolution::Deny(reason.clone()),
                     PersistedToolAuthorizationResolution::Denied { reason },

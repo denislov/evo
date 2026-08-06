@@ -28,6 +28,7 @@ impl CodingAgentSession {
             options.tool_authorization_mode(),
             project_root,
             worktree_registry,
+            options.extension_host_options().cloned(),
         )
         .await
     }
@@ -57,6 +58,7 @@ impl CodingAgentSession {
             options.tool_authorization_mode(),
             project_root,
             worktree_registry,
+            options.extension_host_options().cloned(),
         )
         .await
     }
@@ -88,6 +90,7 @@ impl CodingAgentSession {
             options.tool_authorization_mode(),
             project_root,
             worktree_registry,
+            options.extension_host_options().cloned(),
         )
         .await
     }
@@ -117,6 +120,7 @@ impl CodingAgentSession {
             options.tool_authorization_mode(),
             project_root,
             worktree_registry,
+            options.extension_host_options().cloned(),
         )
     }
 
@@ -218,6 +222,7 @@ impl CodingAgentSession {
         tool_authorization_mode: crate::authorization::ToolAuthorizationMode,
         project_root: PathBuf,
         worktree_registry: Arc<workspace_runtime::api::WorktreeRegistry>,
+        extension_host_options: Option<extension_host::api::ExtensionHostOptions>,
     ) -> Result<Self, CodingSessionError> {
         let mut session_service = session_service;
         let startup_rewind = session_service.startup_rewind_checkpoint()?;
@@ -226,10 +231,16 @@ impl CodingAgentSession {
         let snapshot_coordinator = SnapshotCoordinator::new();
         let event_service = EventService::with_snapshot_coordinator(snapshot_coordinator.clone());
         let client_service = ClientService::new(snapshot_coordinator.clone());
+        let extension_host = extension_host_service(extension_host_options.as_ref(), &project_root);
+        let session_id = session_service.session_id().to_owned();
+        let workspace_root = project_root.to_string_lossy().into_owned();
         let authorization_service = AuthorizationService::new(
             tool_authorization_mode,
             snapshot_coordinator.clone(),
             event_service.clone(),
+            extension_host.sink(),
+            session_id,
+            workspace_root,
         );
         let background_tasks =
             crate::services::background::BackgroundTaskService::new(event_service.clone());
@@ -262,9 +273,7 @@ impl CodingAgentSession {
                 },
                 runtime_service: runtime_service.with_background_tasks(background_tasks.clone()),
                 background_tasks,
-                extension_host: crate::services::ports::ExtensionHostService::new(
-                    std::sync::Arc::new(crate::services::ports::NoopExtensionHostPort),
-                ),
+                extension_host: extension_host.clone(),
                 profile_registry,
                 authorization_service,
                 review_service: crate::services::review::ReviewService::new(
@@ -295,7 +304,42 @@ impl CodingAgentSession {
         session
             .runtime_host
             .events
-            .emit_session_opened(opened_session_id)?;
+            .emit_session_opened(opened_session_id.clone())?;
+        session.runtime_host.extension_host.submit_event(
+            extension_host::api::ExtensionEventKind::SessionStart,
+            &opened_session_id,
+            &session
+                .runtime_host
+                .project_root
+                .as_path()
+                .to_string_lossy(),
+            extension_host::api::ExtensionEventPayload::SessionStart {
+                source: "open".into(),
+                model_id: None,
+                agent_type: None,
+            },
+        );
+        // 首次启用展示：来源 + 能力（folder trust 未决定 → 等待产品
+        // 放行；确认路径由 Phase 9 CLI/Desktop 完成，此处经诊断展示）。
+        for request in session.runtime_host.extension_host.first_enables() {
+            let capabilities = request
+                .capabilities
+                .iter()
+                .map(|claim| format!("{}:{:?}", claim.name, claim.risk))
+                .collect::<Vec<_>>()
+                .join(", ");
+            session.runtime_host.events.emit_diagnostic(
+                Option::<String>::None,
+                format!(
+                    "extension '{}' ({}) awaits first-enable approval: source={}, dir={}, \
+                     capabilities=[{capabilities}]",
+                    request.extension_id,
+                    request.name,
+                    request.source,
+                    request.source_dir.to_string_lossy(),
+                ),
+            )?;
+        }
         for record in startup_outbox_records {
             session
                 .runtime_host
@@ -312,14 +356,20 @@ impl CodingAgentSession {
         tool_authorization_mode: crate::authorization::ToolAuthorizationMode,
         project_root: PathBuf,
         worktree_registry: Arc<workspace_runtime::api::WorktreeRegistry>,
+        extension_host_options: Option<extension_host::api::ExtensionHostOptions>,
     ) -> Result<Self, CodingSessionError> {
         let snapshot_coordinator = SnapshotCoordinator::new();
         let client_service = ClientService::new(snapshot_coordinator.clone());
         let event_service = EventService::with_snapshot_coordinator(snapshot_coordinator.clone());
+        let extension_host = extension_host_service(extension_host_options.as_ref(), &project_root);
+        let workspace_root = project_root.to_string_lossy().into_owned();
         let authorization_service = AuthorizationService::new(
             tool_authorization_mode,
             snapshot_coordinator.clone(),
             event_service.clone(),
+            extension_host.sink(),
+            state.runtime_id.clone(),
+            workspace_root,
         );
         let background_tasks =
             crate::services::background::BackgroundTaskService::new(event_service.clone());
@@ -349,9 +399,7 @@ impl CodingAgentSession {
                 },
                 runtime_service: runtime_service.with_background_tasks(background_tasks.clone()),
                 background_tasks,
-                extension_host: crate::services::ports::ExtensionHostService::new(
-                    std::sync::Arc::new(crate::services::ports::NoopExtensionHostPort),
-                ),
+                extension_host: extension_host.clone(),
                 profile_registry,
                 authorization_service,
                 review_service: crate::services::review::ReviewService::new(
@@ -363,7 +411,52 @@ impl CodingAgentSession {
             },
         };
         session.refresh_snapshot_projection()?;
+        let session_id = session.runtime_host.session_identity().0;
+        session.runtime_host.extension_host.submit_event(
+            extension_host::api::ExtensionEventKind::SessionStart,
+            &session_id,
+            &session
+                .runtime_host
+                .project_root
+                .as_path()
+                .to_string_lossy(),
+            extension_host::api::ExtensionEventPayload::SessionStart {
+                source: "new".into(),
+                model_id: None,
+                agent_type: None,
+            },
+        );
         Ok(session)
+    }
+}
+
+/// 装配 extension host 服务：显式提供 host options 时启动真实 host
+/// （user hooks 生效），否则保持 Noop（无 host，行为不变）。
+///
+/// project hooks 目录默认取 `project_root/.evo/extensions`，与 product
+/// folder trust（[`ExtensionHostOptions::trust_store`]）共用判定；首次
+/// 启用（NotDecided）的扩展经 [`ExtensionHostService::first_enables`]
+/// 展示来源与能力。
+fn extension_host_service(
+    options: Option<&extension_host::api::ExtensionHostOptions>,
+    project_root: &std::path::Path,
+) -> crate::services::ports::ExtensionHostService {
+    let Some(options) = options else {
+        return crate::services::ports::ExtensionHostService::new(std::sync::Arc::new(
+            crate::services::ports::NoopExtensionHostPort,
+        ));
+    };
+    let mut options = options.clone();
+    if options.project_dirs.is_empty() {
+        options
+            .project_dirs
+            .push(project_root.join(".evo").join("extensions"));
+    }
+    match crate::services::ports::LiveExtensionHostPort::start(options) {
+        Ok(port) => crate::services::ports::ExtensionHostService::new(Arc::new(port)),
+        Err(_) => crate::services::ports::ExtensionHostService::new(std::sync::Arc::new(
+            crate::services::ports::NoopExtensionHostPort,
+        )),
     }
 }
 
@@ -502,3 +595,7 @@ fn worktree_registry_for(
         })?;
     Ok(Arc::new(registry))
 }
+
+#[cfg(test)]
+#[path = "hooks_tests.rs"]
+mod hooks_tests;

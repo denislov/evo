@@ -483,6 +483,8 @@ impl CodingAgentSession {
                                 )
                             },
                         );
+                        let (_session_id, workspace_root) =
+                            self.runtime_host.session_identity();
                         let result = crate::operations::prompt::run(
                             &mut self.runtime_host.session_coordinator.persistence,
                             &mut self.runtime_host.operation_supervisor.control,
@@ -494,6 +496,8 @@ impl CodingAgentSession {
                                 .pending_delegation_confirmations,
                             &self.runtime_host.authorization_service,
                             &self.runtime_host.review_service,
+                            Some(self.runtime_host.extension_host.sink()),
+                            workspace_root,
                             options,
                             &snapshot,
                             operation_cancellation.clone(),
@@ -698,11 +702,14 @@ impl CodingAgentSession {
                             .ok_or_else(|| CodingSessionError::UnsupportedCapability {
                                 capability: "merge requires a managed worktree registry".into(),
                             })?;
+                        let (session_id, _) = self.runtime_host.session_identity();
                         crate::operations::merge::runner::merge_worktree(
                             &self.runtime_host.events,
+                            &self.runtime_host.extension_host,
                             &registry,
                             &workspace_root,
                             &snapshot.operation_id,
+                            &session_id,
                             &worktree_id,
                             operation_cancellation
                                 .clone()

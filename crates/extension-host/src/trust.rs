@@ -245,6 +245,7 @@ mod tests {
                     risk: CapabilityRisk::ProcessExecution,
                 }],
                 config: None,
+                hooks: None,
             },
             source: ExtensionSource::Project,
             dir: dir("/project/ext/lint-tools"),

@@ -39,3 +39,50 @@ Local modifications:
     Grok 无 host 概念，属 Evo 独立设计（参考了 `xai-grok-config` 的 layer 思想）
   - runner/matcher 未移植（ARC-710）
 Sync policy: 不跟随上游（一次性适配）；后续 ARC 若再参考 `matcher.rs`/`runner/*` 需单独登记。
+
+---
+
+## ARC-710 User hooks（2026-08-07）
+
+Status: adapted（小步改写 + 重新设计，未整文件复制；参考文件均标注 `Adapted from xai-grok-hooks` 来源注释）
+Upstream repository: https://github.com/bytecodealliance/xai-grok（vendored at `third-party/grok-build`）
+Upstream revision: `d6937fe255dce4133c3d000a50f9cb94de12f06f`
+Source paths: `third-party/grok-build/crates/codegen/xai-grok-hooks/src/`
+  - `matcher.rs`（simple-vs-regex 精确/正则语义、pipe 列表防锚定错误、缺省=通配）
+  - `runner/command.rs`（shell 元字符路由、timeout 终止进程树、输出截断上限 64KB、
+    exit-code 阶梯、JSON 决策优先于退出码、deny/block 默认 reason 文案）
+  - `dispatcher.rs`（首个 deny 短路、Stop 信号聚合与 first force-stop wins、
+    fail-open 语义与理由）
+  - `event.rs`（信封元数据、SubagentStopPhase、payload 判别思想、`MAX_PAYLOAD_SIZE` 截断）
+  - `runner/http.rs`：仅阅读评估；HTTP runner 未移植（SSRF 安全 fetch 管线在 Evo `ai`
+    crate 内部，下沉共享 HTTP 层为 Phase 8+ 工作，登记为验证债务）
+License/notices: Apache-2.0（`third-party/grok-build/THIRD-PARTY-NOTICES`）
+Destination paths:
+  - `crates/extension-host/src/{matcher,hook,runner,dispatcher}.rs`（新模块）
+  - `crates/extension-host/src/{event,discovery,host/mod,budget,api}.rs`（扩展）
+  - `crates/extension-host/src/runner/tests_interpret.rs`、
+    `crates/extension-host/src/dispatcher/tests_dispatcher.rs`、
+    `crates/extension-host/tests/hook_runner.rs`（测试）
+  - coding-agent 接线：`crates/coding-agent/src/services/ports.rs`（LiveExtensionHostPort /
+    ExtensionEventSink / ExtensionHostService 扩展）、`session/view.rs`、
+    `runtime/facade/{lifecycle,connection}.rs`、`runtime/owners.rs`、
+    `application/operation/dispatch.rs`、`operations/{prompt/mod.rs,prompt/context.rs,
+    prompt/context/setup.rs,merge/runner.rs}`、`services/{runtime.rs,authorization.rs}`、
+    `runtime/facade/hooks_tests.rs`（测试）
+Tests carried over: 无直接复制；按 Evo 语义重写 —— matcher 四维条件、
+priority 排序、gate transition-table（Tool/Stop 各 9+ 行）、runner 超时/取消/洪泛/
+崩溃/退出码/sandbox 注入、host shutdown 在途 hook 取消、coding-agent 适配器集成
+（session 生命周期事件、gate 决策暴露、首次启用展示、permission 事件）
+Local modifications:
+  - 事件通道：Grok stdin 注入 → Evo 环境变量（`ProcessSpec` 固定 stdin=null）
+  - matcher 新增 path（前缀语义）与 profile 维度；新增 `priority` 确定排序
+    （Grok 无优先级，按配置顺序）
+  - runner 强制 `SandboxProfile` + `SandboxCapability` 探测：sandbox 失败是唯一
+    fail-closed 类别（Grok 全部 fail-open，且无沙箱概念）
+  - gate 拆 host 通道（Observe 派发）与 `HookGate`（产品同步调用），避免事件双跑
+  - 结构化结果枚举（Success/ToolDecision/StopSignals/TimedOut/Cancelled/
+    OutputLimited/Failed/SpawnFailed/SandboxUnsupported）替代 Grok 的字符串失败
+  - dispatch 事件逐条独立 task + panic fail-closed + shutdown 取消在途 hook
+    （Grok 无 host 生命周期）
+  - 无 HTTP runner；`StopSignals` 聚合三信号；JSON 决策协议保留但简化字段集
+Sync policy: 不跟随上游（一次性适配）；`runner/http.rs` 若后续移植需单独登记。

@@ -6,6 +6,7 @@ use workspace_runtime::api::{ChangeEntry, WorktreeRegistry, apply_merge_cancella
 
 use crate::kernel::error::CodingSessionError;
 use crate::services::event::EventService;
+use crate::services::ports::ExtensionHostService;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MergeOutcome {
@@ -75,15 +76,29 @@ pub(crate) async fn list_proposals(
 /// parent must still sit on the child's base revision, and no parent-side
 /// change may overlap the child's changes. Every outcome publishes a merge
 /// event; a failed merge leaves the parent and the record untouched so the
-/// proposal can be retried or discarded.
+/// proposal can be retried or discarded. user hooks receive
+/// `merge_proposed` / `merge_applied` Observe 事件。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn merge_worktree(
     events: &EventService,
+    extension_host: &ExtensionHostService,
     registry: &Arc<WorktreeRegistry>,
     parent_workspace_root: &Path,
     operation_id: &str,
+    session_id: &str,
     worktree_id: &str,
     cancellation: CancellationToken,
 ) -> Result<MergeOutcome, CodingSessionError> {
+    let workspace_root = parent_workspace_root.to_string_lossy().into_owned();
+    extension_host.submit_event(
+        extension_host::api::ExtensionEventKind::MergeProposed,
+        session_id,
+        &workspace_root,
+        extension_host::api::ExtensionEventPayload::MergeProposed {
+            proposal_id: operation_id.to_owned(),
+            child_worktree: worktree_id.to_owned(),
+        },
+    );
     let record = registry
         .load(worktree_id)
         .map_err(|error| CodingSessionError::Resource {
@@ -164,6 +179,15 @@ pub(crate) async fn merge_worktree(
         .map_err(|error| CodingSessionError::Session {
             message: format!("cannot publish merge event: {error}"),
         })?;
+    extension_host.submit_event(
+        extension_host::api::ExtensionEventKind::MergeApplied,
+        session_id,
+        &workspace_root,
+        extension_host::api::ExtensionEventPayload::MergeApplied {
+            proposal_id: operation_id.to_owned(),
+            applied_entries: u32::try_from(report.applied).unwrap_or(u32::MAX),
+        },
+    );
     discard_after_merge(
         events,
         &registry,

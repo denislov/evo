@@ -202,6 +202,10 @@ impl CapabilityQuery for FakeCapabilityQuery {
 }
 
 fn request(id: &str, generation: u64) -> ToolAuthorizationRequest {
+    make_request(id, generation)
+}
+
+fn make_request(id: &str, generation: u64) -> ToolAuthorizationRequest {
     ToolAuthorizationRequest {
         authorization_id: id.into(),
         operation_id: "op-1".into(),
@@ -237,6 +241,8 @@ fn service(
         ToolAuthorizationMode::Ask,
         capabilities.clone(),
         events.clone(),
+        Some(Arc::new(crate::services::ports::NoopExtensionEventSink)),
+        ("test-session".into(), "/ws".into()),
     );
     (service, capabilities, events)
 }
@@ -375,6 +381,86 @@ async fn authorization_generation_transition_table() {
         assert_eq!(writer.labels(), vec![expected_event]);
         assert_eq!(capabilities.pending_snapshots(), vec![Vec::new()]);
     }
+}
+
+#[derive(Debug, Default)]
+struct RecordingExtensionSink {
+    events: std::sync::Mutex<Vec<String>>,
+}
+
+impl crate::services::ports::ExtensionEventSink for RecordingExtensionSink {
+    fn submit(
+        &self,
+        kind: extension_host::api::ExtensionEventKind,
+        _session_id: &str,
+        _workspace_root: &str,
+        payload: extension_host::api::ExtensionEventPayload,
+    ) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("{kind}:{payload:?}"));
+    }
+
+    fn hook_gate(&self) -> Option<Arc<extension_host::api::HookGate>> {
+        None
+    }
+}
+
+#[tokio::test]
+async fn denied_decision_emits_permission_denied_to_extension_hooks() {
+    let capabilities = Arc::new(FakeCapabilityQuery::new(7));
+    let events = Arc::new(FakeEventSink::default());
+    let extension_sink = Arc::new(RecordingExtensionSink::default());
+    let service = AuthorizationService::with_ports(
+        ToolAuthorizationMode::Ask,
+        capabilities.clone(),
+        events.clone(),
+        Some(extension_sink.clone()),
+        ("test-session".into(), "/ws".into()),
+    );
+    let request = make_request("auth-deny", 7);
+    let identity = request.identity();
+    let writer = Arc::new(FakeSessionWriter::default());
+    let _receiver = insert_pending(&service, request.clone(), writer.clone());
+
+    service
+        .decide(
+            &identity,
+            ToolAuthorizationDecision::Deny {
+                reason: Some("user declined".into()),
+            },
+        )
+        .await
+        .expect("deny resolves");
+
+    let recorded = extension_sink.events.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1, "exactly one permission_denied event");
+    assert!(
+        recorded[0].starts_with("permission_denied:"),
+        "kind must be permission_denied, got {:?}",
+        recorded
+    );
+    assert!(
+        recorded[0].contains("user declined"),
+        "reason must travel with the event: {:?}",
+        recorded
+    );
+
+    // Allow 决策不产生 permission_denied。
+    let request = make_request("auth-allow", 7);
+    let identity = request.identity();
+    let writer = Arc::new(FakeSessionWriter::default());
+    let _receiver = insert_pending(&service, request, writer);
+    service
+        .decide(&identity, ToolAuthorizationDecision::AllowOnce)
+        .await
+        .expect("allow resolves");
+    assert_eq!(
+        extension_sink.events.lock().unwrap().len(),
+        1,
+        "allow decisions must not emit permission_denied"
+    );
 }
 
 #[test]

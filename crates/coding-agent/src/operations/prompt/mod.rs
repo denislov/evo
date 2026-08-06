@@ -13,6 +13,7 @@ use crate::platform::time::{Clock, IdGenerator, SystemClock, SystemIdGenerator};
 use crate::profiles::{ProfileId, ProfileKind, ProfileRegistry};
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
+use crate::services::ports::ExtensionEventSink;
 use crate::services::review::ReviewService;
 use crate::session::event::PersistedDelegationStatus;
 use crate::session::service::{FinalizedSessionWrite, SessionPersistence, SessionService};
@@ -21,6 +22,7 @@ use context::{
     PromptTurnOptions,
 };
 use runner::PromptTurnRunner;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 struct PromptOperation<'a> {
@@ -31,6 +33,8 @@ struct PromptOperation<'a> {
     pending_delegation_confirmations: &'a mut PendingDelegationConfirmationQueue,
     authorization_service: &'a AuthorizationService,
     review_service: &'a ReviewService,
+    extension_events: Option<Arc<dyn ExtensionEventSink>>,
+    workspace_root: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -42,6 +46,8 @@ pub(crate) async fn run(
     pending_delegation_confirmations: &mut PendingDelegationConfirmationQueue,
     authorization_service: &AuthorizationService,
     review_service: &ReviewService,
+    extension_events: Option<Arc<dyn ExtensionEventSink>>,
+    workspace_root: String,
     options: PromptTurnOptions,
     snapshot: &OperationCapabilitySnapshot,
     cancellation: Option<CancellationToken>,
@@ -54,6 +60,8 @@ pub(crate) async fn run(
         pending_delegation_confirmations,
         authorization_service,
         review_service,
+        extension_events,
+        workspace_root,
     }
     .run_inner(options, snapshot, cancellation)
     .await
@@ -112,6 +120,7 @@ impl PromptOperation<'_> {
 
         self.event_service
             .emit_prompt_started(operation_id, turn_id)?;
+        self.emit_user_prompt_submitted(&context)?;
         let turn_result: Result<InternalPromptTurnOutcome, CodingSessionError> =
             match PromptTurnRunner::new()?.run_typed(&mut context).await {
                 Ok(_) => {
@@ -212,6 +221,30 @@ impl PromptOperation<'_> {
             0,
             Vec::new(),
         )
+    }
+
+    /// user hooks 的 `user_prompt_submit` 事件（Observe gate）。
+    fn emit_user_prompt_submitted(
+        &self,
+        context: &PromptTurnContext,
+    ) -> Result<(), CodingSessionError> {
+        let Some(sink) = self.extension_events.as_ref() else {
+            return Ok(());
+        };
+        let Some(session_id) = context.session_id() else {
+            return Ok(());
+        };
+        let prompt = match context.options().invocation() {
+            crate::app::bootstrap::PromptInvocation::Text(text) => Some(text.clone()),
+            _ => None,
+        };
+        sink.submit(
+            extension_host::api::ExtensionEventKind::UserPromptSubmit,
+            session_id,
+            &self.workspace_root,
+            extension_host::api::ExtensionEventPayload::UserPromptSubmit { prompt },
+        );
+        Ok(())
     }
 
     async fn execute_authorized_delegations(
@@ -365,6 +398,8 @@ impl PromptOperation<'_> {
                 }
                 context.enable_live_events(event_service);
                 context.set_capability_snapshot(snapshot.clone());
+                context.set_extension_events(self.extension_events.clone());
+                context.set_extension_workspace_root(self.workspace_root.clone());
                 Ok(context)
             }
             SessionPersistence::NonPersistent(state) => {
@@ -389,6 +424,8 @@ impl PromptOperation<'_> {
                 }
                 context.enable_live_events(event_service);
                 context.set_capability_snapshot(snapshot.clone());
+                context.set_extension_events(self.extension_events.clone());
+                context.set_extension_workspace_root(self.workspace_root.clone());
                 Ok(context)
             }
         }

@@ -4,33 +4,43 @@
 //! 生命周期：
 //!
 //! 1. [`ExtensionHost::new`]（同步）：discovery + config merge + trust
-//!    判定，产出启用列表、首次启用请求与诊断。
+//!    判定，产出启用列表、首次启用请求、hook 注册表与诊断。
 //! 2. [`ExtensionHost::start`]（async）：启动后台 dispatch task，返回
 //!    [`ExtensionHostHandle`]（提交事件 / 触发 shutdown）与
 //!    [`ExtensionHostTask`]（join 回收结果）。
 //! 3. [`ExtensionHostHandle::shutdown`]：确定性顺序 —— 状态置
-//!    `Stopping`（新事件被拒）-> dispatch task 退出 select 并 drain 已
-//!    提交事件（有界，不丢已入队事件）-> 写 `host_shutdown` 诊断 ->
-//!    退出；随后 [`ExtensionHostTask::join`] 返回 [`HostExit`]。
-//!    重复 shutdown 幂等。
+//!    `Stopping`（新事件被拒）+ 取消在途 hook 进程 -> dispatch task 退出
+//!    select 并 drain 已提交事件（有界，不丢已入队事件）-> 写
+//!    `host_shutdown` 诊断 -> 退出；随后 [`ExtensionHostTask::join`]
+//!    返回 [`HostExit`]。重复 shutdown 幂等。
 //!
-//! 骨架阶段的 dispatch 只做 budget 记账与诊断（事件不派发到任何扩展）；
-//! `dispatch_loop` 的 `on_event` 槽位是 ARC-710 runner 的接入点。
-//! task 内 panic 被捕获（fail closed），join 不传播 panic。
+//! 事件派发（ARC-710）：
+//!
+//! - host 通道只派发 Observe gate 事件（session / prompt / post_tool_use /
+//!   permission / subagent / compact / merge），串行 + budget 记账强制。
+//! - gate 事件（pre_tool_use / stop / subagent_stop）在 host 通道只记账，
+//!   hook 执行由产品经 [`ExtensionHost::gate`]（[`HookGate`]）同步调用
+//!   驱动——避免一次事件双跑 hook。
+//! - 任务内 panic 被捕获（fail closed），join 不传播 panic。
 
 // Evo 独立设计：Grok 的 xai-grok-hooks 无 host 概念（load-and-fire）；
 // host 生命周期 / shutdown 顺序 / panic 捕获为本 crate 自研机制。
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::budget::{BudgetTracker, ExtensionBudget};
 use crate::config::{ExtensionConfig, ExtensionConfigLayer, ExtensionSource};
 use crate::diagnostic::{DiagnosticLevel, DiagnosticRecord, DiagnosticSink, DiagnosticsCollector};
 use crate::discovery::{ExtensionRecord, discover_extensions};
+use crate::dispatcher::{HookGate, HookRegistry, dispatch_observe, event_gate};
 use crate::error::ExtensionError;
-use crate::event::ExtensionEvent;
+use crate::event::{ExtensionEvent, ExtensionEventKind};
+use crate::hook::parse_hooks;
 use crate::trust::{EnableRequest, TrustDecision, TrustStatus, TrustStore, build_enable_request};
 
 /// dispatch 事件队列容量（有界背压）。
@@ -38,7 +48,7 @@ const EVENT_QUEUE_CAPACITY: usize = 64;
 /// 诊断环形缓冲容量。
 const DEFAULT_DIAGNOSTIC_CAPACITY: usize = 256;
 
-/// host 启动参数。ARC-710 / ARC-720 在此扩展新配置字段。
+/// host 启动参数。ARC-720 在此扩展新配置字段。
 #[derive(Debug, Clone)]
 pub struct ExtensionHostOptions {
     /// 用户级扩展目录（来源 `Global`）。
@@ -93,16 +103,58 @@ struct HostInfo {
 
 /// host / handle 共享的可变状态。
 #[derive(Debug)]
-struct HostShared {
+pub(crate) struct HostShared {
     state: Mutex<HostState>,
     shutdown_tx: Mutex<Option<watch::Sender<bool>>>,
     collector: Mutex<DiagnosticsCollector>,
     budget: Mutex<BudgetTracker>,
+    /// shutdown 时取消在途 hook 进程。
+    cancel: CancellationToken,
+    /// 已解析的 hook 注册表（只读；gate 事件经 [`HookGate`] 查询）。
+    registry: Option<Arc<HookRegistry>>,
 }
 
 impl HostShared {
-    fn record(&self, record: DiagnosticRecord) {
+    pub(crate) fn record(&self, record: DiagnosticRecord) {
         self.collector.lock().unwrap().record(record);
+    }
+
+    /// 宿主级取消令牌（shutdown 时触发）。
+    pub(crate) fn cancel(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// 合并后预算的 `max_run_secs`（runner 超时上限）。
+    pub(crate) fn budget_max_run_secs(&self) -> u64 {
+        self.budget.lock().unwrap().limits().max_run_secs
+    }
+
+    /// 通知所有在途 hook 终止（shutdown 顺序第 0 步）。
+    pub(crate) fn cancel_in_flight(&self) {
+        self.cancel.cancel();
+    }
+
+    pub(crate) fn registry(&self) -> Option<&Arc<HookRegistry>> {
+        self.registry.as_ref()
+    }
+
+    /// 诊断快照（测试用）。
+    #[cfg(test)]
+    pub(crate) fn diagnostics(&self) -> Vec<DiagnosticRecord> {
+        self.collector.lock().unwrap().snapshot()
+    }
+
+    /// 测试 harness：默认运行态共享结构（无 registry、默认预算）。
+    #[cfg(test)]
+    pub(crate) fn test_harness() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(HostState::Running),
+            shutdown_tx: Mutex::new(None),
+            collector: Mutex::new(DiagnosticsCollector::new(None, 64)),
+            budget: Mutex::new(BudgetTracker::new(ExtensionBudget::default())),
+            cancel: CancellationToken::new(),
+            registry: None,
+        })
     }
 }
 
@@ -114,7 +166,7 @@ pub struct ExtensionHost {
 }
 
 impl ExtensionHost {
-    /// 构造 host：discovery + config merge + trust 判定。
+    /// 构造 host：discovery + config merge + trust 判定 + hook 注册表。
     ///
     /// 返回 host 与加载期的诊断错误（坏 manifest 等，不影响 host 运行）。
     pub fn new(options: ExtensionHostOptions) -> (Self, Vec<ExtensionError>) {
@@ -189,6 +241,26 @@ impl ExtensionHost {
             }
         }
 
+        // 4. 从启用扩展解析 hook 注册表（容错：坏 hook 记录诊断并跳过）。
+        let mut registry = HookRegistry::new();
+        for record in &enabled {
+            let Some(hooks_value) = record.manifest.hooks.as_ref() else {
+                continue;
+            };
+            let (specs, hook_errors) = parse_hooks(hooks_value, &record.dir);
+            for detail in hook_errors {
+                collector.record(DiagnosticRecord {
+                    level: DiagnosticLevel::Warning,
+                    code: "hook_invalid".into(),
+                    message: format!("extension '{}': {detail}", record.id),
+                    extension_id: Some(record.id.clone()),
+                    context: Default::default(),
+                });
+            }
+            registry.add_extension(&record.id, specs);
+        }
+        let registry = (!registry.is_empty()).then(|| Arc::new(registry));
+
         let info = Arc::new(HostInfo {
             options,
             records,
@@ -201,6 +273,8 @@ impl ExtensionHost {
             shutdown_tx: Mutex::new(None),
             collector: Mutex::new(collector),
             budget: Mutex::new(BudgetTracker::new(budget)),
+            cancel: CancellationToken::new(),
+            registry,
         });
         (Self { info, shared }, errors)
     }
@@ -224,10 +298,12 @@ impl ExtensionHost {
         *self.shared.shutdown_tx.lock().unwrap() = Some(shutdown_tx);
 
         let shared = self.shared.clone();
-        let join = tokio::spawn(async move {
-            dispatch_loop(rx, shutdown_rx, shared.clone(), default_on_event).await
-        });
-
+        let on_event: Arc<DispatchHandler> =
+            Arc::new(|shared, event| Box::pin(hooks_on_event(shared, event)));
+        let join =
+            tokio::spawn(
+                async move { dispatch_loop(rx, shutdown_rx, shared.clone(), on_event).await },
+            );
         let handle = ExtensionHostHandle {
             shared: self.shared.clone(),
             tx,
@@ -244,6 +320,17 @@ impl ExtensionHost {
     /// 保留的诊断快照（最老在前）。
     pub fn diagnostics(&self) -> Vec<DiagnosticRecord> {
         self.shared.collector.lock().unwrap().snapshot()
+    }
+
+    /// 产品侧 gate 评估入口（Tool / Stop gate）。
+    ///
+    /// 有启用扩展时返回 `Some`；产品在 agent loop 内同步调用评估并消费
+    /// 决策。gate 事件在 host 通道只记账，hook 执行仅发生在这里。
+    pub fn gate(&self) -> Option<Arc<HookGate>> {
+        self.shared
+            .registry
+            .as_ref()
+            .map(|registry| Arc::new(HookGate::new(registry.clone(), self.shared.clone())))
     }
 }
 
@@ -308,6 +395,9 @@ impl ExtensionHostHandle {
     }
 
     /// 触发确定性 shutdown（幂等）。随后用 [`ExtensionHostTask::join`] 回收。
+    ///
+    /// 顺序：状态置 `Stopping`（新事件被拒）-> 取消在途 hook 进程（dispatch
+    /// 中的事件尽快结束）-> 发 watch 信号（dispatch 退出 select 并 drain）。
     pub fn shutdown(&self, reason: impl Into<String>) {
         let reason = reason.into();
         {
@@ -317,6 +407,7 @@ impl ExtensionHostHandle {
             }
             // Idle / Stopping / Stopped / Failed：幂等，不再变更。
         }
+        self.shared.cancel_in_flight();
         self.shared.record(DiagnosticRecord {
             level: DiagnosticLevel::Info,
             code: "host_shutdown_initiated".into(),
@@ -373,16 +464,26 @@ impl ExtensionHostTask {
     }
 }
 
+/// dispatch 事件处理器签名：`Arc<HostShared>`（owned）+ 事件 -> future。
+///
+/// 每个事件在独立 task 中执行（panic 被 tokio 捕获为 `JoinError`，
+/// fail closed）；`on_event` 必须是 `Send + Sync` 的 `Fn`（可变状态都在
+/// `HostShared` 内）。
+type DispatchHandler = dyn Fn(Arc<HostShared>, ExtensionEvent) -> Pin<Box<dyn Future<Output = ()> + Send>>
+    + Send
+    + Sync;
+
 /// dispatch 主循环：消费事件队列直到 shutdown 信号或所有 sender 退出；
 /// 退出前 drain 已入队事件（不丢已提交），然后写收尾诊断。
 ///
-/// `on_event` 是 ARC-710 runner 的接入槽位；默认实现做 budget 记账 +
-/// 诊断。事件处理中的 panic 被捕获并终止循环（fail closed）。
+/// 每个事件的处理在独立 task 中执行；task 内 panic 被捕获并终止循环
+/// （fail closed）。shutdown 先取消在途 hook（[`HostShared::cancel`]），
+/// 使正在运行的 hook 进程尽快结束，随后 drain。
 async fn dispatch_loop(
     mut rx: mpsc::Receiver<ExtensionEvent>,
     mut shutdown_rx: watch::Receiver<bool>,
     shared: Arc<HostShared>,
-    mut on_event: impl FnMut(&HostShared, ExtensionEvent) + Send + 'static,
+    on_event: Arc<DispatchHandler>,
 ) -> HostExit {
     let mut handled: u64 = 0;
     let mut panicked = false;
@@ -397,37 +498,44 @@ async fn dispatch_loop(
                 let Some(event) = event else {
                     break; // 所有 sender 已 drop。
                 };
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    on_event(&shared, event)
-                }));
-                match outcome {
+                let handler = on_event.clone();
+                let shared_for_task = shared.clone();
+                let task = tokio::spawn(async move {
+                    handler(shared_for_task, event).await
+                });
+                match task.await {
                     Ok(()) => handled += 1,
-                    Err(_) => {
+                    Err(error) if error.is_panic() => {
                         panicked = true;
                         shared.record(DiagnosticRecord {
                             level: DiagnosticLevel::Error,
                             code: "dispatch_panic".into(),
-                            message: "extension dispatch panicked; host stopping (fail closed)".into(),
+                            message: "extension dispatch panicked; host stopping (fail closed)"
+                                .into(),
                             extension_id: None,
                             context: Default::default(),
                         });
                         break;
                     }
+                    Err(_) => break, // task 被 abort：视同 panic，停止派发。
                 }
             }
         }
     }
 
-    // 确定性 shutdown：drain 已入队事件（shutdown 后新提交已被拒绝，此循环有界）。
+    // 确定性 shutdown：drain 已入队事件（shutdown 后新提交已被拒绝，
+    // 此循环有界；在途 hook 已被 cancel，drain 快速完成）。
     while let Ok(event) = rx.try_recv() {
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| on_event(&shared, event)));
-        match outcome {
+        let handler = on_event.clone();
+        let shared_for_task = shared.clone();
+        let task = tokio::spawn(async move { handler(shared_for_task, event).await });
+        match task.await {
             Ok(()) => handled += 1,
-            Err(_) => {
+            Err(error) if error.is_panic() => {
                 panicked = true;
                 break;
             }
+            Err(_) => break,
         }
     }
 
@@ -465,9 +573,14 @@ fn reason_label(reason: ShutdownReason) -> &'static str {
     }
 }
 
-/// 默认事件处理：budget 记账（超出 → 诊断并丢弃该事件）+ 为 ARC-710
-/// runner 预留的槽位（当前不派发到任何扩展）。
-fn default_on_event(shared: &HostShared, event: ExtensionEvent) {
+/// 默认事件处理：budget 记账（超出 → 诊断并丢弃该事件）+ Observe 事件
+/// 派发。
+///
+/// - gate 事件（pre_tool_use / stop / subagent_stop）只记账：hook 执行由
+///   产品经 [`ExtensionHost::gate`] 同步驱动，避免双跑。
+/// - Observe 事件记账后串行派发到匹配 hook（fail-open：hook 失败只落
+///   诊断，不阻断产品）。
+async fn hooks_on_event(shared: Arc<HostShared>, event: ExtensionEvent) {
     let session_id = event.session_id.clone();
     let payload_bytes = serde_json::to_vec(&event.payload)
         .map(|bytes| bytes.len())
@@ -488,6 +601,33 @@ fn default_on_event(shared: &HostShared, event: ExtensionEvent) {
             level: DiagnosticLevel::Warning,
             code: "budget_exceeded".into(),
             message: format!("event dropped: {err}"),
+            extension_id: event.extension_id.clone(),
+            context: Default::default(),
+        });
+        return;
+    }
+    // session 终结事件：清零该 session 的记账（预算按 session 计）。
+    if event.kind == ExtensionEventKind::SessionEnd {
+        shared.budget.lock().unwrap().reset_session(&session_id);
+    }
+
+    // 只有非 gate 事件在此派发。
+    if event_gate(event.kind).is_some() {
+        return;
+    }
+    let Some(registry) = shared.registry() else {
+        return;
+    };
+    let executed = dispatch_observe(registry, &shared, &event).await;
+    if executed > 0 {
+        shared.record(DiagnosticRecord {
+            level: DiagnosticLevel::Debug,
+            code: "hook_dispatched".into(),
+            message: format!(
+                "dispatched {} hook(s) for event {}",
+                executed,
+                event.kind.as_str()
+            ),
             extension_id: event.extension_id.clone(),
             context: Default::default(),
         });

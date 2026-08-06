@@ -81,9 +81,11 @@ async fn merge_applies_into_the_session_workspace_and_cleans_up() {
 
     let outcome = merge_worktree(
         &events,
+        &noop_extension_host(),
         &Arc::new(registry.clone()),
         &source,
         "op-merge",
+        "session-test",
         &id,
         CancellationToken::new(),
     )
@@ -118,9 +120,11 @@ async fn merge_refuses_worktrees_owned_by_another_workspace() {
 
     let error = merge_worktree(
         &events,
+        &noop_extension_host(),
         &Arc::new(registry.clone()),
         &stranger,
         "op-merge",
+        "session-test",
         &id,
         CancellationToken::new(),
     )
@@ -146,9 +150,11 @@ async fn merge_conflicts_surface_and_keep_the_proposal_retryable() {
 
     let error = merge_worktree(
         &events,
+        &noop_extension_host(),
         &Arc::new(registry.clone()),
         &source,
         "op-merge",
+        "session-test",
         &id,
         CancellationToken::new(),
     )
@@ -193,9 +199,11 @@ async fn merge_stale_parent_surfaces_retryable_error() {
 
     let error = merge_worktree(
         &events,
+        &noop_extension_host(),
         &Arc::new(registry.clone()),
         &source,
         "op-merge",
+        "session-test",
         &id,
         CancellationToken::new(),
     )
@@ -272,4 +280,10 @@ async fn merge_operation_dispatch_reaches_the_runner_through_a_session() {
         error.category,
         crate::runtime::facade::CodingAgentErrorCategory::Input
     );
+}
+
+fn noop_extension_host() -> crate::services::ports::ExtensionHostService {
+    crate::services::ports::ExtensionHostService::new(std::sync::Arc::new(
+        crate::services::ports::NoopExtensionHostPort,
+    ))
 }

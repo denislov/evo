@@ -33,4 +33,4 @@ test	1200	1489	Phase 9	crates/desktop/src/runtime/tests/admission.rs
 test	1200	1315	Phase 9	crates/desktop/src/app/native_shell/tests/workspace.rs
 production	900	909	Phase 10	crates/coding-agent/src/app/embedding.rs
 production	900	930	Phase 10	crates/coding-agent/src/application/operation/contract.rs
-production	900	918	Phase 10	crates/coding-agent/src/application/operation/dispatch.rs
+production	900	925	Phase 10	crates/coding-agent/src/application/operation/dispatch.rs

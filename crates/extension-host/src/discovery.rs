@@ -43,6 +43,10 @@ pub struct ExtensionManifest {
     pub capabilities: Vec<CapabilityClaim>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<ExtensionConfig>,
+    /// hook 声明的 wire 形状（解析为 [`HookSpec`] 发生在 host 装配时，
+    /// 因为 matcher 编译失败等错误需要诊断上下文）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<serde_json::Value>,
 }
 
 impl ExtensionManifest {
@@ -303,6 +307,7 @@ mod tests {
                 },
                 ..Default::default()
             }),
+            hooks: None,
         };
         assert!(manifest.validate().is_ok());
         let value = serde_json::to_value(&manifest).unwrap();

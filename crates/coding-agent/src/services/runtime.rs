@@ -26,6 +26,7 @@ use ai_protocol::api::stream::{EventStream, StreamOptions};
 use tool_runtime::api::{ToolRegistry, ToolRuntime};
 
 use crate::app::bootstrap::{SessionMode, build_agent_config_with_auth_diagnostics};
+use crate::platform::time::Clock;
 
 use crate::application::capability::OperationCapabilitySnapshot;
 use crate::kernel::capability::ModelCapability;
@@ -325,24 +326,162 @@ impl RuntimeService {
             let turn_id = authorization.turn_id;
             let capability_snapshot = authorization.capability_snapshot;
             let event_writer = authorization.event_writer;
-            config.hooks.before_tool_call = Some(Arc::new(move |context| {
-                let service = service.clone();
-                let turn_id = turn_id.clone();
-                let capability_snapshot = capability_snapshot.clone();
-                let inventory = authorization_inventory.clone();
-                let event_writer = event_writer.clone();
-                Box::pin(async move {
-                    service
-                        .authorize_with_event_writer(
-                            context,
-                            turn_id,
-                            capability_snapshot,
-                            inventory,
-                            event_writer,
-                        )
-                        .await
-                })
-            }));
+            let extension_events = authorization.extension_events;
+            let (extension_session_id, extension_workspace_root) = authorization.extension_identity;
+            if let Some(extension_events) = extension_events {
+                let service_for_before = service.clone();
+                let turn_id_for_before = turn_id.clone();
+                let capability_for_before = capability_snapshot.clone();
+                let writer_for_before = event_writer.clone();
+                let events_for_before = extension_events.clone();
+                let session_for_before = extension_session_id.clone();
+                let workspace_for_before = extension_workspace_root.clone();
+                config.hooks.before_tool_call = Some(Arc::new(move |context| {
+                    let service = service_for_before.clone();
+                    let turn_id = turn_id_for_before.clone();
+                    let capability_snapshot = capability_for_before.clone();
+                    let inventory = authorization_inventory.clone();
+                    let event_writer = writer_for_before.clone();
+                    let extension_events = events_for_before.clone();
+                    let extension_session_id = session_for_before.clone();
+                    let extension_workspace_root = workspace_for_before.clone();
+                    Box::pin(async move {
+                        // user hooks Tool gate：deny / sandbox 拒绝 → 阻塞
+                        // 工具调用（block 语义直接生效）；allow 与失败
+                        // （fail-open）→ 继续走产品 authorization。
+                        let sink = &extension_events;
+                        let gate = sink.hook_gate();
+                        if let Some(event) = pre_tool_event(
+                            &context,
+                            &extension_session_id,
+                            &extension_workspace_root,
+                        ) {
+                            if let Some(gate) = gate {
+                                match gate.evaluate_tool(&event).await {
+                                    extension_host::api::ToolGateDecision::Deny { reason }
+                                    | extension_host::api::ToolGateDecision::ClosedByEnvironment {
+                                        reason,
+                                    } => {
+                                        return Ok(Some(
+                                            agent_core::api::agent::BeforeToolCallResult {
+                                                block: true,
+                                                reason: Some(reason),
+                                            },
+                                        ));
+                                    }
+                                    extension_host::api::ToolGateDecision::Allow => {}
+                                }
+                            }
+                            let extension_host::api::ExtensionEventPayload::PreToolUse {
+                                tool_name,
+                                tool_input,
+                                tool_input_truncated,
+                                path,
+                            } = event.payload
+                            else {
+                                unreachable!("pre_tool_event always builds PreToolUse");
+                            };
+                            sink.submit(
+                                extension_host::api::ExtensionEventKind::PreToolUse,
+                                &event.session_id,
+                                &event.workspace_root,
+                                extension_host::api::ExtensionEventPayload::PreToolUse {
+                                    tool_name,
+                                    tool_input,
+                                    tool_input_truncated,
+                                    path,
+                                },
+                            );
+                        }
+                        service
+                            .authorize_with_event_writer(
+                                context,
+                                turn_id,
+                                capability_snapshot,
+                                inventory,
+                                event_writer,
+                            )
+                            .await
+                    })
+                }));
+                // user hooks 的 after_tool_call：PostToolUse 事件（Observe gate）。
+                let events_for_after = extension_events.clone();
+                let session_for_after = extension_session_id.clone();
+                let workspace_for_after = extension_workspace_root.clone();
+                config.hooks.after_tool_call = Some(Arc::new(move |context| {
+                    let extension_events = events_for_after.clone();
+                    let extension_session_id = session_for_after.clone();
+                    let extension_workspace_root = workspace_for_after.clone();
+                    Box::pin(async move {
+                        let event = post_tool_event(
+                            &context,
+                            &extension_session_id,
+                            &extension_workspace_root,
+                        );
+                        extension_events.submit(
+                            extension_host::api::ExtensionEventKind::PostToolUse,
+                            &event.session_id,
+                            &event.workspace_root,
+                            event.payload,
+                        );
+                        Ok(None)
+                    })
+                }));
+                // user hooks Stop gate：每个 turn 自然结束时评估。block →
+                // 继续（false）；force_stop / 无信号 / 失败（fail-open）→
+                // 正常停止（true）。
+                let events_for_stop = extension_events.clone();
+                let session_for_stop = extension_session_id.clone();
+                let workspace_for_stop = extension_workspace_root.clone();
+                config.hooks.should_stop_after_turn = Some(Arc::new(move |context| {
+                    let extension_events = events_for_stop.clone();
+                    let extension_session_id = session_for_stop.clone();
+                    let extension_workspace_root = workspace_for_stop.clone();
+                    Box::pin(async move {
+                        let gate = extension_events.hook_gate();
+                        let event = extension_host::api::ExtensionEvent::new(
+                            extension_host::api::ExtensionEventKind::Stop,
+                            &extension_session_id,
+                            &extension_workspace_root,
+                            crate::platform::time::SystemClock.now_rfc3339(),
+                            extension_host::api::ExtensionEventPayload::Stop {
+                                reason: format!("{:?}", context.assistant_message.stop_reason),
+                                last_assistant_message: None,
+                            },
+                        );
+                        extension_events.submit(
+                            extension_host::api::ExtensionEventKind::Stop,
+                            &event.session_id,
+                            &event.workspace_root,
+                            event.payload.clone(),
+                        );
+                        let Some(gate) = gate else {
+                            return Ok(true);
+                        };
+                        let decision = gate.evaluate_stop(&event).await;
+                        Ok(!decision.wants_continuation())
+                    })
+                }));
+            } else {
+                config.hooks.before_tool_call = Some(Arc::new(move |context| {
+                    let service = service.clone();
+                    let turn_id = turn_id.clone();
+                    let capability_snapshot = capability_snapshot.clone();
+                    let inventory = authorization_inventory.clone();
+                    let event_writer = event_writer.clone();
+                    Box::pin(async move {
+                        service
+                            .authorize_with_event_writer(
+                                context,
+                                turn_id,
+                                capability_snapshot,
+                                inventory,
+                                event_writer,
+                            )
+                            .await
+                    })
+                }));
+            }
         }
 
         let agent = Agent::new(config);
@@ -621,4 +760,74 @@ fn flush_replay_hydration_group(
     for message in pending_tool_results.drain(..) {
         agent.add_message(message);
     }
+}
+
+/// 从 `before_tool_call` 上下文构造 `pre_tool_use` 事件信封。
+///
+/// `path` 取 arguments 的 `path` 字段（matcher 的 path 条件数据源）；
+/// 工具名非法（不应发生）时返回 `None`，调用方跳过 hook 层直接走
+/// authorization（fail-open）。
+fn pre_tool_event(
+    context: &agent_core::api::agent::BeforeToolCallContext,
+    session_id: &str,
+    workspace_root: &str,
+) -> Option<extension_host::api::ExtensionEvent> {
+    let tool_name = tool_contract::api::definition::ToolId::new(&context.tool_name).ok()?;
+    let path = context
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    Some(extension_host::api::ExtensionEvent::new(
+        extension_host::api::ExtensionEventKind::PreToolUse,
+        session_id,
+        workspace_root,
+        crate::platform::time::SystemClock.now_rfc3339(),
+        extension_host::api::ExtensionEventPayload::PreToolUse {
+            tool_name,
+            tool_input: context.arguments.clone(),
+            tool_input_truncated: false,
+            path,
+        },
+    ))
+}
+
+/// 从 `after_tool_call` 上下文构造 `post_tool_use` 事件信封。
+///
+/// 工具结果按摘要 JSON 承载（`isError` / `terminate` / `details`），不把
+/// 完整 ContentBlock 转储进 hook 环境（事件不携带输出内容的骨架约定）。
+fn post_tool_event(
+    context: &agent_core::api::agent::AfterToolCallContext,
+    session_id: &str,
+    workspace_root: &str,
+) -> extension_host::api::ExtensionEvent {
+    let tool_name =
+        tool_contract::api::definition::ToolId::new(&context.tool_name).unwrap_or_else(|_| {
+            tool_contract::api::definition::ToolId::new("unknown").expect("static tool id")
+        });
+    let path = context
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let tool_result = serde_json::json!({
+        "isError": context.result.is_error,
+        "terminate": context.result.terminate,
+        "details": context.result.details,
+    });
+    extension_host::api::ExtensionEvent::new(
+        extension_host::api::ExtensionEventKind::PostToolUse,
+        session_id,
+        workspace_root,
+        crate::platform::time::SystemClock.now_rfc3339(),
+        extension_host::api::ExtensionEventPayload::PostToolUse {
+            tool_name,
+            tool_input: context.arguments.clone(),
+            tool_result,
+            tool_input_truncated: false,
+            tool_result_truncated: false,
+            duration_ms: None,
+            path,
+        },
+    )
 }

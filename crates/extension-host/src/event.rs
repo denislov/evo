@@ -43,10 +43,17 @@ pub enum ExtensionEventKind {
     SubagentStop,
     PreCompact,
     PostCompact,
+    MergeProposed,
+    MergeApplied,
     SessionEnd,
 }
 
 impl ExtensionEventKind {
+    /// 别名解析入口（与 `Deserialize` 共享单一来源）。
+    pub fn try_parse(spelling: &str) -> Option<Self> {
+        Self::from_key(spelling)
+    }
+
     /// 已知拼写到事件类型的映射（别名表，单一来源）。
     fn from_key(s: &str) -> Option<Self> {
         Some(match s {
@@ -66,6 +73,8 @@ impl ExtensionEventKind {
             "SubagentStop" | "subagent_stop" | "subagentStop" => Self::SubagentStop,
             "PreCompact" | "pre_compact" | "preCompact" => Self::PreCompact,
             "PostCompact" | "post_compact" | "postCompact" => Self::PostCompact,
+            "MergeProposed" | "merge_proposed" | "mergeProposed" => Self::MergeProposed,
+            "MergeApplied" | "merge_applied" | "mergeApplied" => Self::MergeApplied,
             "SessionEnd" | "session_end" | "sessionEnd" => Self::SessionEnd,
             _ => return None,
         })
@@ -83,6 +92,8 @@ impl ExtensionEventKind {
             Self::SubagentStop => "subagent_stop",
             Self::PreCompact => "pre_compact",
             Self::PostCompact => "post_compact",
+            Self::MergeProposed => "merge_proposed",
+            Self::MergeApplied => "merge_applied",
             Self::SessionEnd => "session_end",
         }
     }
@@ -104,7 +115,8 @@ impl<'de> Deserialize<'de> for ExtensionEventKind {
             serde::de::Error::custom(format!(
                 "unknown extension event '{s}'; expected one of: session_start, \
                  user_prompt_submit, pre_tool_use, post_tool_use, permission_denied, \
-                 stop, subagent_start, subagent_stop, pre_compact, post_compact, session_end"
+                 stop, subagent_start, subagent_stop, pre_compact, post_compact, \
+                 merge_proposed, merge_applied, session_end"
             ))
         })
     }
@@ -146,6 +158,10 @@ pub enum ExtensionEventPayload {
         tool_input: serde_json::Value,
         #[serde(rename = "toolInputTruncated", default)]
         tool_input_truncated: bool,
+        /// 工具操作的目标路径（matcher 的 path 条件数据源）；无明确路径
+        /// 时缺省。
+        #[serde(rename = "path", default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     PostToolUse {
         #[serde(rename = "toolName")]
@@ -164,11 +180,15 @@ pub enum ExtensionEventPayload {
             skip_serializing_if = "Option::is_none"
         )]
         duration_ms: Option<u64>,
+        #[serde(rename = "path", default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     PermissionDenied {
         #[serde(rename = "toolName")]
         tool_name: ToolId,
         reason: String,
+        #[serde(rename = "path", default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     Stop {
         reason: String,
@@ -205,6 +225,20 @@ pub enum ExtensionEventPayload {
         entries_removed: u32,
         /// compact 完成后 session 是否已恢复执行。
         resumed: bool,
+    },
+    /// 合并提案提交给工作区时触发（Observe gate）。
+    MergeProposed {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+        #[serde(rename = "childWorktree")]
+        child_worktree: String,
+    },
+    /// 合并已应用时触发（Observe gate）。
+    MergeApplied {
+        #[serde(rename = "proposalId")]
+        proposal_id: String,
+        #[serde(rename = "appliedEntries")]
+        applied_entries: u32,
     },
     SessionEnd {
         reason: String,
@@ -265,6 +299,31 @@ impl ExtensionEvent {
     }
 }
 
+/// 单个 `toolInput` / `toolResult` 序列化后的最大字节数（128 KB）。
+///
+/// hook 事件经 runner 的环境变量通道注入子进程，env 总量受
+/// `ARG_MAX` 约束；超限的 JSON 值被截断为字符串并标记，与
+/// xai-grok-hooks 的 `MAX_PAYLOAD_SIZE` 语义一致。
+pub const MAX_HOOK_PAYLOAD_BYTES: usize = 128 * 1024;
+
+/// 截断 JSON 值到 [`MAX_HOOK_PAYLOAD_BYTES`]，返回 `(值, 是否截断)`。
+///
+/// 截断在字符边界上进行（不劈开多字节码点），结果用字符串承载并追加
+/// ` [truncated]` 标记。
+pub fn truncate_json_payload(value: serde_json::Value) -> (serde_json::Value, bool) {
+    let serialized = serde_json::to_string(&value).unwrap_or_default();
+    if serialized.len() <= MAX_HOOK_PAYLOAD_BYTES {
+        return (value, false);
+    }
+    let mut end = MAX_HOOK_PAYLOAD_BYTES;
+    while !serialized.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = serialized[..end].to_string();
+    truncated.push_str(" [truncated]");
+    (serde_json::Value::String(truncated), true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +343,7 @@ mod tests {
                 tool_name: tool("read_file"),
                 tool_input: json!({"path": "a.txt"}),
                 tool_input_truncated: false,
+                path: None,
             },
         )
     }
@@ -331,6 +391,7 @@ mod tests {
                 tool_name: tool("read_file"),
                 tool_input: json!({"path": "/x"}),
                 tool_input_truncated: false,
+                path: Some("src/main.rs".into()),
             },
             ExtensionEventPayload::PostToolUse {
                 tool_name: tool("read_file"),
@@ -339,10 +400,12 @@ mod tests {
                 tool_input_truncated: false,
                 tool_result_truncated: true,
                 duration_ms: Some(12),
+                path: None,
             },
             ExtensionEventPayload::PermissionDenied {
                 tool_name: tool("bash"),
                 reason: "policy denies network".into(),
+                path: None,
             },
             ExtensionEventPayload::Stop {
                 reason: "end_turn".into(),
@@ -364,6 +427,14 @@ mod tests {
                 source: "manual".into(),
                 entries_removed: 7,
                 resumed: true,
+            },
+            ExtensionEventPayload::MergeProposed {
+                proposal_id: "p-1".into(),
+                child_worktree: "wt-1".into(),
+            },
+            ExtensionEventPayload::MergeApplied {
+                proposal_id: "p-1".into(),
+                applied_entries: 42,
             },
             ExtensionEventPayload::SessionEnd {
                 reason: "user_stop".into(),
@@ -427,6 +498,7 @@ mod tests {
                 tool_name: tool("read_file"),
                 tool_input: json!({}),
                 tool_input_truncated: false,
+                path: None,
             }
         );
     }
@@ -441,6 +513,8 @@ mod tests {
             ("beforeShellExecution", ExtensionEventKind::PreToolUse),
             ("stop", ExtensionEventKind::Stop),
             ("PostCompact", ExtensionEventKind::PostCompact),
+            ("merge_proposed", ExtensionEventKind::MergeProposed),
+            ("MergeApplied", ExtensionEventKind::MergeApplied),
         ] {
             let kind: ExtensionEventKind =
                 serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
@@ -554,6 +628,8 @@ mod tests {
             ExtensionEventKind::SubagentStop,
             ExtensionEventKind::PreCompact,
             ExtensionEventKind::PostCompact,
+            ExtensionEventKind::MergeProposed,
+            ExtensionEventKind::MergeApplied,
             ExtensionEventKind::SessionEnd,
         ] {
             assert_eq!(
@@ -561,6 +637,53 @@ mod tests {
                 serde_json::to_value(kind).unwrap().as_str().unwrap(),
                 "{kind:?} Display drifted from serialization"
             );
+        }
+    }
+
+    #[test]
+    fn truncate_json_payload_small_and_large() {
+        let small = json!({"key": "small"});
+        let (kept, truncated) = truncate_json_payload(small.clone());
+        assert!(!truncated);
+        assert_eq!(kept, small);
+
+        let large = serde_json::Value::String("x".repeat(MAX_HOOK_PAYLOAD_BYTES + 1000));
+        let (clipped, truncated) = truncate_json_payload(large);
+        assert!(truncated);
+        assert!(clipped.as_str().unwrap().ends_with(" [truncated]"));
+
+        let unicode = serde_json::Value::String("€".repeat(MAX_HOOK_PAYLOAD_BYTES));
+        let (clipped, truncated) = truncate_json_payload(unicode);
+        assert!(truncated);
+        assert!(clipped.as_str().unwrap().ends_with(" [truncated]"));
+    }
+
+    #[test]
+    fn merge_payloads_round_trip_with_camel_case_wire() {
+        for (payload, wire) in [
+            (
+                ExtensionEventPayload::MergeProposed {
+                    proposal_id: "p-1".into(),
+                    child_worktree: "wt-7".into(),
+                },
+                r#"{"kind":"merge_proposed","proposalId":"p-1","childWorktree":"wt-7"}"#,
+            ),
+            (
+                ExtensionEventPayload::MergeApplied {
+                    proposal_id: "p-1".into(),
+                    applied_entries: 3,
+                },
+                r#"{"kind":"merge_applied","proposalId":"p-1","appliedEntries":3}"#,
+            ),
+        ] {
+            let value = serde_json::to_value(&payload).unwrap();
+            assert_eq!(
+                value,
+                serde_json::from_str::<serde_json::Value>(wire).unwrap(),
+                "wire shape drifted"
+            );
+            let back: ExtensionEventPayload = serde_json::from_value(value).unwrap();
+            assert_eq!(back, payload);
         }
     }
 }

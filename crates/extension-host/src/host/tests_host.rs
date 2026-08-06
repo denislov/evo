@@ -43,6 +43,7 @@ fn event(kind: ExtensionEventKind, session: &str) -> ExtensionEvent {
             tool_name: ToolId::new("read_file").unwrap(),
             tool_input: json!({}),
             tool_input_truncated: false,
+            path: None,
         },
     )
 }
@@ -145,6 +146,7 @@ async fn start_submit_shutdown_join_happy_path() {
             tool_input_truncated: false,
             tool_result_truncated: false,
             duration_ms: None,
+            path: None,
         };
         handle.submit_event(ev).unwrap();
     }
@@ -329,12 +331,7 @@ async fn output_bytes_budget_is_checked() {
 async fn dispatch_panic_fails_closed_without_propagating() {
     // 直接驱动 dispatch_loop 的 panic 路径：task 内部 panic 被捕获，
     // join 正常返回，不向调用方传播 panic。
-    let shared = Arc::new(HostShared {
-        state: Mutex::new(HostState::Running),
-        shutdown_tx: Mutex::new(None),
-        collector: Mutex::new(DiagnosticsCollector::new(None, 16)),
-        budget: Mutex::new(BudgetTracker::new(ExtensionBudget::default())),
-    });
+    let shared = test_shared();
     let (tx, rx) = mpsc::channel(4);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     tx.try_send(event(ExtensionEventKind::PreToolUse, "s1"))
@@ -347,7 +344,11 @@ async fn dispatch_panic_fails_closed_without_propagating() {
         rx,
         shutdown_rx,
         shared.clone(),
-        |_shared, _ev| panic!("boom"),
+        Arc::new(|_shared, _ev| {
+            Box::pin(async {
+                panic!("boom");
+            })
+        }),
     ));
     let exit = task.await.unwrap();
     assert_eq!(exit.reason, ShutdownReason::Panic);
@@ -359,34 +360,38 @@ async fn dispatch_panic_fails_closed_without_propagating() {
 
 #[tokio::test]
 async fn panic_after_partial_handling_reports_count() {
-    let shared = Arc::new(HostShared {
-        state: Mutex::new(HostState::Running),
-        shutdown_tx: Mutex::new(None),
-        collector: Mutex::new(DiagnosticsCollector::new(None, 16)),
-        budget: Mutex::new(BudgetTracker::new(ExtensionBudget::default())),
-    });
+    let shared = test_shared();
     let (tx, rx) = mpsc::channel(8);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mut count = 0;
+    let count = Arc::new(std::sync::Mutex::new(0u32));
     tx.try_send(event(ExtensionEventKind::PreToolUse, "s1"))
         .unwrap();
     tx.try_send(event(ExtensionEventKind::PreToolUse, "s1"))
         .unwrap();
     drop(tx);
+    let counter = count.clone();
     let task = tokio::spawn(dispatch_loop(
         rx,
         shutdown_rx,
         shared.clone(),
-        move |_s, _e| {
-            count += 1;
-            if count == 2 {
-                panic!("boom on second");
-            }
-        },
+        Arc::new(move |_s, _e| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                let mut count = counter.lock().unwrap();
+                *count += 1;
+                if *count == 2 {
+                    panic!("boom on second");
+                }
+            })
+        }),
     ));
     let exit = task.await.unwrap();
     assert!(exit.panicked);
     assert_eq!(exit.handled_events, 1);
+}
+
+fn test_shared() -> Arc<HostShared> {
+    HostShared::test_harness()
 }
 
 #[tokio::test]
