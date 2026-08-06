@@ -34,6 +34,10 @@ pub enum AgentQueueError {
         queue: AgentInputQueue,
         max_bytes: usize,
     },
+    #[error("agent mailbox is full")]
+    MailboxFull,
+    #[error("agent actor is closed")]
+    ActorClosed,
 }
 
 // ── QueueMode ──────────────────────────────────────
