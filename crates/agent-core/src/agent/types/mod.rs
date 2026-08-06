@@ -13,8 +13,8 @@ pub use crate::resources::{
     SourcedPromptTemplate, SourcedResourceDiagnostic, SourcedSkill,
 };
 pub use config::{
-    AgentConfig, AgentConfigError, CompactionConfig, CompactionSettings, MAX_AGENT_TURNS,
-    MAX_COMPACTION_INSTRUCTION_BYTES, MAX_COMPACTION_TOKEN_BUDGET,
+    AgentConfig, AgentConfigError, CompactionConfig, CompactionSampler, CompactionSettings,
+    MAX_AGENT_TURNS, MAX_COMPACTION_INSTRUCTION_BYTES, MAX_COMPACTION_TOKEN_BUDGET,
 };
 pub use event::{AgentEvent, AgentStream, ProviderRequestSnapshot};
 pub use message::AgentMessage;

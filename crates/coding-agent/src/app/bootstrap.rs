@@ -224,6 +224,7 @@ pub(crate) fn build_agent_config_with_auth_diagnostics(
                 enabled: true,
                 reserve_tokens: settings.compaction.reserve_tokens,
                 keep_recent_tokens: settings.compaction.keep_recent_tokens,
+                ..CompactionSettings::default()
             },
             custom_instructions: None,
         });

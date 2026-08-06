@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use agent_core::api::agent::AgentMessage;
+use agent_core::api::agent::{AgentMessage, CompactionSettings};
 use agent_core::api::compaction::summarize_with_provider_streamer;
 use ai_protocol::api::conversation::{AssistantMessage, ContentBlock};
 use ai_protocol::api::stream::StreamOptions;
@@ -349,6 +349,8 @@ impl BranchSummaryContext {
                     runtime,
                     model_capability,
                 )?),
+                None,
+                CompactionSettings::default().summary_max_chars,
             )
             .await
             .map_err(|error| {

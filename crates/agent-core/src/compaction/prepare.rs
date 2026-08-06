@@ -1,3 +1,5 @@
+use ai_protocol::api::conversation::ContentBlock;
+
 use crate::agent::types::{AgentMessage, CompactionSettings};
 use crate::compaction::estimate::estimate_tokens;
 
@@ -26,7 +28,8 @@ pub fn prepare_compaction(
         return (vec![], vec![]);
     }
 
-    let estimated = estimate_tokens(messages);
+    let bytes_per_token = settings.token_estimation.bytes_per_token;
+    let estimated = estimate_tokens(messages, bytes_per_token);
     let total_context_window = settings
         .reserve_tokens
         .saturating_add(settings.keep_recent_tokens);
@@ -54,7 +57,7 @@ pub fn prepare_compaction(
             continue;
         }
 
-        let msg_tokens = estimate_tokens(std::slice::from_ref(msg));
+        let msg_tokens = estimate_tokens(std::slice::from_ref(msg), bytes_per_token);
         if keep_tokens.saturating_add(msg_tokens) > settings.keep_recent_tokens
             && !keep_recent.is_empty()
         {
@@ -73,7 +76,35 @@ pub fn prepare_compaction(
         keep_recent.extend(skipped_tool_results);
     }
 
-    let to_summarize: Vec<AgentMessage> = messages[..i].to_vec();
+    let mut to_summarize: Vec<AgentMessage> = messages[..i].to_vec();
+
+    // Move orphaned leading ToolResults from keep_recent to to_summarize.
+    // An orphaned ToolResult is one whose corresponding Assistant(tool_call)
+    // is not in keep_recent (it is in to_summarize). Keeping such a
+    // ToolResult without its Assistant would leave a dangling tool result in
+    // the active context and split a tool pair across the compaction cut.
+    while let Some(first) = keep_recent.first() {
+        if matches!(first, AgentMessage::ToolResult { .. }) {
+            let has_assistant_with_tool_call = keep_recent.iter().any(|m| {
+                matches!(
+                    m,
+                    AgentMessage::Assistant { message, .. }
+                    if message
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
+                )
+            });
+            if !has_assistant_with_tool_call {
+                let orphan = keep_recent.remove(0);
+                to_summarize.push(orphan);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
 
     (to_summarize, keep_recent)
 }
@@ -81,6 +112,7 @@ pub fn prepare_compaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ai_protocol::api::conversation::{AssistantMessage, ToolCallKind};
 
     fn user(message_id: &str, text: &str) -> AgentMessage {
         AgentMessage::UserText {
@@ -95,7 +127,7 @@ mod tests {
             tool_call_id: tool_call_id.into(),
             tool_name: "tool".into(),
             is_error: false,
-            content: vec![ai_protocol::api::conversation::ContentBlock::Text {
+            content: vec![ContentBlock::Text {
                 text: text.into(),
                 text_signature: None,
             }],
@@ -103,10 +135,25 @@ mod tests {
     }
 
     fn assistant(message_id: &str, text: &str) -> AgentMessage {
-        let mut message = ai_protocol::api::conversation::AssistantMessage::empty("api", "model");
-        message.content = vec![ai_protocol::api::conversation::ContentBlock::Text {
+        let mut message = AssistantMessage::empty("api", "model");
+        message.content = vec![ContentBlock::Text {
             text: text.into(),
             text_signature: None,
+        }];
+        AgentMessage::Assistant {
+            message_id: message_id.into(),
+            message,
+        }
+    }
+
+    fn assistant_with_tool_call(message_id: &str, call_id: &str, name: &str) -> AgentMessage {
+        let mut message = AssistantMessage::empty("api", "model");
+        message.content = vec![ContentBlock::ToolCall {
+            id: call_id.into(),
+            name: name.into(),
+            arguments: serde_json::Value::Object(serde_json::Map::new()),
+            kind: ToolCallKind::Function,
+            thought_signature: None,
         }];
         AgentMessage::Assistant {
             message_id: message_id.into(),
@@ -119,6 +166,7 @@ mod tests {
             enabled: true,
             reserve_tokens: 1024,
             keep_recent_tokens,
+            ..CompactionSettings::default()
         }
     }
 
@@ -126,8 +174,7 @@ mod tests {
     fn disabled_compaction_never_triggers() {
         let settings = CompactionSettings {
             enabled: false,
-            reserve_tokens: 1024,
-            keep_recent_tokens: 1024,
+            ..CompactionSettings::default()
         };
         assert!(!should_compact(100_000, 128_000, &settings));
     }
@@ -180,5 +227,79 @@ mod tests {
     fn empty_history_produces_nothing() {
         let (to_summarize, keep) = prepare_compaction(&[], &settings(100));
         assert!(to_summarize.is_empty() && keep.is_empty());
+    }
+
+    #[test]
+    fn compaction_split_does_not_break_middle_tool_pair() {
+        // [user(big), assistant(tool_call), tool_result, user(big), assistant(tool_call), tool_result]
+        // With a small keep budget the natural cut lands between the first
+        // tool_result and the second user message, which would orphan the
+        // second tool pair's leading assistant. The cut must move so neither
+        // pair is split.
+        let messages = vec![
+            user("u1", &"x".repeat(20_000)),
+            assistant_with_tool_call("a1", "c1", "tool"),
+            tool_result("c1", "first"),
+            user("u2", &"x".repeat(20_000)),
+            assistant_with_tool_call("a2", "c2", "tool"),
+            tool_result("c2", "second"),
+        ];
+        let (to_summarize, keep) = prepare_compaction(&messages, &settings(2000));
+
+        // Every ToolResult kept must have its Assistant(tool_call) kept too.
+        for msg in &keep {
+            if let AgentMessage::ToolResult { tool_call_id, .. } = msg {
+                let has_call = keep.iter().any(|m| match m {
+                    AgentMessage::Assistant { message, .. } => message.content.iter().any(
+                        |b| matches!(b, ContentBlock::ToolCall { id, .. } if id == tool_call_id),
+                    ),
+                    _ => false,
+                });
+                assert!(
+                    has_call,
+                    "kept ToolResult {tool_call_id} is missing its Assistant(tool_call)"
+                );
+            }
+        }
+        // And every ToolResult in to_summarize must have its Assistant there too.
+        for msg in &to_summarize {
+            if let AgentMessage::ToolResult { tool_call_id, .. } = msg {
+                let has_call = to_summarize.iter().any(|m| match m {
+                    AgentMessage::Assistant { message, .. } => message.content.iter().any(
+                        |b| matches!(b, ContentBlock::ToolCall { id, .. } if id == tool_call_id),
+                    ),
+                    _ => false,
+                });
+                assert!(
+                    has_call,
+                    "summarized ToolResult {tool_call_id} is missing its Assistant(tool_call)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_split_does_not_break_trailing_tool_pair() {
+        // Trailing tool results are kept with their assistant via the existing
+        // skip path; this confirms that path still holds with a mid-history cut.
+        let messages = vec![
+            user("u1", &"x".repeat(20_000)),
+            assistant_with_tool_call("a1", "c1", "tool"),
+            tool_result("c1", "first"),
+            user("u2", "small"),
+            assistant_with_tool_call("a2", "c2", "tool"),
+            tool_result("c2", "second"),
+        ];
+        let (to_summarize, keep) = prepare_compaction(&messages, &settings(2000));
+        assert!(!to_summarize.is_empty());
+        // The second tool pair must be fully kept.
+        assert!(keep.iter().any(|m| matches!(
+            m,
+            AgentMessage::Assistant { message, .. }
+            if message.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { id, .. } if id == "c2"))
+        )));
+        assert!(keep.iter().any(
+            |m| matches!(m, AgentMessage::ToolResult { tool_call_id, .. } if tool_call_id == "c2")
+        ));
     }
 }

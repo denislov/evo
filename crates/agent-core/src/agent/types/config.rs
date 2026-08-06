@@ -2,6 +2,7 @@ use ai_protocol::api::model::Model;
 use ai_protocol::api::stream::StreamOptions;
 use tool_contract::api::definition::ToolExecutionMode;
 
+use crate::compaction::estimate::TokenEstimationConfig;
 use crate::hooks::AgentHooks;
 
 use super::{AgentResources, ProviderStreamer, QueueMode, ThinkingLevel};
@@ -28,11 +29,35 @@ pub enum AgentConfigError {
     CompactionInstructions { bytes: usize },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Optional sampler override for compaction summarization.
+///
+/// When set, compaction uses `model` (instead of the agent's primary model)
+/// and `max_tokens` (instead of the hardcoded 4096) for the summarization
+/// request. This lets compaction run on a cheaper/faster model than the
+/// primary agent loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionSampler {
+    pub model: Option<Model>,
+    pub max_tokens: Option<u32>,
+}
+
+impl Default for CompactionSampler {
+    fn default() -> Self {
+        Self {
+            model: None,
+            max_tokens: Some(4096),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompactionSettings {
     pub enabled: bool,
     pub reserve_tokens: u32,
     pub keep_recent_tokens: u32,
+    pub token_estimation: TokenEstimationConfig,
+    pub sampler: CompactionSampler,
+    pub summary_max_chars: usize,
 }
 
 impl Default for CompactionSettings {
@@ -41,12 +66,15 @@ impl Default for CompactionSettings {
             enabled: true,
             reserve_tokens: 16_384,
             keep_recent_tokens: 20_000,
+            token_estimation: TokenEstimationConfig::default(),
+            sampler: CompactionSampler::default(),
+            summary_max_chars: 8192,
         }
     }
 }
 
 impl CompactionSettings {
-    pub fn validate(self) -> Result<(), AgentConfigError> {
+    pub fn validate(&self) -> Result<(), AgentConfigError> {
         let total = u64::from(self.reserve_tokens) + u64::from(self.keep_recent_tokens);
         if total > u64::from(MAX_COMPACTION_TOKEN_BUDGET) {
             return Err(AgentConfigError::CompactionTokenBudget { total });

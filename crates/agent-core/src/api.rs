@@ -3,10 +3,10 @@
 pub mod agent {
     pub use crate::agent::types::{
         AgentConfig, AgentConfigError, AgentEvent, AgentInputQueue, AgentMessage, AgentQueueError,
-        AgentResources, AgentStream, CompactionConfig, CompactionSettings, MAX_AGENT_QUEUE_BYTES,
-        MAX_AGENT_QUEUE_ITEMS, MAX_AGENT_TURNS, MAX_COMPACTION_INSTRUCTION_BYTES,
-        MAX_COMPACTION_TOKEN_BUDGET, ProviderRequestSnapshot, ProviderStreamer, QueueMode,
-        ThinkingLevel,
+        AgentResources, AgentStream, CompactionConfig, CompactionSampler, CompactionSettings,
+        MAX_AGENT_QUEUE_BYTES, MAX_AGENT_QUEUE_ITEMS, MAX_AGENT_TURNS,
+        MAX_COMPACTION_INSTRUCTION_BYTES, MAX_COMPACTION_TOKEN_BUDGET, ProviderRequestSnapshot,
+        ProviderStreamer, QueueMode, ThinkingLevel,
     };
     pub use crate::agent::{Agent, AgentAdmissionError};
     pub use crate::hooks::{
@@ -68,7 +68,8 @@ pub mod resources {
 pub mod compaction {
     pub use crate::compaction::error::CompactionError;
     pub use crate::compaction::estimate::{
-        ContextUsageEstimate, calculate_context_tokens, estimate_context_tokens, estimate_tokens,
+        ContextUsageEstimate, TokenEstimationConfig, calculate_context_tokens,
+        estimate_context_tokens, estimate_tokens,
     };
     pub use crate::compaction::prepare::{prepare_compaction, should_compact};
     pub use crate::compaction::summarize::{

@@ -1,5 +1,7 @@
-use agent_core::api::agent::AgentMessage;
-use agent_core::api::compaction::{estimate_tokens, summarize_with_provider_streamer};
+use agent_core::api::agent::{AgentMessage, CompactionSettings};
+use agent_core::api::compaction::{
+    TokenEstimationConfig, estimate_tokens, summarize_with_provider_streamer,
+};
 use ai_protocol::api::conversation::{AssistantMessage, ContentBlock};
 use ai_protocol::api::stream::StreamOptions;
 use tokio_util::sync::CancellationToken;
@@ -267,7 +269,8 @@ impl ManualCompactionContext {
                 message: "Nothing to compact (no compactable history)".into(),
             });
         }
-        let tokens_before = estimate_tokens(&messages);
+        let tokens_before =
+            estimate_tokens(&messages, TokenEstimationConfig::default().bytes_per_token);
         let first_kept_message_id =
             self.first_kept_message_id
                 .clone()
@@ -302,6 +305,8 @@ impl ManualCompactionContext {
                 self.options.runtime(),
                 model_capability,
             )?),
+            None,
+            CompactionSettings::default().summary_max_chars,
         )
         .await
         .map_err(|error| {

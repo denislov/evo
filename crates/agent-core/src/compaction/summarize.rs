@@ -1,5 +1,5 @@
 use crate::agent::provider::stream_model_with_provider_streamer;
-use crate::agent::types::{AgentMessage, ProviderStreamer};
+use crate::agent::types::{AgentMessage, CompactionSampler, CompactionSettings, ProviderStreamer};
 use crate::compaction::error::CompactionError;
 use ai_protocol::api::conversation::{ContentBlock, Context, Message};
 use ai_protocol::api::model::Model;
@@ -317,10 +317,13 @@ pub async fn summarize(
         stream_options,
         cancel,
         None,
+        None,
+        CompactionSettings::default().summary_max_chars,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn summarize_with_provider_streamer(
     model: &Model,
     messages: &[AgentMessage],
@@ -328,6 +331,8 @@ pub async fn summarize_with_provider_streamer(
     stream_options: Option<StreamOptions>,
     cancel: Option<CancellationToken>,
     provider_streamer: Option<ProviderStreamer>,
+    sampler: Option<&CompactionSampler>,
+    summary_max_chars: usize,
 ) -> Result<String, CompactionError> {
     let system_prompt = custom_instructions.unwrap_or(
         "You are helping compact conversation history. Summarize the key points, decisions, and actions.",
@@ -335,11 +340,15 @@ pub async fn summarize_with_provider_streamer(
 
     let ctx = build_summarization_context(messages, system_prompt)?;
 
+    let effective_model = sampler.and_then(|s| s.model.as_ref()).unwrap_or(model);
+    let max_tokens = sampler.and_then(|s| s.max_tokens).unwrap_or(4096);
+
     let mut opts = stream_options.unwrap_or_default();
     opts.cancel = cancel;
-    opts.max_tokens = Some(4096);
+    opts.max_tokens = Some(max_tokens);
 
-    let stream = stream_model_with_provider_streamer(model, ctx, Some(opts), provider_streamer);
+    let stream =
+        stream_model_with_provider_streamer(effective_model, ctx, Some(opts), provider_streamer);
     let message = complete(stream)
         .await
         .map_err(|e| CompactionError::SummarizationFailed(format!("complete failed: {}", e)))?;
@@ -359,5 +368,18 @@ pub async fn summarize_with_provider_streamer(
         return Err(CompactionError::SummarizationFailed("empty summary".into()));
     }
 
-    Ok(summary)
+    Ok(truncate_to_char_boundary(&summary, summary_max_chars))
+}
+
+/// Truncate `text` to at most `max_chars` bytes on a UTF-8 boundary, keeping
+/// the beginning. Returns the original string unchanged when it already fits.
+fn truncate_to_char_boundary(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    let mut end = max_chars;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }

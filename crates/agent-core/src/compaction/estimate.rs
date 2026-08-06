@@ -1,16 +1,39 @@
 use crate::agent::types::AgentMessage;
 use ai_protocol::api::conversation::{ContentBlock, StopReason, Usage};
 
-pub fn estimate_tokens(messages: &[AgentMessage]) -> u32 {
+/// Per-model token estimation tuning.
+///
+/// Compaction estimates tokens from byte length using a fixed
+/// `bytes_per_token` ratio. Most providers target ~4 bytes/token for
+/// English-heavy text; models with different tokenizers can override this so
+/// compaction triggers at the right context pressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenEstimationConfig {
+    pub bytes_per_token: u32,
+}
+
+impl Default for TokenEstimationConfig {
+    fn default() -> Self {
+        Self { bytes_per_token: 4 }
+    }
+}
+
+pub fn estimate_tokens(messages: &[AgentMessage], bytes_per_token: u32) -> u32 {
     let mut total: u32 = 0;
 
     for msg in messages {
         total = total.saturating_add(match msg {
-            AgentMessage::UserText { text, .. } => estimate_text_tokens(text),
-            AgentMessage::Assistant { message, .. } => estimate_content_tokens(&message.content),
-            AgentMessage::ToolResult { content, .. } => estimate_content_tokens(content),
-            AgentMessage::SystemPrompt { text, .. } => estimate_text_tokens(text),
-            AgentMessage::CompactionSummary { summary, .. } => estimate_text_tokens(summary),
+            AgentMessage::UserText { text, .. } => estimate_text_tokens(text, bytes_per_token),
+            AgentMessage::Assistant { message, .. } => {
+                estimate_content_tokens(&message.content, bytes_per_token)
+            }
+            AgentMessage::ToolResult { content, .. } => {
+                estimate_content_tokens(content, bytes_per_token)
+            }
+            AgentMessage::SystemPrompt { text, .. } => estimate_text_tokens(text, bytes_per_token),
+            AgentMessage::CompactionSummary { summary, .. } => {
+                estimate_text_tokens(summary, bytes_per_token)
+            }
             AgentMessage::BashExecution {
                 command,
                 output,
@@ -18,41 +41,50 @@ pub fn estimate_tokens(messages: &[AgentMessage]) -> u32 {
                 ..
             } => {
                 if !exclude_from_context {
-                    estimate_text_tokens(command).saturating_add(estimate_text_tokens(output))
+                    estimate_text_tokens(command, bytes_per_token)
+                        .saturating_add(estimate_text_tokens(output, bytes_per_token))
                 } else {
                     0
                 }
             }
-            AgentMessage::Custom { content, .. } => estimate_content_tokens(content),
-            AgentMessage::BranchSummary { summary, .. } => estimate_text_tokens(summary),
+            AgentMessage::Custom { content, .. } => {
+                estimate_content_tokens(content, bytes_per_token)
+            }
+            AgentMessage::BranchSummary { summary, .. } => {
+                estimate_text_tokens(summary, bytes_per_token)
+            }
         });
     }
 
     total
 }
 
-fn estimate_text_tokens(text: &str) -> u32 {
-    u32::try_from(text.len().div_ceil(4)).unwrap_or(u32::MAX)
+fn estimate_text_tokens(text: &str, bytes_per_token: u32) -> u32 {
+    let bpt = bytes_per_token.max(1) as usize;
+    u32::try_from(text.len().div_ceil(bpt)).unwrap_or(u32::MAX)
 }
 
-fn estimate_content_tokens(content: &[ContentBlock]) -> u32 {
+fn estimate_content_tokens(content: &[ContentBlock], bytes_per_token: u32) -> u32 {
     content
         .iter()
-        .map(estimate_block_tokens)
+        .map(|b| estimate_block_tokens(b, bytes_per_token))
         .fold(0u32, u32::saturating_add)
 }
 
-fn estimate_block_tokens(block: &ContentBlock) -> u32 {
+fn estimate_block_tokens(block: &ContentBlock, bytes_per_token: u32) -> u32 {
     match block {
-        ContentBlock::Text { text, .. } => estimate_text_tokens(text),
+        ContentBlock::Text { text, .. } => estimate_text_tokens(text, bytes_per_token),
         ContentBlock::ToolCall {
             name, arguments, ..
-        } => {
-            estimate_text_tokens(name).saturating_add(estimate_text_tokens(&arguments.to_string()))
+        } => estimate_text_tokens(name, bytes_per_token).saturating_add(estimate_text_tokens(
+            &arguments.to_string(),
+            bytes_per_token,
+        )),
+        ContentBlock::Thinking { thinking, .. } => estimate_text_tokens(thinking, bytes_per_token),
+        ContentBlock::Image { .. } => 4800u32.div_ceil(bytes_per_token.max(1)),
+        ContentBlock::ProviderItem { item, .. } => {
+            estimate_text_tokens(&item.to_string(), bytes_per_token)
         }
-        ContentBlock::Thinking { thinking, .. } => estimate_text_tokens(thinking),
-        ContentBlock::Image { .. } => 4800u32.div_ceil(4),
-        ContentBlock::ProviderItem { item, .. } => estimate_text_tokens(&item.to_string()),
     }
 }
 
@@ -120,9 +152,12 @@ fn last_valid_assistant_usage(messages: &[AgentMessage]) -> Option<(Usage, usize
 /// [`estimate_tokens`] is deliberately heuristic and does not read assistant
 /// usage; this function is the only compaction estimator that should use
 /// provider usage, and only for the newest valid anchor.
-pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimate {
+pub fn estimate_context_tokens(
+    messages: &[AgentMessage],
+    bytes_per_token: u32,
+) -> ContextUsageEstimate {
     let Some((usage, index)) = last_valid_assistant_usage(messages) else {
-        let trailing = estimate_tokens(messages);
+        let trailing = estimate_tokens(messages, bytes_per_token);
         return ContextUsageEstimate {
             tokens: trailing,
             usage_tokens: 0,
@@ -133,7 +168,7 @@ pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimat
 
     let usage_tokens = calculate_context_tokens(&usage);
     let trailing_tokens = if index + 1 < messages.len() {
-        estimate_tokens(&messages[index + 1..])
+        estimate_tokens(&messages[index + 1..], bytes_per_token)
     } else {
         0
     };
@@ -182,8 +217,16 @@ mod tests {
 
     #[test]
     fn token_estimate_is_roughly_bytes_over_four() {
-        assert_eq!(estimate_text_tokens("abcdefgh"), 2);
-        assert_eq!(estimate_text_tokens("abcde"), 2);
+        assert_eq!(estimate_text_tokens("abcdefgh", 4), 2);
+        assert_eq!(estimate_text_tokens("abcde", 4), 2);
+    }
+
+    #[test]
+    fn estimate_tokens_with_custom_bytes_per_token() {
+        let messages = vec![user("abcdefgh")];
+        assert_eq!(estimate_tokens(&messages, 4), 2);
+        assert_eq!(estimate_tokens(&messages, 2), 4);
+        assert_eq!(estimate_tokens(&messages, 8), 1);
     }
 
     #[test]
@@ -192,7 +235,7 @@ mod tests {
             assistant_with_usage(usage(100, 50, 150), StopReason::Stop),
             user("trailing text"),
         ];
-        let estimate = estimate_context_tokens(&messages);
+        let estimate = estimate_context_tokens(&messages, 4);
         assert_eq!(estimate.usage_tokens, 150);
         assert!(estimate.trailing_tokens > 0);
         assert_eq!(
@@ -209,7 +252,7 @@ mod tests {
             assistant_with_usage(usage(10, 20, 30), StopReason::Aborted),
             user("text"),
         ];
-        let estimate = estimate_context_tokens(&messages);
+        let estimate = estimate_context_tokens(&messages, 4);
         assert_eq!(estimate.usage_tokens, 0);
         assert_eq!(estimate.last_usage_index, None);
         assert_eq!(estimate.tokens, estimate.trailing_tokens);
@@ -222,7 +265,7 @@ mod tests {
             user("x"),
             assistant_with_usage(usage(200, 100, 300), StopReason::Stop),
         ];
-        let estimate = estimate_context_tokens(&messages);
+        let estimate = estimate_context_tokens(&messages, 4);
         assert_eq!(estimate.usage_tokens, 300);
         assert_eq!(estimate.last_usage_index, Some(2));
         assert_eq!(estimate.trailing_tokens, 0);

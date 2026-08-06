@@ -56,14 +56,13 @@ impl ToolExecutionLimit {
 #[derive(Debug, Clone)]
 pub(crate) enum AgentTurnError {
     Invariant(String),
-    Compaction(String),
     ToolLimit(ToolExecutionLimit),
 }
 
 impl std::fmt::Display for AgentTurnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Invariant(msg) | Self::Compaction(msg) => write!(f, "{msg}"),
+            Self::Invariant(msg) => write!(f, "{msg}"),
             Self::ToolLimit(limit) => write!(f, "{}", limit.message()),
         }
     }
@@ -266,7 +265,8 @@ pub(crate) async fn maybe_compact_runtime_context(
         return Ok(());
     };
 
-    let usage_estimate = estimate_context_tokens(&ctx.messages);
+    let bytes_per_token = config.settings.token_estimation.bytes_per_token;
+    let usage_estimate = estimate_context_tokens(&ctx.messages, bytes_per_token);
     let tokens_before = usage_estimate.tokens;
     if !should_compact(
         tokens_before,
@@ -285,16 +285,29 @@ pub(crate) async fn maybe_compact_runtime_context(
         return Ok(());
     }
 
-    let summary = summarize_with_provider_streamer(
+    let summary = match summarize_with_provider_streamer(
         &ctx.config.model,
         &to_summarize,
         config.custom_instructions.as_deref(),
         ctx.config.stream_options.clone(),
         Some(ctx.cancel_token.clone()),
         ctx.config.provider_streamer.clone(),
+        Some(&config.settings.sampler),
+        config.settings.summary_max_chars,
     )
     .await
-    .map_err(|err| AgentTurnError::Compaction(err.to_string()))?;
+    {
+        Ok(summary) => summary,
+        Err(error) => {
+            // Fitted fallback: summarization failed, so truncate without a
+            // summary rather than aborting the turn. The keep_recent window
+            // is still applied below; only the summary is synthetic.
+            format!(
+                "Compaction fallback: summarization failed ({}). History truncated without summary.",
+                error
+            )
+        }
+    };
 
     let first_kept_message_id = keep.first().map(message_id).unwrap_or("none").to_string();
     for message in &mut keep {
