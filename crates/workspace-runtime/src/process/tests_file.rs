@@ -91,6 +91,7 @@ mod tests {
             )])),
             timeout,
             output_budget: OutputBudget::new(50 * 1024, 2_000),
+            sandbox: None,
         }
     }
 

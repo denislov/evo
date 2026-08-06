@@ -22,6 +22,7 @@ mod tests {
             )])),
             timeout: Duration::from_secs(300),
             output_budget: OutputBudget::new(max_bytes, 2_000),
+            sandbox: None,
         }
     }
 
@@ -298,6 +299,7 @@ mod tests {
             env: EnvPolicy::AllowList(HashMap::new()),
             timeout: Duration::from_secs(5),
             output_budget: OutputBudget::new(64 * 1024, 2_000),
+            sandbox: None,
         };
         let error = registry
             .spawn(spec, TaskOwner::Operation("op-spawn-fail".into()), None)

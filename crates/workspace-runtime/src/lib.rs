@@ -13,6 +13,7 @@ mod resource;
 mod fs;
 mod process;
 mod rewind;
+mod sandbox;
 mod worktree;
 
 /// Stable workspace ownership, lifecycle, and capability facade.

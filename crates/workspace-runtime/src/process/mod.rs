@@ -85,6 +85,10 @@ pub struct ProcessSpec {
     pub env: EnvPolicy,
     pub timeout: Duration,
     pub output_budget: OutputBudget,
+    /// Optional sandbox applied at the spawn boundary. `None` keeps the
+    /// legacy unrestricted behavior. When set, unsupported platforms fail the
+    /// spawn explicitly instead of silently running unrestricted.
+    pub sandbox: Option<crate::sandbox::SandboxProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,7 +331,14 @@ pub(crate) struct SpawnedProcess {
 impl SpawnedProcess {
     async fn spawn(spec: &ProcessSpec) -> Result<Self, String> {
         let mut command = command_from_spec(spec);
-        configure_process(&mut command, spec);
+        let prepared_sandbox = match spec.sandbox.as_ref().map(crate::sandbox::prepare_sandbox) {
+            Some(Ok(prepared)) => prepared,
+            Some(Err(error)) => {
+                return Err(format!("sandbox setup failed: {error}"));
+            }
+            None => None,
+        };
+        configure_process(&mut command, spec, prepared_sandbox);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -445,21 +456,39 @@ fn command_from_spec(spec: &ProcessSpec) -> tokio::process::Command {
     }
 }
 
-fn configure_process(command: &mut tokio::process::Command, spec: &ProcessSpec) {
+fn configure_process(
+    command: &mut tokio::process::Command,
+    spec: &ProcessSpec,
+    prepared_sandbox: Option<crate::sandbox::PreparedSandbox>,
+) {
     command
         .current_dir(&spec.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    match &spec.env {
-        EnvPolicy::Inherit => {}
-        EnvPolicy::AllowList(env) => {
-            command.env_clear().envs(env);
-        }
+    let profile_env = spec.sandbox.as_ref().map(|profile| &profile.env);
+    if let Some(env) = crate::sandbox::resolve_env(&spec.env, profile_env) {
+        command.env_clear().envs(env);
     }
     #[cfg(unix)]
-    command.process_group(0);
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        if let Some(prepared_sandbox) = prepared_sandbox {
+            // SAFETY: the closure only performs async-signal-safe raw syscalls
+            // (prctl + landlock_restrict_self) on an owned descriptor and
+            // never allocates or panics; the child either execs under the
+            // sandbox or fails the spawn, both explicit outcomes.
+            unsafe {
+                command
+                    .as_std_mut()
+                    .pre_exec(move || prepared_sandbox.restrict_self());
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = prepared_sandbox;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

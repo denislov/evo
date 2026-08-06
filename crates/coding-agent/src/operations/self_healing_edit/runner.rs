@@ -721,6 +721,9 @@ impl SelfHealingEditCheckRunner for RealSelfHealingEditCheckRunner {
                     env: EnvPolicy::AllowList(safe_process_env()),
                     timeout: self.timeout,
                     output_budget: OutputBudget::new(DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES),
+                    // Internal validation command, not a granted shell; the
+                    // product sandbox applies to the bash tool only.
+                    sandbox: None,
                 },
                 cancellation,
                 None,

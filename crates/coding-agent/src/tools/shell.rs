@@ -16,7 +16,7 @@ use crate::platform::io::output::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
 use crate::services::background::BackgroundTaskService;
 use workspace_runtime::api::{
     EnvPolicy, OutputBudget, ProcessOutcome, ProcessOutput, ProcessSpec, ProcessUpdateCallback,
-    ProgramKind, TaskOwner, WorkspaceAccessHandle, path_exists, resolve_shell_path,
+    ProgramKind, SandboxProfile, TaskOwner, WorkspaceAccessHandle, path_exists, resolve_shell_path,
     run as run_process,
 };
 
@@ -214,6 +214,11 @@ async fn execute_bash(
         env: EnvPolicy::AllowList(safe_process_env()),
         timeout: timeout.unwrap_or_else(|| Duration::from_secs_f64(MAX_TIMEOUT_SECS)),
         output_budget: OutputBudget::new(DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES),
+        // The granted shell runs under the product default OS policy: reads
+        // the workspace and system directories, writes only the workspace,
+        // `/tmp` and `/dev`. Platforms without an enforcement mechanism fail
+        // the spawn explicitly (fail-closed) instead of running unrestricted.
+        sandbox: Some(SandboxProfile::product_default(shell.cwd())),
     };
     if background {
         return execute_background(background_tasks, context, spec, task_budget).await;
@@ -409,7 +414,7 @@ mod tests {
     use crate::mutex::MutexExt;
     use crate::services::background::{BackgroundTaskService, CodingAgentBackgroundTaskState};
     use crate::services::event::EventService;
-    use workspace_runtime::api::{TaskId, WorkspaceAccessHandle};
+    use workspace_runtime::api::{SandboxCapability, TaskId, WorkspaceAccessHandle};
 
     fn runtime(cwd: &Path) -> ToolRuntime {
         runtime_with_background(cwd, None)
@@ -716,5 +721,62 @@ mod tests {
         .expect("task completes");
         assert_eq!(report.output, "ok");
         service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bash_runs_inside_the_product_default_sandbox() {
+        let Some(capability) = std::panic::catch_unwind(SandboxCapability::current).ok() else {
+            eprintln!("SKIP: sandbox capability probe failed");
+            return;
+        };
+        if !capability.fs_supported() {
+            eprintln!(
+                "SKIP: platform cannot enforce sandbox fs policy ({}); production bash is fail-closed",
+                capability.fs.detail
+            );
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = runtime(workspace.path());
+
+        // Inside the workspace: write and read both succeed.
+        let inside = runtime
+            .execute(
+                context(CancellationToken::new()),
+                serde_json::json!({"command": "printf sandboxed > inside.txt && cat inside.txt"}),
+            )
+            .await
+            .unwrap();
+        assert!(terminal_text(inside).contains("sandboxed"));
+        assert!(
+            workspace.path().join("inside.txt").exists(),
+            "workspace write must land"
+        );
+
+        // Outside the workspace ($HOME is readable but not writable): the
+        // OS policy denies the write even though the shell was granted.
+        // Denial text varies by locale ("Permission denied" / "权限不够"),
+        // so assert on the non-zero exit code and the denied target.
+        let escaped = runtime
+            .execute(
+                context(CancellationToken::new()),
+                serde_json::json!({"command": "echo x > \"$HOME/sandbox-escape.txt\""}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(escaped.kind, ToolErrorKind::Execution);
+        assert!(
+            escaped.message.contains("sandbox-escape.txt"),
+            "denial must name the rejected path: {}",
+            escaped.message
+        );
+        assert_eq!(escaped.details.unwrap()["exitCode"], 1);
+        let home = std::env::var_os("HOME").expect("HOME is set");
+        assert!(
+            !std::path::Path::new(&home)
+                .join("sandbox-escape.txt")
+                .exists(),
+            "sandboxed shell must not write outside the workspace"
+        );
     }
 }

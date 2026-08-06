@@ -24,6 +24,7 @@ mod tests {
             )])),
             timeout: Duration::from_secs(300),
             output_budget: OutputBudget::new(max_bytes, 2_000),
+            sandbox: None,
         }
     }
 

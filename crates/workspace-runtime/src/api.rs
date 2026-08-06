@@ -20,6 +20,10 @@ pub use crate::rewind::{
     WorkspaceRestoreReport, WorkspaceSnapshot, WorkspaceSnapshotError, capture_workspace_snapshot,
     restore_workspace_snapshot,
 };
+pub use crate::sandbox::{
+    CapabilityDimension, ExecPolicy, NetworkPolicy, SandboxCapability, SandboxProfile,
+    SandboxUnsupported,
+};
 pub use crate::worktree::merge::{
     ChangeEntry, ChangeKind, ChangeSet, MergeError, MergeProposal, MergeReport, apply_merge,
     apply_merge_cancellable, build_changeset, build_changeset_cancellable,
