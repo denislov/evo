@@ -514,6 +514,14 @@ impl CodingAgentSession {
                         if let Some(cancellation) = operation_cancellation.clone() {
                             options = options.with_cancellation(cancellation);
                         }
+                        let (extension_session_id, extension_workspace_root) =
+                            self.runtime_host.session_identity();
+                        let extension_events =
+                            crate::services::ports::ExtensionEventDispatch::from_parts(
+                                Some(self.runtime_host.extension_host.sink()),
+                                extension_session_id,
+                                extension_workspace_root,
+                            );
                         let SessionPersistence::Persistent(session_service) =
                             &mut self.runtime_host.session_coordinator.persistence
                         else {
@@ -527,6 +535,7 @@ impl CodingAgentSession {
                             options,
                             &snapshot,
                             operation_cancellation_handle.clone(),
+                            extension_events,
                         )
                         .await
                         .map(OperationOutcome::ManualCompaction)
@@ -629,6 +638,14 @@ impl CodingAgentSession {
                             .operation_supervisor
                             .control
                             .clear_prompt_control_receiver()?;
+                        let (extension_session_id, extension_workspace_root) =
+                            self.runtime_host.session_identity();
+                        let extension_events =
+                            crate::services::ports::ExtensionEventDispatch::from_parts(
+                                Some(self.runtime_host.extension_host.sink()),
+                                extension_session_id,
+                                extension_workspace_root,
+                            );
                         let result = crate::operations::agent_invocation::run(
                             options,
                             snapshot.operation_id.clone(),
@@ -638,21 +655,33 @@ impl CodingAgentSession {
                             &self.runtime_host.operation_supervisor.control,
                             snapshot.clone(),
                             operation_cancellation.clone(),
+                            extension_events,
                         )
                         .await;
                         result.map(OperationOutcome::AgentInvocation)
                     }
-                    CodingAgentOperation::InvokeTeam(options) => crate::operations::team_invocation::run(
-                        options,
-                        snapshot.operation_id.clone(),
-                        &self.runtime_host.profile_registry,
-                        &self.runtime_host.events,
-                        &self.runtime_host.operation_supervisor.control,
-                        snapshot.clone(),
-                        operation_cancellation.clone(),
-                    )
-                    .await
-                    .map(OperationOutcome::AgentTeam),
+                    CodingAgentOperation::InvokeTeam(options) => {
+                        let (extension_session_id, extension_workspace_root) =
+                            self.runtime_host.session_identity();
+                        let extension_events =
+                            crate::services::ports::ExtensionEventDispatch::from_parts(
+                                Some(self.runtime_host.extension_host.sink()),
+                                extension_session_id,
+                                extension_workspace_root,
+                            );
+                        crate::operations::team_invocation::run(
+                            options,
+                            snapshot.operation_id.clone(),
+                            &self.runtime_host.profile_registry,
+                            &self.runtime_host.events,
+                            &self.runtime_host.operation_supervisor.control,
+                            snapshot.clone(),
+                            operation_cancellation.clone(),
+                            extension_events,
+                        )
+                        .await
+                        .map(OperationOutcome::AgentTeam)
+                    }
                     CodingAgentOperation::ListMergeProposals => {
                         let workspace_root = snapshot
                             .workspace
@@ -754,22 +783,33 @@ impl CodingAgentSession {
                     CodingAgentOperation::ApproveDelegation {
                         operation_id,
                         tool_call_id,
-                    } => crate::operations::delegation::execution::approve(
-                        &mut self.runtime_host.session_coordinator,
-                        &self.runtime_host.runtime_service,
-                        &self.runtime_host.profile_registry,
-                        &self.runtime_host.events,
-                        &self.runtime_host.operation_supervisor.control,
-                        operation_id,
-                        tool_call_id,
-                        admission
-                            .admitted_at
-                            .clone()
-                            .expect("delegation approval admission time is resolved"),
-                        snapshot.clone(),
-                    )
-                    .await
-                    .map(|_| OperationOutcome::DelegationApproval),
+                    } => {
+                        let (extension_session_id, extension_workspace_root) =
+                            self.runtime_host.session_identity();
+                        let extension_events =
+                            crate::services::ports::ExtensionEventDispatch::from_parts(
+                                Some(self.runtime_host.extension_host.sink()),
+                                extension_session_id,
+                                extension_workspace_root,
+                            );
+                        crate::operations::delegation::execution::approve(
+                            &mut self.runtime_host.session_coordinator,
+                            &self.runtime_host.runtime_service,
+                            &self.runtime_host.profile_registry,
+                            &self.runtime_host.events,
+                            &self.runtime_host.operation_supervisor.control,
+                            operation_id,
+                            tool_call_id,
+                            admission
+                                .admitted_at
+                                .clone()
+                                .expect("delegation approval admission time is resolved"),
+                            snapshot.clone(),
+                            extension_events,
+                        )
+                        .await
+                        .map(|_| OperationOutcome::DelegationApproval)
+                    }
                     _ => unreachable!("descriptor routed a non-async operation to the async handler"),
                 }
         })

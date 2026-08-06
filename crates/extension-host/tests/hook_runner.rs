@@ -310,3 +310,122 @@ async fn host_shutdown_cancels_in_flight_hook_and_drains() {
         "the cancelled hook run is still recorded: {messages:?}"
     );
 }
+
+/// 收集 hook 运行的 sink（按 code 计数）。
+#[derive(Debug, Clone, Default)]
+struct CountingSink {
+    hook_runs: Arc<std::sync::atomic::AtomicUsize>,
+    records: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl DiagnosticSink for CountingSink {
+    fn emit(&self, record: DiagnosticRecord) {
+        self.records
+            .lock()
+            .unwrap()
+            .push(format!("{}-{}", record.code, record.message));
+        if record.code == "hook_run" {
+            self.hook_runs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// ARC-730：untrusted hook 不执行（trust 三态：Trusted 执行 / Untrusted
+/// 与 NotDecided 不执行，NotDecided 产首次启用请求）。
+#[tokio::test]
+async fn untrusted_and_pending_extensions_never_run_hooks() {
+    let root = tempfile::tempdir().unwrap();
+    let extensions_root = root.path().join("extensions");
+    for (id, hooks) in [
+        (
+            "trusted-ext",
+            serde_json::json!([{"name": "trusted-hook", "event": "post_tool_use", "command": "exit 0"}]),
+        ),
+        (
+            "untrusted-ext",
+            serde_json::json!([{"name": "untrusted-hook", "event": "post_tool_use", "command": "exit 0"}]),
+        ),
+        (
+            "pending-ext",
+            serde_json::json!([{"name": "pending-hook", "event": "post_tool_use", "command": "exit 0"}]),
+        ),
+    ] {
+        let dir = extensions_root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("extension.json"),
+            serde_json::json!({
+                "name": id,
+                "version": "0.1.0",
+                "hooks": hooks
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+    let trust = Arc::new(InMemoryTrustStore::new());
+    trust.trust(extensions_root.join("trusted-ext"));
+    trust.distrust(extensions_root.join("untrusted-ext"));
+    let sink = Arc::new(CountingSink::default());
+    let (host, errors) = ExtensionHost::new(ExtensionHostOptions {
+        project_dirs: vec![extensions_root],
+        trust_store: trust,
+        diagnostics: Some(sink.clone()),
+        ..Default::default()
+    });
+    assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    let (handle, task) = host.clone().start().unwrap();
+
+    let event = ExtensionEvent::new(
+        ExtensionEventKind::PostToolUse,
+        "s1",
+        root.path().to_string_lossy(),
+        "t",
+        ExtensionEventPayload::PostToolUse {
+            tool_name: ToolId::new("read_file").unwrap(),
+            tool_input: json!({}),
+            tool_result: json!({"ok": true}),
+            tool_input_truncated: false,
+            tool_result_truncated: false,
+            duration_ms: None,
+            path: None,
+        },
+    );
+    handle.submit_event(event).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while sink.hook_runs.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "trusted hook must run"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        sink.hook_runs.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one hook run: only the trusted extension is enabled"
+    );
+    // Untrusted → extension_untrusted 诊断；NotDecided → 首次启用请求。
+    let messages: Vec<_> = sink.records.lock().unwrap().clone();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.starts_with("extension_untrusted-")),
+        "untrusted extension is diagnosed: {messages:?}"
+    );
+    let info = host.info();
+    let requests = info.first_enables();
+    assert_eq!(
+        requests.len(),
+        1,
+        "pending extension yields an enable request"
+    );
+    assert_eq!(requests[0].extension_id, "pending-ext");
+
+    handle.shutdown("test shutdown");
+    let _ = tokio::time::timeout(Duration::from_secs(10), task.join())
+        .await
+        .expect("host joins promptly");
+}

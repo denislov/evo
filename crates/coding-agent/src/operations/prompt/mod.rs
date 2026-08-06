@@ -261,6 +261,12 @@ impl PromptOperation<'_> {
                     child_delegation_depth,
                 } => {
                     self.event_service.emit_delegation_approved(request)?;
+                    let extension_events =
+                        crate::services::ports::ExtensionEventDispatch::from_parts(
+                            self.extension_events.clone(),
+                            context.session_id().unwrap_or(""),
+                            self.workspace_root.clone(),
+                        );
                     let outcome = match request.target_kind {
                         ProfileKind::Agent => {
                             crate::operations::delegation::execution::execute_agent(
@@ -274,6 +280,7 @@ impl PromptOperation<'_> {
                                 parent_capability_snapshot.clone(),
                                 Some(self.authorization_service.clone()),
                                 None,
+                                extension_events.clone(),
                             )
                             .await
                         }
@@ -289,6 +296,7 @@ impl PromptOperation<'_> {
                                 parent_capability_snapshot.clone(),
                                 Some(self.authorization_service.clone()),
                                 None,
+                                extension_events,
                             )
                             .await
                         }

@@ -253,9 +253,12 @@ impl RpcSession {
         self.pending.lock().await.remove(&id);
         match reply {
             Ok(Ok(Ok(response))) => Ok(response.result),
+            // 服务器显式返回错误响应（如 401 Unauthorized）→ 原样上抛，
+            // 供调用方触发凭据恢复（不折叠成 TransportClosed）。
+            Ok(Ok(Err(error))) => Err(error),
             // 响应通道已消失：读循环终止（transport 关闭）或取消/超时后
             // 迟到响应已被移除。
-            Ok(Ok(Err(_))) | Ok(Err(_)) => Err(RpcError::TransportClosed {
+            Ok(Err(_)) => Err(RpcError::TransportClosed {
                 reason: "response channel dropped".into(),
             }),
             Err(error) => Err(error),

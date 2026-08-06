@@ -9,6 +9,8 @@ use crate::kernel::capability::{SessionReadCapability, SessionWriteCapability};
 use crate::kernel::error::CodingSessionError;
 use crate::operations::prompt::context::InternalPromptTurnOutcome;
 use crate::services::event::EventService;
+use crate::services::ports::ExtensionEventDispatch;
+use crate::session::replay::transcript_item_id;
 use crate::session::service::SessionService;
 
 pub(crate) mod runner;
@@ -19,16 +21,42 @@ pub(crate) async fn run(
     options: ManualCompactionOptions,
     snapshot: &OperationCapabilitySnapshot,
     cancellation: Option<OperationCancellationHandle>,
+    extension_events: ExtensionEventDispatch,
 ) -> Result<InternalPromptTurnOutcome, CodingSessionError> {
     SessionReadCapability::require(snapshot.session_read.as_ref())?;
     SessionWriteCapability::require(snapshot.session_write.as_ref())?;
     let replay = session_service.replay()?;
+    // user hooks 的 pre_compact 事件（Observe gate）：entries_removed 为
+    // first-kept 条目（最后一个 id 条目）之前的 transcript 条目数。
+    // ARC-730 产品接线。
+    let entries_removed = replay
+        .transcript
+        .iter()
+        .rposition(|item| transcript_item_id(item).is_some())
+        .unwrap_or(0) as u32;
+    extension_events.submit(
+        extension_host::api::ExtensionEventKind::PreCompact,
+        extension_host::api::ExtensionEventPayload::PreCompact {
+            source: "manual".into(),
+            entries_removed,
+        },
+    );
     let transaction = session_service.begin_manual_compaction_transaction(snapshot);
     let mut context = ManualCompactionContext::new(options, replay, transaction, snapshot.clone());
     let operation_id = context.operation_id().to_owned();
     let turn_id = context.turn_id().to_owned();
 
     let compaction_result = ManualCompactionRunner::new()?.run_typed(&mut context).await;
+    let post_compact = |resumed: bool| {
+        extension_events.submit(
+            extension_host::api::ExtensionEventKind::PostCompact,
+            extension_host::api::ExtensionEventPayload::PostCompact {
+                source: "manual".into(),
+                entries_removed,
+                resumed,
+            },
+        );
+    };
     match compaction_result {
         Ok(compaction) => {
             if let Some(cancellation) = cancellation
@@ -83,6 +111,7 @@ pub(crate) async fn run(
                 .into_product_draft(),
             )?;
             event_service.emit_session_write_committed(&finalized)?;
+            post_compact(true);
             Ok(outcome)
         }
         Err(error) => {
@@ -102,6 +131,7 @@ pub(crate) async fn run(
             );
             event_service.emit_session_write_events(&finalized)?;
             defer_compact_terminal(event_service, &outcome)?;
+            post_compact(false);
             Ok(outcome)
         }
     }

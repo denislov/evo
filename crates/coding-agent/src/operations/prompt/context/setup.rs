@@ -70,6 +70,18 @@ impl PromptTurnContext {
         self.extension_workspace_root = workspace_root;
     }
 
+    /// 会话身份绑定的 extension 事件提交句柄（ARC-730：subagent /
+    /// compaction 接线穿透点）。
+    pub(crate) fn extension_events_dispatch(
+        &self,
+    ) -> crate::services::ports::ExtensionEventDispatch {
+        crate::services::ports::ExtensionEventDispatch::from_parts(
+            self.extension_events.clone(),
+            self.session_id().unwrap_or(""),
+            self.extension_workspace_root.clone(),
+        )
+    }
+
     pub(crate) fn authorization_hook_context(&self) -> Option<AuthorizationHookContext> {
         let service = self.authorization_service.as_ref()?;
         let capability_snapshot = self.capability_snapshot.as_ref()?;

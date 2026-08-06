@@ -24,6 +24,7 @@ use crate::operations::team_invocation::runner::{
 use crate::profiles::{DelegationPolicy, ProfileId, ProfileKind, ProfileRegistry};
 use crate::services::authorization::AuthorizationService;
 use crate::services::event::EventService;
+use crate::services::ports::ExtensionEventDispatch;
 use crate::services::runtime::RuntimeService;
 use crate::session::event::PersistedDelegationStatus;
 use std::sync::{Arc, Mutex};
@@ -75,6 +76,7 @@ pub(crate) fn install_tool_executor(
     let turn_id = context.turn_id().to_owned();
     let deferred_pending = context.deferred_pending_delegations();
     let confirmation_awaited = authorization_service.uses_interactive_waiters();
+    let extension_events = context.extension_events_dispatch();
     context.set_delegation_executor(Arc::new(move |tool_context, args| {
         let profile_registry = profile_registry.clone();
         let event_service = event_service.clone();
@@ -87,6 +89,7 @@ pub(crate) fn install_tool_executor(
         let authorization_service = authorization_service.clone();
         let delegation_lineage = delegation_lineage.clone();
         let turn_id = turn_id.clone();
+        let extension_events = extension_events.clone();
         Box::pin(async move {
             execute_tool_request_with_pending(
                 profile_registry,
@@ -104,6 +107,7 @@ pub(crate) fn install_tool_executor(
                 turn_id,
                 current_depth,
                 delegation_lineage,
+                extension_events,
             )
             .await
         })
@@ -131,6 +135,7 @@ pub(crate) async fn execute_tool_request_with_pending(
     turn_id: String,
     current_depth: usize,
     delegation_lineage: Vec<DelegationLineageEntry>,
+    extension_events: ExtensionEventDispatch,
 ) -> Result<String, String> {
     let cancellation = tool_context.cancel.clone();
     let (target_kind, target_field) = match tool_context.tool_id.as_str() {
@@ -203,6 +208,7 @@ pub(crate) async fn execute_tool_request_with_pending(
                         Some(parent_capability_snapshot),
                         Some(authorization_service),
                         Some(child_cancel),
+                        extension_events,
                     )
                     .await
                 }),
@@ -218,6 +224,7 @@ pub(crate) async fn execute_tool_request_with_pending(
                         Some(parent_capability_snapshot),
                         Some(authorization_service),
                         Some(child_cancel),
+                        extension_events,
                     )
                     .await
                 }),
@@ -328,6 +335,7 @@ pub(crate) async fn execute_agent(
     parent_capability_snapshot: Option<OperationCapabilitySnapshot>,
     authorization_service: Option<AuthorizationService>,
     external_cancellation: Option<CancellationToken>,
+    extension_events: ExtensionEventDispatch,
 ) -> ApprovedDelegationExecutionOutcome {
     let child_operation_id = OperationScheduler::allocate_child_operation_id();
     let mut context = AgentInvocationContext::new(
@@ -342,7 +350,8 @@ pub(crate) async fn execute_agent(
         event_service.clone(),
         operation_control.clone(),
         child_operation_id.clone(),
-    );
+    )
+    .with_extension_events(extension_events.clone());
     if let Some(service) = authorization_service {
         context = context.with_authorization_service(service);
     }
@@ -377,6 +386,24 @@ pub(crate) async fn execute_agent(
         drop(child_admission);
         return failed_execution(error);
     }
+    // user hooks subagent 事件（Observe gate：subagent_start 派发 hook；
+    // subagent_stop 为 gate 事件，host 通道记账）。ARC-730 产品接线。
+    extension_events.submit(
+        extension_host::api::ExtensionEventKind::SubagentStart,
+        extension_host::api::ExtensionEventPayload::SubagentStart {
+            subagent_type: request.target_id.to_string(),
+        },
+    );
+    let subagent_stop = |reason: Option<String>| {
+        extension_events.submit(
+            extension_host::api::ExtensionEventKind::SubagentStop,
+            extension_host::api::ExtensionEventPayload::SubagentStop {
+                subagent_type: request.target_id.to_string(),
+                phase: extension_host::api::SubagentStopPhase::Gate,
+                stop_reason: reason,
+            },
+        );
+    };
     let result = match AgentInvocationRunner::new() {
         Ok(runner) => {
             let runner_fut = runner.run_typed(&mut context, child_admission.cancellation_token());
@@ -401,12 +428,14 @@ pub(crate) async fn execute_agent(
             if let Err(event_error) =
                 event_service.emit_delegation_failed(request, child_operation_id, error.clone())
             {
+                subagent_stop(Some(event_error.to_string()));
                 drop(child_admission);
                 return ApprovedDelegationExecutionOutcome {
                     execution: Err(event_error),
                     pending_confirmations,
                 };
             }
+            subagent_stop(Some(error.to_string()));
             drop(child_admission);
             return ApprovedDelegationExecutionOutcome {
                 execution: Err(error),
@@ -422,12 +451,14 @@ pub(crate) async fn execute_agent(
             final_text.clone(),
         )
     {
+        subagent_stop(Some(error.to_string()));
         drop(child_admission);
         return ApprovedDelegationExecutionOutcome {
             execution: Err(error),
             pending_confirmations,
         };
     }
+    subagent_stop(Some("completed".into()));
     drop(child_admission);
     ApprovedDelegationExecutionOutcome {
         execution: Ok(ApprovedDelegationExecution {
@@ -453,6 +484,7 @@ pub(crate) async fn execute_team(
     parent_capability_snapshot: Option<OperationCapabilitySnapshot>,
     authorization_service: Option<AuthorizationService>,
     external_cancellation: Option<CancellationToken>,
+    extension_events: ExtensionEventDispatch,
 ) -> ApprovedDelegationExecutionOutcome {
     let child_operation_id = OperationScheduler::allocate_child_operation_id();
     let mut context = AgentTeamContext::new(
@@ -467,7 +499,8 @@ pub(crate) async fn execute_team(
         event_service.clone(),
         operation_control.clone(),
         child_operation_id.clone(),
-    );
+    )
+    .with_extension_events(extension_events.clone());
     if let Some(service) = authorization_service {
         context = context.with_authorization_service(service);
     }
@@ -501,6 +534,24 @@ pub(crate) async fn execute_team(
         drop(child_admission);
         return failed_execution(error);
     }
+    // user hooks subagent 事件（Observe gate：subagent_start 派发 hook；
+    // subagent_stop 为 gate 事件，host 通道记账）。ARC-730 产品接线。
+    extension_events.submit(
+        extension_host::api::ExtensionEventKind::SubagentStart,
+        extension_host::api::ExtensionEventPayload::SubagentStart {
+            subagent_type: request.target_id.to_string(),
+        },
+    );
+    let subagent_stop = |reason: Option<String>| {
+        extension_events.submit(
+            extension_host::api::ExtensionEventKind::SubagentStop,
+            extension_host::api::ExtensionEventPayload::SubagentStop {
+                subagent_type: request.target_id.to_string(),
+                phase: extension_host::api::SubagentStopPhase::Gate,
+                stop_reason: reason,
+            },
+        );
+    };
     let result = match AgentTeamRunner::new() {
         Ok(runner) => {
             let runner_fut = runner.run_typed(&mut context, child_admission.cancellation_token());
@@ -525,12 +576,14 @@ pub(crate) async fn execute_team(
             if let Err(event_error) =
                 event_service.emit_delegation_failed(request, child_operation_id, error.clone())
             {
+                subagent_stop(Some(event_error.to_string()));
                 drop(child_admission);
                 return ApprovedDelegationExecutionOutcome {
                     execution: Err(event_error),
                     pending_confirmations,
                 };
             }
+            subagent_stop(Some(error.to_string()));
             drop(child_admission);
             return ApprovedDelegationExecutionOutcome {
                 execution: Err(error),
@@ -546,12 +599,14 @@ pub(crate) async fn execute_team(
             final_text.clone(),
         )
     {
+        subagent_stop(Some(error.to_string()));
         drop(child_admission);
         return ApprovedDelegationExecutionOutcome {
             execution: Err(error),
             pending_confirmations,
         };
     }
+    subagent_stop(Some("completed".into()));
     drop(child_admission);
     ApprovedDelegationExecutionOutcome {
         execution: Ok(ApprovedDelegationExecution {
@@ -573,6 +628,7 @@ pub(crate) async fn approve(
     tool_call_id: String,
     now: String,
     parent_capability_snapshot: OperationCapabilitySnapshot,
+    extension_events: ExtensionEventDispatch,
 ) -> Result<(), CodingSessionError> {
     SessionWriteCapability::require(parent_capability_snapshot.session_write.as_ref())?;
     let approval_operation_id = parent_capability_snapshot.operation_id.clone();
@@ -607,6 +663,7 @@ pub(crate) async fn approve(
                 Some(parent_capability_snapshot.clone()),
                 None,
                 None,
+                extension_events.clone(),
             )
             .await
         }
@@ -622,6 +679,7 @@ pub(crate) async fn approve(
                 Some(parent_capability_snapshot),
                 None,
                 None,
+                extension_events,
             )
             .await
         }

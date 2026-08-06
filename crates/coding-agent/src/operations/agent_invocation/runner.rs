@@ -185,6 +185,7 @@ pub(crate) struct AgentInvocationContext {
     failure_terminal_recorded: bool,
     defer_terminal_publication: bool,
     authorization_service: Option<AuthorizationService>,
+    extension_events: crate::services::ports::ExtensionEventDispatch,
 }
 
 impl AgentInvocationContext {
@@ -217,7 +218,16 @@ impl AgentInvocationContext {
             failure_terminal_recorded: false,
             defer_terminal_publication: false,
             authorization_service: None,
+            extension_events: crate::services::ports::ExtensionEventDispatch::none(),
         }
+    }
+
+    pub(crate) fn with_extension_events(
+        mut self,
+        events: crate::services::ports::ExtensionEventDispatch,
+    ) -> Self {
+        self.extension_events = events;
+        self
     }
 
     pub(crate) fn with_parent_capability_snapshot(
@@ -665,6 +675,7 @@ impl AgentInvocationContext {
             self.child_capability_snapshot.clone(),
             self.authorization_service.clone(),
             None,
+            self.extension_events.clone(),
         ))
         .await;
         self.pending_delegation_confirmations
@@ -689,6 +700,7 @@ impl AgentInvocationContext {
             self.child_capability_snapshot.clone(),
             self.authorization_service.clone(),
             None,
+            self.extension_events.clone(),
         )
         .await;
         self.pending_delegation_confirmations

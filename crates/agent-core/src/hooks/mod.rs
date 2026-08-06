@@ -9,7 +9,8 @@ pub type HookFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send>>
 
 pub use agent::{
     AgentHooks, AgentLoopTurnUpdate, ConvertToLlmHook, PrepareNextTurnContext, PrepareNextTurnHook,
-    ShouldStopAfterTurnContext, ShouldStopAfterTurnHook, TransformContextHook,
+    ShouldStopAfterTurnContext, ShouldStopAfterTurnHook, ShouldStopAfterTurnResult,
+    TransformContextHook,
 };
 pub use provider::{
     BeforeProviderRequestContext, BeforeProviderRequestHook, BeforeProviderRequestResult,

@@ -26,6 +26,8 @@ const DELEGATION_CONFIRMATION_TTL_HOURS: i64 = 24;
 mod capability_snapshot_tests;
 pub(crate) mod confirmation;
 pub(crate) mod execution;
+#[cfg(test)]
+mod extension_events_tests;
 mod tool;
 pub(crate) mod worktree;
 #[cfg(test)]

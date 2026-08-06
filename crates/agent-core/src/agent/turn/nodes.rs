@@ -961,7 +961,21 @@ async fn should_stop_after_turn(
     })
     .await
     {
-        Ok(should_stop) => Ok(Some(should_stop)),
+        Ok(outcome) => {
+            // 继续运行时把 additional context 注入消息流（ARC-730：Stop
+            // gate 的 additionalContext 回填模型上下文）。
+            if !outcome.should_stop && !outcome.additional_context.is_empty() {
+                let turn = ctx.turn;
+                ctx.messages
+                    .extend(outcome.additional_context.into_iter().enumerate().map(
+                        |(index, text)| AgentMessage::UserText {
+                            message_id: format!("hook_additional_context_{turn}_{index}"),
+                            text,
+                        },
+                    ));
+            }
+            Ok(Some(outcome.should_stop))
+        }
         Err(error) => {
             ctx.emit(AgentEvent::AgentError {
                 error: error.clone(),

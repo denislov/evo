@@ -12,6 +12,8 @@
 //! - `--call-delay-ms <n>`：`tools/call` 响应前延迟。
 //! - `--list-changed-delay-ms <n>`：首次 `tools/list` 后延迟发
 //!   `notifications/tools/list_changed`（0 = 不发）。
+//! - `--auth-fail-on-call <n>`：前 n 次 `tools/call` 返回 JSON-RPC
+//!   `-32001`（UNAUTHORIZED），之后正常（OAuth 401 refresh 测试）。
 //! - `--mode <name>`：行为模式，见 [`Mode`]。
 
 use std::io::{BufRead, Write};
@@ -38,6 +40,7 @@ fn main() {
     let mut crash_file: Option<std::path::PathBuf> = None;
     let mut call_delay_ms: u64 = 0;
     let mut list_changed_delay_ms: u64 = 0;
+    let mut auth_fail_on_call: u64 = 0;
     let mut mode = Mode::Echo;
 
     let mut index = 0;
@@ -66,6 +69,12 @@ fn main() {
                     .parse()
                     .expect("--list-changed-delay-ms must be a number");
             }
+            "--auth-fail-on-call" => {
+                index += 1;
+                auth_fail_on_call = args[index]
+                    .parse()
+                    .expect("--auth-fail-on-call must be a number");
+            }
             "--mode" => {
                 index += 1;
                 mode = match args[index].as_str() {
@@ -77,6 +86,7 @@ fn main() {
                     "crash-on-call" => Mode::CrashOnCall,
                     "ping-drop" => Mode::PingDrop,
                     "list-changed" => Mode::ListChanged,
+                    "crash-every-call" => Mode::CrashEveryCall,
                     other => panic!("unknown --mode '{other}'"),
                 };
             }
@@ -188,6 +198,14 @@ fn main() {
                     }
                     std::process::exit(3);
                 }
+                if matches!(mode, Mode::CrashEveryCall) {
+                    std::process::exit(3);
+                }
+                if auth_fail_on_call > 0 {
+                    auth_fail_on_call -= 1;
+                    respond_error(&id, -32001, "authentication required");
+                    continue;
+                }
                 if call_delay_ms > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(call_delay_ms));
                 }
@@ -233,6 +251,14 @@ fn respond(id: &Option<serde_json::Value>, result: serde_json::Value) {
     out_line(&payload.to_string());
 }
 
+fn respond_error(id: &Option<serde_json::Value>, code: i32, message: &str) {
+    let Some(id) = id else {
+        return; // 通知：无响应。
+    };
+    let payload = serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}});
+    out_line(&payload.to_string());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     /// 默认：正常 echo。
@@ -251,4 +277,6 @@ enum Mode {
     PingDrop,
     /// 首轮 list 后发 tools/list_changed 通知。
     ListChanged,
+    /// 每次 tools/call 都以退出码 3 崩溃（重连风暴测试）。
+    CrashEveryCall,
 }

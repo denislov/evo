@@ -367,3 +367,253 @@ async fn disabled_server_is_not_assembled_or_callable() {
     assert_eq!(host.server_state("off"), ServerLifecycleState::Disconnected);
     host.shutdown().await;
 }
+
+/// mock OAuth 端点：`/token` 走 `token_behavior`，`/device` 返回设备码。
+/// 返回 `(device_authorization_endpoint, token_endpoint)`。
+fn start_oauth_mock(
+    token_behavior: impl Fn() -> (u16, serde_json::Value) + Send + Sync + 'static,
+) -> (String, String) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            use std::io::{Read, Write};
+            let mut stream = stream;
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        request.extend_from_slice(&buf[..n]);
+                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split(' ').nth(1))
+                .unwrap_or("/");
+            let (status, body) = if path.starts_with("/device") {
+                (
+                    200,
+                    json!({
+                        "device_code": "dc-1",
+                        "user_code": "UC-123",
+                        "verification_uri": "http://localhost/verify",
+                        "expires_in": 900,
+                        "interval": 1,
+                    }),
+                )
+            } else {
+                token_behavior()
+            };
+            let body = serde_json::to_vec(&body).unwrap();
+            let reason = if status == 200 { "OK" } else { "Bad Request" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        }
+    });
+    (
+        format!("http://{addr}/device"),
+        format!("http://{addr}/token"),
+    )
+}
+
+fn oauth_config(device_endpoint: &str, token_endpoint: &str) -> OAuthConfig {
+    OAuthConfig {
+        client_id: "evo-test".into(),
+        scopes: Vec::new(),
+        device_authorization_endpoint: device_endpoint.into(),
+        token_endpoint: token_endpoint.into(),
+    }
+}
+
+fn fast_oauth_runtime() -> OAuthRuntime {
+    OAuthRuntime {
+        poll_interval: Duration::from_millis(10),
+        flow_timeout: Duration::from_secs(10),
+        present_verification: Some(Arc::new(|_, _| {})),
+        ..Default::default()
+    }
+}
+
+/// 收集 MCP host 诊断的 sink。
+#[derive(Debug, Default, Clone)]
+struct CollectingDiagnostics {
+    records: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl DiagnosticSink for CollectingDiagnostics {
+    fn emit(&self, record: DiagnosticRecord) {
+        self.records
+            .lock()
+            .unwrap()
+            .push((record.code, record.message));
+    }
+}
+
+#[tokio::test]
+async fn oauth_401_refreshes_token_and_retries_once() {
+    // 服务器对首个 tools/call 返回 -32001（UNAUTHORIZED），之后正常。
+    // 预置过期 access token + refresh token；401 → refresh → retry 成功。
+    let (device, token) = start_oauth_mock(|| {
+        (
+            200,
+            json!({"access_token": "at-refreshed", "refresh_token": "rt-rotated", "expires_in": 3600}),
+        )
+    });
+    let store = Arc::new(FileCredentialStore::new(
+        tempfile::tempdir().unwrap().path(),
+    ));
+    store
+        .set(
+            "fake",
+            McpCredentials {
+                access_token: "at-stale".into(),
+                refresh_token: Some("rt-1".into()),
+                expires_at: None,
+            },
+        )
+        .unwrap();
+    let mut config =
+        McpServerConfig::new("fake", stdio_config("echo", &["--auth-fail-on-call", "1"]));
+    config.oauth = Some(oauth_config(&device, &token));
+    let host = McpHost::new(vec![config], store.clone());
+    host.start().unwrap();
+    wait_ready(&host, Duration::from_secs(10)).await;
+
+    let handle = host.servers().first().unwrap().clone();
+    let result = handle
+        .call_tool("echo", json!({"round": 1}), &CancellationToken::new())
+        .await
+        .expect("401 → refresh → retry must succeed");
+    assert!(result["content"][0]["text"].is_string());
+    let refreshed = store.get("fake").expect("refreshed credentials stored");
+    assert_eq!(refreshed.access_token, "at-refreshed");
+    assert_eq!(refreshed.refresh_token.as_deref(), Some("rt-rotated"));
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn oauth_401_refresh_failure_falls_back_to_device_flow_and_surfaces_error() {
+    // token 端点 400（refresh 失败）→ device flow 也失败 → 结构化错误。
+    let (device, token) = start_oauth_mock(|| (400, json!({"error": "invalid_grant"})));
+    let diagnostics = Arc::new(CollectingDiagnostics::default());
+    let mut config =
+        McpServerConfig::new("fake", stdio_config("echo", &["--auth-fail-on-call", "1"]));
+    config.oauth = Some(oauth_config(&device, &token));
+    let store = Arc::new(FileCredentialStore::new(
+        tempfile::tempdir().unwrap().path(),
+    ));
+    store
+        .set(
+            "fake",
+            McpCredentials {
+                access_token: "at-stale".into(),
+                refresh_token: Some("rt-1".into()),
+                expires_at: None,
+            },
+        )
+        .unwrap();
+    let host = McpHost::with_diagnostics(
+        vec![config],
+        store,
+        fast_oauth_runtime(),
+        diagnostics.clone(),
+    );
+    host.start().unwrap();
+    wait_ready(&host, Duration::from_secs(10)).await;
+
+    let handle = host.servers().first().unwrap().clone();
+    let error = handle
+        .call_tool("echo", json!({}), &CancellationToken::new())
+        .await
+        .expect_err("401 with failing recovery must surface a structured error");
+    assert!(
+        error.is_unauthorized(),
+        "recovery failure keeps the original unauthorized error, got {error:?}"
+    );
+    let records = diagnostics.records.lock().unwrap().clone();
+    assert!(
+        records.iter().any(|(code, _)| code == "mcp_refresh_failed"),
+        "refresh failure must be recorded: {records:?}"
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn reconnect_storm_stays_bounded_and_recovers() {
+    // 每次 tools/call 都崩溃：Ready → crash → 退避重连 → Ready 循环。
+    // 断言：退避封顶（max_backoff 约束单次重连间隔）、总时长有界、
+    // shutdown 不被风暴阻塞。
+    let host = host_for("crash-every-call", &[], |config| {
+        config.tool_timeout = Duration::from_secs(5);
+        config.liveness = LivenessConfig {
+            ping_interval: Duration::from_millis(200),
+            ping_timeout: Duration::from_millis(100),
+        };
+        config.reconnect = ReconnectConfig {
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(60),
+        };
+    });
+    host.start().unwrap();
+    wait_ready(&host, Duration::from_secs(10)).await;
+
+    let handle = host.servers().first().unwrap().clone();
+    let started = std::time::Instant::now();
+    let mut longest_cycle = Duration::ZERO;
+    let mut cycles = 0;
+    for _ in 0..5 {
+        let cycle_started = std::time::Instant::now();
+        let call = handle
+            .call_tool("echo", json!({}), &CancellationToken::new())
+            .await;
+        assert!(
+            call.is_err(),
+            "crash-every-call server must fail the in-flight call"
+        );
+        // 等重连完成（tools 版本每次重新发现 +1）。
+        let version = host.tools_version();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if host.server_state("fake").is_ready() && host.tools_version() > version {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "reconnect storm must recover each cycle"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        longest_cycle = longest_cycle.max(cycle_started.elapsed());
+        cycles += 1;
+    }
+    assert_eq!(cycles, 5);
+    assert!(
+        longest_cycle < Duration::from_secs(2),
+        "backoff must be capped by max_backoff (longest cycle {longest_cycle:?})"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "storm cycles must stay bounded in total"
+    );
+
+    let shutdown_started = std::time::Instant::now();
+    host.shutdown().await;
+    assert!(
+        shutdown_started.elapsed() < Duration::from_secs(5),
+        "shutdown must not be blocked by the reconnect storm"
+    );
+}

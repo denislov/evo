@@ -263,6 +263,47 @@ impl ExtensionEventSink for NoopExtensionEventSink {
     }
 }
 
+/// extension 事件提交句柄：sink + 会话身份（session id / workspace root）。
+///
+/// ARC-730 接线（subagent / compaction）把 sink 与事件信封所需的会话身份
+/// 一起穿透操作层（纯函数式服务组合多层签名只加这一个参数）；`sink` 为
+/// `None`（无 host）时 `submit` 是 no-op，既有行为不变。
+#[derive(Debug, Clone)]
+pub(crate) struct ExtensionEventDispatch {
+    sink: Option<Arc<dyn ExtensionEventSink>>,
+    session_id: String,
+    workspace_root: String,
+}
+
+impl ExtensionEventDispatch {
+    pub(crate) fn from_parts(
+        sink: Option<Arc<dyn ExtensionEventSink>>,
+        session_id: impl Into<String>,
+        workspace_root: impl Into<String>,
+    ) -> Self {
+        Self {
+            sink,
+            session_id: session_id.into(),
+            workspace_root: workspace_root.into(),
+        }
+    }
+
+    /// 无 host 的占位（`submit` no-op）。
+    pub(crate) fn none() -> Self {
+        Self {
+            sink: None,
+            session_id: String::new(),
+            workspace_root: String::new(),
+        }
+    }
+
+    pub(crate) fn submit(&self, kind: ExtensionEventKind, payload: ExtensionEventPayload) {
+        if let Some(sink) = &self.sink {
+            sink.submit(kind, &self.session_id, &self.workspace_root, payload);
+        }
+    }
+}
+
 /// 持有 extension host 端口的轻量服务，挂在 [`crate::runtime::owners::RuntimeHost`]。
 #[derive(Debug, Clone)]
 pub(crate) struct ExtensionHostService {

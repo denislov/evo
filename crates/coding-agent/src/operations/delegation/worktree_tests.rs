@@ -56,7 +56,7 @@ fn model(api: &str) -> Model {
     }
 }
 
-fn parent_snapshot(root: &Path) -> OperationCapabilitySnapshot {
+pub(crate) fn parent_snapshot(root: &Path) -> OperationCapabilitySnapshot {
     OperationCapabilitySnapshot {
         generation: CapabilityGeneration::new(1),
         operation_id: "parent-operation".into(),
@@ -105,12 +105,12 @@ fn write_profile() -> AgentProfile {
     }
 }
 
-fn control_with_registry(registry: WorktreeRegistry) -> OperationControl {
+pub(crate) fn control_with_registry(registry: WorktreeRegistry) -> OperationControl {
     OperationControl::with_snapshot_coordinator(Arc::new(SnapshotCoordinator::default()))
         .with_worktree_registry(Arc::new(registry))
 }
 
-fn profile_registry_with_writer(root: &Path) -> ProfileRegistry {
+pub(crate) fn profile_registry_with_writer(root: &Path) -> ProfileRegistry {
     let agents = root.join("profiles").join("agents");
     std::fs::create_dir_all(&agents).expect("profile dir");
     std::fs::write(

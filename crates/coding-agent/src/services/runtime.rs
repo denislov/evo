@@ -456,10 +456,13 @@ impl RuntimeService {
                             event.payload.clone(),
                         );
                         let Some(gate) = gate else {
-                            return Ok(true);
+                            return Ok(agent_core::api::agent::ShouldStopAfterTurnResult::stop());
                         };
                         let decision = gate.evaluate_stop(&event).await;
-                        Ok(!decision.wants_continuation())
+                        Ok(agent_core::api::agent::ShouldStopAfterTurnResult {
+                            should_stop: !decision.wants_continuation(),
+                            additional_context: decision.additional_context.clone(),
+                        })
                     })
                 }));
             } else {

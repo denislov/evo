@@ -154,6 +154,12 @@ impl CodingAgentSession {
         let profile_registry = self.runtime_host.profile_registry.clone();
         let event_service = self.runtime_host.events.clone();
         let operation_control = self.runtime_host.operation_supervisor.control.clone();
+        let (extension_session_id, extension_workspace_root) = self.runtime_host.session_identity();
+        let extension_events = crate::services::ports::ExtensionEventDispatch::from_parts(
+            Some(self.runtime_host.extension_host.sink()),
+            extension_session_id,
+            extension_workspace_root,
+        );
 
         let task = runtime.spawn(async move {
             let result = match operation {
@@ -167,6 +173,7 @@ impl CodingAgentSession {
                         &operation_control,
                         snapshot.clone(),
                         operation_cancellation.clone(),
+                        extension_events.clone(),
                     )
                     .await;
                     result.map(OperationOutcome::AgentInvocation)
@@ -179,6 +186,7 @@ impl CodingAgentSession {
                     &operation_control,
                     snapshot.clone(),
                     operation_cancellation.clone(),
+                    extension_events,
                 )
                 .await
                 .map(OperationOutcome::AgentTeam),

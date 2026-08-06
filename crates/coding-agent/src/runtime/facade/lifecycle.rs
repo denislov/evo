@@ -599,3 +599,7 @@ fn worktree_registry_for(
 #[cfg(test)]
 #[path = "hooks_tests.rs"]
 mod hooks_tests;
+
+#[cfg(test)]
+#[path = "hooks_e2e_tests.rs"]
+mod hooks_e2e_tests;

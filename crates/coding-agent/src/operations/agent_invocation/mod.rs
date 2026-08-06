@@ -6,6 +6,7 @@ use crate::kernel::control::PromptControlReceiver;
 use crate::kernel::error::CodingSessionError;
 use crate::profiles::ProfileRegistry;
 use crate::services::event::EventService;
+use crate::services::ports::ExtensionEventDispatch;
 use runner::{
     AgentInvocationContext, AgentInvocationOptions, AgentInvocationOutcome, AgentInvocationRunner,
 };
@@ -24,6 +25,7 @@ pub(crate) async fn run(
     operation_control: &OperationControl,
     parent_capability_snapshot: OperationCapabilitySnapshot,
     cancellation: Option<CancellationToken>,
+    extension_events: ExtensionEventDispatch,
 ) -> Result<AgentInvocationOutcome, CodingSessionError> {
     let mut context = AgentInvocationContext::new(
         options,
@@ -33,7 +35,8 @@ pub(crate) async fn run(
         scheduler_parent_operation_id,
     )
     .with_deferred_terminal_publication()
-    .with_parent_capability_snapshot(parent_capability_snapshot);
+    .with_parent_capability_snapshot(parent_capability_snapshot)
+    .with_extension_events(extension_events);
     if let Some(receiver) = prompt_control_receiver {
         context.set_prompt_control_receiver(receiver);
     }

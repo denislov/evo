@@ -15,7 +15,7 @@ pub mod agent {
         BeforeProviderRequestResult, BeforeToolCallContext, BeforeToolCallHook,
         BeforeToolCallResult, ConvertToLlmHook, HookFuture, PrepareNextTurnContext,
         PrepareNextTurnHook, ShouldStopAfterTurnContext, ShouldStopAfterTurnHook,
-        TransformContextHook,
+        ShouldStopAfterTurnResult, TransformContextHook,
     };
 }
 

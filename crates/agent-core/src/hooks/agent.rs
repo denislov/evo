@@ -8,7 +8,34 @@ use super::{AfterToolCallHook, BeforeProviderRequestHook, BeforeToolCallHook, Ho
 use crate::agent::types::{AgentMessage, AgentResources, ThinkingLevel};
 
 pub type ShouldStopAfterTurnHook =
-    Arc<dyn Fn(ShouldStopAfterTurnContext) -> HookFuture<bool> + Send + Sync>;
+    Arc<dyn Fn(ShouldStopAfterTurnContext) -> HookFuture<ShouldStopAfterTurnResult> + Send + Sync>;
+
+/// `should_stop_after_turn` 的评估结果：是否停止 + 继续运行时注入模型
+/// 消息流的 additional context（ARC-730：Stop gate 的 `additionalContext`
+/// 回填）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShouldStopAfterTurnResult {
+    /// `true` = 停止本轮；`false` = 继续（additional_context 注入消息流）。
+    pub should_stop: bool,
+    /// 继续运行时注入的 additional context（按序追加为 user 消息）。
+    pub additional_context: Vec<String>,
+}
+
+impl ShouldStopAfterTurnResult {
+    pub fn stop() -> Self {
+        Self {
+            should_stop: true,
+            additional_context: Vec::new(),
+        }
+    }
+
+    pub fn continue_with(additional_context: Vec<String>) -> Self {
+        Self {
+            should_stop: false,
+            additional_context,
+        }
+    }
+}
 pub type PrepareNextTurnHook =
     Arc<dyn Fn(PrepareNextTurnContext) -> HookFuture<Option<AgentLoopTurnUpdate>> + Send + Sync>;
 pub type TransformContextHook =
