@@ -1,16 +1,15 @@
-use futures::Stream;
-use futures::channel::mpsc;
 use std::pin::Pin;
-use std::sync::{
-    Arc, RwLock,
-    atomic::{AtomicBool, Ordering},
-};
-use std::task::{Context as TaskContext, Poll};
 
+use ai_protocol::api::conversation::ContentBlock;
+use futures::channel::mpsc;
+use futures::{FutureExt, StreamExt};
+
+use super::context::{AgentTurnContext, AgentTurnProviderRequestOverride};
+use super::nodes;
 use super::nodes::{AgentTurnDecision, AgentTurnError};
-use super::{context::AgentTurnContext, nodes};
-use crate::agent::AgentState;
-use crate::agent::types::{AgentEvent, AgentStream};
+use crate::agent::queue::{AgentInputQueue, enqueue_message};
+use crate::agent::runtime::next_message_id;
+use crate::agent::types::{AgentEvent, AgentMessage, AgentQueueError};
 
 /// Defense-in-depth fuse for one typed turn, not a user-visible turn budget.
 ///
@@ -42,107 +41,114 @@ enum AgentTurnResult {
     Finish,
 }
 
-pub struct AgentTurnRunner;
-
-impl AgentTurnRunner {
-    pub(crate) fn run_state(
-        state: Arc<RwLock<AgentState>>,
-        queues_cleared: Arc<AtomicBool>,
-    ) -> AgentStream {
-        Box::pin(TurnLoopStream::new(state, queues_cleared))
-    }
-}
-
 type TurnRunOutcome = (Result<AgentTurnResult, AgentTurnError>, AgentTurnContext);
 
-/// One multi-turn agent loop, implemented as a hand-written `Stream` so the
-/// in-flight `AgentTurnContext` is committed back to the shared `AgentState`
-/// even when the consumer drops the stream early (e.g. UI cancellation
-/// without `abort()`). Dropping mid-turn used to discard every message the
-/// turn had produced along with the queued inputs.
-struct TurnLoopStream {
-    state: Arc<RwLock<AgentState>>,
-    queues_cleared: Arc<AtomicBool>,
-    turn: u32,
+/// One multi-turn agent loop, driven from inside the agent actor.
+///
+/// The actor owns `AgentState` exclusively, so `TurnRunner` holds a turn-local
+/// working copy (`AgentTurnContext`) and never touches a lock. Queued input
+/// arriving mid-turn is appended to the context's queues by the actor via
+/// [`TurnRunner::steer`] / [`TurnRunner::follow_up`], and the loop consumes it
+/// at the same nodes that previously synced live queues
+/// (`drain_queued_input` and `maybe_prepare_next_turn`).
+///
+/// Events are buffered on an internal unbounded channel and surfaced one at a
+/// time through [`TurnRunner::next_event`]. When the actor observes the
+/// consumer's event stream has been dropped, it commits the context back to
+/// the state and drops the runner; no drop guard is needed because the actor
+/// is the only owner and always commits at a turn boundary.
+pub(crate) struct TurnRunner {
     context: Option<AgentTurnContext>,
+    turn: u32,
     event_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
     run_fut: Option<Pin<Box<dyn Future<Output = TurnRunOutcome> + Send>>>,
     /// Error event produced by the completed turn, yielded after any events
     /// still buffered in `event_rx`.
     pending_error: Option<AgentEvent>,
-    committed: bool,
     done: bool,
+    /// Set when a single turn finishes with `Continue`. The actor loop clears
+    /// this to start the next turn. Between setting and clearing, `next_event`
+    /// returns `None`, giving the actor a chance to process pending commands
+    /// or detect a dropped consumer.
+    turn_continues: bool,
 }
 
-impl TurnLoopStream {
-    fn new(state: Arc<RwLock<AgentState>>, queues_cleared: Arc<AtomicBool>) -> Self {
+impl TurnRunner {
+    pub(crate) fn new(context: AgentTurnContext) -> Self {
         Self {
-            state,
-            queues_cleared,
+            context: Some(context),
             turn: 0,
-            context: None,
             event_rx: None,
             run_fut: None,
             pending_error: None,
-            committed: false,
             done: false,
+            turn_continues: false,
         }
     }
 
-    fn commit(&mut self) {
-        let Some(context) = &mut self.context else {
-            self.committed = true;
-            return;
-        };
-        let discard_queues = self.queues_cleared.swap(false, Ordering::SeqCst);
-        commit_context(context, &self.state, discard_queues);
-        self.committed = true;
+    /// Returns the next buffered turn event, or `None` once the whole loop
+    /// has finished (all buffered events already drained).
+    pub(crate) async fn next_event(&mut self) -> Option<AgentEvent> {
+        loop {
+            // Drain whatever the running turn future already buffered.
+            if let Some(rx) = &mut self.event_rx {
+                match rx.next().now_or_never() {
+                    Some(Some(event)) => return Some(event),
+                    Some(None) => self.event_rx = None,
+                    None => {}
+                }
+            }
+            if let Some(event) = self.pending_error.take() {
+                return Some(event);
+            }
+            if self.run_fut.is_none() {
+                if self.done || self.turn_continues {
+                    return None;
+                }
+                self.start_turn();
+                continue;
+            }
+            if self.event_rx.is_none() {
+                let outcome = self.run_fut.as_mut().expect("run future is set").await;
+                self.run_fut = None;
+                self.context = Some(outcome.1);
+                self.finish_outcome(outcome.0);
+                continue;
+            }
+            tokio::select! {
+                event = async {
+                    self.event_rx.as_mut().expect("event receiver is set").next().await
+                } => {
+                    match event {
+                        Some(event) => return Some(event),
+                        None => self.event_rx = None,
+                    }
+                }
+                outcome = async {
+                    self.run_fut.as_mut().expect("run future is set").await
+                } => {
+                    self.run_fut = None;
+                    self.context = Some(outcome.1);
+                    self.finish_outcome(outcome.0);
+                }
+            }
+        }
     }
 
     fn start_turn(&mut self) {
-        let mut context = {
-            let mut state = self.state.write().unwrap();
-            let mut context = AgentTurnContext::from_state(&state);
-            // A turn takes ownership of the live queues: they are cloned into
-            // the context and the live copies cleared so later enqueues stay
-            // distinct. If the caller cleared the queues mid-turn, the cloned
-            // (already-synced) messages are dropped here as well.
-            if self.queues_cleared.swap(false, Ordering::SeqCst) {
-                context.steering_queue.clear();
-                context.follow_up_queue.clear();
-            }
-            state.steering_queue.clear();
-            state.follow_up_queue.clear();
-            context
-        };
+        let mut context = self.context.take().expect("turn context is held");
         context.turn = self.turn;
         let cancel = context.cancel_token.clone();
         let (event_sender, event_rx) = mpsc::unbounded();
-        context.attach_runtime(Arc::clone(&self.state), event_sender);
-        // The turn future owns the context. A drop guard inside the future
-        // commits it back to the shared state even when the stream itself is
-        // dropped mid-poll; on normal completion the future returns the
-        // context so this stream commits it at the turn boundary instead.
-        let run = {
-            let state = Arc::clone(&self.state);
-            let queues_cleared = Arc::clone(&self.queues_cleared);
-            async move {
-                let mut guard = TurnRunDropGuard {
-                    context: Some(context),
-                    state,
-                    queues_cleared,
-                };
-                let outcome = run_typed_turn(
-                    guard.context.as_mut().expect("turn context is held"),
-                    cancel,
-                )
-                .await;
-                (outcome, guard.context.take().expect("turn context is held"))
-            }
+        context.attach_event_sender(event_sender);
+        // The turn future owns the context and returns it on completion; the
+        // actor commits it to the shared state at the turn boundary.
+        let run = async move {
+            let outcome = run_typed_turn(&mut context, cancel).await;
+            (outcome, context)
         };
         self.event_rx = Some(event_rx);
         self.run_fut = Some(Box::pin(run));
-        self.committed = false;
     }
 
     fn finish_outcome(&mut self, outcome: Result<AgentTurnResult, AgentTurnError>) {
@@ -151,9 +157,8 @@ impl TurnLoopStream {
             .as_ref()
             .is_some_and(|ctx| ctx.cancel_token.is_cancelled());
         self.turn = self.context.as_ref().map_or(self.turn, |ctx| ctx.turn);
-        self.commit();
         match outcome {
-            Ok(AgentTurnResult::Continue) => {}
+            Ok(AgentTurnResult::Continue) => self.turn_continues = true,
             Ok(AgentTurnResult::Finish) => self.done = true,
             Err(error) => {
                 self.done = true;
@@ -167,80 +172,150 @@ impl TurnLoopStream {
             }
         }
     }
-}
 
-fn commit_context(
-    context: &mut AgentTurnContext,
-    state: &Arc<RwLock<AgentState>>,
-    discard_queues: bool,
-) {
-    let mut state = state.write().unwrap();
-    context.apply_to_state(&mut state, discard_queues);
-}
-
-/// Commits the in-flight turn context when the turn future is dropped before
-/// completion (the consumer dropped the stream mid-poll). On the normal path
-/// the context is taken out before this guard drops, so no second commit
-/// happens.
-struct TurnRunDropGuard {
-    context: Option<AgentTurnContext>,
-    state: Arc<RwLock<AgentState>>,
-    queues_cleared: Arc<AtomicBool>,
-}
-
-impl Drop for TurnRunDropGuard {
-    fn drop(&mut self) {
-        if let Some(context) = &mut self.context {
-            let discard_queues = self.queues_cleared.swap(false, Ordering::SeqCst);
-            commit_context(context, &self.state, discard_queues);
-        }
+    /// Enqueues steering input into the turn's working copy. Called by the
+    /// actor when a `Steer` command arrives while this runner owns the turn.
+    pub(crate) fn steer(&mut self, text: String) -> Result<(), AgentQueueError> {
+        let context = self.context.as_mut().expect("turn context is held");
+        let message_id = next_message_id(
+            &context.messages,
+            &context.steering_queue,
+            &context.follow_up_queue,
+            "steer",
+        );
+        enqueue_message(
+            &mut context.steering_queue,
+            AgentInputQueue::Steering,
+            AgentMessage::UserText { message_id, text },
+        )
     }
-}
 
-impl Drop for TurnLoopStream {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.commit();
-        }
+    pub(crate) fn steer_content(
+        &mut self,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), AgentQueueError> {
+        let context = self.context.as_mut().expect("turn context is held");
+        let message_id = next_message_id(
+            &context.messages,
+            &context.steering_queue,
+            &context.follow_up_queue,
+            "steer",
+        );
+        enqueue_message(
+            &mut context.steering_queue,
+            AgentInputQueue::Steering,
+            AgentMessage::Custom {
+                message_id,
+                custom_type: "input".into(),
+                content,
+                display: true,
+                details: None,
+                timestamp: 0,
+            },
+        )
     }
-}
 
-impl Stream for TurnLoopStream {
-    type Item = AgentEvent;
+    pub(crate) fn follow_up(&mut self, text: String) -> Result<(), AgentQueueError> {
+        let context = self.context.as_mut().expect("turn context is held");
+        let message_id = next_message_id(
+            &context.messages,
+            &context.steering_queue,
+            &context.follow_up_queue,
+            "followup",
+        );
+        enqueue_message(
+            &mut context.follow_up_queue,
+            AgentInputQueue::FollowUp,
+            AgentMessage::UserText { message_id, text },
+        )
+    }
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<AgentEvent>> {
-        let this = self.get_mut();
-        loop {
-            if let Some(rx) = &mut this.event_rx {
-                match Pin::new(rx).poll_next(cx) {
-                    Poll::Ready(Some(event)) => return Poll::Ready(Some(event)),
-                    Poll::Ready(None) => this.event_rx = None,
-                    Poll::Pending => {}
-                }
-            }
-            if let Some(event) = this.pending_error.take() {
-                return Poll::Ready(Some(event));
-            }
+    pub(crate) fn follow_up_content(
+        &mut self,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), AgentQueueError> {
+        let context = self.context.as_mut().expect("turn context is held");
+        let message_id = next_message_id(
+            &context.messages,
+            &context.steering_queue,
+            &context.follow_up_queue,
+            "followup",
+        );
+        enqueue_message(
+            &mut context.follow_up_queue,
+            AgentInputQueue::FollowUp,
+            AgentMessage::Custom {
+                message_id,
+                custom_type: "input".into(),
+                content,
+                display: true,
+                details: None,
+                timestamp: 0,
+            },
+        )
+    }
 
-            if this.run_fut.is_none() {
-                if this.done {
-                    return Poll::Ready(None);
-                }
-                this.start_turn();
-                continue;
-            }
+    pub(crate) fn clear_queues(&mut self) {
+        let context = self.context.as_mut().expect("turn context is held");
+        context.steering_queue.clear();
+        context.follow_up_queue.clear();
+    }
 
-            let run_fut = this.run_fut.as_mut().expect("run future is set");
-            match run_fut.as_mut().poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready((outcome, context)) => {
-                    this.run_fut = None;
-                    this.context = Some(context);
-                    this.finish_outcome(outcome);
-                    continue;
-                }
-            }
-        }
+    pub(crate) fn drain_steering_queue(&mut self) -> Vec<AgentMessage> {
+        self.context
+            .as_mut()
+            .expect("turn context is held")
+            .steering_queue
+            .drain(..)
+            .collect()
+    }
+
+    pub(crate) fn drain_follow_up_queue(&mut self) -> Vec<AgentMessage> {
+        self.context
+            .as_mut()
+            .expect("turn context is held")
+            .follow_up_queue
+            .drain(..)
+            .collect()
+    }
+
+    pub(crate) fn abort(&mut self) {
+        self.context
+            .as_mut()
+            .expect("turn context is held")
+            .cancel_token
+            .cancel();
+    }
+
+    pub(crate) fn set_provider_request_override(
+        &mut self,
+        context: ai_protocol::api::conversation::Context,
+        stream_options: Option<ai_protocol::api::stream::StreamOptions>,
+    ) {
+        self.context
+            .as_mut()
+            .expect("turn context is held")
+            .provider_request_override = Some(AgentTurnProviderRequestOverride {
+            context,
+            stream_options,
+        });
+    }
+
+    /// Hands the working copy back to the actor for committing.
+    pub(crate) fn into_context(self) -> AgentTurnContext {
+        self.context.expect("turn context is held")
+    }
+
+    /// Returns `true` when a turn finished with `Continue` and the actor has
+    /// not yet started the next turn.
+    pub(crate) fn turn_continues(&self) -> bool {
+        self.turn_continues
+    }
+
+    /// Clears the `turn_continues` flag so `next_event` will start the next
+    /// turn on its next call.
+    pub(crate) fn start_next_turn(&mut self) {
+        self.turn_continues = false;
     }
 }
 
@@ -577,7 +652,7 @@ mod loop_tests {
         )
     }
 
-    fn install_test_tool(agent: &Agent) {
+    async fn install_test_tool(agent: &Agent) {
         let definition = ToolDefinition {
             id: ToolId::new("test_tool").unwrap(),
             kind: ToolKind::Function,
@@ -604,6 +679,7 @@ mod loop_tests {
         registry.register(Arc::new(tool)).unwrap();
         agent
             .set_tool_runtime(ToolRuntime::new(registry).unwrap())
+            .await
             .unwrap();
     }
 
@@ -622,7 +698,7 @@ mod loop_tests {
         }
         assert_eq!(turns, 1);
         assert!(saw_done);
-        assert_eq!(agent.messages().len(), 2);
+        assert_eq!(agent.messages().await.len(), 2);
     }
 
     #[tokio::test]
@@ -631,9 +707,9 @@ mod loop_tests {
             tool_call("typed"),
             text_call("found", StopReason::Stop),
         ]);
-        install_test_tool(&agent);
+        install_test_tool(&agent).await;
 
-        let request = agent.provider_request_snapshot().0;
+        let request = agent.provider_request_snapshot().await.0;
         assert!(request.tools.as_ref().is_some_and(|tools| {
             tools.iter().any(|tool| {
                 tool.name == "test_tool" && tool.description.as_deref() == Some("Typed test tool")
@@ -674,6 +750,7 @@ mod loop_tests {
         assert!(
             agent
                 .messages()
+                .await
                 .iter()
                 .any(|message| matches!(message, AgentMessage::UserText { .. })),
             "the user prompt must survive an early drop"
@@ -691,7 +768,7 @@ mod loop_tests {
             tool_call("searching"),
             text_call("found", StopReason::Stop),
         ]);
-        install_test_tool(&agent);
+        install_test_tool(&agent).await;
         let mut stream = agent.prompt("hello");
         while let Some(event) = stream.next().await {
             if matches!(event, AgentEvent::ToolCallEnd { .. }) {
@@ -699,9 +776,12 @@ mod loop_tests {
             }
         }
         drop(stream);
-        assert_eq!(agent.messages().len(), 3);
-        let has_tool_result = agent
-            .messages()
+        // In the bounded actor model the turn runner may complete the next
+        // turn before the consumer's drop is observed, so the exact count is
+        // timing-dependent. The invariant that matters is that the tool
+        // result survives the early drop.
+        let messages = agent.messages().await;
+        let has_tool_result = messages
             .iter()
             .any(|message| matches!(message, AgentMessage::ToolResult { .. }));
         assert!(has_tool_result, "tool result must survive an early drop");
@@ -713,7 +793,7 @@ mod loop_tests {
             tool_call("searching"),
             text_call("found", StopReason::Stop),
         ]);
-        install_test_tool(&agent);
+        install_test_tool(&agent).await;
         let mut stream = agent.prompt("hello");
         while let Some(event) = stream.next().await {
             if matches!(event, AgentEvent::ToolCallEnd { .. }) {
@@ -723,13 +803,39 @@ mod loop_tests {
         agent.steer("late input").expect("queue accepts");
         agent.clear_queues();
         while stream.next().await.is_some() {}
-        assert!(agent.drain_steering_queue().is_empty());
+        assert!(agent.drain_steering_queue().await.is_empty());
         assert!(
             !agent
                 .messages()
+                .await
                 .iter()
                 .any(|message| matches!(message, AgentMessage::UserText { text, .. } if text == "late input")),
             "cleared steering input must not reach the conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn steering_during_turn_is_consumed_by_the_current_turn() {
+        let agent = test_agent(vec![
+            tool_call("searching"),
+            text_call("found", StopReason::Stop),
+        ]);
+        install_test_tool(&agent).await;
+        let mut stream = agent.prompt("hello");
+        while let Some(event) = stream.next().await {
+            if matches!(event, AgentEvent::ToolCallEnd { .. }) {
+                break;
+            }
+        }
+        agent.steer("steer during turn").expect("queue accepts");
+        while stream.next().await.is_some() {}
+        assert!(
+            agent
+                .messages()
+                .await
+                .iter()
+                .any(|message| matches!(message, AgentMessage::UserText { text, .. } if text == "steer during turn")),
+            "steering input enqueued mid-turn must be consumed by the current turn"
         );
     }
 

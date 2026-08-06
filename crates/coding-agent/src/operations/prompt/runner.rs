@@ -42,7 +42,7 @@ impl PromptTurnRunner {
                 PromptTurnStep::ResolveRuntime => resolve_runtime(ctx),
                 PromptTurnStep::LoadResources => load_resources(ctx),
                 PromptTurnStep::OpenSession => open_session(ctx),
-                PromptTurnStep::BuildAgentRuntime => build_agent_runtime(ctx),
+                PromptTurnStep::BuildAgentRuntime => build_agent_runtime(ctx).await,
                 PromptTurnStep::RecordUserInput => record_user_input(ctx).await,
                 PromptTurnStep::RunAgentTurn => run_agent_turn(ctx).await,
                 PromptTurnStep::FinalizeTurn => finalize_turn(ctx),
@@ -119,7 +119,7 @@ fn open_session(ctx: &mut PromptTurnContext) -> Result<(), CodingSessionError> {
     step_complete()
 }
 
-fn build_agent_runtime(ctx: &mut PromptTurnContext) -> Result<(), CodingSessionError> {
+async fn build_agent_runtime(ctx: &mut PromptTurnContext) -> Result<(), CodingSessionError> {
     if ctx.agent().is_some() {
         return step_complete();
     }
@@ -144,13 +144,15 @@ fn build_agent_runtime(ctx: &mut PromptTurnContext) -> Result<(), CodingSessionE
     let service = RuntimeService::new();
     let authorization = ctx.authorization_hook_context();
     let delegation_executor = ctx.delegation_executor();
-    let build = service.build_agent_runtime_with_authorization(
-        &runtime,
-        snapshot,
-        authorization,
-        delegation_executor,
-        ctx.mutation_tracking(),
-    )?;
+    let build = service
+        .build_agent_runtime_with_authorization(
+            &runtime,
+            snapshot,
+            authorization,
+            delegation_executor,
+            ctx.mutation_tracking(),
+        )
+        .await?;
     for diagnostic in build.diagnostics {
         ctx.record_diagnostic(diagnostic);
     }
@@ -193,7 +195,7 @@ async fn run_agent_turn(ctx: &mut PromptTurnContext) -> Result<(), CodingSession
         })?;
     let mut controls = ctx.take_prompt_control_receiver();
     let mut cancellation = ctx.operation_cancellation();
-    let mut stream = start_agent_turn(ctx)?;
+    let mut stream = start_agent_turn(ctx).await?;
     loop {
         let next = match (controls.as_mut(), cancellation.as_ref()) {
             (Some(receiver), Some(cancellation)) => {
@@ -336,7 +338,7 @@ fn emit_completion(ctx: &mut PromptTurnContext) -> Result<(), CodingSessionError
     step_complete()
 }
 
-fn start_agent_turn(ctx: &mut PromptTurnContext) -> Result<AgentStream, CodingSessionError> {
+async fn start_agent_turn(ctx: &mut PromptTurnContext) -> Result<AgentStream, CodingSessionError> {
     let agent = ctx
         .agent()
         .cloned()
@@ -350,7 +352,7 @@ fn start_agent_turn(ctx: &mut PromptTurnContext) -> Result<AgentStream, CodingSe
             message: "prompt turn requires non-empty text input".into(),
         }),
         PromptInvocation::Content(content) if !content.is_empty() => {
-            let message_id = format!("user_{}", agent.messages().len());
+            let message_id = format!("user_{}", agent.messages().await.len());
             agent.add_message(AgentMessage::Custom {
                 message_id,
                 custom_type: "input".into(),
@@ -374,9 +376,11 @@ fn start_agent_turn(ctx: &mut PromptTurnContext) -> Result<AgentStream, CodingSe
             additional_instructions,
         } => agent
             .skill(name, additional_instructions.as_deref())
+            .await
             .map_err(|message| CodingSessionError::Resource { message }),
         PromptInvocation::PromptTemplate { name, args } => agent
             .prompt_from_template(name, args)
+            .await
             .map_err(|message| CodingSessionError::Resource { message }),
     }
 }

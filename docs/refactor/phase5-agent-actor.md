@@ -1,6 +1,6 @@
 # Phase 5 / ARC-500：Agent actor
 
-> 状态：进行中
+> 状态：完成（2026-08-06）
 > 前序：Phase 4（review/rewind/reconcile 闭合）
 > 目标：消除 `Arc<RwLock<AgentState>>` 和 `queues_cleared` workaround，让状态拥有者和并发语义唯一
 
@@ -219,3 +219,16 @@ bash scripts/architecture-gate.sh
 
 Phase 5 Gate：`Arc<RwLock<AgentState>>` 和 `queues_cleared` workaround 删除；
 每 session 只有一个状态写入者；所有 command 均有有界失败语义。
+
+## 完成验证（2026-08-06）
+
+- `Arc<RwLock<AgentState>>`、`queues_cleared`、`RunGuard`、`TurnRunDropGuard` 已物理删除
+- `Agent` 现在只持有 `AgentHandle`（bounded `mpsc::Sender`），`Agent::new` 启动 actor task
+- actor 独占 `AgentState`（`&mut`），通过 `tokio::select!` 交错处理 command 与 turn 推进
+- `TurnRunner` 替代 `TurnLoopStream`：actor 内 async loop，`turn_continues` flag 在 tool-turn 结束后让出控制权
+- `AgentTurnContext` 拆分为持久 `AgentState` + turn 临时 working copy，无锁 queue 同步
+- coding-agent `build_agent_runtime_with_capabilities`、`prepare_summary_prompt`、`prepare_summary_context`、`build_agent_runtime` 已 async 适配
+- `cargo check --workspace --all-features`、`cargo clippy -D warnings`、`cargo fmt --check` 通过
+- `cargo test -p agent-core`：52 passed, 0 failed, 1 ignored
+- `cargo test -p coding-agent`：182 passed, 0 failed
+- architecture gate：`execution_debts=0`，`oversized_debts=35`（既有基线）

@@ -102,15 +102,16 @@ impl RuntimeService {
         }));
     }
 
-    pub(crate) fn build_agent_runtime_with_capabilities(
+    pub(crate) async fn build_agent_runtime_with_capabilities(
         &self,
         runtime: &RuntimeSnapshot,
         snapshot: &OperationCapabilitySnapshot,
     ) -> Result<AgentRuntimeBuild, CodingSessionError> {
         self.build_agent_runtime_with_authorization(runtime, snapshot, None, None, None)
+            .await
     }
 
-    pub(crate) fn build_agent_runtime_with_authorization(
+    pub(crate) async fn build_agent_runtime_with_authorization(
         &self,
         runtime: &RuntimeSnapshot,
         snapshot: &OperationCapabilitySnapshot,
@@ -319,6 +320,7 @@ impl RuntimeService {
         if let Some(runtime) = typed_runtime {
             agent
                 .set_tool_runtime(runtime)
+                .await
                 .map_err(|error| CodingSessionError::Tool {
                     message: error.to_string(),
                 })?;
@@ -327,11 +329,11 @@ impl RuntimeService {
             .into_iter()
             .filter(|definition| snapshot.tools.allows(&definition.id))
         {
-            agent
-                .add_provider_tool(definition)
-                .map_err(|error| CodingSessionError::Tool {
+            agent.add_provider_tool(definition).await.map_err(|error| {
+                CodingSessionError::Tool {
                     message: error.to_string(),
-                })?;
+                }
+            })?;
         }
         Ok(AgentRuntimeBuild { agent, diagnostics })
     }

@@ -106,7 +106,6 @@ pub(crate) fn start_turn(ctx: &mut AgentTurnContext) -> Result<AgentTurnDecision
 }
 
 pub(crate) fn drain_queued_input(ctx: &mut AgentTurnContext) {
-    ctx.sync_live_queues();
     let steered = drain_queue(&mut ctx.steering_queue, ctx.config.steering_mode);
     ctx.messages.extend(steered);
 }
@@ -522,7 +521,6 @@ pub(crate) async fn maybe_prepare_next_turn(
         .assistant_message
         .clone()
         .ok_or_else(|| AgentTurnError::Invariant("assistant message is not available".into()))?;
-    ctx.sync_live_queues();
 
     match assistant.stop_reason {
         StopReason::Stop | StopReason::Length => {

@@ -78,6 +78,7 @@ async fn main() {
     registry.register(tool).expect("tool registration");
     agent
         .set_tool_runtime(ToolRuntime::new(registry).expect("valid runtime"))
+        .await
         .expect("example tool runtime must be valid");
 
     println!("=== agent-core loop example ===\n");
@@ -119,8 +120,9 @@ async fn main() {
         }
     }
 
-    println!("\n=== Final messages ({}) ===", agent.messages().len());
-    for msg in agent.messages() {
+    let messages = agent.messages().await;
+    println!("\n=== Final messages ({}) ===", messages.len());
+    for msg in messages {
         match msg {
             AgentMessage::UserText { text, .. } => println!("  User: {}", text),
             AgentMessage::Assistant { .. } => {

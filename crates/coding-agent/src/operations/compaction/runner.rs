@@ -241,18 +241,20 @@ impl ManualCompactionContext {
         Ok(())
     }
 
-    fn prepare_summary_context(&mut self) -> Result<(), CodingSessionError> {
+    async fn prepare_summary_context(&mut self) -> Result<(), CodingSessionError> {
         if !self.summary_messages.is_empty() {
             return Ok(());
         }
         let service = RuntimeService::new();
-        let build = service.build_agent_runtime_with_capabilities(
-            self.options.runtime(),
-            &self.capability_snapshot,
-        )?;
+        let build = service
+            .build_agent_runtime_with_capabilities(
+                self.options.runtime(),
+                &self.capability_snapshot,
+            )
+            .await?;
         let agent = build.agent;
         service.hydrate_agent_runtime(&agent, self.options.runtime(), &self.replay);
-        let messages = agent.messages();
+        let messages = agent.messages().await;
         if messages.len() < 2 {
             return Err(CodingSessionError::Session {
                 message: "Nothing to compact (no messages yet)".into(),
@@ -272,7 +274,7 @@ impl ManualCompactionContext {
                 .ok_or_else(|| CodingSessionError::Session {
                     message: "manual compaction range was not selected".into(),
                 })?;
-        let stream_options = agent.provider_request_snapshot().1;
+        let stream_options = agent.provider_request_snapshot().await.1;
         self.transaction_mut_required()?
             .record_session_compaction_started(first_kept_message_id, tokens_before)?;
         self.tokens_before = Some(tokens_before);
@@ -364,7 +366,7 @@ impl ManualCompactionRunner {
         Self::check_cancellation(ctx)?;
         ctx.select_compaction_range()?;
         Self::check_cancellation(ctx)?;
-        ctx.prepare_summary_context()?;
+        ctx.prepare_summary_context().await?;
         Self::check_cancellation(ctx)?;
         ctx.run_summary_model().await?;
         Self::check_cancellation(ctx)?;

@@ -1,10 +1,6 @@
-// TODO(ARC-D500, Phase 5): actor task + Agent migration in progress; remove allow once wired
-#![allow(dead_code)]
-
 use ai_protocol::api::conversation::{ContentBlock, Context};
 use ai_protocol::api::stream::StreamOptions;
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 use tool_contract::api::definition::{ToolDefinition, ToolDefinitionError};
 use tool_runtime::api::ToolRuntime;
 
@@ -17,12 +13,14 @@ pub type AgentEventStream = mpsc::Receiver<AgentEvent>;
 
 pub(crate) const MAILBOX_CAPACITY: usize = 256;
 
-/// Cloneable handle that only holds a bounded command channel and a shared
-/// cancellation token. The actor task owns `AgentState` exclusively.
+/// Capacity of the bounded event stream handed to consumers of a turn.
+pub(crate) const EVENT_STREAM_CAPACITY: usize = 64;
+
+/// Cloneable handle that only holds a bounded command channel. The actor task
+/// owns `AgentState` exclusively.
 #[derive(Clone)]
 pub struct AgentHandle {
     pub(crate) commands: mpsc::Sender<AgentCommand>,
-    pub(crate) cancel_token: CancellationToken,
 }
 
 /// Structured error for mailbox saturation or actor shutdown.
@@ -129,10 +127,232 @@ pub(crate) enum AgentCommand {
     DrainFollowUpQueue {
         reply: oneshot::Sender<Vec<AgentMessage>>,
     },
+    Resources {
+        reply: oneshot::Sender<AgentResources>,
+    },
     Shutdown,
 }
 
 /// Allocates the bounded mailbox and returns the sender plus receiver halves.
 pub(crate) fn mailbox() -> (mpsc::Sender<AgentCommand>, mpsc::Receiver<AgentCommand>) {
     mpsc::channel(MAILBOX_CAPACITY)
+}
+
+impl AgentHandle {
+    /// Sends a command and awaits its structured reply. A failed send or a
+    /// dropped reply (actor panicked or shut down) maps to `Closed`.
+    async fn request<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<T>) -> AgentCommand,
+    ) -> Result<T, AgentActorError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let command = build(reply_tx);
+        self.commands
+            .send(command)
+            .await
+            .map_err(|_| AgentActorError::Closed)?;
+        reply_rx.await.map_err(|_| AgentActorError::Closed)
+    }
+
+    /// Sends a command without waiting for the actor's reply. Only mailbox
+    /// saturation or a closed actor surface as errors.
+    fn fire<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<T>) -> AgentCommand,
+    ) -> Result<(), AgentQueueError> {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        self.commands
+            .try_send(build(reply_tx))
+            .map_err(AgentActorError::from_send)
+            .map_err(AgentQueueError::from)
+    }
+
+    pub(crate) async fn try_prompt(
+        &self,
+        text: String,
+    ) -> Result<AgentEventStream, AgentAdmissionError> {
+        self.request(|reply| AgentCommand::Prompt { text, reply })
+            .await
+            .map_err(|_| AgentAdmissionError::Busy {
+                operation: "prompt",
+            })?
+    }
+
+    pub(crate) async fn try_run(&self) -> Result<AgentEventStream, AgentAdmissionError> {
+        self.request(|reply| AgentCommand::Run { reply })
+            .await
+            .map_err(|_| AgentAdmissionError::Busy { operation: "run" })?
+    }
+
+    pub(crate) fn steer(&self, text: String) -> Result<(), AgentQueueError> {
+        self.fire(|reply| AgentCommand::Steer { text, reply })
+    }
+
+    pub(crate) fn steer_content(&self, content: Vec<ContentBlock>) -> Result<(), AgentQueueError> {
+        self.fire(|reply| AgentCommand::SteerContent { content, reply })
+    }
+
+    pub(crate) fn follow_up(&self, text: String) -> Result<(), AgentQueueError> {
+        self.fire(|reply| AgentCommand::FollowUp { text, reply })
+    }
+
+    pub(crate) fn follow_up_content(
+        &self,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), AgentQueueError> {
+        self.fire(|reply| AgentCommand::FollowUpContent { content, reply })
+    }
+
+    pub(crate) fn abort(&self) {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = self
+            .commands
+            .try_send(AgentCommand::Abort { reply: reply_tx });
+    }
+
+    /// Requests a graceful actor shutdown: any in-flight turn is committed
+    /// and the actor task ends. All later commands fail with `Closed`.
+    pub(crate) fn shutdown(&self) {
+        let _ = self.commands.try_send(AgentCommand::Shutdown);
+    }
+
+    pub(crate) fn clear_queues(&self) {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = self
+            .commands
+            .try_send(AgentCommand::ClearQueues { reply: reply_tx });
+    }
+
+    pub(crate) async fn messages(&self) -> Result<Vec<AgentMessage>, AgentActorError> {
+        self.request(|reply| AgentCommand::Messages { reply }).await
+    }
+
+    pub(crate) fn add_message(&self, message: AgentMessage) {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = self.commands.try_send(AgentCommand::AddMessage {
+            message,
+            reply: reply_tx,
+        });
+    }
+
+    pub(crate) fn replace_messages(&self, messages: Vec<AgentMessage>) {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = self.commands.try_send(AgentCommand::ReplaceMessages {
+            messages,
+            reply: reply_tx,
+        });
+    }
+
+    pub(crate) async fn set_tool_runtime(
+        &self,
+        runtime: ToolRuntime,
+    ) -> Result<Result<(), ToolDefinitionError>, AgentActorError> {
+        self.request(|reply| AgentCommand::SetToolRuntime { runtime, reply })
+            .await
+    }
+
+    pub(crate) async fn add_provider_tool(
+        &self,
+        definition: ToolDefinition,
+    ) -> Result<Result<(), ToolDefinitionError>, AgentActorError> {
+        self.request(|reply| AgentCommand::AddProviderTool { definition, reply })
+            .await
+    }
+
+    pub(crate) fn set_resources(&self, resources: AgentResources) {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = self.commands.try_send(AgentCommand::SetResources {
+            resources,
+            reply: reply_tx,
+        });
+    }
+
+    pub(crate) async fn provider_request_snapshot(
+        &self,
+    ) -> Result<(Context, Option<StreamOptions>), AgentActorError> {
+        self.request(|reply| AgentCommand::ProviderRequestSnapshot { reply })
+            .await
+    }
+
+    pub(crate) fn set_provider_request_override(
+        &self,
+        context: Context,
+        stream_options: Option<StreamOptions>,
+    ) {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = self
+            .commands
+            .try_send(AgentCommand::SetProviderRequestOverride {
+                context: Box::new(context),
+                stream_options,
+                reply: reply_tx,
+            });
+    }
+
+    pub(crate) async fn before_provider_request_hook(
+        &self,
+    ) -> Result<Option<BeforeProviderRequestHook>, AgentActorError> {
+        self.request(|reply| AgentCommand::BeforeProviderRequestHook { reply })
+            .await
+    }
+
+    pub(crate) fn set_before_provider_request_hook(&self, hook: Option<BeforeProviderRequestHook>) {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = self
+            .commands
+            .try_send(AgentCommand::SetBeforeProviderRequestHook {
+                hook,
+                reply: reply_tx,
+            });
+    }
+
+    pub(crate) async fn drain_steering_queue(&self) -> Result<Vec<AgentMessage>, AgentActorError> {
+        self.request(|reply| AgentCommand::DrainSteeringQueue { reply })
+            .await
+    }
+
+    pub(crate) async fn drain_follow_up_queue(&self) -> Result<Vec<AgentMessage>, AgentActorError> {
+        self.request(|reply| AgentCommand::DrainFollowUpQueue { reply })
+            .await
+    }
+
+    pub(crate) async fn resources(&self) -> Result<AgentResources, AgentActorError> {
+        self.request(|reply| AgentCommand::Resources { reply })
+            .await
+    }
+}
+
+#[cfg(test)]
+mod mailbox_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn steer_returns_mailbox_full_when_mailbox_is_full() {
+        let (commands, _receiver) = mpsc::channel(1);
+        let handle = AgentHandle { commands };
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        handle
+            .commands
+            .try_send(AgentCommand::Abort { reply: reply_tx })
+            .expect("first command fills the mailbox");
+        let error = handle.steer("blocked".into()).expect_err("mailbox is full");
+        assert_eq!(error, AgentQueueError::MailboxFull);
+    }
+
+    #[tokio::test]
+    async fn steer_returns_actor_closed_after_shutdown() {
+        let (commands, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let handle = AgentHandle { commands };
+        let error = handle.steer("blocked".into()).expect_err("actor is closed");
+        assert_eq!(error, AgentQueueError::ActorClosed);
+    }
+
+    #[tokio::test]
+    async fn shutdown_command_is_accepted() {
+        let (commands, _receiver) = mpsc::channel(2);
+        let handle = AgentHandle { commands };
+        handle.shutdown();
+        assert!(handle.steer("blocked".into()).is_ok());
+    }
 }

@@ -1,2 +1,1 @@
 # id	clear-by-phase	path	description
-ARC-D500	5	crates/agent-core/src/agent/command.rs	AgentCommand/AgentHandle types defined; actor task + Agent migration in progress (ARC-500)

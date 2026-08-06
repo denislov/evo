@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, RwLock};
 
 use ai_protocol::api::conversation::{AssistantMessage, Context};
 use ai_protocol::api::stream::StreamOptions;
@@ -52,12 +51,19 @@ pub struct AgentTurnContext {
     pub tool_results: Vec<AgentToolResult>,
     pub tool_results_all_terminate: bool,
     pub runtime_compaction: RuntimeCompactionState,
-    pub(crate) live_state: Option<Arc<RwLock<AgentState>>>,
     event_sender: Option<mpsc::UnboundedSender<AgentEvent>>,
 }
 
 impl AgentTurnContext {
-    pub(crate) fn from_state(state: &AgentState) -> Self {
+    /// Snapshots the persistent actor state into a turn-owned working copy.
+    ///
+    /// The actor owns `AgentState` exclusively, so no locking is needed. The
+    /// provider request override is *moved* out of the state: it is consumed
+    /// by at most one turn (mirroring the previous take-on-use semantics).
+    /// The steering/follow-up queues are cloned here and cleared in the state
+    /// by the caller (`TurnRunner::start_turn`), so input enqueued during a
+    /// turn is appended to the turn's working copy directly.
+    pub(crate) fn from_state(state: &mut AgentState) -> Self {
         Self {
             config: state.config.clone(),
             messages: state.messages.clone(),
@@ -68,10 +74,10 @@ impl AgentTurnContext {
             cancel_token: state.cancel_token.clone(),
             turn: 0,
             provider_request: None,
-            provider_request_override: state.provider_request_override.as_ref().map(|request| {
+            provider_request_override: state.provider_request_override.take().map(|request| {
                 AgentTurnProviderRequestOverride {
-                    context: request.context.clone(),
-                    stream_options: request.stream_options.clone(),
+                    context: request.context,
+                    stream_options: request.stream_options,
                 }
             }),
             provider_request_override_consumed: false,
@@ -80,17 +86,11 @@ impl AgentTurnContext {
             tool_results: Vec::new(),
             tool_results_all_terminate: false,
             runtime_compaction: RuntimeCompactionState::default(),
-            live_state: None,
             event_sender: None,
         }
     }
 
-    pub(crate) fn attach_runtime(
-        &mut self,
-        live_state: Arc<RwLock<AgentState>>,
-        event_sender: mpsc::UnboundedSender<AgentEvent>,
-    ) {
-        self.live_state = Some(live_state);
+    pub(crate) fn attach_event_sender(&mut self, event_sender: mpsc::UnboundedSender<AgentEvent>) {
         self.event_sender = Some(event_sender);
     }
 
@@ -100,28 +100,9 @@ impl AgentTurnContext {
         }
     }
 
-    pub(crate) fn sync_live_queues(&mut self) {
-        let Some(live_state) = &self.live_state else {
-            return;
-        };
-        let mut state = live_state.write().unwrap();
-        self.steering_queue.extend(state.steering_queue.drain(..));
-        self.follow_up_queue.extend(state.follow_up_queue.drain(..));
-    }
-
     pub(crate) fn take_provider_request_override(
         &mut self,
     ) -> Option<AgentTurnProviderRequestOverride> {
-        if let Some(live_state) = &self.live_state {
-            let mut state = live_state.write().unwrap();
-            return state.provider_request_override.take().map(|request| {
-                AgentTurnProviderRequestOverride {
-                    context: request.context,
-                    stream_options: request.stream_options,
-                }
-            });
-        }
-
         let request = self.provider_request_override.take();
         if request.is_some() {
             self.provider_request_override_consumed = true;
@@ -129,33 +110,28 @@ impl AgentTurnContext {
         request
     }
 
-    pub(crate) fn apply_to_state(&mut self, state: &mut AgentState, discard_queues: bool) {
+    /// Writes the turn's working copy back into the actor-owned state.
+    ///
+    /// Only the fields a turn can mutate are written back; everything else in
+    /// `AgentConfig` is immutable for the lifetime of a turn. Queue leftovers
+    /// are merged with whatever the actor state still holds (input enqueued
+    /// between the turn's last queue drain and its commit).
+    pub(crate) fn apply_to_state(&mut self, state: &mut AgentState) {
         state.messages = std::mem::take(&mut self.messages);
-        // Only the fields a turn can mutate are written back; everything else
-        // in `AgentConfig` is immutable for the lifetime of a turn.
         state.config.model = self.config.model.clone();
         state.config.stream_options = self.config.stream_options.clone();
         state.config.thinking_level = self.config.thinking_level;
         state.cancel_token = self.cancel_token.clone();
 
-        if discard_queues {
-            // The caller asked to clear all queued input; drop what the turn
-            // already synced and whatever arrived on the live queues.
-            self.steering_queue.clear();
-            self.follow_up_queue.clear();
-            state.steering_queue.clear();
-            state.follow_up_queue.clear();
-        } else {
-            let mut steering_queue = std::mem::take(&mut self.steering_queue);
-            steering_queue.extend(state.steering_queue.drain(..));
-            state.steering_queue = steering_queue;
+        let mut steering_queue = std::mem::take(&mut self.steering_queue);
+        steering_queue.extend(state.steering_queue.drain(..));
+        state.steering_queue = steering_queue;
 
-            let mut follow_up_queue = std::mem::take(&mut self.follow_up_queue);
-            follow_up_queue.extend(state.follow_up_queue.drain(..));
-            state.follow_up_queue = follow_up_queue;
-        }
+        let mut follow_up_queue = std::mem::take(&mut self.follow_up_queue);
+        follow_up_queue.extend(state.follow_up_queue.drain(..));
+        state.follow_up_queue = follow_up_queue;
 
-        if self.live_state.is_none() && self.provider_request_override_consumed {
+        if self.provider_request_override_consumed {
             state.provider_request_override = None;
         }
     }

@@ -277,7 +277,7 @@ impl BranchSummaryContext {
         Ok(())
     }
 
-    fn prepare_summary_prompt(&mut self) -> Result<(), CodingSessionError> {
+    async fn prepare_summary_prompt(&mut self) -> Result<(), CodingSessionError> {
         if self.outcome.is_some() || !self.summary_messages.is_empty() {
             return Ok(());
         }
@@ -299,18 +299,19 @@ impl BranchSummaryContext {
             operation_statuses: Default::default(),
         };
         let service = RuntimeService::new();
-        let build =
-            service.build_agent_runtime_with_capabilities(runtime, &self.capability_snapshot)?;
+        let build = service
+            .build_agent_runtime_with_capabilities(runtime, &self.capability_snapshot)
+            .await?;
         let agent = build.agent;
         service.hydrate_agent_runtime(&agent, runtime, &selected_replay);
-        let messages = agent.messages();
+        let messages = agent.messages().await;
         if messages.is_empty() {
             self.outcome = Some(BranchSummaryOutcome::NoOp {
                 reason: NO_ABANDONED_BRANCH_REASON.into(),
             });
             return Ok(());
         }
-        self.stream_options = agent.provider_request_snapshot().1;
+        self.stream_options = agent.provider_request_snapshot().await.1;
         self.summary_messages = messages;
         Ok(())
     }
@@ -432,7 +433,7 @@ impl BranchSummaryRunner {
         Self::check_cancellation(&cancellation)?;
         ctx.select_abandoned_range()?;
         Self::check_cancellation(&cancellation)?;
-        ctx.prepare_summary_prompt()?;
+        ctx.prepare_summary_prompt().await?;
         Self::check_cancellation(&cancellation)?;
         ctx.run_summary_model().await?;
         Self::check_cancellation(&cancellation)?;
