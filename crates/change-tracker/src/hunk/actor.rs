@@ -534,6 +534,60 @@ impl ActorState {
         Ok(())
     }
 
+    pub(super) fn reconcile(&mut self) -> Result<(), ChangeTrackerError> {
+        if matches!(self.reconcile, ReconcileState::Ready) {
+            return Ok(());
+        }
+        let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
+        for path in &paths {
+            let observed = read_observed(&self.root, path, self.options.max_content_bytes)?;
+            let unchanged = self
+                .files
+                .get(path)
+                .and_then(|state| state.current.as_ref())
+                .is_some_and(|current| {
+                    current.exists == observed.exists && current.revision == observed.revision
+                });
+            if unchanged {
+                continue;
+            }
+            let previous_state = self.files.get(path).cloned();
+            let (source, before_revision) = {
+                let state = self
+                    .files
+                    .get_mut(path)
+                    .expect("path is drawn from the file map keys");
+                let source = if state.agent_touched {
+                    ChangeSource::ExternalEditOnAgentFile
+                } else {
+                    ChangeSource::ExternalEdit
+                };
+                let before_revision = state
+                    .current
+                    .as_ref()
+                    .and_then(|current| current.exists.then(|| current.revision.clone()));
+                state.current = Some(FileVersion::from_observed(observed));
+                state.mutation_kind = "external_reconcile".into();
+                (source, before_revision)
+            };
+            if let Err(error) =
+                self.recompute_and_record(path.clone(), source, None, before_revision)
+            {
+                match previous_state {
+                    Some(state) => {
+                        self.files.insert(path.clone(), state);
+                    }
+                    None => {
+                        self.files.remove(path);
+                    }
+                }
+                return Err(error);
+            }
+        }
+        self.reconcile = ReconcileState::Ready;
+        Ok(())
+    }
+
     fn apply_external(&mut self, pending: PendingEvent) -> Result<(), ChangeTrackerError> {
         let path = pending.event.path;
         let previous_state = self.files.get(&path).cloned();

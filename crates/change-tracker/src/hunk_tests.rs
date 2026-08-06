@@ -630,6 +630,178 @@ async fn watch_gap_requires_reconciliation_and_accumulates_loss() {
 }
 
 #[tokio::test]
+async fn reconcile_restores_current_and_clears_required_after_watch_gap() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "after\n").unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(b"before\n"),
+                b"after\n",
+                Some(&patch(1, 1, "before", "after")),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    handle.observe(FsEvent::WatchGap { lost: 1 }).await.unwrap();
+    assert_eq!(
+        handle.snapshot().await.unwrap().reconcile,
+        ReconcileState::Required { lost: 1 }
+    );
+    std::fs::write(dir.path().join("notes.txt"), "external\n").unwrap();
+    handle.reconcile().await.unwrap();
+    let snapshot = handle.snapshot().await.unwrap();
+    assert_eq!(snapshot.reconcile, ReconcileState::Ready);
+    assert_eq!(snapshot.files.len(), 1);
+    assert_eq!(snapshot.files[0].after_revision, revision(b"external\n"));
+    assert_eq!(
+        snapshot.files[0].source,
+        ChangeSource::ExternalEditOnAgentFile
+    );
+    assert_eq!(snapshot.files[0].mutation_kind, "external_reconcile");
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_is_noop_when_ready() {
+    let dir = TempDir::new().unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle.reconcile().await.unwrap();
+    assert_eq!(
+        handle.snapshot().await.unwrap().reconcile,
+        ReconcileState::Ready
+    );
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_enables_checkpoint_after_watch_gap() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "after\n").unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(b"before\n"),
+                b"after\n",
+                Some(&patch(1, 1, "before", "after")),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    handle.observe(FsEvent::WatchGap { lost: 1 }).await.unwrap();
+    assert!(matches!(
+        handle.checkpoint().await,
+        Err(ChangeTrackerError::InvalidFact { .. })
+    ));
+    handle.reconcile().await.unwrap();
+    assert!(handle.checkpoint().await.is_ok());
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_handles_deleted_tracked_files() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "after\n").unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(b"before\n"),
+                b"after\n",
+                Some(&patch(1, 1, "before", "after")),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    handle.observe(FsEvent::WatchGap { lost: 1 }).await.unwrap();
+    std::fs::remove_file(dir.path().join("notes.txt")).unwrap();
+    handle.reconcile().await.unwrap();
+    let snapshot = handle.snapshot().await.unwrap();
+    assert_eq!(snapshot.reconcile, ReconcileState::Ready);
+    assert_eq!(snapshot.files.len(), 1);
+    assert!(!snapshot.files[0].after_exists);
+    assert_eq!(
+        snapshot.files[0].source,
+        ChangeSource::ExternalEditOnAgentFile
+    );
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_skips_unchanged_files() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "after\n").unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(b"before\n"),
+                b"after\n",
+                Some(&patch(1, 1, "before", "after")),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    let before_facts = handle.snapshot().await.unwrap().facts.len();
+    handle.observe(FsEvent::WatchGap { lost: 1 }).await.unwrap();
+    // 文件未变化，reconcile 不应产生新 fact
+    handle.reconcile().await.unwrap();
+    let snapshot = handle.snapshot().await.unwrap();
+    assert_eq!(snapshot.reconcile, ReconcileState::Ready);
+    assert_eq!(snapshot.facts.len(), before_facts);
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_checkpoint_round_trips_through_restore() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "after\n").unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(b"before\n"),
+                b"after\n",
+                Some(&patch(1, 1, "before", "after")),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    handle.observe(FsEvent::WatchGap { lost: 1 }).await.unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "external\n").unwrap();
+    handle.reconcile().await.unwrap();
+    let checkpoint = handle.checkpoint().await.unwrap();
+    let reconciled = handle.snapshot().await.unwrap();
+    handle.restore_checkpoint(checkpoint).await.unwrap();
+    let restored = handle.snapshot().await.unwrap();
+    assert_eq!(restored, reconciled);
+    tracker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn budgets_and_invalid_sources_fail_closed_without_mutating_snapshot() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("notes.txt"), "after\n").unwrap();

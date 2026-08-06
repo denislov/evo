@@ -290,6 +290,7 @@ impl HunkTrackingService {
                     Ok(event) => handle.observe_wait(event).await?,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(lost)) => {
                         handle.observe_wait(FsEvent::WatchGap { lost }).await?;
+                        let _ = handle.reconcile().await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
                 }
@@ -382,6 +383,10 @@ impl HunkTrackerHandle {
     ) -> Result<(), ChangeTrackerError> {
         self.request(CommandKind::RestoreCheckpoint(checkpoint))
             .await
+    }
+
+    pub async fn reconcile(&self) -> Result<(), ChangeTrackerError> {
+        self.request(CommandKind::Reconcile).await
     }
 
     pub async fn accept_hunk(
@@ -530,6 +535,7 @@ enum CommandKind {
         expected_target_fingerprint: String,
     },
     RestoreCheckpoint(HunkTrackerCheckpoint),
+    Reconcile,
     Shutdown,
 }
 
@@ -663,6 +669,7 @@ async fn run_actor(
                     CommandKind::RestoreCheckpoint(checkpoint) => {
                         state.restore_checkpoint(checkpoint)
                     }
+                    CommandKind::Reconcile => state.reconcile(),
                     CommandKind::Shutdown => state.flush_all_events(),
                 };
                 if result.is_ok()

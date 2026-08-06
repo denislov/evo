@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～3 完成，Phase 4 / ARC-400～430 完成，准备进入 ARC-440）
+> 状态：执行中（Phase 0～4 完成，Phase 4 Gate 通过，准备进入 Phase 5）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -42,6 +42,8 @@
 | Phase 4 / ARC-410 | 完成（复验 2026-08-06） | `docs/refactor/phase4-hunk-tracker.md`；baseline→current HunkTracker actor、receipt/event 因果关联、稳定 HunkId、来源归因、bounded diff/content/history、accept/reject plan 与 creation/deletion/empty-file fail-closed 语义；45 个 `change-tracker` 测试通过 |
 | Phase 4 / ARC-420 | 完成（复验 2026-08-06） | `docs/refactor/phase4-review-domain.md`；统一 list/open/accept/reject/discard API、typed receipt 直连 filesystem tools、共享 Review DTO、live Review product event、Desktop/CLI projection 与 capability/revision/target 复验；coding-agent 178、Desktop 303 测试通过，workspace/release API/architecture/clippy Gate 通过 |
 | Phase 4 / ARC-430 | 完成（复验 2026-08-06） | `docs/refactor/phase4-rewind.md`；三域一致恢复（session event cursor/branch + workspace snapshot restore + hunk tracker checkpoint）、新 branch 不截断历史、事务双向 rollback、startup recovery、capability/cursor/drafts 同步、fail-closed（source/stale/sidecar）；change-tracker 60、workspace-runtime 91、coding-agent 182 测试通过，architecture Gate 通过（oversized_debts=35，execution_debts=0） |
+| Phase 4 / ARC-440 | 完成（复验 2026-08-06） | `docs/refactor/phase4-rewind-tests.md`；WatchGap full reconcile（重新扫描 tracked 文件、更新 current、生成 external fact、重置 Ready）、forwarder 自动触发、显式命令接口、reconcile 后 checkpoint 可用；change-tracker 66 测试通过，跨域矩阵覆盖 receipt/event 双顺序、hunk 漂移、rename、冲突 reject、stale accept、rewind 后 prompt、crash reopen |
+| Phase 4 Gate | 通过（2026-08-06） | UI 展示的每个 diff 可追溯到文件事实；accept/reject/rewind 有 revision 防护；外部修改不会被错误归因给 Agent；WatchGap 后可 reconcile 恢复 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -566,6 +568,8 @@ Phase 3 Gate：完成（2026-08-05）。并行 child 默认完全隔离；父 wo
 - 恢复后 hunk tracker、prompt queue、capability generation 和 client cursor 同步更新。
 
 ### ARC-440 Review/rewind 测试
+
+执行状态：完成（复验 2026-08-06）。完成证据见 `docs/refactor/phase4-rewind-tests.md`。
 
 - Agent 写后外部编辑、外部编辑后 Agent 写、rename 后继续编辑。
 - hunk 漂移、相邻 hunk 合并、冲突 reject、stale accept。
