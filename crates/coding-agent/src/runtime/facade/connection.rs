@@ -132,6 +132,12 @@ impl CodingAgentSession {
         // session is terminated and its driver joined before the session
         // commits its terminal state.
         self.runtime_host.background_tasks.shutdown().await;
+        // Extension host lifecycle: session close notifies the host so it can
+        // shut down in deterministic order (ARC-710 wires the real host;
+        // the Noop port makes this a no-op today).
+        self.runtime_host
+            .extension_host
+            .notify_shutdown("session shutdown");
         self.runtime_host
             .client_projection
             .snapshots

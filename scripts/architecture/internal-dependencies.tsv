@@ -15,4 +15,5 @@ coding-agent	tool-contract
 coding-agent	tool-runtime
 coding-agent	workspace-runtime
 desktop	coding-agent
+extension-host	tool-contract
 tool-runtime	tool-contract

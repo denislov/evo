@@ -262,6 +262,9 @@ impl CodingAgentSession {
                 },
                 runtime_service: runtime_service.with_background_tasks(background_tasks.clone()),
                 background_tasks,
+                extension_host: crate::services::ports::ExtensionHostService::new(
+                    std::sync::Arc::new(crate::services::ports::NoopExtensionHostPort),
+                ),
                 profile_registry,
                 authorization_service,
                 review_service: crate::services::review::ReviewService::new(
@@ -346,6 +349,9 @@ impl CodingAgentSession {
                 },
                 runtime_service: runtime_service.with_background_tasks(background_tasks.clone()),
                 background_tasks,
+                extension_host: crate::services::ports::ExtensionHostService::new(
+                    std::sync::Arc::new(crate::services::ports::NoopExtensionHostPort),
+                ),
                 profile_registry,
                 authorization_service,
                 review_service: crate::services::review::ReviewService::new(
