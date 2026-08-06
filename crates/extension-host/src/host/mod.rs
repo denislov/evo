@@ -65,6 +65,9 @@ pub struct ExtensionHostOptions {
     pub diagnostics: Option<Arc<dyn DiagnosticSink>>,
     /// 诊断环形缓冲容量。
     pub diagnostic_capacity: usize,
+    /// MCP host（ARC-720）：配置了 MCP server 时装配并随 host 启动 /
+    /// 关闭；`None` = 无 MCP（行为不变）。
+    pub mcp: Option<crate::mcp::lifecycle::McpHost>,
 }
 
 impl Default for ExtensionHostOptions {
@@ -77,6 +80,7 @@ impl Default for ExtensionHostOptions {
             budget: ExtensionBudget::default(),
             diagnostics: None,
             diagnostic_capacity: DEFAULT_DIAGNOSTIC_CAPACITY,
+            mcp: None,
         }
     }
 }
@@ -112,6 +116,8 @@ pub(crate) struct HostShared {
     cancel: CancellationToken,
     /// 已解析的 hook 注册表（只读；gate 事件经 [`HookGate`] 查询）。
     registry: Option<Arc<HookRegistry>>,
+    /// MCP host（ARC-720）：随 host start / shutdown 生命周期。
+    mcp: Option<crate::mcp::lifecycle::McpHost>,
 }
 
 impl HostShared {
@@ -154,6 +160,7 @@ impl HostShared {
             budget: Mutex::new(BudgetTracker::new(ExtensionBudget::default())),
             cancel: CancellationToken::new(),
             registry: None,
+            mcp: None,
         })
     }
 }
@@ -261,6 +268,7 @@ impl ExtensionHost {
         }
         let registry = (!registry.is_empty()).then(|| Arc::new(registry));
 
+        let mcp = options.mcp.clone();
         let info = Arc::new(HostInfo {
             options,
             records,
@@ -275,6 +283,7 @@ impl ExtensionHost {
             budget: Mutex::new(BudgetTracker::new(budget)),
             cancel: CancellationToken::new(),
             registry,
+            mcp,
         });
         (Self { info, shared }, errors)
     }
@@ -292,6 +301,14 @@ impl ExtensionHost {
                 return Err(ExtensionError::NotRunning);
             }
             *state = HostState::Running;
+        }
+        // MCP host 随 host 启动（幂等；启动失败视为 host 启动失败）。
+        if let Some(mcp) = self.shared.mcp.as_ref() {
+            mcp.start().map_err(|error| ExtensionError::InvalidConfig {
+                name: "mcp".into(),
+                path: std::path::PathBuf::from("<host>"),
+                detail: error,
+            })?;
         }
         let (tx, rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -331,6 +348,21 @@ impl ExtensionHost {
             .registry
             .as_ref()
             .map(|registry| Arc::new(HookGate::new(registry.clone(), self.shared.clone())))
+    }
+
+    /// MCP host（ARC-720）。配置了 MCP server 时返回 `Some`；其生命周期
+    /// 由 host 托管（start 启动、dispatch task 结束时确定性关闭）。
+    pub fn mcp(&self) -> Option<&crate::mcp::lifecycle::McpHost> {
+        self.shared.mcp.as_ref()
+    }
+
+    /// 生成的 MCP meta tools（`mcp_search` / `mcp_use`）。无 MCP 配置时
+    /// 为空。
+    pub fn mcp_meta_tools(&self) -> Vec<std::sync::Arc<dyn tool_runtime::api::DynamicTool>> {
+        let Some(mcp) = self.mcp() else {
+            return Vec::new();
+        };
+        crate::mcp::meta::meta_tools(std::sync::Arc::new(mcp.clone()))
     }
 }
 
@@ -546,6 +578,12 @@ async fn dispatch_loop(
     } else {
         ShutdownReason::SendersDropped
     };
+    // MCP host 确定性关闭：停新调用（状态置 Stopping）→ 取消在途 →
+    // 终止子进程 / 关连接（在 host_shutdown 诊断之前完成，join 回收时
+    // 已是终态）。
+    if let Some(mcp) = shared.mcp.as_ref() {
+        mcp.shutdown().await;
+    }
     shared.record(DiagnosticRecord {
         level: DiagnosticLevel::Info,
         code: "host_shutdown".into(),

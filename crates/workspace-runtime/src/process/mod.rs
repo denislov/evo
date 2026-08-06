@@ -9,11 +9,13 @@ use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 mod background;
+mod peer;
 
 pub use background::{
     OutputGap, TaskHandle, TaskId, TaskOutputChunk, TaskOwner, TaskRegistry, TaskReport,
     TaskSnapshot, TaskSpawnError, TaskState,
 };
+pub use peer::PeerProcess;
 
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
@@ -328,53 +330,57 @@ pub(crate) struct SpawnedProcess {
     stderr: Option<tokio::process::ChildStderr>,
 }
 
+async fn spawn_process(spec: &ProcessSpec, stdin_piped: bool) -> Result<SpawnedProcess, String> {
+    let mut command = command_from_spec(spec);
+    let prepared_sandbox = match spec.sandbox.as_ref().map(crate::sandbox::prepare_sandbox) {
+        Some(Ok(prepared)) => prepared,
+        Some(Err(error)) => {
+            return Err(format!("sandbox setup failed: {error}"));
+        }
+        None => None,
+    };
+    configure_process(&mut command, spec, prepared_sandbox, stdin_piped);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return Err(format!("failed to spawn: {error}"));
+        }
+    };
+    let process_tree = match ProcessTree::attach(&child) {
+        Ok(process_tree) => process_tree,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!(
+                "failed to attach process tree containment: {error}"
+            ));
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => Some(stdout),
+        None => {
+            terminate_child_process_tree(&mut child, &process_tree).await;
+            return Err("failed to capture stdout".into());
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => Some(stderr),
+        None => {
+            terminate_child_process_tree(&mut child, &process_tree).await;
+            return Err("failed to capture stderr".into());
+        }
+    };
+    Ok(SpawnedProcess {
+        child,
+        process_tree,
+        stdout,
+        stderr,
+    })
+}
+
 impl SpawnedProcess {
     async fn spawn(spec: &ProcessSpec) -> Result<Self, String> {
-        let mut command = command_from_spec(spec);
-        let prepared_sandbox = match spec.sandbox.as_ref().map(crate::sandbox::prepare_sandbox) {
-            Some(Ok(prepared)) => prepared,
-            Some(Err(error)) => {
-                return Err(format!("sandbox setup failed: {error}"));
-            }
-            None => None,
-        };
-        configure_process(&mut command, spec, prepared_sandbox);
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                return Err(format!("failed to spawn: {error}"));
-            }
-        };
-        let process_tree = match ProcessTree::attach(&child) {
-            Ok(process_tree) => process_tree,
-            Err(error) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(format!(
-                    "failed to attach process tree containment: {error}"
-                ));
-            }
-        };
-        let stdout = match child.stdout.take() {
-            Some(stdout) => Some(stdout),
-            None => {
-                terminate_child_process_tree(&mut child, &process_tree).await;
-                return Err("failed to capture stdout".into());
-            }
-        };
-        let stderr = match child.stderr.take() {
-            Some(stderr) => Some(stderr),
-            None => {
-                terminate_child_process_tree(&mut child, &process_tree).await;
-                return Err("failed to capture stderr".into());
-            }
-        };
-        Ok(Self {
-            child,
-            process_tree,
-            stdout,
-            stderr,
-        })
+        spawn_process(spec, false).await
     }
 
     /// The shared read/await loop: cancellation, optional timeout, child
@@ -441,7 +447,7 @@ impl SpawnedProcess {
 }
 
 pub(crate) type BoxTimeout = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-fn command_from_spec(spec: &ProcessSpec) -> tokio::process::Command {
+pub(super) fn command_from_spec(spec: &ProcessSpec) -> tokio::process::Command {
     match &spec.program {
         ProgramKind::Shell { path, command_arg } => {
             let mut command = tokio::process::Command::new(path);
@@ -456,14 +462,19 @@ fn command_from_spec(spec: &ProcessSpec) -> tokio::process::Command {
     }
 }
 
-fn configure_process(
+pub(super) fn configure_process(
     command: &mut tokio::process::Command,
     spec: &ProcessSpec,
     prepared_sandbox: Option<crate::sandbox::PreparedSandbox>,
+    stdin_piped: bool,
 ) {
     command
         .current_dir(&spec.cwd)
-        .stdin(Stdio::null())
+        .stdin(if stdin_piped {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -590,13 +601,16 @@ fn truncate_str_from_end(text: &str, max_bytes: usize) -> String {
     chars.into_iter().rev().collect()
 }
 
-async fn terminate_child_process_tree(child: &mut tokio::process::Child, tree: &ProcessTree) {
+pub(super) async fn terminate_child_process_tree(
+    child: &mut tokio::process::Child,
+    tree: &ProcessTree,
+) {
     tree.terminate(child).await;
 }
 
 #[cfg(unix)]
 #[derive(Debug)]
-struct ProcessTree;
+pub(super) struct ProcessTree;
 
 #[cfg(unix)]
 impl ProcessTree {
@@ -625,7 +639,7 @@ impl ProcessTree {
 
 #[cfg(not(any(unix, windows)))]
 #[derive(Debug)]
-struct ProcessTree;
+pub(super) struct ProcessTree;
 
 #[cfg(not(any(unix, windows)))]
 impl ProcessTree {
@@ -643,7 +657,7 @@ impl ProcessTree {
 
 #[cfg(windows)]
 #[derive(Debug)]
-struct ProcessTree {
+pub(super) struct ProcessTree {
     job: windows_sys::Win32::Foundation::HANDLE,
 }
 

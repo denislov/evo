@@ -140,7 +140,7 @@ pub fn resolve_application_context(
         !global_config_only,
     );
     let system_prompt = resolve_system_prompt(&parsed, &cwd, &context_files);
-    let tools = tools::filter_tools(
+    let mut tools = tools::filter_tools(
         options.tools,
         &ToolFilter {
             allow: parsed.tools.clone(),
@@ -149,6 +149,16 @@ pub fn resolve_application_context(
             no_builtin_tools: parsed.no_builtin_tools,
         },
     );
+    // ARC-720：配置了 MCP server 时追加 meta tools（mcp_search / mcp_use）。
+    // 同一份 ExtensionHostOptions 会随 session 装配进 extension host，
+    // 工具执行时读 host 托管的 McpHost 状态。
+    if let Some(extension_options) = &options.extension_host_options
+        && let Some(mcp) = &extension_options.mcp
+    {
+        tools.extend(extension_host::mcp::meta_tools(std::sync::Arc::new(
+            mcp.clone(),
+        )));
+    }
 
     let session = resolve_session_options(&parsed, &config, options.session);
     let session_target = resolve_session_target(&parsed);

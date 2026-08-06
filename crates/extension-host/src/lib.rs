@@ -32,6 +32,11 @@
 //! `#[serde(default)]` 向后兼容。事件 kind 覆盖 session / prompt / tool /
 //! permission / stop / subagent / compaction / merge 八类。
 //!
+//! MCP provider adapter（ARC-720）：[`mcp`] 模块提供 MCP server 装配
+//! （stdio / HTTP transport、initialize 握手、liveness、重连、工具发现、
+//! credential store + OAuth device flow）与 `mcp_search` / `mcp_use`
+//! meta tools，经 [`ExtensionHostOptions::mcp`] 接入 host 生命周期。
+//!
 //! 扩展点：`ExtensionHostOptions`（ARC-720 扩展配置字段）、manifest 的
 //! `capabilities` 与 `ConcurrentExtensions` 维度（ARC-720 MCP 注册入口）。
 
@@ -48,6 +53,7 @@ pub mod event;
 pub mod hook;
 pub mod host;
 pub mod matcher;
+pub mod mcp;
 pub mod runner;
 pub mod trust;
 

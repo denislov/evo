@@ -2054,6 +2054,7 @@ name = "extension-host"
 version = "0.7.2"
 dependencies = [
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -2062,6 +2063,7 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tool-contract",
+ "tool-runtime",
  "workspace-runtime",
 ]
 

@@ -31,6 +31,7 @@ pub(crate) fn default_application_options(
         global_config_only: false,
         ai_client: None,
         session,
+        extension_host_options: None,
     })
 }
 

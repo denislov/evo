@@ -76,6 +76,10 @@ pub(crate) struct ApplicationRunOptions {
     pub global_config_only: bool,
     pub ai_client: Option<AiClient>,
     pub session: SessionRunOptions,
+    /// ARC-720：携带 MCP server 配置的 extension host 装配参数。配置了
+    /// MCP server 时，`resolve_application_context` 会把 `mcp_search` /
+    /// `mcp_use` meta tools 追加到工具列表。`None` = 无 MCP（行为不变）。
+    pub extension_host_options: Option<extension_host::api::ExtensionHostOptions>,
 }
 
 impl Default for ApplicationRunOptions {
@@ -87,6 +91,7 @@ impl Default for ApplicationRunOptions {
             global_config_only: false,
             ai_client: None,
             session: SessionRunOptions::disabled(PathBuf::from(".")),
+            extension_host_options: None,
         }
     }
 }

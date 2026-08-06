@@ -7,13 +7,15 @@ license.workspace = true
 
 [dependencies]
 regex = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-util.workspace = true
 toml = { workspace = true }
 tool-contract = { workspace = true }
+tool-runtime = { workspace = true }
 workspace-runtime = { workspace = true }
 
 [dev-dependencies]

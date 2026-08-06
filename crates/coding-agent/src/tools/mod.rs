@@ -11,6 +11,8 @@ pub use workspace_runtime::api::WorkspaceAccessHandle;
 
 pub(crate) mod filesystem;
 #[cfg(test)]
+mod mcp_meta_tools_tests;
+#[cfg(test)]
 mod server_tools_tests;
 pub(crate) mod shell;
 pub(crate) mod web_fetch;

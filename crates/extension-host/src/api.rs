@@ -25,6 +25,25 @@ pub use crate::host::{
     HostInfoView, HostState, ShutdownReason,
 };
 pub use crate::matcher::{HookMatcher, MatchContext};
+pub use crate::mcp::credentials::{
+    CREDENTIALS_FILENAME, CredentialStoreError, FileCredentialStore, McpCredentialStore,
+    McpCredentials,
+};
+pub use crate::mcp::lifecycle::{
+    DEFAULT_PING_INTERVAL, DEFAULT_PING_TIMEOUT, DEFAULT_RECONNECT_BASE, DEFAULT_RECONNECT_MAX,
+    DEFAULT_TOOL_TIMEOUT, DiscoveredTool, LivenessConfig, McpHost, McpServerConfig,
+    McpServerHandle, ReconnectConfig, convert_tool,
+};
+pub use crate::mcp::meta::{
+    MCP_SEARCH_TOOL_ID, MCP_USE_TOOL_ID, meta_tools, search_tool, use_tool,
+};
+pub use crate::mcp::oauth::{OAuthConfig, OAuthError, OAuthRuntime};
+pub use crate::mcp::transport::{HttpConfig, RpcError, RpcSession, StdioConfig, TransportConfig};
+pub use crate::mcp::wire::{
+    ErrorResponse, Id, JSONRPC_VERSION, JsonRpcError, Message, Notification, Request, Response,
+    WireError, parse_message,
+};
+pub use crate::mcp::{LifecycleEvent, ServerLifecycleState, apply_event, backoff_for};
 pub use crate::runner::{
     DEFAULT_HOOK_TIMEOUT, EVENT_ENV_VAR, GateKind, HOOK_NAME_ENV_VAR, HOOK_OUTPUT_MAX_BYTES,
     HOOK_OUTPUT_MAX_LINES, HookRunOutcome, RunContext, SESSION_ENV_VAR, StopSignals,

@@ -86,3 +86,45 @@ Local modifications:
     （Grok 无 host 生命周期）
   - 无 HTTP runner；`StopSignals` 聚合三信号；JSON 决策协议保留但简化字段集
 Sync policy: 不跟随上游（一次性适配）；`runner/http.rs` 若后续移植需单独登记。
+
+---
+
+## ARC-720 MCP provider adapter（2026-08-07）
+
+Status: adapted（小步改写 + 重新设计，未整文件复制；参考文件均标注 `Adapted from xai-grok-mcp` 来源注释）
+Upstream repository: https://github.com/bytecodealliance/xai-grok（vendored at `third-party/grok-build`）
+Upstream revision: `d6937fe255dce4133c3d000a50f9cb94de12f06f`
+Source paths: `third-party/grok-build/crates/codegen/xai-grok-mcp/src/`
+  - `servers.rs`（`ResilientRwTransport` 单行解码失败跳过的读纪律、`McpError`
+    分类、ClientStateKind 生命周期、401/auth-rejection 识别、工具调用重试结构）
+  - `liveness.rs`（transport 死亡检测的 one-shot watcher 思想；Evo 改为主动 ping）
+  - `credentials.rs`（0600 权限、原子写、加载时收紧权限的持久化纪律）
+  - `oauth.rs`（OAuth 编排预算与结构化失败；Evo 改用 RFC 8628 device flow）
+  - `mcp_http_client.rs`（重连退避的量级参考；Evo 在 lifecycle 层实现）
+  - `wire.rs` / `acp_transport.rs`（仅阅读确认 ACP 不在本任务范围）
+  - `third-party/grok-build/crates/codegen/xai-grok-hooks/src/env_expand.rs`
+    （仅阅读确认环境注入模式；MCP server 环境为配置声明白名单，不继承宿主）
+License/notices: Apache-2.0（`third-party/grok-build/THIRD-PARTY-NOTICES`）
+Destination paths:
+  - `crates/extension-host/src/mcp/{wire,transport,lifecycle,state,credentials,oauth,meta}.rs`
+  - `crates/extension-host/src/mcp/{mod.rs}`、`src/{lib,api}.rs`（公开面）
+  - `crates/extension-host/src/host/mod.rs`（`ExtensionHostOptions.mcp` 与生命周期接线）
+  - `crates/extension-host/tests/mcp_lifecycle.rs`、`src/bin/fake_mcp_server.rs`（测试 + 测试辅助二进制）
+  - `crates/workspace-runtime/src/process/peer.rs`（`PeerProcess`：sandbox 强制的交互式子进程）
+  - `crates/coding-agent/src/app/{bootstrap,startup}.rs`、`src/tools/mcp_meta_tools_tests.rs`（meta tools 装配）
+Tests carried over: 无直接复制；按 Evo 语义重写 —— wire golden/round-trip 与非法输入拒绝、
+lifecycle transition-table（13 行）、OAuth device flow（mock 端点轮询/拒绝/取消/refresh）、
+stdio 集成（握手/发现/转发/timeout/取消/liveness 重连/崩溃重连/list_changed/洪泛/坏 JSON/
+shutdown 在途取消/不可用语义）
+Local modifications:
+  - wire 从 rmcp 依赖改为手写 JSON-RPC 2.0 严格解析（未知字段拒绝，fail closed）
+  - transport 从 rmcp `TokioChildProcess`/streamable HTTP 改为手写 JSON lines stdio +
+    reqwest 同步 POST；stdio 子进程强制 `SandboxProfile`（Grok 无沙箱）
+  - liveness 从 transport-closed 轮询改为主动 `ping` 心跳（可配置间隔/超时）
+  - OAuth 从浏览器授权码流程改为 RFC 8628 device flow；401 后单次 refresh/retry
+  - credential 从 rmcp `StoredCredentials` 简化为 token/refresh 分离的 `McpCredentials`；
+    跨进程 flock 登记债务
+  - 状态机从四态枚举改为 `apply_event` 纯决策层 + transition 表 + 状态发布
+  - 新增 `mcp_search`/`mcp_use` meta tools（Grok 无此概念，全部工具直注册）
+  - tools/list_changed 热更新 + `tools_version` 订阅（Grok 仅 ACP 推送）
+Sync policy: 不跟随上游（一次性适配）；ACP 与 HTTP SSE 若后续实现需单独登记。

@@ -10,7 +10,7 @@ pub use crate::fs::{
     MAX_WALK_ENTRIES, MutationGuard, OpenedEditFile, walk_target,
 };
 pub use crate::process::{
-    EnvPolicy, OutputBudget, OutputGap, ProcessOutcome, ProcessOutput, ProcessSpec,
+    EnvPolicy, OutputBudget, OutputGap, PeerProcess, ProcessOutcome, ProcessOutput, ProcessSpec,
     ProcessUpdateCallback, ProgramKind, TaskHandle, TaskId, TaskOutputChunk, TaskOwner,
     TaskRegistry, TaskReport, TaskSnapshot, TaskSpawnError, TaskState, path_exists,
     resolve_shell_path, run,

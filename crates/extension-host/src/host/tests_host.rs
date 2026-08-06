@@ -478,3 +478,59 @@ async fn subagent_stop_phase_round_trip() {
     let back: ExtensionEventPayload = serde_json::from_value(value).unwrap();
     assert_eq!(back, payload);
 }
+
+/// McpHost 随 host 装配：start 启动、dispatch task 退出时确定性关闭。
+///
+/// 使用必然 spawn 失败的命令（lib 测试无 `CARGO_BIN_EXE_*`），只验证
+/// 生命周期装配，不依赖真实 server。
+#[tokio::test]
+async fn host_start_starts_mcp_and_shutdown_stops_it() {
+    use crate::mcp::*;
+
+    let store = Arc::new(crate::mcp::credentials::FileCredentialStore::new(
+        tempfile::tempdir().unwrap().path(),
+    ));
+    let config = McpServerConfig::new(
+        "fake",
+        crate::mcp::transport::TransportConfig::Stdio(StdioConfig {
+            command: "no-such-mcp-server-binary".into(),
+            args: vec![],
+            env: workspace_runtime::api::EnvPolicy::AllowList(Default::default()),
+            cwd: None,
+            sandbox: None,
+        }),
+    );
+    let mcp = McpHost::new(vec![config], store);
+    assert!(!mcp.is_running());
+
+    let (host, errors) = ExtensionHost::new(ExtensionHostOptions {
+        mcp: Some(mcp.clone()),
+        ..Default::default()
+    });
+    assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    let (handle, task) = host.clone().start().unwrap();
+    assert!(mcp.is_running(), "host start must start the MCP host");
+    assert_eq!(host.mcp_meta_tools().len(), 2, "search + use meta tools");
+    assert_eq!(
+        host.mcp_meta_tools()[0].definition().id.as_str(),
+        "mcp_search"
+    );
+    assert_eq!(host.mcp_meta_tools()[1].definition().id.as_str(), "mcp_use");
+
+    // host shutdown → MCP host 确定性关闭（dispatch task join 完成时已停）。
+    handle.shutdown("test");
+    let exit = tokio::time::timeout(Duration::from_secs(10), task.join())
+        .await
+        .expect("host join promptly");
+    assert_eq!(exit.reason, ShutdownReason::Manual);
+    assert!(!mcp.is_running(), "host shutdown must stop the MCP host");
+}
+
+/// 无 MCP 配置：行为与现在完全一致（mcp 为 None，meta tools 为空）。
+#[test]
+fn host_without_mcp_produces_no_meta_tools() {
+    let (host, errors) = ExtensionHost::new(ExtensionHostOptions::default());
+    assert!(errors.is_empty());
+    assert!(host.mcp().is_none());
+    assert!(host.mcp_meta_tools().is_empty());
+}
