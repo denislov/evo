@@ -416,15 +416,30 @@ fn enqueue_content_entry(
 pub(crate) async fn run_actor(mut state: AgentState, mut commands: mpsc::Receiver<AgentCommand>) {
     let mut turn: Option<TurnRunner> = None;
     let mut event_tx: Option<mpsc::Sender<AgentEvent>> = None;
+    let mut pending_commit = false;
     loop {
-        // The consumer dropped its event stream mid-turn: commit promptly so
-        // the messages are visible and a new turn can be admitted. This also
-        // closes the race between `drop(stream)` and a follow-up query.
-        if let (Some(tx), true) = (event_tx.as_ref(), turn.is_some())
-            && tx.is_closed()
-        {
-            commit_turn(&mut state, &mut turn);
+        // The consumer dropped its event stream mid-turn: abort the turn so
+        // it completes promptly, then drain remaining events and commit once
+        // the context is restored. This also closes the race between
+        // `drop(stream)` and a follow-up query.
+        if !pending_commit && event_tx.as_ref().is_some_and(|tx| tx.is_closed()) && turn.is_some() {
+            if let Some(runner) = turn.as_mut() {
+                runner.abort();
+            }
+            pending_commit = true;
             event_tx = None;
+        }
+        // Pending commit: advance the turn to completion, then commit. The
+        // consumer is gone, so events are discarded.
+        if pending_commit {
+            if let Some(runner) = turn.as_mut()
+                && runner.next_event().await.is_some()
+            {
+                continue;
+            }
+            commit_turn(&mut state, &mut turn);
+            pending_commit = false;
+            continue;
         }
         tokio::select! {
             command = commands.recv() => {
@@ -432,11 +447,13 @@ pub(crate) async fn run_actor(mut state: AgentState, mut commands: mpsc::Receive
                     Some(command) => {
                         // Re-check consumer drop before processing commands
                         // (e.g., Messages) so the turn's messages are committed.
-                        if let (Some(tx), true) = (event_tx.as_ref(), turn.is_some())
-                            && tx.is_closed()
-                        {
-                            commit_turn(&mut state, &mut turn);
+                        if event_tx.as_ref().is_some_and(|tx| tx.is_closed()) && turn.is_some() {
+                            if let Some(runner) = turn.as_mut() {
+                                runner.abort();
+                            }
+                            pending_commit = true;
                             event_tx = None;
+                            continue;
                         }
                         if handle_command(&mut state, &mut turn, &mut event_tx, command).await {
                             break;
@@ -450,7 +467,10 @@ pub(crate) async fn run_actor(mut state: AgentState, mut commands: mpsc::Receive
                     Some(event) => {
                         let tx = event_tx.as_mut().expect("event sender is set");
                         if tx.send(event).await.is_err() {
-                            commit_turn(&mut state, &mut turn);
+                            if let Some(runner) = turn.as_mut() {
+                                runner.abort();
+                            }
+                            pending_commit = true;
                             event_tx = None;
                         }
                     }
@@ -492,7 +512,11 @@ pub(crate) async fn run_actor(mut state: AgentState, mut commands: mpsc::Receive
             }
         }
     }
-    // Graceful shutdown: commit any in-flight turn so nothing is lost.
+    // Graceful shutdown: abort any in-flight turn, drain events, and commit.
+    if let Some(runner) = turn.as_mut() {
+        runner.abort();
+        while runner.next_event().await.is_some() {}
+    }
     commit_turn(&mut state, &mut turn);
 }
 

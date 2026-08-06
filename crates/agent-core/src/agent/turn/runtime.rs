@@ -1,8 +1,10 @@
+use std::collections::VecDeque;
 use std::pin::Pin;
 
 use ai_protocol::api::conversation::ContentBlock;
 use futures::channel::mpsc;
 use futures::{FutureExt, StreamExt};
+use tokio_util::sync::CancellationToken;
 
 use super::context::{AgentTurnContext, AgentTurnProviderRequestOverride};
 use super::nodes;
@@ -73,6 +75,11 @@ pub(crate) struct TurnRunner {
     /// returns `None`, giving the actor a chance to process pending commands
     /// or detect a dropped consumer.
     turn_continues: bool,
+    cancel_token: CancellationToken,
+    pending_steering: VecDeque<PromptQueueEntry>,
+    pending_follow_up: VecDeque<PromptQueueEntry>,
+    pending_interjection: VecDeque<PromptQueueEntry>,
+    pending_counter: u64,
 }
 
 impl TurnRunner {
@@ -85,6 +92,11 @@ impl TurnRunner {
             pending_error: None,
             done: false,
             turn_continues: false,
+            cancel_token: CancellationToken::new(),
+            pending_steering: VecDeque::new(),
+            pending_follow_up: VecDeque::new(),
+            pending_interjection: VecDeque::new(),
+            pending_counter: 0,
         }
     }
 
@@ -114,6 +126,7 @@ impl TurnRunner {
                 let outcome = self.run_fut.as_mut().expect("run future is set").await;
                 self.run_fut = None;
                 self.context = Some(outcome.1);
+                self.flush_pending();
                 self.finish_outcome(outcome.0);
                 continue;
             }
@@ -131,6 +144,7 @@ impl TurnRunner {
                 } => {
                     self.run_fut = None;
                     self.context = Some(outcome.1);
+                    self.flush_pending();
                     self.finish_outcome(outcome.0);
                 }
             }
@@ -140,7 +154,8 @@ impl TurnRunner {
     fn start_turn(&mut self) {
         let mut context = self.context.take().expect("turn context is held");
         context.turn = self.turn;
-        let cancel = context.cancel_token.clone();
+        self.cancel_token = context.cancel_token.clone();
+        let cancel = self.cancel_token.clone();
         let (event_sender, event_rx) = mpsc::unbounded();
         context.attach_event_sender(event_sender);
         // The turn future owns the context and returns it on completion; the
@@ -175,156 +190,291 @@ impl TurnRunner {
         }
     }
 
+    fn flush_pending(&mut self) {
+        let Self {
+            context,
+            pending_steering,
+            pending_follow_up,
+            pending_interjection,
+            ..
+        } = self;
+        if let Some(context) = context {
+            while let Some(entry) = pending_steering.pop_front() {
+                if enqueue_message(
+                    &mut context.steering_queue,
+                    AgentInputQueue::Steering,
+                    entry,
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
+            while let Some(entry) = pending_follow_up.pop_front() {
+                if enqueue_message(
+                    &mut context.follow_up_queue,
+                    AgentInputQueue::FollowUp,
+                    entry,
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
+            while let Some(entry) = pending_interjection.pop_front() {
+                if enqueue_message(
+                    &mut context.interjection_queue,
+                    AgentInputQueue::Interjection,
+                    entry,
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn next_pending_id(&mut self, prefix: &str) -> String {
+        let id = format!("pending_{}_{}", prefix, self.pending_counter);
+        self.pending_counter += 1;
+        id
+    }
+
     /// Enqueues steering input into the turn's working copy. Called by the
     /// actor when a `Steer` command arrives while this runner owns the turn.
     pub(crate) fn steer(&mut self, text: String) -> Result<(), AgentQueueError> {
-        let context = self.context.as_mut().expect("turn context is held");
-        let message_id = next_message_id(
-            &context.messages,
-            &context.steering_queue,
-            &context.follow_up_queue,
-            &context.interjection_queue,
-            "steer",
-        );
-        enqueue_message(
-            &mut context.steering_queue,
-            AgentInputQueue::Steering,
-            PromptQueueEntry {
-                id: message_id.clone(),
+        if let Some(context) = &mut self.context {
+            let message_id = next_message_id(
+                &context.messages,
+                &context.steering_queue,
+                &context.follow_up_queue,
+                &context.interjection_queue,
+                "steer",
+            );
+            enqueue_message(
+                &mut context.steering_queue,
+                AgentInputQueue::Steering,
+                PromptQueueEntry {
+                    id: message_id.clone(),
+                    version: 0,
+                    message: AgentMessage::UserText { message_id, text },
+                },
+            )
+        } else {
+            let id = self.next_pending_id("steer");
+            self.pending_steering.push_back(PromptQueueEntry {
+                id: id.clone(),
                 version: 0,
-                message: AgentMessage::UserText { message_id, text },
-            },
-        )
+                message: AgentMessage::UserText {
+                    message_id: id,
+                    text,
+                },
+            });
+            Ok(())
+        }
     }
 
     pub(crate) fn steer_content(
         &mut self,
         content: Vec<ContentBlock>,
     ) -> Result<(), AgentQueueError> {
-        let context = self.context.as_mut().expect("turn context is held");
-        let message_id = next_message_id(
-            &context.messages,
-            &context.steering_queue,
-            &context.follow_up_queue,
-            &context.interjection_queue,
-            "steer",
-        );
-        enqueue_message(
-            &mut context.steering_queue,
-            AgentInputQueue::Steering,
-            PromptQueueEntry {
-                id: message_id.clone(),
+        if let Some(context) = &mut self.context {
+            let message_id = next_message_id(
+                &context.messages,
+                &context.steering_queue,
+                &context.follow_up_queue,
+                &context.interjection_queue,
+                "steer",
+            );
+            enqueue_message(
+                &mut context.steering_queue,
+                AgentInputQueue::Steering,
+                PromptQueueEntry {
+                    id: message_id.clone(),
+                    version: 0,
+                    message: AgentMessage::Custom {
+                        message_id,
+                        custom_type: "input".into(),
+                        content,
+                        display: true,
+                        details: None,
+                        timestamp: 0,
+                    },
+                },
+            )
+        } else {
+            let id = self.next_pending_id("steer");
+            self.pending_steering.push_back(PromptQueueEntry {
+                id: id.clone(),
                 version: 0,
                 message: AgentMessage::Custom {
-                    message_id,
+                    message_id: id,
                     custom_type: "input".into(),
                     content,
                     display: true,
                     details: None,
                     timestamp: 0,
                 },
-            },
-        )
+            });
+            Ok(())
+        }
     }
 
     pub(crate) fn follow_up(&mut self, text: String) -> Result<(), AgentQueueError> {
-        let context = self.context.as_mut().expect("turn context is held");
-        let message_id = next_message_id(
-            &context.messages,
-            &context.steering_queue,
-            &context.follow_up_queue,
-            &context.interjection_queue,
-            "followup",
-        );
-        enqueue_message(
-            &mut context.follow_up_queue,
-            AgentInputQueue::FollowUp,
-            PromptQueueEntry {
-                id: message_id.clone(),
+        if let Some(context) = &mut self.context {
+            let message_id = next_message_id(
+                &context.messages,
+                &context.steering_queue,
+                &context.follow_up_queue,
+                &context.interjection_queue,
+                "followup",
+            );
+            enqueue_message(
+                &mut context.follow_up_queue,
+                AgentInputQueue::FollowUp,
+                PromptQueueEntry {
+                    id: message_id.clone(),
+                    version: 0,
+                    message: AgentMessage::UserText { message_id, text },
+                },
+            )
+        } else {
+            let id = self.next_pending_id("followup");
+            self.pending_follow_up.push_back(PromptQueueEntry {
+                id: id.clone(),
                 version: 0,
-                message: AgentMessage::UserText { message_id, text },
-            },
-        )
+                message: AgentMessage::UserText {
+                    message_id: id,
+                    text,
+                },
+            });
+            Ok(())
+        }
     }
 
     pub(crate) fn follow_up_content(
         &mut self,
         content: Vec<ContentBlock>,
     ) -> Result<(), AgentQueueError> {
-        let context = self.context.as_mut().expect("turn context is held");
-        let message_id = next_message_id(
-            &context.messages,
-            &context.steering_queue,
-            &context.follow_up_queue,
-            &context.interjection_queue,
-            "followup",
-        );
-        enqueue_message(
-            &mut context.follow_up_queue,
-            AgentInputQueue::FollowUp,
-            PromptQueueEntry {
-                id: message_id.clone(),
+        if let Some(context) = &mut self.context {
+            let message_id = next_message_id(
+                &context.messages,
+                &context.steering_queue,
+                &context.follow_up_queue,
+                &context.interjection_queue,
+                "followup",
+            );
+            enqueue_message(
+                &mut context.follow_up_queue,
+                AgentInputQueue::FollowUp,
+                PromptQueueEntry {
+                    id: message_id.clone(),
+                    version: 0,
+                    message: AgentMessage::Custom {
+                        message_id,
+                        custom_type: "input".into(),
+                        content,
+                        display: true,
+                        details: None,
+                        timestamp: 0,
+                    },
+                },
+            )
+        } else {
+            let id = self.next_pending_id("followup");
+            self.pending_follow_up.push_back(PromptQueueEntry {
+                id: id.clone(),
                 version: 0,
                 message: AgentMessage::Custom {
-                    message_id,
+                    message_id: id,
                     custom_type: "input".into(),
                     content,
                     display: true,
                     details: None,
                     timestamp: 0,
                 },
-            },
-        )
+            });
+            Ok(())
+        }
     }
 
     pub(crate) fn interject(&mut self, text: String) -> Result<(), AgentQueueError> {
-        let context = self.context.as_mut().expect("turn context is held");
-        let message_id = next_message_id(
-            &context.messages,
-            &context.steering_queue,
-            &context.follow_up_queue,
-            &context.interjection_queue,
-            "interject",
-        );
-        enqueue_message(
-            &mut context.interjection_queue,
-            AgentInputQueue::Interjection,
-            PromptQueueEntry {
-                id: message_id.clone(),
+        if let Some(context) = &mut self.context {
+            let message_id = next_message_id(
+                &context.messages,
+                &context.steering_queue,
+                &context.follow_up_queue,
+                &context.interjection_queue,
+                "interject",
+            );
+            enqueue_message(
+                &mut context.interjection_queue,
+                AgentInputQueue::Interjection,
+                PromptQueueEntry {
+                    id: message_id.clone(),
+                    version: 0,
+                    message: AgentMessage::UserText { message_id, text },
+                },
+            )
+        } else {
+            let id = self.next_pending_id("interject");
+            self.pending_interjection.push_back(PromptQueueEntry {
+                id: id.clone(),
                 version: 0,
-                message: AgentMessage::UserText { message_id, text },
-            },
-        )
+                message: AgentMessage::UserText {
+                    message_id: id,
+                    text,
+                },
+            });
+            Ok(())
+        }
     }
 
     pub(crate) fn interject_content(
         &mut self,
         content: Vec<ContentBlock>,
     ) -> Result<(), AgentQueueError> {
-        let context = self.context.as_mut().expect("turn context is held");
-        let message_id = next_message_id(
-            &context.messages,
-            &context.steering_queue,
-            &context.follow_up_queue,
-            &context.interjection_queue,
-            "interject",
-        );
-        enqueue_message(
-            &mut context.interjection_queue,
-            AgentInputQueue::Interjection,
-            PromptQueueEntry {
-                id: message_id.clone(),
+        if let Some(context) = &mut self.context {
+            let message_id = next_message_id(
+                &context.messages,
+                &context.steering_queue,
+                &context.follow_up_queue,
+                &context.interjection_queue,
+                "interject",
+            );
+            enqueue_message(
+                &mut context.interjection_queue,
+                AgentInputQueue::Interjection,
+                PromptQueueEntry {
+                    id: message_id.clone(),
+                    version: 0,
+                    message: AgentMessage::Custom {
+                        message_id,
+                        custom_type: "input".into(),
+                        content,
+                        display: true,
+                        details: None,
+                        timestamp: 0,
+                    },
+                },
+            )
+        } else {
+            let id = self.next_pending_id("interject");
+            self.pending_interjection.push_back(PromptQueueEntry {
+                id: id.clone(),
                 version: 0,
                 message: AgentMessage::Custom {
-                    message_id,
+                    message_id: id,
                     custom_type: "input".into(),
                     content,
                     display: true,
                     details: None,
                     timestamp: 0,
                 },
-            },
-        )
+            });
+            Ok(())
+        }
     }
 
     pub(crate) fn edit_queue_entry(
@@ -333,17 +483,34 @@ impl TurnRunner {
         expected_version: u32,
         new_message: AgentMessage,
     ) -> Result<(), AgentQueueError> {
-        let context = self.context.as_mut().expect("turn context is held");
-        edit_entry(
-            &mut [
-                &mut context.steering_queue,
-                &mut context.follow_up_queue,
-                &mut context.interjection_queue,
-            ],
-            entry_id,
-            expected_version,
-            new_message,
-        )
+        let Self {
+            context,
+            pending_steering,
+            pending_follow_up,
+            pending_interjection,
+            ..
+        } = self;
+        match context {
+            Some(context) => edit_entry(
+                &mut [
+                    &mut context.steering_queue,
+                    &mut context.follow_up_queue,
+                    &mut context.interjection_queue,
+                    pending_steering,
+                    pending_follow_up,
+                    pending_interjection,
+                ],
+                entry_id,
+                expected_version,
+                new_message,
+            ),
+            None => edit_entry(
+                &mut [pending_steering, pending_follow_up, pending_interjection],
+                entry_id,
+                expected_version,
+                new_message,
+            ),
+        }
     }
 
     pub(crate) fn remove_queue_entry(
@@ -351,51 +518,73 @@ impl TurnRunner {
         entry_id: &str,
         expected_version: u32,
     ) -> Result<(), AgentQueueError> {
-        let context = self.context.as_mut().expect("turn context is held");
-        remove_entry(
-            &mut [
-                &mut context.steering_queue,
-                &mut context.follow_up_queue,
-                &mut context.interjection_queue,
-            ],
-            entry_id,
-            expected_version,
-        )
+        let Self {
+            context,
+            pending_steering,
+            pending_follow_up,
+            pending_interjection,
+            ..
+        } = self;
+        match context {
+            Some(context) => remove_entry(
+                &mut [
+                    &mut context.steering_queue,
+                    &mut context.follow_up_queue,
+                    &mut context.interjection_queue,
+                    pending_steering,
+                    pending_follow_up,
+                    pending_interjection,
+                ],
+                entry_id,
+                expected_version,
+            ),
+            None => remove_entry(
+                &mut [pending_steering, pending_follow_up, pending_interjection],
+                entry_id,
+                expected_version,
+            ),
+        }
     }
 
     pub(crate) fn clear_queues(&mut self) {
-        let context = self.context.as_mut().expect("turn context is held");
-        context.steering_queue.clear();
-        context.follow_up_queue.clear();
-        context.interjection_queue.clear();
+        if let Some(context) = &mut self.context {
+            context.steering_queue.clear();
+            context.follow_up_queue.clear();
+            context.interjection_queue.clear();
+        }
+        self.pending_steering.clear();
+        self.pending_follow_up.clear();
+        self.pending_interjection.clear();
     }
 
     pub(crate) fn drain_steering_queue(&mut self) -> Vec<AgentMessage> {
-        self.context
-            .as_mut()
-            .expect("turn context is held")
-            .steering_queue
-            .drain(..)
-            .map(|entry| entry.message)
-            .collect()
+        let mut result: Vec<AgentMessage> = match &mut self.context {
+            Some(context) => context
+                .steering_queue
+                .drain(..)
+                .map(|entry| entry.message)
+                .collect(),
+            None => Vec::new(),
+        };
+        result.extend(self.pending_steering.drain(..).map(|entry| entry.message));
+        result
     }
 
     pub(crate) fn drain_follow_up_queue(&mut self) -> Vec<AgentMessage> {
-        self.context
-            .as_mut()
-            .expect("turn context is held")
-            .follow_up_queue
-            .drain(..)
-            .map(|entry| entry.message)
-            .collect()
+        let mut result: Vec<AgentMessage> = match &mut self.context {
+            Some(context) => context
+                .follow_up_queue
+                .drain(..)
+                .map(|entry| entry.message)
+                .collect(),
+            None => Vec::new(),
+        };
+        result.extend(self.pending_follow_up.drain(..).map(|entry| entry.message));
+        result
     }
 
     pub(crate) fn abort(&mut self) {
-        self.context
-            .as_mut()
-            .expect("turn context is held")
-            .cancel_token
-            .cancel();
+        self.cancel_token.cancel();
     }
 
     pub(crate) fn set_provider_request_override(
@@ -403,13 +592,12 @@ impl TurnRunner {
         context: ai_protocol::api::conversation::Context,
         stream_options: Option<ai_protocol::api::stream::StreamOptions>,
     ) {
-        self.context
-            .as_mut()
-            .expect("turn context is held")
-            .provider_request_override = Some(AgentTurnProviderRequestOverride {
-            context,
-            stream_options,
-        });
+        if let Some(ctx) = &mut self.context {
+            ctx.provider_request_override = Some(AgentTurnProviderRequestOverride {
+                context,
+                stream_options,
+            });
+        }
     }
 
     /// Hands the working copy back to the actor for committing.

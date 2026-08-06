@@ -1,10 +1,18 @@
+use std::time::Duration;
+
+use tokio::sync::mpsc;
+use tokio::time::timeout;
+
 use crate::agent::Agent;
-use crate::agent::types::{AgentConfig, AgentEvent, AgentMessage, AgentQueueError};
+use crate::agent::command::{AgentActorError, AgentHandle};
+use crate::agent::types::{
+    AgentConfig, AgentEvent, AgentMessage, AgentQueueError, ProviderStreamer,
+};
 use ai::api::client::AiClient;
 use ai::api::provider::faux::{FauxCall, FauxProvider, FauxResponse, FauxToolCall};
 use ai_protocol::api::conversation::{ContentBlock, StopReason};
 use ai_protocol::api::model::{Model, ModelCost, ModelInput};
-use ai_protocol::api::stream::AssistantMessageEvent;
+use ai_protocol::api::stream::{AssistantMessageEvent, EventStream};
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -52,6 +60,15 @@ fn test_agent(calls: Vec<FauxCall>) -> Agent {
         let ai_client = Arc::clone(&ai_client);
         move |model, context, options| ai_client.stream_model(model, context, options)
     }));
+    Agent::new(config)
+}
+
+fn hanging_agent() -> Agent {
+    let streamer: ProviderStreamer = Arc::new(move |_model, _ctx, _opts| -> EventStream {
+        Box::pin(futures::stream::pending::<AssistantMessageEvent>())
+    });
+    let mut config = AgentConfig::new(test_model());
+    config.provider_streamer = Some(streamer);
     Agent::new(config)
 }
 
@@ -420,4 +437,239 @@ async fn steering_mid_tool_turn_does_not_break_tool_pairing() {
         tool_result_idx < steer_idx,
         "steering must appear after tool result, not between request and result"
     );
+}
+
+#[tokio::test]
+async fn actor_closed_returns_error_after_actor_task_panics() {
+    let (commands, mut receiver) = mpsc::channel(8);
+    let handle = AgentHandle { commands };
+
+    let join = tokio::spawn(async move {
+        let _ = receiver.recv().await;
+        panic!("simulated actor panic");
+    });
+
+    let error = handle
+        .messages()
+        .await
+        .expect_err("request fails after actor panic");
+    assert_eq!(error, AgentActorError::Closed);
+
+    let join_result = join.await;
+    assert!(join_result.is_err(), "spawned task should have panicked");
+    assert!(join_result.unwrap_err().is_panic());
+
+    let error = handle
+        .steer("after panic".into())
+        .expect_err("fire fails after actor panic");
+    assert_eq!(error, AgentQueueError::ActorClosed);
+}
+
+#[tokio::test]
+async fn provider_hang_does_not_freeze_actor() {
+    let agent = hanging_agent();
+    let mut stream = agent.prompt("hello");
+
+    let event = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("TurnStart arrives within timeout")
+        .expect("stream is alive");
+    assert!(matches!(event, AgentEvent::TurnStart { .. }));
+
+    let messages = timeout(Duration::from_secs(2), agent.messages())
+        .await
+        .expect("messages query completes during provider hang");
+    assert!(!messages.is_empty(), "user prompt must be visible");
+
+    agent.abort();
+
+    timeout(Duration::from_secs(5), async {
+        while stream.next().await.is_some() {}
+    })
+    .await
+    .expect("turn terminates after abort without deadlock");
+
+    let result = timeout(Duration::from_secs(2), agent.try_prompt("next"))
+        .await
+        .expect("try_prompt completes after abort");
+    assert!(result.is_ok(), "actor admits a new prompt after abort");
+}
+
+#[tokio::test]
+async fn steer_and_follow_up_during_provider_hang_are_preserved_after_abort() {
+    let agent = hanging_agent();
+    let mut stream = agent.prompt("hello");
+
+    let event = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("TurnStart arrives within timeout")
+        .expect("stream is alive");
+    assert!(matches!(event, AgentEvent::TurnStart { .. }));
+
+    agent
+        .steer("steer during hang")
+        .expect("steer accepts during provider hang");
+    agent
+        .follow_up("followup during hang")
+        .expect("follow_up accepts during provider hang");
+    agent.abort();
+
+    timeout(Duration::from_secs(5), async {
+        while stream.next().await.is_some() {}
+    })
+    .await
+    .expect("turn terminates after abort without deadlock");
+
+    let steering = timeout(Duration::from_secs(2), agent.drain_steering_queue())
+        .await
+        .expect("drain_steering_queue completes");
+    assert!(
+        steering.iter().any(
+            |m| matches!(m, AgentMessage::UserText { text, .. } if text == "steer during hang")
+        ),
+        "steering enqueued during provider hang must survive abort"
+    );
+
+    let follow_ups = timeout(Duration::from_secs(2), agent.drain_follow_up_queue())
+        .await
+        .expect("drain_follow_up_queue completes");
+    assert!(
+        follow_ups.iter().any(|m| matches!(m,
+            AgentMessage::UserText { text, .. } if text == "followup during hang"
+        )),
+        "follow-up enqueued during provider hang must survive abort"
+    );
+
+    let result = timeout(Duration::from_secs(2), agent.try_prompt("next"))
+        .await
+        .expect("try_prompt completes after abort");
+    assert!(result.is_ok(), "actor admits a new prompt after abort");
+}
+
+#[tokio::test]
+async fn concurrent_steering_follow_up_and_abort_do_not_corrupt_state() {
+    let agent = test_agent(vec![
+        tool_call("working"),
+        text_call("done", StopReason::Stop),
+    ]);
+    install_test_tool(&agent).await;
+
+    let mut stream = agent.prompt("hello");
+    while let Some(event) = stream.next().await {
+        if matches!(event, AgentEvent::ToolCallEnd { .. }) {
+            break;
+        }
+    }
+
+    agent.steer("concurrent steer").expect("steer accepts");
+    agent
+        .follow_up("concurrent followup")
+        .expect("follow_up accepts");
+    agent.abort();
+
+    timeout(Duration::from_secs(5), async {
+        while stream.next().await.is_some() {}
+    })
+    .await
+    .expect("turn terminates after concurrent commands without deadlock");
+
+    let messages = timeout(Duration::from_secs(2), agent.messages())
+        .await
+        .expect("messages query completes");
+    assert!(!messages.is_empty(), "user prompt must survive");
+
+    let result = timeout(Duration::from_secs(2), agent.try_prompt("next"))
+        .await
+        .expect("try_prompt completes");
+    assert!(
+        result.is_ok(),
+        "actor admits a new prompt after concurrent commands"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_thread_runtime_does_not_freeze() {
+    let agent = test_agent(vec![
+        tool_call("working"),
+        text_call("done", StopReason::Stop),
+    ]);
+    install_test_tool(&agent).await;
+
+    let mut stream = agent.prompt("hello");
+    let mut saw_tool = false;
+
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event {
+                AgentEvent::ToolCallEnd { .. } => {
+                    saw_tool = true;
+                    agent.steer("steer mid turn").expect("steer accepts");
+                }
+                AgentEvent::AgentDone { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("turn completes without deadlock in current-thread runtime");
+
+    assert!(saw_tool, "tool must execute");
+    let messages = timeout(Duration::from_secs(2), agent.messages())
+        .await
+        .expect("messages query completes");
+    assert!(
+        messages.iter().any(|m| matches!(m,
+            AgentMessage::UserText { text, .. } if text == "steer mid turn"
+        )),
+        "steering must be consumed in current-thread runtime"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_releases_actor_task() {
+    let agent = test_agent(vec![text_call("answer", StopReason::Stop)]);
+    agent.shutdown();
+
+    let error = agent
+        .handle
+        .messages()
+        .await
+        .expect_err("messages fails after shutdown");
+    assert_eq!(error, AgentActorError::Closed);
+
+    let error = agent
+        .steer("after shutdown")
+        .expect_err("steer fails after shutdown");
+    assert_eq!(error, AgentQueueError::ActorClosed);
+}
+
+#[tokio::test]
+async fn slow_consumer_receives_all_events_without_loss() {
+    let delta_count = 100;
+    let deltas: Vec<String> = (0..delta_count).map(|i| format!("d{i}")).collect();
+    let call = FauxProvider::single_call(
+        vec![FauxResponse {
+            text_deltas: deltas.clone(),
+            thinking_deltas: vec![],
+            tool_calls: vec![],
+        }],
+        StopReason::Stop,
+    );
+    let agent = test_agent(vec![call]);
+    let mut stream = agent.prompt("hello");
+
+    let mut received = Vec::new();
+    timeout(Duration::from_secs(15), async {
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::LlmEvent(AssistantMessageEvent::TextDelta { delta, .. }) = event {
+                received.push(delta);
+            }
+            tokio::time::sleep(Duration::from_micros(200)).await;
+        }
+    })
+    .await
+    .expect("stream completes despite bounded-channel backpressure");
+
+    assert_eq!(received.len(), delta_count);
+    assert_eq!(received, deltas);
 }
