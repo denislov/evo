@@ -8,6 +8,7 @@ use tool_contract::api::definition::ToolDefinition;
 use tool_runtime::api::ToolRuntime;
 
 use crate::agent::AgentState;
+use crate::agent::queue::PromptQueueEntry;
 use crate::agent::types::{
     AgentConfig, AgentEvent, AgentMessage, AgentToolResult, ProviderRequestSnapshot,
 };
@@ -39,8 +40,9 @@ pub struct AgentTurnContext {
     pub messages: Vec<AgentMessage>,
     pub tool_runtime: Option<ToolRuntime>,
     pub provider_tools: Vec<ToolDefinition>,
-    pub steering_queue: VecDeque<AgentMessage>,
-    pub follow_up_queue: VecDeque<AgentMessage>,
+    pub steering_queue: VecDeque<PromptQueueEntry>,
+    pub follow_up_queue: VecDeque<PromptQueueEntry>,
+    pub interjection_queue: VecDeque<PromptQueueEntry>,
     pub cancel_token: CancellationToken,
     pub turn: u32,
     pub provider_request: Option<ProviderRequestSnapshot>,
@@ -71,6 +73,7 @@ impl AgentTurnContext {
             provider_tools: state.provider_tools.clone(),
             steering_queue: state.steering_queue.clone(),
             follow_up_queue: state.follow_up_queue.clone(),
+            interjection_queue: state.interjection_queue.clone(),
             cancel_token: state.cancel_token.clone(),
             turn: 0,
             provider_request: None,
@@ -130,6 +133,10 @@ impl AgentTurnContext {
         let mut follow_up_queue = std::mem::take(&mut self.follow_up_queue);
         follow_up_queue.extend(state.follow_up_queue.drain(..));
         state.follow_up_queue = follow_up_queue;
+
+        let mut interjection_queue = std::mem::take(&mut self.interjection_queue);
+        interjection_queue.extend(state.interjection_queue.drain(..));
+        state.interjection_queue = interjection_queue;
 
         if self.provider_request_override_consumed {
             state.provider_request_override = None;

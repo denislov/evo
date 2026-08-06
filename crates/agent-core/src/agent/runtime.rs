@@ -8,7 +8,7 @@ use tool_contract::api::definition::{ToolDefinition, ToolDefinitionError};
 use tool_runtime::api::ToolRuntime;
 
 use crate::agent::command::{AgentCommand, AgentEventStream, AgentHandle, EVENT_STREAM_CAPACITY};
-use crate::agent::queue::enqueue_message;
+use crate::agent::queue::{PromptQueueEntry, edit_entry, enqueue_message, remove_entry};
 use crate::agent::turn::TurnRunner;
 use crate::agent::turn::context::AgentTurnContext;
 use crate::agent::types::{
@@ -37,8 +37,9 @@ pub struct AgentState {
     pub provider_tools: Vec<ToolDefinition>,
     pub config: AgentConfig,
     pub cancel_token: CancellationToken,
-    pub steering_queue: VecDeque<AgentMessage>,
-    pub follow_up_queue: VecDeque<AgentMessage>,
+    pub steering_queue: VecDeque<PromptQueueEntry>,
+    pub follow_up_queue: VecDeque<PromptQueueEntry>,
+    pub interjection_queue: VecDeque<PromptQueueEntry>,
     pub(crate) provider_request_override: Option<ProviderRequestOverride>,
 }
 
@@ -56,7 +57,7 @@ pub(crate) struct ProviderRequestOverride {
 /// reply.
 #[derive(Clone)]
 pub struct Agent {
-    handle: AgentHandle,
+    pub(crate) handle: AgentHandle,
 }
 
 impl Agent {
@@ -70,6 +71,7 @@ impl Agent {
             config,
             steering_queue: VecDeque::new(),
             follow_up_queue: VecDeque::new(),
+            interjection_queue: VecDeque::new(),
             provider_request_override: None,
         };
         tokio::spawn(run_actor(state, receiver));
@@ -116,45 +118,6 @@ impl Agent {
 
     pub fn set_resources(&self, resources: AgentResources) {
         self.handle.set_resources(resources);
-    }
-
-    pub fn steer(&self, text: impl Into<String>) -> Result<(), AgentQueueError> {
-        self.handle.steer(text.into())
-    }
-
-    pub fn steer_content(
-        &self,
-        content: Vec<ai_protocol::api::conversation::ContentBlock>,
-    ) -> Result<(), AgentQueueError> {
-        self.handle.steer_content(content)
-    }
-
-    pub fn follow_up(&self, text: impl Into<String>) -> Result<(), AgentQueueError> {
-        self.handle.follow_up(text.into())
-    }
-
-    pub fn follow_up_content(
-        &self,
-        content: Vec<ai_protocol::api::conversation::ContentBlock>,
-    ) -> Result<(), AgentQueueError> {
-        self.handle.follow_up_content(content)
-    }
-
-    pub fn clear_queues(&self) {
-        self.handle.clear_queues();
-    }
-
-    /// Drain and return all queued steering messages.
-    pub async fn drain_steering_queue(&self) -> Vec<AgentMessage> {
-        self.handle.drain_steering_queue().await.unwrap_or_default()
-    }
-
-    /// Drain and return all queued follow-up messages.
-    pub async fn drain_follow_up_queue(&self) -> Vec<AgentMessage> {
-        self.handle
-            .drain_follow_up_queue()
-            .await
-            .unwrap_or_default()
     }
 
     pub async fn skill(
@@ -326,8 +289,9 @@ fn stream_from_receiver(receiver: AgentEventStream) -> AgentStream {
 
 pub(crate) fn next_message_id(
     messages: &[AgentMessage],
-    steering_queue: &VecDeque<AgentMessage>,
-    follow_up_queue: &VecDeque<AgentMessage>,
+    steering_queue: &VecDeque<PromptQueueEntry>,
+    follow_up_queue: &VecDeque<PromptQueueEntry>,
+    interjection_queue: &VecDeque<PromptQueueEntry>,
     prefix: &str,
 ) -> String {
     let mut index = 0u64;
@@ -335,8 +299,9 @@ pub(crate) fn next_message_id(
         let candidate = format!("{prefix}_{index}");
         if !messages
             .iter()
-            .chain(steering_queue.iter())
-            .chain(follow_up_queue.iter())
+            .chain(steering_queue.iter().map(|entry| &entry.message))
+            .chain(follow_up_queue.iter().map(|entry| &entry.message))
+            .chain(interjection_queue.iter().map(|entry| &entry.message))
             .any(|message| message.message_id() == candidate)
         {
             return candidate;
@@ -349,8 +314,9 @@ fn next_message_id_from_preferred(state: &AgentState, preferred: String) -> Stri
     if !state
         .messages
         .iter()
-        .chain(state.steering_queue.iter())
-        .chain(state.follow_up_queue.iter())
+        .chain(state.steering_queue.iter().map(|entry| &entry.message))
+        .chain(state.follow_up_queue.iter().map(|entry| &entry.message))
+        .chain(state.interjection_queue.iter().map(|entry| &entry.message))
         .any(|message| message.message_id() == preferred)
     {
         return preferred;
@@ -361,14 +327,80 @@ fn next_message_id_from_preferred(state: &AgentState, preferred: String) -> Stri
         let used = state
             .messages
             .iter()
-            .chain(state.steering_queue.iter())
-            .chain(state.follow_up_queue.iter())
+            .chain(state.steering_queue.iter().map(|entry| &entry.message))
+            .chain(state.follow_up_queue.iter().map(|entry| &entry.message))
+            .chain(state.interjection_queue.iter().map(|entry| &entry.message))
             .any(|message| message.message_id() == candidate);
         if !used {
             return candidate;
         }
         index += 1;
     }
+}
+
+fn enqueue_text_entry(
+    state: &mut AgentState,
+    queue_kind: AgentInputQueue,
+    prefix: &str,
+    text: String,
+) -> Result<(), AgentQueueError> {
+    let message_id = next_message_id(
+        &state.messages,
+        &state.steering_queue,
+        &state.follow_up_queue,
+        &state.interjection_queue,
+        prefix,
+    );
+    let queue = match queue_kind {
+        AgentInputQueue::Steering => &mut state.steering_queue,
+        AgentInputQueue::FollowUp => &mut state.follow_up_queue,
+        AgentInputQueue::Interjection => &mut state.interjection_queue,
+    };
+    enqueue_message(
+        queue,
+        queue_kind,
+        PromptQueueEntry {
+            id: message_id.clone(),
+            version: 0,
+            message: AgentMessage::UserText { message_id, text },
+        },
+    )
+}
+
+fn enqueue_content_entry(
+    state: &mut AgentState,
+    queue_kind: AgentInputQueue,
+    prefix: &str,
+    content: Vec<ai_protocol::api::conversation::ContentBlock>,
+) -> Result<(), AgentQueueError> {
+    let message_id = next_message_id(
+        &state.messages,
+        &state.steering_queue,
+        &state.follow_up_queue,
+        &state.interjection_queue,
+        prefix,
+    );
+    let queue = match queue_kind {
+        AgentInputQueue::Steering => &mut state.steering_queue,
+        AgentInputQueue::FollowUp => &mut state.follow_up_queue,
+        AgentInputQueue::Interjection => &mut state.interjection_queue,
+    };
+    enqueue_message(
+        queue,
+        queue_kind,
+        PromptQueueEntry {
+            id: message_id.clone(),
+            version: 0,
+            message: AgentMessage::Custom {
+                message_id,
+                custom_type: "input".into(),
+                content,
+                display: true,
+                details: None,
+                timestamp: 0,
+            },
+        },
+    )
 }
 
 // ── Actor task ────────────────────────────────────────────────
@@ -482,6 +514,7 @@ fn start_turn(
     let context = AgentTurnContext::from_state(state);
     state.steering_queue.clear();
     state.follow_up_queue.clear();
+    state.interjection_queue.clear();
     let (tx, rx) = mpsc::channel(EVENT_STREAM_CAPACITY);
     *turn = Some(TurnRunner::new(context));
     *event_tx = Some(tx);
@@ -510,6 +543,7 @@ fn admit_prompt(
         &state.messages,
         &state.steering_queue,
         &state.follow_up_queue,
+        &state.interjection_queue,
         "user",
     );
     state
@@ -561,64 +595,21 @@ async fn handle_command(
         AgentCommand::Steer { text, reply } => {
             let result = match turn {
                 Some(runner) => runner.steer(text),
-                None => {
-                    let message_id = next_message_id(
-                        &state.messages,
-                        &state.steering_queue,
-                        &state.follow_up_queue,
-                        "steer",
-                    );
-                    enqueue_message(
-                        &mut state.steering_queue,
-                        AgentInputQueue::Steering,
-                        AgentMessage::UserText { message_id, text },
-                    )
-                }
+                None => enqueue_text_entry(state, AgentInputQueue::Steering, "steer", text),
             };
             let _ = reply.send(result);
         }
         AgentCommand::SteerContent { content, reply } => {
             let result = match turn {
                 Some(runner) => runner.steer_content(content),
-                None => {
-                    let message_id = next_message_id(
-                        &state.messages,
-                        &state.steering_queue,
-                        &state.follow_up_queue,
-                        "steer",
-                    );
-                    enqueue_message(
-                        &mut state.steering_queue,
-                        AgentInputQueue::Steering,
-                        AgentMessage::Custom {
-                            message_id,
-                            custom_type: "input".into(),
-                            content,
-                            display: true,
-                            details: None,
-                            timestamp: 0,
-                        },
-                    )
-                }
+                None => enqueue_content_entry(state, AgentInputQueue::Steering, "steer", content),
             };
             let _ = reply.send(result);
         }
         AgentCommand::FollowUp { text, reply } => {
             let result = match turn {
                 Some(runner) => runner.follow_up(text),
-                None => {
-                    let message_id = next_message_id(
-                        &state.messages,
-                        &state.steering_queue,
-                        &state.follow_up_queue,
-                        "followup",
-                    );
-                    enqueue_message(
-                        &mut state.follow_up_queue,
-                        AgentInputQueue::FollowUp,
-                        AgentMessage::UserText { message_id, text },
-                    )
-                }
+                None => enqueue_text_entry(state, AgentInputQueue::FollowUp, "followup", text),
             };
             let _ = reply.send(result);
         }
@@ -626,25 +617,27 @@ async fn handle_command(
             let result = match turn {
                 Some(runner) => runner.follow_up_content(content),
                 None => {
-                    let message_id = next_message_id(
-                        &state.messages,
-                        &state.steering_queue,
-                        &state.follow_up_queue,
-                        "followup",
-                    );
-                    enqueue_message(
-                        &mut state.follow_up_queue,
-                        AgentInputQueue::FollowUp,
-                        AgentMessage::Custom {
-                            message_id,
-                            custom_type: "input".into(),
-                            content,
-                            display: true,
-                            details: None,
-                            timestamp: 0,
-                        },
-                    )
+                    enqueue_content_entry(state, AgentInputQueue::FollowUp, "followup", content)
                 }
+            };
+            let _ = reply.send(result);
+        }
+        AgentCommand::Interject { text, reply } => {
+            let result = match turn {
+                Some(runner) => runner.interject(text),
+                None => enqueue_text_entry(state, AgentInputQueue::Interjection, "interject", text),
+            };
+            let _ = reply.send(result);
+        }
+        AgentCommand::InterjectContent { content, reply } => {
+            let result = match turn {
+                Some(runner) => runner.interject_content(content),
+                None => enqueue_content_entry(
+                    state,
+                    AgentInputQueue::Interjection,
+                    "interject",
+                    content,
+                ),
             };
             let _ = reply.send(result);
         }
@@ -658,10 +651,51 @@ async fn handle_command(
         AgentCommand::ClearQueues { reply } => {
             state.steering_queue.clear();
             state.follow_up_queue.clear();
+            state.interjection_queue.clear();
             if let Some(runner) = turn {
                 runner.clear_queues();
             }
             let _ = reply.send(());
+        }
+        AgentCommand::EditQueueEntry {
+            entry_id,
+            expected_version,
+            new_message,
+            reply,
+        } => {
+            let result = match turn {
+                Some(runner) => runner.edit_queue_entry(&entry_id, expected_version, new_message),
+                None => edit_entry(
+                    &mut [
+                        &mut state.steering_queue,
+                        &mut state.follow_up_queue,
+                        &mut state.interjection_queue,
+                    ],
+                    &entry_id,
+                    expected_version,
+                    new_message,
+                ),
+            };
+            let _ = reply.send(result);
+        }
+        AgentCommand::RemoveQueueEntry {
+            entry_id,
+            expected_version,
+            reply,
+        } => {
+            let result = match turn {
+                Some(runner) => runner.remove_queue_entry(&entry_id, expected_version),
+                None => remove_entry(
+                    &mut [
+                        &mut state.steering_queue,
+                        &mut state.follow_up_queue,
+                        &mut state.interjection_queue,
+                    ],
+                    &entry_id,
+                    expected_version,
+                ),
+            };
+            let _ = reply.send(result);
         }
         AgentCommand::Messages { reply } => {
             let _ = reply.send(state.messages.clone());
@@ -715,14 +749,22 @@ async fn handle_command(
             let _ = reply.send(());
         }
         AgentCommand::DrainSteeringQueue { reply } => {
-            let mut drained = state.steering_queue.drain(..).collect::<Vec<_>>();
+            let mut drained: Vec<AgentMessage> = state
+                .steering_queue
+                .drain(..)
+                .map(|entry| entry.message)
+                .collect();
             if let Some(runner) = turn {
                 drained.extend(runner.drain_steering_queue());
             }
             let _ = reply.send(drained);
         }
         AgentCommand::DrainFollowUpQueue { reply } => {
-            let mut drained = state.follow_up_queue.drain(..).collect::<Vec<_>>();
+            let mut drained: Vec<AgentMessage> = state
+                .follow_up_queue
+                .drain(..)
+                .map(|entry| entry.message)
+                .collect();
             if let Some(runner) = turn {
                 drained.extend(runner.drain_follow_up_queue());
             }

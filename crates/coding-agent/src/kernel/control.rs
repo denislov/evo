@@ -17,6 +17,12 @@ pub(crate) enum PromptControlCommand {
     FollowUpContent {
         content: Vec<ai_protocol::api::conversation::ContentBlock>,
     },
+    Interject {
+        text: String,
+    },
+    InterjectContent {
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
+    },
 }
 
 pub(crate) type PromptControlReceiver = mpsc::Receiver<PromptControlCommand>;

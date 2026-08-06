@@ -77,11 +77,30 @@ pub(crate) enum AgentCommand {
         content: Vec<ContentBlock>,
         reply: oneshot::Sender<Result<(), AgentQueueError>>,
     },
+    Interject {
+        text: String,
+        reply: oneshot::Sender<Result<(), AgentQueueError>>,
+    },
+    InterjectContent {
+        content: Vec<ContentBlock>,
+        reply: oneshot::Sender<Result<(), AgentQueueError>>,
+    },
     Abort {
         reply: oneshot::Sender<()>,
     },
     ClearQueues {
         reply: oneshot::Sender<()>,
+    },
+    EditQueueEntry {
+        entry_id: String,
+        expected_version: u32,
+        new_message: AgentMessage,
+        reply: oneshot::Sender<Result<(), AgentQueueError>>,
+    },
+    RemoveQueueEntry {
+        entry_id: String,
+        expected_version: u32,
+        reply: oneshot::Sender<Result<(), AgentQueueError>>,
     },
     Messages {
         reply: oneshot::Sender<Vec<AgentMessage>>,
@@ -203,6 +222,17 @@ impl AgentHandle {
         self.fire(|reply| AgentCommand::FollowUpContent { content, reply })
     }
 
+    pub(crate) fn interject(&self, text: String) -> Result<(), AgentQueueError> {
+        self.fire(|reply| AgentCommand::Interject { text, reply })
+    }
+
+    pub(crate) fn interject_content(
+        &self,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), AgentQueueError> {
+        self.fire(|reply| AgentCommand::InterjectContent { content, reply })
+    }
+
     pub(crate) fn abort(&self) {
         let (reply_tx, _reply_rx) = oneshot::channel();
         let _ = self
@@ -221,6 +251,34 @@ impl AgentHandle {
         let _ = self
             .commands
             .try_send(AgentCommand::ClearQueues { reply: reply_tx });
+    }
+
+    pub(crate) async fn edit_queue_entry(
+        &self,
+        entry_id: String,
+        expected_version: u32,
+        new_message: AgentMessage,
+    ) -> Result<Result<(), AgentQueueError>, AgentActorError> {
+        self.request(|reply| AgentCommand::EditQueueEntry {
+            entry_id,
+            expected_version,
+            new_message,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn remove_queue_entry(
+        &self,
+        entry_id: String,
+        expected_version: u32,
+    ) -> Result<Result<(), AgentQueueError>, AgentActorError> {
+        self.request(|reply| AgentCommand::RemoveQueueEntry {
+            entry_id,
+            expected_version,
+            reply,
+        })
+        .await
     }
 
     pub(crate) async fn messages(&self) -> Result<Vec<AgentMessage>, AgentActorError> {

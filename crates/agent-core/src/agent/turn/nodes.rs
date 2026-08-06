@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::agent::provider::stream_model_with_provider_streamer;
-use crate::agent::queue::drain_queue;
+use crate::agent::queue::{QueueMode, drain_queue};
 use crate::agent::tool_adapter::{error_result, serialized_result_bytes};
 use crate::agent::turn::options::stream_options_for_turn;
 use crate::agent::turn::tool_execution::{execute_tool, execute_tool_with_updates};
@@ -106,6 +106,8 @@ pub(crate) fn start_turn(ctx: &mut AgentTurnContext) -> Result<AgentTurnDecision
 }
 
 pub(crate) fn drain_queued_input(ctx: &mut AgentTurnContext) {
+    let interjected = drain_queue(&mut ctx.interjection_queue, QueueMode::All);
+    ctx.messages.extend(interjected);
     let steered = drain_queue(&mut ctx.steering_queue, ctx.config.steering_mode);
     ctx.messages.extend(steered);
 }
@@ -536,7 +538,9 @@ pub(crate) async fn maybe_prepare_next_turn(
                 return Ok(action);
             }
 
-            let has_more = !ctx.follow_up_queue.is_empty() || !ctx.steering_queue.is_empty();
+            let has_more = !ctx.follow_up_queue.is_empty()
+                || !ctx.steering_queue.is_empty()
+                || !ctx.interjection_queue.is_empty();
             if has_more {
                 let follow_ups = drain_queue(&mut ctx.follow_up_queue, ctx.config.follow_up_mode);
                 ctx.messages.extend(follow_ups);

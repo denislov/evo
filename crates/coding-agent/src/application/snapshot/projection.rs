@@ -80,6 +80,7 @@ impl SnapshotCoordinator {
                     .iter()
                     .chain(record.steer_drafts.iter())
                     .chain(record.follow_up_drafts.iter())
+                    .chain(record.interjection_drafts.iter())
                     .map(|draft| ClientDraft::new(draft.kind, draft.text.clone()))
                     .collect()
             }

@@ -189,6 +189,7 @@ impl SnapshotCoordinator {
             .iter()
             .chain(record.steer_drafts.iter())
             .chain(record.follow_up_drafts.iter())
+            .chain(record.interjection_drafts.iter())
             .cloned()
             .collect();
         Ok(ClientSnapshotState {
@@ -346,6 +347,7 @@ impl SnapshotCoordinator {
                 .iter()
                 .chain(record.steer_drafts.iter())
                 .chain(record.follow_up_drafts.iter())
+                .chain(record.interjection_drafts.iter())
                 .map(|draft| ClientDraft::new(draft.kind, draft.text.clone()))
                 .collect(),
             Vec::new(),
@@ -358,6 +360,7 @@ impl SnapshotCoordinator {
                 .iter()
                 .chain(record.steer_drafts.iter())
                 .chain(record.follow_up_drafts.iter())
+                .chain(record.interjection_drafts.iter())
                 .cloned()
                 .collect(),
             submitted_operation: record.submitted_operation.clone(),

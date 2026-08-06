@@ -162,6 +162,9 @@ impl SnapshotCoordinator {
                 crate::runtime::client::connection::CodingAgentControlKind::FollowUp => {
                     &record.follow_up_drafts
                 }
+                crate::runtime::client::connection::CodingAgentControlKind::Interject => {
+                    &record.interjection_drafts
+                }
                 crate::runtime::client::connection::CodingAgentControlKind::Abort => {
                     return Err(crate::runtime::client::connection::CodingAgentControlRejection {
                         control_id: crate::runtime::client::connection::CodingAgentControlId(draft_id.0),
@@ -362,6 +365,9 @@ impl SnapshotCoordinator {
             crate::runtime::client::connection::CodingAgentControlKind::FollowUp => {
                 Some(&mut record.follow_up_drafts)
             }
+            crate::runtime::client::connection::CodingAgentControlKind::Interject => {
+                Some(&mut record.interjection_drafts)
+            }
             crate::runtime::client::connection::CodingAgentControlKind::Abort => None,
         };
         if let Some(queue) = queue
@@ -423,6 +429,14 @@ impl SnapshotCoordinator {
                     crate::runtime::client::connection::CodingAgentControlKind::FollowUp,
                     PromptControlPayload::Content(content),
                 ) => active.sender.follow_up_content(content),
+                (
+                    crate::runtime::client::connection::CodingAgentControlKind::Interject,
+                    PromptControlPayload::Text(text),
+                ) => active.sender.interject(text),
+                (
+                    crate::runtime::client::connection::CodingAgentControlKind::Interject,
+                    PromptControlPayload::Content(content),
+                ) => active.sender.interject_content(content),
                 (
                     crate::runtime::client::connection::CodingAgentControlKind::Abort,
                     PromptControlPayload::Content(_),

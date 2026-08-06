@@ -273,6 +273,7 @@ pub enum CodingAgentControlKind {
     Abort,
     Steer,
     FollowUp,
+    Interject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,6 +475,28 @@ impl CodingAgentPromptControl {
         draft_id: CodingAgentDraftId,
     ) -> Result<CodingAgentControlReceipt, CodingAgentControlRejection> {
         self.submit_draft(draft_id, CodingAgentControlKind::FollowUp)
+    }
+
+    pub fn interject(
+        &self,
+        control_id: CodingAgentControlId,
+        text: impl Into<String>,
+    ) -> Result<CodingAgentControlReceipt, CodingAgentControlRejection> {
+        self.submit(control_id, CodingAgentControlKind::Interject, text.into())
+    }
+
+    pub fn interject_prepared(
+        &self,
+        control_id: CodingAgentControlId,
+        prompt: crate::app::interactive::CodingAgentPreparedPrompt,
+    ) -> Result<CodingAgentControlReceipt, CodingAgentControlRejection> {
+        match prompt.into_invocation() {
+            crate::app::bootstrap::PromptInvocation::Text(text) => self.interject(control_id, text),
+            crate::app::bootstrap::PromptInvocation::Content(content) => {
+                self.submit_content(control_id, CodingAgentControlKind::Interject, content)
+            }
+            _ => unreachable!("prepared application prompt contains only text or content"),
+        }
     }
 
     fn submit_draft(

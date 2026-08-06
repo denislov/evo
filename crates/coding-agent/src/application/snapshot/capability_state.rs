@@ -249,6 +249,7 @@ impl SnapshotCoordinator {
         let record = Self::record(&mut state, handle)?;
         record.steer_drafts.clear();
         record.follow_up_drafts.clear();
+        record.interjection_drafts.clear();
         Ok(())
     }
 

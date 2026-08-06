@@ -49,6 +49,17 @@ impl PromptControlHandle {
         self.send(PromptControlCommand::FollowUpContent { content })
     }
 
+    pub(crate) fn interject(&self, text: impl Into<String>) -> Result<(), CodingSessionError> {
+        self.send(PromptControlCommand::Interject { text: text.into() })
+    }
+
+    pub(crate) fn interject_content(
+        &self,
+        content: Vec<ai_protocol::api::conversation::ContentBlock>,
+    ) -> Result<(), CodingSessionError> {
+        self.send(PromptControlCommand::InterjectContent { content })
+    }
+
     fn send(&self, command: PromptControlCommand) -> Result<(), CodingSessionError> {
         self.sender.try_send(command).map_err(|error| match error {
             mpsc::error::TrySendError::Closed(_) => CodingSessionError::Session {

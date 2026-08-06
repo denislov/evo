@@ -294,6 +294,8 @@ fn apply_prompt_control_command(
         PromptControlCommand::SteerContent { content } => agent.steer_content(content),
         PromptControlCommand::FollowUp { text } => agent.follow_up(text),
         PromptControlCommand::FollowUpContent { content } => agent.follow_up_content(content),
+        PromptControlCommand::Interject { text } => agent.interject(text),
+        PromptControlCommand::InterjectContent { content } => agent.interject_content(content),
     }
 }
 
