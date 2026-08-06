@@ -84,7 +84,9 @@ pub(crate) async fn shutdown_internal(&mut self) -> Result<CodingAgentShutdownOu
 
 当前 Agent drop 时 sender drop -> actor 的 `commands.recv()` 返回 None -> actor 退出（commit any in-flight turn）。这已经是合理的 shutdown 行为。
 
-**决策**：不改变 Agent 的 drop 行为。Actor 通过 sender drop 自然退出，且会 commit in-flight turn。显式 `shutdown()` 命令只是加速这个过程（发送 Shutdown command 而非等 sender drop）。两者效果相同。
+**决策**：不改变 Agent 的 drop 行为。Actor 通过 sender drop 自然退出，且会 commit in-flight turn。显式 `shutdown()` 命令只是加速这个过程（发送 Shutdown command 而非等 sender drop）。
+
+> 更正（2026-08-06 复验）：显式 `shutdown()` 与 sender drop **并不完全相同**——复验发现 turn 进行中收到 Shutdown 命令时，`run_actor` 的让出窗口 drain loop 曾直接 `return` 跳过 commit（已修复，见 `phase5-agent-actor.md` 复验记录）。修复后两者一致：均走 graceful shutdown（abort turn + commit）。
 
 ### 3. 文档化 session actor 边界
 
@@ -107,7 +109,7 @@ pub(crate) async fn shutdown_internal(&mut self) -> Result<CodingAgentShutdownOu
 
 1. **不重写 SnapshotCoordinator 为 actor**：当前 Mutex 模型在功能上正确，重写风险大、收益低。Mutex 串行化等价于 actor 串行化。
 
-2. **Agent actor shutdown 通过 sender drop 隐式完成**：显式 `shutdown()` 与 sender drop 效果相同，不需要额外集成。
+2. **Agent actor shutdown 通过 sender drop 隐式完成**：显式 `shutdown()` 与 sender drop 行为等价（2026-08-06 修复 `phase5-agent-actor.md` 中记录的不一致后成立），不需要额外集成。
 
 3. **shutdown 顺序调整**：commit terminal 在 drain writer 之前，确保终止事件被持久化。
 

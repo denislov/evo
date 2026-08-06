@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use super::context::{AgentTurnContext, AgentTurnProviderRequestOverride};
 use super::nodes;
 use super::nodes::{AgentTurnDecision, AgentTurnError};
+use super::transitions::transition_from_decision;
 use crate::agent::queue::{
     AgentInputQueue, PromptQueueEntry, edit_entry, enqueue_message, remove_entry,
 };
@@ -26,7 +27,7 @@ const MAX_LEGAL_TURN_STATE_VISITS: usize = 9;
 const _: () = assert!(TURN_STATE_VISIT_FUSE > MAX_LEGAL_TURN_STATE_VISITS);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentTurnState {
+pub(crate) enum AgentTurnState {
     Finish,
     Start,
     DrainQueuedInput,
@@ -61,6 +62,15 @@ type TurnRunOutcome = (Result<AgentTurnResult, AgentTurnError>, AgentTurnContext
 /// consumer's event stream has been dropped, it commits the context back to
 /// the state and drops the runner; no drop guard is needed because the actor
 /// is the only owner and always commits at a turn boundary.
+/// Pending queue entries collected while the turn future was running and not
+/// yet flushed into the turn's working copy. The actor merges them into the
+/// persistent state at commit time so enqueued input is never dropped.
+pub(crate) struct PendingQueueInput {
+    pub steering: VecDeque<PromptQueueEntry>,
+    pub follow_up: VecDeque<PromptQueueEntry>,
+    pub interjection: VecDeque<PromptQueueEntry>,
+}
+
 pub(crate) struct TurnRunner {
     context: Option<AgentTurnContext>,
     turn: u32,
@@ -203,10 +213,14 @@ impl TurnRunner {
                 if enqueue_message(
                     &mut context.steering_queue,
                     AgentInputQueue::Steering,
-                    entry,
+                    entry.clone(),
                 )
                 .is_err()
                 {
+                    // Put the entry back: it was popped off the pending
+                    // queue, so a full working-copy queue must not drop the
+                    // input. It stays pending until the next flush.
+                    pending_steering.push_front(entry);
                     break;
                 }
             }
@@ -214,10 +228,11 @@ impl TurnRunner {
                 if enqueue_message(
                     &mut context.follow_up_queue,
                     AgentInputQueue::FollowUp,
-                    entry,
+                    entry.clone(),
                 )
                 .is_err()
                 {
+                    pending_follow_up.push_front(entry);
                     break;
                 }
             }
@@ -225,10 +240,11 @@ impl TurnRunner {
                 if enqueue_message(
                     &mut context.interjection_queue,
                     AgentInputQueue::Interjection,
-                    entry,
+                    entry.clone(),
                 )
                 .is_err()
                 {
+                    pending_interjection.push_front(entry);
                     break;
                 }
             }
@@ -263,15 +279,18 @@ impl TurnRunner {
             )
         } else {
             let id = self.next_pending_id("steer");
-            self.pending_steering.push_back(PromptQueueEntry {
-                id: id.clone(),
-                version: 0,
-                message: AgentMessage::UserText {
-                    message_id: id,
-                    text,
+            enqueue_message(
+                &mut self.pending_steering,
+                AgentInputQueue::Steering,
+                PromptQueueEntry {
+                    id: id.clone(),
+                    version: 0,
+                    message: AgentMessage::UserText {
+                        message_id: id,
+                        text,
+                    },
                 },
-            });
-            Ok(())
+            )
         }
     }
 
@@ -305,19 +324,22 @@ impl TurnRunner {
             )
         } else {
             let id = self.next_pending_id("steer");
-            self.pending_steering.push_back(PromptQueueEntry {
-                id: id.clone(),
-                version: 0,
-                message: AgentMessage::Custom {
-                    message_id: id,
-                    custom_type: "input".into(),
-                    content,
-                    display: true,
-                    details: None,
-                    timestamp: 0,
+            enqueue_message(
+                &mut self.pending_steering,
+                AgentInputQueue::Steering,
+                PromptQueueEntry {
+                    id: id.clone(),
+                    version: 0,
+                    message: AgentMessage::Custom {
+                        message_id: id,
+                        custom_type: "input".into(),
+                        content,
+                        display: true,
+                        details: None,
+                        timestamp: 0,
+                    },
                 },
-            });
-            Ok(())
+            )
         }
     }
 
@@ -341,15 +363,18 @@ impl TurnRunner {
             )
         } else {
             let id = self.next_pending_id("followup");
-            self.pending_follow_up.push_back(PromptQueueEntry {
-                id: id.clone(),
-                version: 0,
-                message: AgentMessage::UserText {
-                    message_id: id,
-                    text,
+            enqueue_message(
+                &mut self.pending_follow_up,
+                AgentInputQueue::FollowUp,
+                PromptQueueEntry {
+                    id: id.clone(),
+                    version: 0,
+                    message: AgentMessage::UserText {
+                        message_id: id,
+                        text,
+                    },
                 },
-            });
-            Ok(())
+            )
         }
     }
 
@@ -383,19 +408,22 @@ impl TurnRunner {
             )
         } else {
             let id = self.next_pending_id("followup");
-            self.pending_follow_up.push_back(PromptQueueEntry {
-                id: id.clone(),
-                version: 0,
-                message: AgentMessage::Custom {
-                    message_id: id,
-                    custom_type: "input".into(),
-                    content,
-                    display: true,
-                    details: None,
-                    timestamp: 0,
+            enqueue_message(
+                &mut self.pending_follow_up,
+                AgentInputQueue::FollowUp,
+                PromptQueueEntry {
+                    id: id.clone(),
+                    version: 0,
+                    message: AgentMessage::Custom {
+                        message_id: id,
+                        custom_type: "input".into(),
+                        content,
+                        display: true,
+                        details: None,
+                        timestamp: 0,
+                    },
                 },
-            });
-            Ok(())
+            )
         }
     }
 
@@ -419,15 +447,18 @@ impl TurnRunner {
             )
         } else {
             let id = self.next_pending_id("interject");
-            self.pending_interjection.push_back(PromptQueueEntry {
-                id: id.clone(),
-                version: 0,
-                message: AgentMessage::UserText {
-                    message_id: id,
-                    text,
+            enqueue_message(
+                &mut self.pending_interjection,
+                AgentInputQueue::Interjection,
+                PromptQueueEntry {
+                    id: id.clone(),
+                    version: 0,
+                    message: AgentMessage::UserText {
+                        message_id: id,
+                        text,
+                    },
                 },
-            });
-            Ok(())
+            )
         }
     }
 
@@ -461,19 +492,22 @@ impl TurnRunner {
             )
         } else {
             let id = self.next_pending_id("interject");
-            self.pending_interjection.push_back(PromptQueueEntry {
-                id: id.clone(),
-                version: 0,
-                message: AgentMessage::Custom {
-                    message_id: id,
-                    custom_type: "input".into(),
-                    content,
-                    display: true,
-                    details: None,
-                    timestamp: 0,
+            enqueue_message(
+                &mut self.pending_interjection,
+                AgentInputQueue::Interjection,
+                PromptQueueEntry {
+                    id: id.clone(),
+                    version: 0,
+                    message: AgentMessage::Custom {
+                        message_id: id,
+                        custom_type: "input".into(),
+                        content,
+                        display: true,
+                        details: None,
+                        timestamp: 0,
+                    },
                 },
-            });
-            Ok(())
+            )
         }
     }
 
@@ -600,9 +634,21 @@ impl TurnRunner {
         }
     }
 
-    /// Hands the working copy back to the actor for committing.
-    pub(crate) fn into_context(self) -> AgentTurnContext {
-        self.context.expect("turn context is held")
+    /// Hands the working copy and any pending (not yet flushed) queue entries
+    /// back to the actor for committing. Pending entries are input enqueued
+    /// while the turn future was running; they could not be flushed into the
+    /// working copy if its queues were full, so the actor merges them into
+    /// the persistent state instead of dropping them.
+    pub(crate) fn into_context(mut self) -> (AgentTurnContext, PendingQueueInput) {
+        let context = self.context.take().expect("turn context is held");
+        (
+            context,
+            PendingQueueInput {
+                steering: self.pending_steering,
+                follow_up: self.pending_follow_up,
+                interjection: self.pending_interjection,
+            },
+        )
     }
 
     /// Returns `true` when a turn finished with `Continue` and the actor has
@@ -685,189 +731,6 @@ async fn run_typed_turn(
 
         if cancellation.is_cancelled() {
             return Ok(AgentTurnResult::Finish);
-        }
-    }
-}
-
-fn transition_from_decision(
-    state: AgentTurnState,
-    decision: AgentTurnDecision,
-) -> Result<AgentTurnState, AgentTurnError> {
-    match state {
-        AgentTurnState::Start => transition_from_start(decision),
-        AgentTurnState::PrepareProviderRequest => transition_from_prepare_provider(decision),
-        AgentTurnState::ApplyProviderHook => transition_from_provider_hook(decision),
-        AgentTurnState::ProviderStream => transition_from_provider_stream(decision),
-        AgentTurnState::DecideAfterAssistant => transition_from_assistant(decision),
-        AgentTurnState::ExecuteTools => transition_from_tools(decision),
-        AgentTurnState::Finish
-        | AgentTurnState::DrainQueuedInput
-        | AgentTurnState::CompactRuntimeContext
-        | AgentTurnState::PrepareNextTurn => unexpected_decision(state, decision),
-    }
-}
-
-fn transition_from_start(decision: AgentTurnDecision) -> Result<AgentTurnState, AgentTurnError> {
-    match decision {
-        AgentTurnDecision::Next => Ok(AgentTurnState::DrainQueuedInput),
-        AgentTurnDecision::Error | AgentTurnDecision::Aborted => Ok(AgentTurnState::Finish),
-        AgentTurnDecision::Continue
-        | AgentTurnDecision::ContinueProvider
-        | AgentTurnDecision::Tools
-        | AgentTurnDecision::Done => unexpected_decision(AgentTurnState::Start, decision),
-    }
-}
-
-fn transition_from_prepare_provider(
-    decision: AgentTurnDecision,
-) -> Result<AgentTurnState, AgentTurnError> {
-    match decision {
-        AgentTurnDecision::Next => Ok(AgentTurnState::ApplyProviderHook),
-        AgentTurnDecision::Error | AgentTurnDecision::Aborted => Ok(AgentTurnState::Finish),
-        AgentTurnDecision::Continue
-        | AgentTurnDecision::ContinueProvider
-        | AgentTurnDecision::Tools
-        | AgentTurnDecision::Done => {
-            unexpected_decision(AgentTurnState::PrepareProviderRequest, decision)
-        }
-    }
-}
-
-fn transition_from_provider_hook(
-    decision: AgentTurnDecision,
-) -> Result<AgentTurnState, AgentTurnError> {
-    match decision {
-        AgentTurnDecision::Next => Ok(AgentTurnState::ProviderStream),
-        AgentTurnDecision::Error | AgentTurnDecision::Aborted => Ok(AgentTurnState::Finish),
-        AgentTurnDecision::Continue
-        | AgentTurnDecision::ContinueProvider
-        | AgentTurnDecision::Tools
-        | AgentTurnDecision::Done => {
-            unexpected_decision(AgentTurnState::ApplyProviderHook, decision)
-        }
-    }
-}
-
-fn transition_from_provider_stream(
-    decision: AgentTurnDecision,
-) -> Result<AgentTurnState, AgentTurnError> {
-    match decision {
-        AgentTurnDecision::Next => Ok(AgentTurnState::DecideAfterAssistant),
-        AgentTurnDecision::Error | AgentTurnDecision::Aborted => Ok(AgentTurnState::Finish),
-        AgentTurnDecision::Continue
-        | AgentTurnDecision::ContinueProvider
-        | AgentTurnDecision::Tools
-        | AgentTurnDecision::Done => unexpected_decision(AgentTurnState::ProviderStream, decision),
-    }
-}
-
-fn transition_from_assistant(
-    decision: AgentTurnDecision,
-) -> Result<AgentTurnState, AgentTurnError> {
-    match decision {
-        AgentTurnDecision::Continue => Ok(AgentTurnState::PrepareNextTurn),
-        AgentTurnDecision::Tools => Ok(AgentTurnState::ExecuteTools),
-        AgentTurnDecision::Error | AgentTurnDecision::Aborted => Ok(AgentTurnState::Finish),
-        AgentTurnDecision::Next | AgentTurnDecision::ContinueProvider | AgentTurnDecision::Done => {
-            unexpected_decision(AgentTurnState::DecideAfterAssistant, decision)
-        }
-    }
-}
-
-fn transition_from_tools(decision: AgentTurnDecision) -> Result<AgentTurnState, AgentTurnError> {
-    match decision {
-        AgentTurnDecision::Continue | AgentTurnDecision::ContinueProvider => {
-            Ok(AgentTurnState::PrepareNextTurn)
-        }
-        AgentTurnDecision::Error | AgentTurnDecision::Aborted => Ok(AgentTurnState::Finish),
-        AgentTurnDecision::Next | AgentTurnDecision::Tools | AgentTurnDecision::Done => {
-            unexpected_decision(AgentTurnState::ExecuteTools, decision)
-        }
-    }
-}
-
-fn unexpected_decision(
-    state: AgentTurnState,
-    decision: AgentTurnDecision,
-) -> Result<AgentTurnState, AgentTurnError> {
-    Err(AgentTurnError::Invariant(format!(
-        "typed AgentTurn transition from {state:?} has unexpected decision {decision:?}"
-    )))
-}
-
-#[cfg(test)]
-mod transition_tests {
-    use super::*;
-
-    #[test]
-    fn start_transitions() {
-        assert_eq!(
-            transition_from_start(AgentTurnDecision::Next).unwrap(),
-            AgentTurnState::DrainQueuedInput
-        );
-        assert_eq!(
-            transition_from_start(AgentTurnDecision::Error).unwrap(),
-            AgentTurnState::Finish
-        );
-        assert_eq!(
-            transition_from_start(AgentTurnDecision::Aborted).unwrap(),
-            AgentTurnState::Finish
-        );
-    }
-
-    #[test]
-    fn assistant_transitions() {
-        assert_eq!(
-            transition_from_assistant(AgentTurnDecision::Continue).unwrap(),
-            AgentTurnState::PrepareNextTurn
-        );
-        assert_eq!(
-            transition_from_assistant(AgentTurnDecision::Tools).unwrap(),
-            AgentTurnState::ExecuteTools
-        );
-        assert_eq!(
-            transition_from_assistant(AgentTurnDecision::Error).unwrap(),
-            AgentTurnState::Finish
-        );
-    }
-
-    #[test]
-    fn tools_transitions() {
-        assert_eq!(
-            transition_from_tools(AgentTurnDecision::Continue).unwrap(),
-            AgentTurnState::PrepareNextTurn
-        );
-        assert_eq!(
-            transition_from_tools(AgentTurnDecision::ContinueProvider).unwrap(),
-            AgentTurnState::PrepareNextTurn
-        );
-    }
-
-    #[test]
-    fn illegal_transitions_fail_closed() {
-        for (state, decision) in [
-            (AgentTurnState::Start, AgentTurnDecision::Tools),
-            (AgentTurnState::Start, AgentTurnDecision::Done),
-            (AgentTurnState::Start, AgentTurnDecision::Continue),
-            (AgentTurnState::ProviderStream, AgentTurnDecision::Tools),
-            (
-                AgentTurnState::DecideAfterAssistant,
-                AgentTurnDecision::Next,
-            ),
-            (AgentTurnState::ExecuteTools, AgentTurnDecision::Done),
-            (AgentTurnState::ExecuteTools, AgentTurnDecision::Tools),
-            (AgentTurnState::Finish, AgentTurnDecision::Next),
-            (AgentTurnState::DrainQueuedInput, AgentTurnDecision::Next),
-            (
-                AgentTurnState::CompactRuntimeContext,
-                AgentTurnDecision::Next,
-            ),
-            (AgentTurnState::PrepareNextTurn, AgentTurnDecision::Next),
-        ] {
-            assert!(
-                transition_from_decision(state, decision).is_err(),
-                "expected {state:?} + {decision:?} to be rejected"
-            );
         }
     }
 }

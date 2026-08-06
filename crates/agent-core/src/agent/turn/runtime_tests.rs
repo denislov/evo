@@ -5,6 +5,7 @@ use tokio::time::timeout;
 
 use crate::agent::Agent;
 use crate::agent::command::{AgentActorError, AgentHandle};
+use crate::agent::queue::MAX_AGENT_QUEUE_ITEMS;
 use crate::agent::types::{
     AgentConfig, AgentEvent, AgentMessage, AgentQueueError, ProviderStreamer,
 };
@@ -229,19 +230,19 @@ async fn dropping_after_tool_turn_preserves_tool_results() {
 
 #[tokio::test]
 async fn clear_queues_during_turn_empties_queued_input() {
-    let agent = test_agent(vec![
-        tool_call("searching"),
-        text_call("found", StopReason::Stop),
-    ]);
-    install_test_tool(&agent).await;
+    // A turn stuck on the provider does not consume queued input, so the
+    // steer lands in the actor's pending buffer where clear_queues removes
+    // it deterministically.
+    let agent = hanging_agent();
     let mut stream = agent.prompt("hello");
-    while let Some(event) = stream.next().await {
-        if matches!(event, AgentEvent::ToolCallEnd { .. }) {
-            break;
-        }
-    }
-    agent.steer("late input").expect("queue accepts");
+    let event = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("TurnStart arrives within timeout")
+        .expect("stream is alive");
+    assert!(matches!(event, AgentEvent::TurnStart { .. }));
+    agent.steer("late input").await.expect("queue accepts");
     agent.clear_queues();
+    agent.abort();
     while stream.next().await.is_some() {}
     assert!(agent.drain_steering_queue().await.is_empty());
     assert!(
@@ -265,7 +266,10 @@ async fn steering_during_turn_is_consumed_by_the_current_turn() {
             break;
         }
     }
-    agent.steer("steer during turn").expect("queue accepts");
+    agent
+        .steer("steer during turn")
+        .await
+        .expect("queue accepts");
     while stream.next().await.is_some() {}
     assert!(
         agent
@@ -305,7 +309,7 @@ async fn agent_core_release_faux_first_text_delta_baseline() {
 #[tokio::test]
 async fn edit_queue_entry_with_correct_version_succeeds() {
     let agent = test_agent(vec![text_call("answer", StopReason::Stop)]);
-    agent.steer("original").expect("queue accepts");
+    agent.steer("original").await.expect("queue accepts");
     let new_message = AgentMessage::UserText {
         message_id: "steer_0".into(),
         text: "edited".into(),
@@ -325,7 +329,7 @@ async fn edit_queue_entry_with_correct_version_succeeds() {
 #[tokio::test]
 async fn edit_queue_entry_with_stale_version_returns_conflict() {
     let agent = test_agent(vec![text_call("answer", StopReason::Stop)]);
-    agent.steer("original").expect("queue accepts");
+    agent.steer("original").await.expect("queue accepts");
     let new_message = AgentMessage::UserText {
         message_id: "steer_0".into(),
         text: "edited".into(),
@@ -356,7 +360,7 @@ async fn edit_queue_entry_not_found_for_unknown_id() {
 #[tokio::test]
 async fn remove_queue_entry_succeeds_with_correct_version() {
     let agent = test_agent(vec![text_call("answer", StopReason::Stop)]);
-    agent.steer("original").expect("queue accepts");
+    agent.steer("original").await.expect("queue accepts");
     agent
         .remove_queue_entry("steer_0", 0)
         .await
@@ -367,8 +371,11 @@ async fn remove_queue_entry_succeeds_with_correct_version() {
 #[tokio::test]
 async fn interjection_drains_before_steering_at_turn_start() {
     let agent = test_agent(vec![text_call("answer", StopReason::Stop)]);
-    agent.steer("steer input").expect("queue accepts");
-    agent.interject("interject input").expect("queue accepts");
+    agent.steer("steer input").await.expect("queue accepts");
+    agent
+        .interject("interject input")
+        .await
+        .expect("queue accepts");
     let mut stream = agent.prompt("hello");
     while let Some(event) = stream.next().await {
         if matches!(event, AgentEvent::AgentDone { .. }) {
@@ -393,9 +400,9 @@ async fn interjection_drains_before_steering_at_turn_start() {
 #[tokio::test]
 async fn clear_queues_empties_all_three_queues() {
     let agent = test_agent(vec![text_call("answer", StopReason::Stop)]);
-    agent.steer("steer").expect("queue accepts");
-    agent.follow_up("followup").expect("queue accepts");
-    agent.interject("interject").expect("queue accepts");
+    agent.steer("steer").await.expect("queue accepts");
+    agent.follow_up("followup").await.expect("queue accepts");
+    agent.interject("interject").await.expect("queue accepts");
     agent.clear_queues();
     let mut stream = agent.prompt("hello");
     while stream.next().await.is_some() {}
@@ -422,7 +429,7 @@ async fn steering_mid_tool_turn_does_not_break_tool_pairing() {
             break;
         }
     }
-    agent.steer("steer mid tool").expect("queue accepts");
+    agent.steer("steer mid tool").await.expect("queue accepts");
     while stream.next().await.is_some() {}
     let messages = agent.messages().await;
     let tool_result_idx = messages
@@ -461,7 +468,8 @@ async fn actor_closed_returns_error_after_actor_task_panics() {
 
     let error = handle
         .steer("after panic".into())
-        .expect_err("fire fails after actor panic");
+        .await
+        .expect_err("steer fails after actor panic");
     assert_eq!(error, AgentQueueError::ActorClosed);
 }
 
@@ -508,9 +516,11 @@ async fn steer_and_follow_up_during_provider_hang_are_preserved_after_abort() {
 
     agent
         .steer("steer during hang")
+        .await
         .expect("steer accepts during provider hang");
     agent
         .follow_up("followup during hang")
+        .await
         .expect("follow_up accepts during provider hang");
     agent.abort();
 
@@ -561,9 +571,13 @@ async fn concurrent_steering_follow_up_and_abort_do_not_corrupt_state() {
         }
     }
 
-    agent.steer("concurrent steer").expect("steer accepts");
+    agent
+        .steer("concurrent steer")
+        .await
+        .expect("steer accepts");
     agent
         .follow_up("concurrent followup")
+        .await
         .expect("follow_up accepts");
     agent.abort();
 
@@ -603,7 +617,7 @@ async fn current_thread_runtime_does_not_freeze() {
             match event {
                 AgentEvent::ToolCallEnd { .. } => {
                     saw_tool = true;
-                    agent.steer("steer mid turn").expect("steer accepts");
+                    agent.steer("steer mid turn").await.expect("steer accepts");
                 }
                 AgentEvent::AgentDone { .. } => break,
                 _ => {}
@@ -639,8 +653,132 @@ async fn shutdown_releases_actor_task() {
 
     let error = agent
         .steer("after shutdown")
+        .await
         .expect_err("steer fails after shutdown");
     assert_eq!(error, AgentQueueError::ActorClosed);
+}
+
+#[tokio::test]
+async fn shutdown_during_active_turn_terminates_cleanly() {
+    // A Shutdown command arriving while a turn is in flight must not skip the
+    // graceful shutdown path: the in-flight turn is aborted and committed
+    // before the actor exits, and later commands fail with `Closed`.
+    let agent = test_agent(vec![
+        tool_call("working"),
+        text_call("done", StopReason::Stop),
+    ]);
+    install_test_tool(&agent).await;
+    let mut stream = agent.prompt("hello");
+    while let Some(event) = stream.next().await {
+        if matches!(event, AgentEvent::ToolCallEnd { .. }) {
+            break;
+        }
+    }
+
+    agent.shutdown();
+
+    timeout(Duration::from_secs(5), async {
+        while stream.next().await.is_some() {}
+    })
+    .await
+    .expect("stream closes after shutdown without deadlock");
+
+    let error = agent
+        .handle
+        .messages()
+        .await
+        .expect_err("messages fails after shutdown during turn");
+    assert_eq!(error, AgentActorError::Closed);
+    let error = agent
+        .handle
+        .steer("after shutdown".into())
+        .await
+        .expect_err("steer fails after shutdown during turn");
+    assert_eq!(error, AgentQueueError::ActorClosed);
+}
+
+#[tokio::test]
+async fn shutdown_during_provider_hang_terminates_cleanly() {
+    // Shutdown must also terminate a turn stuck on a hanging provider: the
+    // actor aborts the turn via the cancellation token and exits without
+    // deadlocking against the provider stream.
+    let agent = hanging_agent();
+    let mut stream = agent.prompt("hello");
+    let event = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("TurnStart arrives within timeout")
+        .expect("stream is alive");
+    assert!(matches!(event, AgentEvent::TurnStart { .. }));
+
+    agent.shutdown();
+
+    timeout(Duration::from_secs(5), async {
+        while stream.next().await.is_some() {}
+    })
+    .await
+    .expect("stream closes after shutdown without deadlock");
+
+    let error = agent
+        .handle
+        .messages()
+        .await
+        .expect_err("messages fails after shutdown during provider hang");
+    assert_eq!(error, AgentActorError::Closed);
+}
+
+#[tokio::test]
+async fn steer_surfaces_item_limit_when_queue_is_full() {
+    let agent = test_agent(vec![text_call("answer", StopReason::Stop)]);
+    for i in 0..MAX_AGENT_QUEUE_ITEMS {
+        agent
+            .steer(format!("input {i}"))
+            .await
+            .expect("queue accepts");
+    }
+    let error = agent
+        .steer("overflow")
+        .await
+        .expect_err("full queue must reject the steer");
+    assert!(matches!(error, AgentQueueError::ItemLimit { .. }));
+    assert!(
+        agent.drain_steering_queue().await.len() == MAX_AGENT_QUEUE_ITEMS,
+        "the rejected steer must not enter the queue"
+    );
+}
+
+#[tokio::test]
+async fn steer_surfaces_item_limit_when_queue_is_full_during_turn() {
+    // Queue limits are enforced on the actor's pending buffer too: while a
+    // turn is stuck on the provider, steers accumulate in the pending queue
+    // and an overflow is rejected to the caller instead of being silently
+    // dropped.
+    let agent = hanging_agent();
+    let mut stream = agent.prompt("hello");
+    let event = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("TurnStart arrives within timeout")
+        .expect("stream is alive");
+    assert!(matches!(event, AgentEvent::TurnStart { .. }));
+    for i in 0..MAX_AGENT_QUEUE_ITEMS {
+        agent
+            .steer(format!("input {i}"))
+            .await
+            .expect("queue accepts");
+    }
+    let error = agent
+        .steer("overflow")
+        .await
+        .expect_err("full queue must reject the steer during a turn");
+    assert!(matches!(error, AgentQueueError::ItemLimit { .. }));
+    agent.abort();
+    while stream.next().await.is_some() {}
+    let messages = agent.messages().await;
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, AgentMessage::UserText { text, .. } if text == "overflow")),
+        "the rejected steer must not reach the conversation"
+    );
 }
 
 #[tokio::test]

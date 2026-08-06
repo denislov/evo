@@ -32,15 +32,6 @@ pub enum AgentActorError {
     Closed,
 }
 
-impl AgentActorError {
-    pub(crate) fn from_send<T>(error: mpsc::error::TrySendError<T>) -> Self {
-        match error {
-            mpsc::error::TrySendError::Full(_) => Self::MailboxFull,
-            mpsc::error::TrySendError::Closed(_) => Self::Closed,
-        }
-    }
-}
-
 impl From<AgentActorError> for AgentQueueError {
     fn from(error: AgentActorError) -> Self {
         match error {
@@ -173,17 +164,13 @@ impl AgentHandle {
         reply_rx.await.map_err(|_| AgentActorError::Closed)
     }
 
-    /// Sends a command without waiting for the actor's reply. Only mailbox
-    /// saturation or a closed actor surface as errors.
-    fn fire<T>(
+    /// Waits for the actor's reply, mapping a failed send or a dropped reply
+    /// (actor panicked or shut down) to `Closed`.
+    async fn await_reply<T>(
         &self,
         build: impl FnOnce(oneshot::Sender<T>) -> AgentCommand,
-    ) -> Result<(), AgentQueueError> {
-        let (reply_tx, _reply_rx) = oneshot::channel();
-        self.commands
-            .try_send(build(reply_tx))
-            .map_err(AgentActorError::from_send)
-            .map_err(AgentQueueError::from)
+    ) -> Result<T, AgentQueueError> {
+        self.request(build).await.map_err(AgentQueueError::from)
     }
 
     pub(crate) async fn try_prompt(
@@ -203,34 +190,43 @@ impl AgentHandle {
             .map_err(|_| AgentAdmissionError::Busy { operation: "run" })?
     }
 
-    pub(crate) fn steer(&self, text: String) -> Result<(), AgentQueueError> {
-        self.fire(|reply| AgentCommand::Steer { text, reply })
+    pub(crate) async fn steer(&self, text: String) -> Result<(), AgentQueueError> {
+        self.await_reply(|reply| AgentCommand::Steer { text, reply })
+            .await?
     }
 
-    pub(crate) fn steer_content(&self, content: Vec<ContentBlock>) -> Result<(), AgentQueueError> {
-        self.fire(|reply| AgentCommand::SteerContent { content, reply })
-    }
-
-    pub(crate) fn follow_up(&self, text: String) -> Result<(), AgentQueueError> {
-        self.fire(|reply| AgentCommand::FollowUp { text, reply })
-    }
-
-    pub(crate) fn follow_up_content(
+    pub(crate) async fn steer_content(
         &self,
         content: Vec<ContentBlock>,
     ) -> Result<(), AgentQueueError> {
-        self.fire(|reply| AgentCommand::FollowUpContent { content, reply })
+        self.await_reply(|reply| AgentCommand::SteerContent { content, reply })
+            .await?
     }
 
-    pub(crate) fn interject(&self, text: String) -> Result<(), AgentQueueError> {
-        self.fire(|reply| AgentCommand::Interject { text, reply })
+    pub(crate) async fn follow_up(&self, text: String) -> Result<(), AgentQueueError> {
+        self.await_reply(|reply| AgentCommand::FollowUp { text, reply })
+            .await?
     }
 
-    pub(crate) fn interject_content(
+    pub(crate) async fn follow_up_content(
         &self,
         content: Vec<ContentBlock>,
     ) -> Result<(), AgentQueueError> {
-        self.fire(|reply| AgentCommand::InterjectContent { content, reply })
+        self.await_reply(|reply| AgentCommand::FollowUpContent { content, reply })
+            .await?
+    }
+
+    pub(crate) async fn interject(&self, text: String) -> Result<(), AgentQueueError> {
+        self.await_reply(|reply| AgentCommand::Interject { text, reply })
+            .await?
+    }
+
+    pub(crate) async fn interject_content(
+        &self,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), AgentQueueError> {
+        self.await_reply(|reply| AgentCommand::InterjectContent { content, reply })
+            .await?
     }
 
     pub(crate) fn abort(&self) {
@@ -385,25 +381,45 @@ mod mailbox_tests {
     use super::*;
 
     #[tokio::test]
-    async fn steer_returns_mailbox_full_when_mailbox_is_full() {
-        let (commands, _receiver) = mpsc::channel(1);
-        let handle = AgentHandle { commands };
-        let (reply_tx, _reply_rx) = oneshot::channel();
-        handle
-            .commands
-            .try_send(AgentCommand::Abort { reply: reply_tx })
-            .expect("first command fills the mailbox");
-        let error = handle.steer("blocked".into()).expect_err("mailbox is full");
-        assert_eq!(error, AgentQueueError::MailboxFull);
-    }
-
-    #[tokio::test]
     async fn steer_returns_actor_closed_after_shutdown() {
         let (commands, receiver) = mpsc::channel(1);
         drop(receiver);
         let handle = AgentHandle { commands };
-        let error = handle.steer("blocked".into()).expect_err("actor is closed");
+        let error = handle
+            .steer("blocked".into())
+            .await
+            .expect_err("actor is closed");
         assert_eq!(error, AgentQueueError::ActorClosed);
+    }
+
+    #[tokio::test]
+    async fn steer_surfaces_enqueue_rejection_from_the_actor() {
+        // The actor rejects the steer with a structured queue error, which
+        // must reach the caller instead of being silently dropped.
+        let (commands, mut receiver) = mpsc::channel(8);
+        let handle = AgentHandle { commands };
+        let actor = tokio::spawn(async move {
+            let command = receiver.recv().await.expect("steer command arrives");
+            match command {
+                AgentCommand::Steer { reply, .. } => {
+                    let _ = reply.send(Err(AgentQueueError::NotFound {
+                        entry_id: "simulated".into(),
+                    }));
+                }
+                _ => panic!("unexpected command"),
+            }
+        });
+        let error = handle
+            .steer("blocked".into())
+            .await
+            .expect_err("actor rejection must surface");
+        assert_eq!(
+            error,
+            AgentQueueError::NotFound {
+                entry_id: "simulated".into()
+            }
+        );
+        actor.await.expect("actor task completes");
     }
 
     #[tokio::test]
@@ -411,6 +427,13 @@ mod mailbox_tests {
         let (commands, _receiver) = mpsc::channel(2);
         let handle = AgentHandle { commands };
         handle.shutdown();
-        assert!(handle.steer("blocked".into()).is_ok());
+        assert!(
+            handle
+                .commands
+                .try_send(AgentCommand::ClearQueues {
+                    reply: oneshot::channel().0,
+                })
+                .is_ok()
+        );
     }
 }

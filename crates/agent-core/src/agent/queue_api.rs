@@ -4,28 +4,37 @@ use crate::agent::runtime::Agent;
 use crate::agent::types::{AgentMessage, AgentQueueError};
 
 impl Agent {
-    pub fn steer(&self, text: impl Into<String>) -> Result<(), AgentQueueError> {
-        self.handle.steer(text.into())
+    /// Enqueues steering input and waits for the actor to admit it. Queue
+    /// rejections (`ItemLimit`, `ByteLimit`) and mailbox failures surface to
+    /// the caller; input is never silently dropped.
+    pub async fn steer(&self, text: impl Into<String>) -> Result<(), AgentQueueError> {
+        self.handle.steer(text.into()).await
     }
 
-    pub fn steer_content(&self, content: Vec<ContentBlock>) -> Result<(), AgentQueueError> {
-        self.handle.steer_content(content)
+    pub async fn steer_content(&self, content: Vec<ContentBlock>) -> Result<(), AgentQueueError> {
+        self.handle.steer_content(content).await
     }
 
-    pub fn follow_up(&self, text: impl Into<String>) -> Result<(), AgentQueueError> {
-        self.handle.follow_up(text.into())
+    pub async fn follow_up(&self, text: impl Into<String>) -> Result<(), AgentQueueError> {
+        self.handle.follow_up(text.into()).await
     }
 
-    pub fn follow_up_content(&self, content: Vec<ContentBlock>) -> Result<(), AgentQueueError> {
-        self.handle.follow_up_content(content)
+    pub async fn follow_up_content(
+        &self,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), AgentQueueError> {
+        self.handle.follow_up_content(content).await
     }
 
-    pub fn interject(&self, text: impl Into<String>) -> Result<(), AgentQueueError> {
-        self.handle.interject(text.into())
+    pub async fn interject(&self, text: impl Into<String>) -> Result<(), AgentQueueError> {
+        self.handle.interject(text.into()).await
     }
 
-    pub fn interject_content(&self, content: Vec<ContentBlock>) -> Result<(), AgentQueueError> {
-        self.handle.interject_content(content)
+    pub async fn interject_content(
+        &self,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), AgentQueueError> {
+        self.handle.interject_content(content).await
     }
 
     pub fn clear_queues(&self) {

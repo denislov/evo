@@ -161,8 +161,8 @@ async fn build_agent_runtime(ctx: &mut PromptTurnContext) -> Result<(), CodingSe
     }
     for input in ctx.options().queued_steering() {
         match input {
-            QueuedPromptInput::Text(text) => build.agent.steer(text.clone()),
-            QueuedPromptInput::Content(content) => build.agent.steer_content(content.clone()),
+            QueuedPromptInput::Text(text) => build.agent.steer(text.clone()).await,
+            QueuedPromptInput::Content(content) => build.agent.steer_content(content.clone()).await,
         }
         .map_err(|error| CodingSessionError::Workflow {
             message: error.to_string(),
@@ -170,8 +170,10 @@ async fn build_agent_runtime(ctx: &mut PromptTurnContext) -> Result<(), CodingSe
     }
     for input in ctx.options().queued_follow_up() {
         match input {
-            QueuedPromptInput::Text(text) => build.agent.follow_up(text.clone()),
-            QueuedPromptInput::Content(content) => build.agent.follow_up_content(content.clone()),
+            QueuedPromptInput::Text(text) => build.agent.follow_up(text.clone()).await,
+            QueuedPromptInput::Content(content) => {
+                build.agent.follow_up_content(content.clone()).await
+            }
         }
         .map_err(|error| CodingSessionError::Workflow {
             message: error.to_string(),
@@ -231,11 +233,11 @@ async fn run_agent_turn(ctx: &mut PromptTurnContext) -> Result<(), CodingSession
                 continue;
             }
             AgentTurnInput::Control(Some(command)) => {
-                apply_prompt_control_command(ctx, &agent, command).map_err(|error| {
-                    CodingSessionError::Workflow {
+                apply_prompt_control_command(ctx, &agent, command)
+                    .await
+                    .map_err(|error| CodingSessionError::Workflow {
                         message: error.to_string(),
-                    }
-                })?;
+                    })?;
                 continue;
             }
             AgentTurnInput::Control(None) => {
@@ -279,7 +281,7 @@ enum AgentTurnInput {
     Event(Option<AgentEvent>),
 }
 
-fn apply_prompt_control_command(
+async fn apply_prompt_control_command(
     ctx: &mut PromptTurnContext,
     agent: &agent_core::api::agent::Agent,
     command: PromptControlCommand,
@@ -290,12 +292,14 @@ fn apply_prompt_control_command(
             agent.abort();
             Ok(())
         }
-        PromptControlCommand::Steer { text } => agent.steer(text),
-        PromptControlCommand::SteerContent { content } => agent.steer_content(content),
-        PromptControlCommand::FollowUp { text } => agent.follow_up(text),
-        PromptControlCommand::FollowUpContent { content } => agent.follow_up_content(content),
-        PromptControlCommand::Interject { text } => agent.interject(text),
-        PromptControlCommand::InterjectContent { content } => agent.interject_content(content),
+        PromptControlCommand::Steer { text } => agent.steer(text).await,
+        PromptControlCommand::SteerContent { content } => agent.steer_content(content).await,
+        PromptControlCommand::FollowUp { text } => agent.follow_up(text).await,
+        PromptControlCommand::FollowUpContent { content } => agent.follow_up_content(content).await,
+        PromptControlCommand::Interject { text } => agent.interject(text).await,
+        PromptControlCommand::InterjectContent { content } => {
+            agent.interject_content(content).await
+        }
     }
 }
 

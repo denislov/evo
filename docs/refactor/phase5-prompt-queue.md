@@ -179,3 +179,39 @@ cargo test --locked -p coding-agent --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 bash scripts/architecture-gate.sh
 ```
+
+## 实现记录与复验修复（2026-08-06）
+
+### steer/follow-up/interject 改为 async request 语义
+
+原 `AgentHandle::fire`（try_send + 丢弃 reply）使入队失败（`ItemLimit`/`ByteLimit`）
+被静默吞掉：`Agent::steer` 返回 `Ok` 但输入实际被拒，CLI/Desktop 整条控制链无感知。
+修复：
+
+- `AgentHandle::steer/steer_content/follow_up/follow_up_content/interject/interject_content`
+  改用 `request`（`send().await` + await reply），`ItemLimit`/`ByteLimit`/`MailboxFull`/
+  `ActorClosed` 全部结构化返回调用方；`Agent::*` 同步 API 改为 `async`。
+- `fire` 仅保留给无错误语义的命令（abort/clear_queues/add_message 等），不再暴露
+  `MailboxFull`。
+- coding-agent `apply_prompt_control_command` 与 queued_steering/queued_follow_up 适配
+  `.await`。
+
+### turn 进行中 pending 缓冲容量约束
+
+turn 运行中（`context` 被 run future 借用）的输入进入 `pending_*` 队列，原实现
+无容量检查且 `flush_pending` 失败时丢弃已 pop 的 entry。修复：
+
+- pending 分支改走 `enqueue_message`（沿用 item/byte 上限）。
+- `flush_pending` 失败时 `push_front` 归还 entry，不丢输入。
+- `TurnRunner::into_context` 返回 `PendingQueueInput`，`commit_turn` 把未 flush 的
+  pending 按 FIFO 追加进 state 队列，commit 不再丢输入。
+
+### 测试
+
+- `steer_surfaces_item_limit_when_queue_is_full`：idle 队列满 32 拒绝第 33 个。
+- `steer_surfaces_item_limit_when_queue_is_full_during_turn`：provider hang 中 pending
+  满同样拒绝。
+- `steer_surfaces_enqueue_rejection_from_the_actor`（command.rs）：actor 的结构化
+  拒绝必须到达调用方。
+- 既有 `clear_queues_during_turn_empties_queued_input` 改用 hanging provider 固定
+  时序（原实现依赖 1µs 让出窗口）。

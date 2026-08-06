@@ -101,10 +101,10 @@ pub fn drain_queue(queue: &mut VecDeque<PromptQueueEntry>, mode: QueueMode) -> V
     }
 }
 
-pub(crate) fn enqueue_message(
-    queue: &mut VecDeque<PromptQueueEntry>,
+pub(crate) fn check_queue_capacity(
+    queue: &VecDeque<PromptQueueEntry>,
     queue_kind: AgentInputQueue,
-    entry: PromptQueueEntry,
+    entry: &PromptQueueEntry,
 ) -> Result<(), AgentQueueError> {
     if queue.len() >= MAX_AGENT_QUEUE_ITEMS {
         return Err(AgentQueueError::ItemLimit {
@@ -121,6 +121,15 @@ pub(crate) fn enqueue_message(
             max_bytes: MAX_AGENT_QUEUE_BYTES,
         });
     }
+    Ok(())
+}
+
+pub(crate) fn enqueue_message(
+    queue: &mut VecDeque<PromptQueueEntry>,
+    queue_kind: AgentInputQueue,
+    entry: PromptQueueEntry,
+) -> Result<(), AgentQueueError> {
+    check_queue_capacity(queue, queue_kind, &entry)?;
     queue.push_back(entry);
     Ok(())
 }

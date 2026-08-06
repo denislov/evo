@@ -232,3 +232,49 @@ Phase 5 Gate：`Arc<RwLock<AgentState>>` 和 `queues_cleared` workaround 删除�
 - `cargo test -p agent-core`：52 passed, 0 failed, 1 ignored
 - `cargo test -p coding-agent`：182 passed, 0 failed
 - architecture gate：`execution_debts=0`，`oversized_debts=35`（既有基线）
+
+## 复验与修复记录（2026-08-06）
+
+Review 发现两个问题并已修复，同时做了文件拆分（因修复后超 900 行上限）：
+
+### 1. Shutdown 在 turn 进行中丢失 working copy（P2-1）
+
+`run_actor` 的 `turn_continues` 让出窗口内 drain pending commands 时，`handle_command`
+返回 `true`（Shutdown）后直接 `return`，绕过 loop 末尾的 graceful shutdown 块
+（abort turn + drain + `commit_turn`），in-flight turn 的 working copy 被 drop。
+与 `Agent::shutdown` 的 doc 契约（"any in-flight turn is committed"）及 ARC-530 文档
+"显式 shutdown 与 sender drop 效果相同"的断言相矛盾。
+
+修复（`actor.rs`）：drain loop 用 `shutting_down` flag + `break` 外层 loop，走
+graceful shutdown 路径。
+
+### 2. Event send 阻塞时 mailbox 被饿死（P2-2 引入风险的根治）
+
+steer 系列改为 await reply 后，若 consumer（coding-agent runner）在等待 reply 时
+停止消费 event stream，actor 可能卡在 `tx.send(event).await`（event channel 满）
+而不再处理 mailbox，形成循环等待。修复：event send 挂起期间用嵌套 `select!`
+继续处理 `commands.recv()`，保持 reply 可达；consumer drop（`tx.is_closed`）仍走
+abort + pending_commit 路径。
+
+### 3. 文件拆分
+
+- `runtime.rs`（878 → 333 行）：保留 `Agent` 公共 API、`AgentState`、`next_message_id`。
+- 新增 `actor.rs`（605 行）：`run_actor`、`handle_command`、admit/commit、tool runtime helpers。
+- `turn/runtime.rs`（873 → 736 行）：保留 `TurnRunner`、`run_typed_turn`。
+- 新增 `turn/transitions.rs`（185 行）：状态机 transition 表 + transition-table 测试。
+
+### 复验结果
+
+- `cargo test -p agent-core --all-features`：77 passed（新增 shutdown-during-turn、
+  shutdown-during-provider-hang、queue limit 入队失败语义等测试），3 次重复无 flaky
+- `cargo test -p coding-agent --all-features`：185 passed
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo fmt --check` 通过
+- architecture gate：`oversized_debts=35`（既有基线，无新增）、`execution_debts=0`
+- release 首 token 性能基线（`agent_core_release_faux_first_text_delta_baseline`）通过
+
+### 已知观察项（不阻塞，Phase 10 前处理）
+
+- `run_actor` 的 `turn_continues` 让出使用 `sleep(1µs)` 轮询 consumer drop / 新命令，
+  依赖调度器行为，测试已覆盖但可考虑显式握手。
+- `TurnRunner` 内部事件缓冲为 unbounded（`mpsc::unbounded`），实际风险低（对外 bounded
+  64 + backpressure），但与 ARC-530 "有界可合并通道"表述有出入。

@@ -6,5 +6,6 @@ mod runtime;
 mod runtime_tests;
 mod tool_execution;
 pub(crate) mod tools;
+mod transitions;
 
 pub(crate) use runtime::TurnRunner;
