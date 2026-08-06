@@ -40,3 +40,8 @@ pub(crate) const MAX_PATCH_FILES: usize = 32;
 pub(crate) const MAX_PATCH_HUNKS: usize = 1_024;
 pub(crate) const MAX_PATCH_LINES: usize = 20_000;
 pub(crate) const MAX_SHELL_COMMAND_BYTES: usize = 1024 * 1024;
+
+/// Hard ceiling for a single web_fetch body budget; the tool default is
+/// smaller and lives with the tool.
+pub(crate) const MAX_WEB_FETCH_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_WEB_FETCH_URL_BYTES: usize = 8 * 1024;

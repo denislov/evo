@@ -224,6 +224,13 @@ impl RuntimeService {
                     .map_err(|error| CodingSessionError::Tool {
                         message: error.to_string(),
                     })?,
+                "web_fetch" => Some(
+                    crate::tools::web_fetch::web_fetch_runtime_tool().map_err(|error| {
+                        CodingSessionError::Tool {
+                            message: error.to_string(),
+                        }
+                    })?,
+                ),
                 _ => None,
             };
             if let Some(tool) = tool {

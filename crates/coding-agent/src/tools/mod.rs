@@ -13,6 +13,7 @@ pub(crate) mod filesystem;
 #[cfg(test)]
 mod server_tools_tests;
 pub(crate) mod shell;
+pub(crate) mod web_fetch;
 
 /// Tools the model provider executes rather than the harness.
 ///
@@ -31,6 +32,7 @@ pub(crate) fn product_tool_ids() -> Vec<ToolId> {
         "ls",
         "apply_patch",
         "hashline_edit",
+        "web_fetch",
         "delegate_agent",
         "delegate_team",
         "web_search",
@@ -51,6 +53,7 @@ pub(crate) fn builtin_runtime_tool_ids() -> Vec<ToolId> {
         "ls",
         "apply_patch",
         "hashline_edit",
+        "web_fetch",
     ]
     .into_iter()
     .map(|name| ToolId::new(name).expect("static tool id is valid"))
@@ -163,6 +166,7 @@ pub fn filter_tools(
         "ls",
         "apply_patch",
         "hashline_edit",
+        "web_fetch",
     ]);
     tools
         .into_iter()

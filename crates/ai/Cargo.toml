@@ -15,7 +15,7 @@ required-features = ["test-support"]
 
 [dependencies]
 ai-protocol.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "net", "time", "io-util"] }
 futures.workspace = true
 async-stream.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -26,6 +26,21 @@ tokio-util.workspace = true
 ring = "0.17"
 base64.workspace = true
 thiserror.workspace = true
+# Fetch pipeline: hyper drives HTTP/1.1 over a connector we own so the
+# connection target is the validated IP; tokio-rustls keeps SNI and
+# certificate verification pinned to the original hostname.
+encoding_rs = "0.8"
+html2md = "0.2"
+http = "1"
+http-body-util = "0.1"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1"] }
+rustls = "0.23"
+rustls-native-certs = "0.8"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+url = "2"
+webpki-roots = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "fs", "time", "test-util"] }

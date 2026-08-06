@@ -178,6 +178,7 @@ fn local_builtin_tools_are_registered_only_in_the_typed_runtime_set() {
             "hashline_edit",
             "ls",
             "read",
+            "web_fetch",
             "write",
         ]
     );

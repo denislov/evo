@@ -49,3 +49,13 @@ pub mod resilience {
         CircuitBreakerRegistry, Clock, SystemClock,
     };
 }
+
+/// SSRF-hardened HTTP fetch for product tools: every hop re-validates the
+/// resolved address, redirects are budgeted, response bodies are bounded,
+/// and successful fetches may be cached in memory.
+pub mod fetch {
+    pub use crate::transport::fetch::{
+        CacheConfig, FetchCache, FetchClient, FetchClientConfig, FetchError, FetchErrorKind,
+        FetchRequest, FetchResult, OutputFormat,
+    };
+}
