@@ -133,8 +133,8 @@ impl CodingAgentSession {
             .snapshots
             .wait_for_active_operation_to_drain()
             .await?;
-        self.runtime_host.session_coordinator.shutdown_writer()?;
         self.runtime_host.events.emit_runtime_shutdown()?;
+        self.runtime_host.session_coordinator.shutdown_writer()?;
         self.runtime_host
             .client_projection
             .snapshots

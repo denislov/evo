@@ -897,3 +897,88 @@ fn assert_dispatch_error_is_not_a_routing_fallback(error: &CodingSessionError, n
         );
     }
 }
+
+/// After shutdown completes, the runtime must reject any new operation at
+/// admission. `run_internal` checks `ensure_runtime_running` before dispatch,
+/// so a post-shutdown operation surfaces a structured lifecycle rejection
+/// rather than reaching a runner.
+#[tokio::test]
+async fn shutdown_rejects_new_operations_after_completion() {
+    let mut session = CodingAgentSession::non_persistent_internal(CodingAgentSessionOptions::new())
+        .await
+        .unwrap();
+    session.shutdown_internal().await.unwrap();
+    let error = session
+        .run_internal(CodingAgentOperation::SetSessionName { name: None })
+        .await
+        .expect_err("operation after shutdown must be rejected");
+    assert!(matches!(
+        error,
+        CodingSessionError::Lifecycle {
+            reason: crate::kernel::error::CodingAgentLifecycleRejection::RuntimeShutDown
+        }
+    ));
+}
+
+/// A control command enqueued after shutdown must be rejected with a
+/// `RuntimeShutDown` reason. The client connection was attached before
+/// shutdown, but `finish_shutdown` advances the runtime lifecycle to
+/// `ShutDown`, so `enqueue_control` fails at `validate_runtime`.
+#[tokio::test]
+async fn shutdown_rejects_control_commands_after_completion() {
+    use crate::runtime::facade::{CodingAgentControlId, CodingAgentControlRejectionReason};
+    let mut session = CodingAgentSession::non_persistent_internal(CodingAgentSessionOptions::new())
+        .await
+        .unwrap();
+    let connection = session
+        .connect_internal(CodingAgentClientId::new("post-shutdown-control"))
+        .unwrap();
+    let control = connection.prompt_control("op-post-shutdown-control");
+    session.shutdown_internal().await.unwrap();
+    let rejection = control
+        .steer(
+            CodingAgentControlId("steer-after-shutdown".into()),
+            "steer after shutdown",
+        )
+        .expect_err("control command after shutdown must be rejected");
+    assert_eq!(
+        rejection.reason,
+        CodingAgentControlRejectionReason::RuntimeShutDown
+    );
+}
+
+/// `shutdown_internal` commits the terminal runtime event before draining the
+/// writer. A subscriber that registered before shutdown must observe the
+/// `Runtime::ShutDown` product event, proving `emit_runtime_shutdown` ran
+/// ahead of `shutdown_writer` and `finish_shutdown`.
+#[tokio::test]
+async fn shutdown_emits_terminal_event_before_draining_writer() {
+    use crate::runtime::facade::{CodingAgentProductEventKind, CodingAgentRuntimeProductEvent};
+    let mut session = CodingAgentSession::non_persistent_internal(CodingAgentSessionOptions::new())
+        .await
+        .unwrap();
+    let mut receiver = session.subscribe_product_events().unwrap();
+    let outcome = session.shutdown_internal().await.unwrap();
+    assert_eq!(outcome, CodingAgentShutdownOutcome::ShutDown);
+    let mut saw_shutdown = false;
+    loop {
+        match receiver.try_recv() {
+            Ok(Some(event)) => {
+                if matches!(
+                    event.event(),
+                    CodingAgentProductEventKind::Runtime(CodingAgentRuntimeProductEvent::ShutDown)
+                ) {
+                    saw_shutdown = true;
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(CodingSessionError::Cancelled) => break,
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_shutdown,
+        "runtime shutdown terminal event must be emitted to product event subscribers"
+    );
+}
