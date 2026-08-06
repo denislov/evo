@@ -13,6 +13,7 @@
 
 use super::*;
 
+use crate::mutex::MutexExt;
 use ai::api::provider::ApiProvider;
 use ai::api::provider::faux::{FauxProvider, FauxResponse, FauxToolCall};
 use ai_protocol::api::conversation::{Message, StopReason};
@@ -150,7 +151,9 @@ impl ApiProvider for RecordingProvider {
         ctx: ai_protocol::api::conversation::Context,
         opts: Option<StreamOptions>,
     ) -> EventStream {
-        self.contexts.lock().unwrap().push(ctx.clone());
+        self.contexts
+            .lock_or_recover("recording provider contexts")
+            .push(ctx.clone());
         self.inner.stream(model, ctx, opts)
     }
 }
@@ -165,8 +168,7 @@ struct CollectingSink {
 impl DiagnosticSink for CollectingSink {
     fn emit(&self, record: DiagnosticRecord) {
         self.records
-            .lock()
-            .unwrap()
+            .lock_or_recover("collecting sink records")
             .push(format!("code={} message={}", record.code, record.message));
         if record.code == "hook_run" {
             self.hook_runs.fetch_add(1, Ordering::SeqCst);
@@ -310,7 +312,7 @@ async fn agent_loop_fires_observe_hooks_and_tool_gate_blocks_bash() {
         "observe hooks run",
     )
     .await;
-    let records = sink.records.lock().unwrap().clone();
+    let records = sink.records.lock_or_recover("sink records").clone();
     assert!(
         records
             .iter()
@@ -390,14 +392,16 @@ async fn stop_gate_block_continues_loop_and_injects_additional_context() {
     // 循环继续（否则第一个工具 turn 后就会 Done）。
     wait_for(
         || {
-            let contexts = contexts.lock().unwrap();
+            let contexts = contexts.lock_or_recover("recording provider contexts");
             contexts.len() >= 2
         },
         "second provider request happens",
     )
     .await;
     // additional_context 注入：第二次请求的消息流包含 hook 回填的上下文。
-    let recorded = contexts.lock().unwrap().clone();
+    let recorded = contexts
+        .lock_or_recover("recording provider contexts")
+        .clone();
     let injected = recorded
         .iter()
         .skip(1)
@@ -711,7 +715,7 @@ async fn manual_compaction_fires_pre_and_post_compact_hooks() {
         "pre_compact and post_compact hooks run",
     )
     .await;
-    let records = sink.records.lock().unwrap().clone();
+    let records = sink.records.lock_or_recover("sink records").clone();
     assert!(
         records
             .iter()

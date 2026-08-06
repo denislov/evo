@@ -397,8 +397,7 @@ impl crate::services::ports::ExtensionEventSink for RecordingExtensionSink {
         payload: extension_host::api::ExtensionEventPayload,
     ) {
         self.events
-            .lock()
-            .unwrap()
+            .lock_or_recover("recording extension sink")
             .push(format!("{kind}:{payload:?}"));
     }
 
@@ -434,7 +433,10 @@ async fn denied_decision_emits_permission_denied_to_extension_hooks() {
         .await
         .expect("deny resolves");
 
-    let recorded = extension_sink.events.lock().unwrap().clone();
+    let recorded = extension_sink
+        .events
+        .lock_or_recover("extension sink")
+        .clone();
     assert_eq!(recorded.len(), 1, "exactly one permission_denied event");
     assert!(
         recorded[0].starts_with("permission_denied:"),
@@ -457,7 +459,10 @@ async fn denied_decision_emits_permission_denied_to_extension_hooks() {
         .await
         .expect("allow resolves");
     assert_eq!(
-        extension_sink.events.lock().unwrap().len(),
+        extension_sink
+            .events
+            .lock_or_recover("extension sink")
+            .len(),
         1,
         "allow decisions must not emit permission_denied"
     );

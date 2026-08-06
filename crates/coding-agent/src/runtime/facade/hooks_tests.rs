@@ -6,6 +6,7 @@
 
 use super::*;
 
+use crate::mutex::MutexExt;
 use extension_host::api::{DiagnosticRecord, DiagnosticSink};
 use extension_host::api::{
     ExtensionEventKind, ExtensionEventPayload, ExtensionHostOptions, InMemoryTrustStore,
@@ -23,8 +24,7 @@ struct CollectingSink {
 impl DiagnosticSink for CollectingSink {
     fn emit(&self, record: DiagnosticRecord) {
         self.records
-            .lock()
-            .unwrap()
+            .lock_or_recover("collecting sink records")
             .push(format!("code={} message={}", record.code, record.message));
         if record.code == "hook_run" {
             self.hook_runs.fetch_add(1, Ordering::SeqCst);
@@ -120,9 +120,6 @@ async fn session_lifecycle_events_reach_the_host_and_fire_observe_hooks() {
         .expect("session shuts down");
     // session_end 事件 + host shutdown：Observe hook 再跑一次；dispatch
     // task 被 join（无泄漏）。
-    if sink.hook_runs.load(Ordering::SeqCst) < 2 {
-        eprintln!("SINK RECORDS: {:?}", sink.records.lock().unwrap());
-    }
     wait_for(
         || sink.hook_runs.load(Ordering::SeqCst) >= 2,
         "session_end must fire the observe hook before host shutdown",

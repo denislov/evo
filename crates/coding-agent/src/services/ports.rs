@@ -12,6 +12,7 @@ use crate::authorization::{ToolAuthorizationDecision, ToolAuthorizationRequest};
 use crate::events::ProductEvent;
 use crate::kernel::capability::CapabilityGeneration;
 use crate::kernel::error::CodingSessionError;
+use crate::mutex::MutexExt;
 use crate::operations::prompt::context::DelegationRequest;
 use crate::platform::time::Clock;
 use crate::services::event::EventService;
@@ -463,8 +464,7 @@ impl ExtensionHostView for LiveHostView {
     fn join_shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let task = self
             .task
-            .lock()
-            .unwrap()
+            .lock_or_recover("extension host task")
             .take()
             .expect("extension host task joined twice");
         Box::pin(async move {

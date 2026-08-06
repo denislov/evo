@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～6 完成，Phase 6 复验通过 2026-08-06，准备进入 Phase 7）
+> 状态：执行中（Phase 0～7 完成，Phase 7 复验通过 2026-08-07，准备进入 Phase 8）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -55,6 +55,11 @@
 | Phase 6 / ARC-620 | 完成（复验 2026-08-06） | `docs/refactor/phase6-web-fetch.md`；`ai` crate SSRF 防护 fetch 管线（每跳重验证、resolved IP 校验后 pin 连接 + SNI/Host 保持原域名、阻止 loopback/RFC1918/link-local/cloud metadata/IPv4-mapped IPv6/ULA/multicast/broadcast、redirect 预算、content-length 与流式截断双预算、非 2xx 结构化 HttpStatus、无 Content-Type fail-closed、内存缓存 TTL、HTML→Markdown/plain text）；`web_fetch` 内置工具（tool-contract 注册、authorization_risk=SideEffect、16 MiB 硬上限）；修复 IPv6 bracketed host 绕过 SSRF 的漏洞与 normalize_url 默认端口误删 bug；ai 113、coding-agent 225 测试通过 |
 | Phase 6 / ARC-630 | 完成（复验 2026-08-06） | `docs/refactor/phase6-provider-resilience.md`；circuit breaker（滑动窗口、half-open probe、可注入 clock、provider/api key 隔离、open 时拒绝发请求）、401 单次 refresh/retry（仅自动凭据、显式 key 双层防护）、TransportConfig extra CA + 统一 transport builder、secrets scrubber（精确 + 结构 + Bearer/sk- 模式）；ai 70 测试通过 |
 | Phase 6 Gate | 通过（复验 2026-08-06） | 长任务可查询/取消/owner 终止（ARC-600）；获准 shell 仍受 Landlock OS policy 限制且能力不足平台 fail-closed（ARC-610）；web fetch SSRF 测试完整（每跳重验证、pin 连接、6+ 类阻止地址、预算超限、缓存边界；ARC-620）；provider failure 有 breaker 熔断 + retry 上限，不无限重试风暴（ARC-630）。workspace-runtime 127、coding-agent 225、agent-core 77、ai 113、change-tracker 66、cli 106、tui 34、event-journal 4、tool-contract 4、tool-runtime 9 测试通过；全 workspace clippy/fmt/architecture gate 通过（oversized_debts=35 既有基线、execution_debts=0）；`gate.sh` 移除与 architecture gate 重复且过时的 900 行循环（行数检查统一由 `scripts/architecture-gate.sh` 的债务登记机制承担）；desktop `desktop-runtime` 测试线程 stack overflow 与 `release-api-snapshots.sh` 阻断为 Phase 4 已登记的全仓 Gate 既有问题，延续至后续 Phase |
+| Phase 7 / ARC-700 | 完成（复验 2026-08-07） | `docs/refactor/phase7-extension-host.md`；新 crate `extension-host`（仅依赖 tool-contract）：版本化 `ExtensionEvent` DTO（version + internally-tagged kind + payload，golden/round-trip/向后兼容测试）、`ExtensionHost`/`Handle`/`Task` dispatch loop（panic fail-closed、确定性 shutdown：Stopping 拒新事件 → drain 已入队 → 收尾诊断 → Stopped，重复 shutdown 幂等）、config merge（`ExtensionSource` 优先级：enabled 全层 AND、scalar 取最高层、permissions 并集）、discovery（每扩展一目录 + `extension.json` manifest，容错 + 稳定排序）、`TrustStore` 三态（Trusted/Untrusted/NotDecided + 首次启用 `EnableRequest`）、`ExtensionBudget` 四维（calls/output_bytes 已强制，run_secs/concurrent 后续 ARC 启用）、结构化 `DiagnosticRecord` 有界环形缓冲；coding-agent `ExtensionHostPort` 端口（Noop 占位 → ARC-710 换真实适配器）；extension-host 67 测试通过 |
+| Phase 7 / ARC-710 | 完成（复验 2026-08-07） | `docs/refactor/phase7-user-hooks.md`；matcher（event/tool/path/profile 四维条件 + priority 降序 + name 字典序确定排序，Tool gate 首个 deny 短路、Stop gate 全跑聚合首个 force_stop wins）、command runner（复用 workspace-runtime `ProcessSpec`/`run`，强制 `SandboxProfile::product_default` + 能力探测，输出 64KB/2000 行预算截断显式报告，超时 = min(spec, budget.max_run_secs)，结构化结果枚举：成功/失败/超时/取消/输出超限，环境变量事件注入）、gate 策略矩阵（Observe/Tool/Stop，崩溃/超时/取消/spawn 失败全 gate fail-open，仅 sandbox 不支持对 Tool gate fail-closed，transition 表钉死）、host 通道只派发 Observe 事件、gate 事件由产品同步评估；coding-agent 真实接入：session/prompt/tool/permission/stop/merge 事件、Tool gate deny → `BeforeToolCallResult{block:true}` 真实生效、Stop gate 生效、首次启用经诊断事件展示来源+能力；HTTP runner 未做（SSRF fetch 管线在 `ai` crate 内部，引入会破坏目标依赖图，登记为验证债务最迟 Phase 10 清偿）；extension-host 124、coding-agent 233 测试通过 |
+| Phase 7 / ARC-720 | 完成（复验 2026-08-07） | `docs/refactor/phase7-mcp-adapter.md`；MCP external tool provider（不进入 agent-core）：手写 JSON-RPC 2.0 wire（`deny_unknown_fields` 严格解析 fail-closed）、stdio transport（复用 workspace-runtime process + SandboxProfile fail-closed，JSON lines framing）+ HTTP transport（reqwest 直连显式配置 endpoint，信任边界文档化，SSE 登记债务）、lifecycle 状态机（`apply_event` 纯决策层 + transition 表：initialize 握手 → initialized → tools/list 发现 → liveness ping → 指数退避重连重新 initialize + 重新发现 → 确定性 shutdown；初始失败不重试、曾 Ready 失败退避重连）、`notifications/tools/list_changed` 热更新、per-tool timeout + cancel 贯通、`McpCredentialStore` trait + `FileCredentialStore`（0600/原子写）+ OAuth RFC 8628 device flow 与 401 单次 refresh/retry（注入 clock/transport seam，不无限重试）、`mcp_search`/`mcp_use` meta tools（避免大量 MCP schema 塞入 context）；workspace-runtime 新增 `PeerProcess`（sandbox 强制交互式子进程）；extension-host 169、coding-agent 228、workspace-runtime 127 测试通过 |
+| Phase 7 / ARC-730 | 完成（复验 2026-08-07） | `docs/refactor/phase7-extension-tests.md`；产品接线补齐：subagent（`execute_agent`/`execute_team` 唯一汇聚点发 `subagent_start`/`subagent_stop`）、compaction（`compaction::run` 发 `pre_compact`/`post_compact`）、Stop gate `additional_context` 注入 agent-core 消息流（`ShouldStopAfterTurnResult` 替代裸 bool，旧语义保留在 `should_stop` 字段）；测试矩阵：untrusted hook 三态、OAuth 401 refresh 成功/失败、重连风暴（退避封顶 + 有界 + shutdown 不阻塞）、hunk 归因 + review 端到端（真实 hook 进程写文件 → `HookEdit` 归因 → review 列表 → open/accept/reject）、agent 循环 e2e（FauxProvider 驱动：Observe/Tool gate deny/Stop gate block + context 注入）；修复 ARC-720 缺陷（401 响应被折叠为 TransportClosed）；extension-host 182、coding-agent 242、change-tracker 66、agent-core 77 测试通过 |
+| Phase 7 Gate | 通过（复验 2026-08-07） | 用户扩展不能绕过 trust/authorization/sandbox：hook 与 MCP stdio server 进程强制 SandboxProfile 且能力不足平台 fail-closed（仅 sandbox 不支持对 Tool gate fail-closed，其余 fail-open 有 transition 表）；extension 修改文件经 `HookEdit` 归因进入 hunk review 且可 accept/reject；首次启用必须展示来源和能力（EnableRequest + 诊断事件）。extension-host 182、coding-agent 242、agent-core 77、workspace-runtime 127、change-tracker 66、cli 106、tui 34、ai 113、event-journal 4、tool-contract 4、tool-runtime 9 测试通过（gate.sh 复验全绿，round4/5/6 中除既有问题外无失败）；全 workspace clippy/fmt/architecture gate 通过（oversized_debts=36：既有基线 35 + dispatch.rs 965 与 team_invocation/runner.rs 908 新登记，execution_debts=0）；MCP 工具与内建工具共用 Tool contract/事件/取消语义（`mcp_search`/`mcp_use` 经 typed ToolRegistry 注册，cancel 贯通）；既有全仓 Gate 问题延续：desktop `desktop-runtime` 测试线程 stack overflow（Phase 4 登记）、coding-agent session writer flock 并行 flaky（`temp_session_env_repairs_a_partial_commit_on_reopen`/`durable_rewind_restores_workspace_tracker_branch_and_client_state`，ARC-710 登记，单跑稳定、`--test-threads=1` 全绿）；验证债务登记：HTTP hook runner（最迟 Phase 10）、MCP HTTP SSE/streaming、MCP resources 深度支持、ACP transport（仅真实需求才加入）、MCP 跨进程 credential flock、产品侧 OAuth device flow 引导 UI（Phase 9）、MCP 请求级取消（协议未定义）、stderr 日志呈现（Phase 9）、首次启用确认路径（Phase 9 CLI） |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -688,11 +693,15 @@ Phase 6 Gate：通过（复验 2026-08-06）。长任务可查询和取消；获
 
 ### ARC-700 抽取 `extension-host`
 
+执行状态：完成（复验 2026-08-07）。完成证据见 `docs/refactor/phase7-extension-host.md`。
+
 - 公共 extension event 使用版本化 DTO，不直接暴露内部 ProductEvent。
 - host 负责 discovery、config merge、trust、lifecycle、budget、diagnostics 和 shutdown。
 - 扩展产生的 tool/文件修改仍经过产品 authorization 和 workspace capability。
 
 ### ARC-710 User hooks
+
+执行状态：完成（复验 2026-08-07）。完成证据见 `docs/refactor/phase7-user-hooks.md`。
 
 - 事件覆盖 session、prompt、tool、permission、stop、subagent、compaction、merge。
 - matcher 支持 event/tool/path/profile 条件和确定优先级。
@@ -702,6 +711,8 @@ Phase 6 Gate：通过（复验 2026-08-06）。长任务可查询和取消；获
 
 ### ARC-720 MCP provider adapter
 
+执行状态：完成（复验 2026-08-07）。完成证据见 `docs/refactor/phase7-mcp-adapter.md`。
+
 - MCP 作为 external tool provider，实现 tool registry adapter，不进入 agent-core。
 - 支持 stdio 和 HTTP；ACP transport 只有出现真实需求才加入。
 - lifecycle 覆盖 initialize、liveness、per-tool timeout、reconnect、tool/resource change。
@@ -710,11 +721,13 @@ Phase 6 Gate：通过（复验 2026-08-06）。长任务可查询和取消；获
 
 ### ARC-730 Extension tests
 
+执行状态：完成（复验 2026-08-07）。完成证据见 `docs/refactor/phase7-extension-tests.md`。
+
 - untrusted hook、timeout、输出洪泛、非法 JSON、进程崩溃、重连风暴。
 - MCP server 工具列表热更新、调用取消、OAuth 401 refresh、session shutdown。
 - extension 修改文件的来源归因和 hunk review。
 
-Phase 7 Gate：用户扩展不能绕过 trust/authorization/sandbox；MCP 工具与内建工具共用同一 Tool contract、事件和取消语义。
+Phase 7 Gate：通过（复验 2026-08-07）。用户扩展不能绕过 trust/authorization/sandbox；MCP 工具与内建工具共用同一 Tool contract、事件和取消语义。
 
 ---
 

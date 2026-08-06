@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::mutex::MutexExt;
 use ai::api::provider::faux::FauxProvider;
 use ai_protocol::api::conversation::StopReason;
 use ai_protocol::api::model::{Model, ModelCost, ModelInput};
@@ -56,7 +57,9 @@ impl ExtensionEventSink for RecordingExtensionSink {
         _workspace_root: &str,
         payload: ExtensionEventPayload,
     ) {
-        self.events.lock().unwrap().push((kind, payload));
+        self.events
+            .lock_or_recover("recording extension sink")
+            .push((kind, payload));
     }
 
     fn hook_gate(&self) -> Option<Arc<HookGate>> {
@@ -145,7 +148,10 @@ async fn delegated_agent_emits_subagent_start_and_stop_events() {
     .await;
     outcome.execution.expect("delegated agent completes");
 
-    let events = sink.events.lock().unwrap().clone();
+    let events = sink
+        .events
+        .lock_or_recover("recording extension sink")
+        .clone();
     let starts = events
         .iter()
         .filter(|(kind, _)| *kind == ExtensionEventKind::SubagentStart)
