@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～5 完成，Phase 5 复验通过 2026-08-06，准备进入 Phase 6）
+> 状态：执行中（Phase 0～6 完成，Phase 6 复验通过 2026-08-06，准备进入 Phase 7）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -50,6 +50,11 @@
 | Phase 5 / ARC-530 | 完成（2026-08-06） | `docs/refactor/phase5-session-actor.md`；shutdown 顺序固定（stop admission -> cancel/join operation -> commit terminal -> drain writer -> close actor）；3 个 shutdown 可靠性测试 |
 | Phase 5 / ARC-540 | 完成（2026-08-06） | TurnRunner context panic 修复（cancel_token clone + pending buffer + pending_commit）；7 个可靠性测试（mailbox saturation、actor panic、provider hang、concurrent steer/follow-up/abort、current-thread runtime、shutdown 无泄漏、slow consumer） |
 | Phase 5 Gate | 通过（复验 2026-08-06） | `Arc<RwLock<AgentState>>` 和 `queues_cleared` 删除；每 session 只有一个状态写入者（Agent actor）；所有 command 有有界失败语义（MailboxFull/ActorClosed/StaleVersion/NotFound/ItemLimit/ByteLimit）；agent-core 77、coding-agent 185 测试通过，clippy/fmt/architecture gate 通过（oversized_debts=35 既有基线、execution_debts=0），release 首 token 性能基线通过 |
+| Phase 6 / ARC-600 | 完成（复验 2026-08-06） | `docs/refactor/phase6-background-task.md`；`workspace-runtime` background task registry（TaskId/TaskOwner/TaskState/OutputGap/TaskRegistry）、共享 spawn 核心（`SpawnedProcess` + `OutputSink` 重构，`run()` 行为不变）、cursor 增量输出 spool 与显式 gap/truncation 报告、owner（operation/session/worktree）批量终止与 registry shutdown、wait(any/all)/cancel/snapshot；bash 工具 `background` 模式（不受 600s 硬超时限制、受 task budget 约束）、`BackgroundTaskService` + 生命周期事件（Started/Completed/Cancelled/TimedOut/Failed）、session 关闭时终止并 join；workspace-runtime 111、coding-agent 224 测试通过 |
+| Phase 6 / ARC-610 | 完成（复验 2026-08-06） | `docs/refactor/phase6-child-sandbox.md`；跨平台 `SandboxProfile`（read/write roots 显式白名单、exec/network/env policy）在 child spawn 边界应用；Linux Landlock（`landlock` crate 0.4.7 + pre_exec `restrict_self`，固定 ABI V3/V4 探测，network none 用零 port rule）真实生效，8 项集成测试验证越界写 EACCES/读拒绝/network none 拒绝 TCP；macOS/Windows/旧内核按 `SandboxCapability` 分级 fail-closed，无静默 unrestricted；bash 工具无条件携带 `product_default(cwd)` profile，能力不足平台 fail-closed；seccomp 最小 BPF、exec allow-list、network loopback 登记为后续（计划分级允许）；workspace-runtime 127、coding-agent 225 测试通过 |
+| Phase 6 / ARC-620 | 完成（复验 2026-08-06） | `docs/refactor/phase6-web-fetch.md`；`ai` crate SSRF 防护 fetch 管线（每跳重验证、resolved IP 校验后 pin 连接 + SNI/Host 保持原域名、阻止 loopback/RFC1918/link-local/cloud metadata/IPv4-mapped IPv6/ULA/multicast/broadcast、redirect 预算、content-length 与流式截断双预算、非 2xx 结构化 HttpStatus、无 Content-Type fail-closed、内存缓存 TTL、HTML→Markdown/plain text）；`web_fetch` 内置工具（tool-contract 注册、authorization_risk=SideEffect、16 MiB 硬上限）；修复 IPv6 bracketed host 绕过 SSRF 的漏洞与 normalize_url 默认端口误删 bug；ai 113、coding-agent 225 测试通过 |
+| Phase 6 / ARC-630 | 完成（复验 2026-08-06） | `docs/refactor/phase6-provider-resilience.md`；circuit breaker（滑动窗口、half-open probe、可注入 clock、provider/api key 隔离、open 时拒绝发请求）、401 单次 refresh/retry（仅自动凭据、显式 key 双层防护）、TransportConfig extra CA + 统一 transport builder、secrets scrubber（精确 + 结构 + Bearer/sk- 模式）；ai 70 测试通过 |
+| Phase 6 Gate | 通过（复验 2026-08-06） | 长任务可查询/取消/owner 终止（ARC-600）；获准 shell 仍受 Landlock OS policy 限制且能力不足平台 fail-closed（ARC-610）；web fetch SSRF 测试完整（每跳重验证、pin 连接、6+ 类阻止地址、预算超限、缓存边界；ARC-620）；provider failure 有 breaker 熔断 + retry 上限，不无限重试风暴（ARC-630）。workspace-runtime 127、coding-agent 225、agent-core 77、ai 113、change-tracker 66、cli 106、tui 34、event-journal 4、tool-contract 4、tool-runtime 9 测试通过；全 workspace clippy/fmt/architecture gate 通过（oversized_debts=35 既有基线、execution_debts=0）；`gate.sh` 移除与 architecture gate 重复且过时的 900 行循环（行数检查统一由 `scripts/architecture-gate.sh` 的债务登记机制承担）；desktop `desktop-runtime` 测试线程 stack overflow 与 `release-api-snapshots.sh` 阻断为 Phase 4 已登记的全仓 Gate 既有问题，延续至后续 Phase |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -636,6 +641,8 @@ Phase 5 Gate：`Arc<RwLock<AgentState>>` 和对应 queue merge workaround 删除
 
 ### ARC-600 Background task registry
 
+执行状态：完成（复验 2026-08-06）。完成证据见 `docs/refactor/phase6-background-task.md`。
+
 - 在 `workspace-runtime` 中增加 task id、owner operation/session/worktree、process handle、output spool 和 terminal state。
 - shell 支持 foreground/background；background 不受单次 tool 600 秒硬超时限制，但受 session/task budget。
 - 提供 list、output(cursor)、wait(any/all)、cancel 和 snapshot。
@@ -643,6 +650,8 @@ Phase 5 Gate：`Arc<RwLock<AgentState>>` 和对应 queue merge workaround 删除
 - session/worktree 关闭时按 ownership policy 终止或转交任务。
 
 ### ARC-610 Child-process sandbox
+
+执行状态：完成（复验 2026-08-06）。完成证据见 `docs/refactor/phase6-child-sandbox.md`。
 
 - 定义跨平台 `SandboxProfile`：read roots、write roots、exec policy、network policy、env policy。
 - Linux 首选 Landlock + seccomp；macOS Seatbelt；Windows 使用受限 token/Job/AppContainer 能力按可行性分级。
@@ -652,6 +661,8 @@ Phase 5 Gate：`Arc<RwLock<AgentState>>` 和对应 queue merge workaround 删除
 
 ### ARC-620 安全 `web_fetch`
 
+执行状态：完成（复验 2026-08-06）。完成证据见 `docs/refactor/phase6-web-fetch.md`。
+
 - URL scheme、redirect 次数、DNS resolution 和 resolved IP 每跳重验证。
 - 阻止 loopback、RFC1918、link-local、cloud metadata、IPv4-mapped IPv6 和 DNS rebinding。
 - 限制 content-length、实际读取字节、解压后大小、解析时间和输出 token。
@@ -660,12 +671,14 @@ Phase 5 Gate：`Arc<RwLock<AgentState>>` 和对应 queue merge workaround 删除
 
 ### ARC-630 Provider resilience
 
+执行状态：完成（复验 2026-08-06）。完成证据见 `docs/refactor/phase6-provider-resilience.md`。
+
 - 适配 `circuit-breaker`：滑动窗口、half-open probe、可注入 clock、provider/endpoint key。
 - auth seam 支持 cheap snapshot、401 后单次 refresh/retry。
 - 增加 extra CA bundle，所有 HTTP client 复用统一 transport builder。
 - secrets scrubber 覆盖日志、diagnostic、hook payload、telemetry 和 crash report。
 
-Phase 6 Gate：长任务可查询和取消；获准 shell 仍受 OS policy 限制；web fetch SSRF 测试完整；provider failure 不引发无限重试风暴。
+Phase 6 Gate：通过（复验 2026-08-06）。长任务可查询和取消；获准 shell 仍受 OS policy 限制；web fetch SSRF 测试完整；provider failure 不引发无限重试风暴。
 
 ---
 
