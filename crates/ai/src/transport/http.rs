@@ -1,15 +1,34 @@
 use async_stream::stream;
 use futures::StreamExt;
 use std::future::Future;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::circuit_breaker::{BreakerVerdict, CircuitBreaker};
 use super::error::ProviderError;
 use crate::model::Model;
 use crate::protocol::stream::EventStream;
 use crate::protocol::{AssistantMessage, AssistantMessageEvent, StopReason, StreamOptions};
+use crate::registry::options_contain_automatic_credentials;
+use crate::scrub::SecretsScrubber;
 use crate::transport::retry::RetryConfig;
+
+/// Refresh callback: re-resolve credentials and return the updated options,
+/// or `None` when no fresher credential is available.
+pub type AuthRefresh = Box<dyn FnMut() -> Option<StreamOptions> + Send>;
+
+/// Optional resilience policy threaded from the caller into one invocation.
+#[derive(Default)]
+pub struct SendResilience {
+    /// Per-(provider, api) breaker consulted before every attempt.
+    pub breaker: Option<Arc<CircuitBreaker>>,
+    /// Single-shot 401 credential refresh; `None` disables refresh/retry.
+    pub refresh_auth: Option<AuthRefresh>,
+    /// Redacts error messages that leave the crate.
+    pub scrubber: Option<Arc<SecretsScrubber>>,
+}
 
 pub fn send_json_stream<F>(
     _client: &reqwest::Client,
@@ -49,7 +68,7 @@ pub fn send_json_stream_with_request_factory<FRequest, FBody>(
     opts: Option<&StreamOptions>,
     api_name: &str,
     payload: serde_json::Value,
-    mut build_request: FRequest,
+    build_request: FRequest,
     process_body: FBody,
 ) -> EventStream
 where
@@ -62,6 +81,45 @@ where
         + Send
         + 'static,
 {
+    send_json_stream_with_resilience(
+        model,
+        opts,
+        api_name,
+        payload,
+        build_request,
+        process_body,
+        SendResilience::default(),
+    )
+}
+
+/// Send path with breaker, single-shot 401 refresh, and error scrubbing.
+/// Breaker decisions happen before the request is built or sent; recorded
+/// failures are network errors, timeouts, and retryable statuses only, so
+/// configuration errors (401/403/404) never open the breaker.
+pub(crate) fn send_json_stream_with_resilience<FRequest, FBody>(
+    model: &Model,
+    opts: Option<&StreamOptions>,
+    api_name: &str,
+    payload: serde_json::Value,
+    mut build_request: FRequest,
+    process_body: FBody,
+    resilience: SendResilience,
+) -> EventStream
+where
+    FRequest: FnMut(&serde_json::Value) -> Result<reqwest::RequestBuilder, String> + Send + 'static,
+    FBody: FnOnce(
+            Box<dyn futures::Stream<Item = Result<bytes::Bytes, String>> + Send + Unpin>,
+            Model,
+            Option<CancellationToken>,
+        ) -> EventStream
+        + Send
+        + 'static,
+{
+    let SendResilience {
+        breaker,
+        mut refresh_auth,
+        scrubber,
+    } = resilience;
     let model = model.clone();
     let model_id = model.id.clone();
     let provider = model.provider.clone();
@@ -70,6 +128,7 @@ where
     let retry_cfg = RetryConfig::from_options(opts);
     let hooks = opts.and_then(|o| o.hooks.clone());
     let mut option_error = validate_options(&api_name, opts).err();
+    let automatic_credentials = options_contain_automatic_credentials(opts);
     let deadline = retry_cfg.timeout_ms.and_then(|timeout_ms| {
         Instant::now()
             .checked_add(Duration::from_millis(timeout_ms))
@@ -90,9 +149,11 @@ where
                 &provider,
                 error,
             );
+            let mut msg = error_event(&api_name, &model_id, &provider, &error);
+            scrub_error_message(scrubber.as_deref(), &mut msg);
             yield AssistantMessageEvent::Error {
                 reason: StopReason::Error,
-                message: error_event(&api_name, &model_id, &provider, &error),
+                message: msg,
             };
             return;
         }
@@ -102,6 +163,7 @@ where
                 &model_id,
                 &provider,
                 WaitError::Timeout { timeout_ms: 0 },
+                scrubber.as_deref(),
             );
             return;
         }
@@ -129,6 +191,7 @@ where
                         &model_id,
                         &provider,
                         wait_error,
+                        scrubber.as_deref(),
                     );
                     return;
                 }
@@ -137,8 +200,27 @@ where
         };
 
         let mut last_error: Option<ProviderError> = None;
+        let mut auth_refreshed = false;
 
-        for attempt in 0..=retry_cfg.max_retries {
+        let mut attempt: u32 = 0;
+        loop {
+            if attempt > retry_cfg.max_retries {
+                break;
+            }
+            if let Some(breaker) = breaker.as_ref() {
+                match breaker.before_request() {
+                    BreakerVerdict::Allow => {}
+                    BreakerVerdict::Reject { retry_after_ms } => {
+                        last_error = Some(ProviderError::circuit_open(
+                            &api_name,
+                            &model_id,
+                            &provider,
+                            retry_after_ms,
+                        ));
+                        break;
+                    }
+                }
+            }
             let request = match build_request(&final_payload) {
                 Ok(request) => request,
                 Err(_error) => {
@@ -153,6 +235,7 @@ where
             let response = match wait_for(request.send(), cancel.as_ref(), deadline).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(_error)) => {
+                    record_failure(breaker.as_ref());
                     last_error = Some(ProviderError::network(
                         &api_name,
                         &model_id,
@@ -170,19 +253,24 @@ where
                     )
                     .await
                     {
-                        Ok(()) => continue,
+                        Ok(()) => {
+                            attempt += 1;
+                            continue;
+                        }
                         Err(wait_error) => {
                             yield wait_error_event(
                                 &api_name,
                                 &model_id,
                                 &provider,
                                 wait_error,
+                                scrubber.as_deref(),
                             );
                             return;
                         }
                     }
                 }
                 Err(WaitError::Timeout { timeout_ms }) => {
+                    record_failure(breaker.as_ref());
                     last_error = Some(ProviderError::timeout(
                         &api_name,
                         &model_id,
@@ -197,6 +285,7 @@ where
                         &model_id,
                         &provider,
                         WaitError::Cancelled,
+                        scrubber.as_deref(),
                     );
                     return;
                 }
@@ -231,6 +320,7 @@ where
                             &model_id,
                             &provider,
                             wait_error,
+                            scrubber.as_deref(),
                         );
                         return;
                     }
@@ -238,7 +328,19 @@ where
             }
 
             if !response.status().is_success() {
+                if status == 401
+                    && !auth_refreshed
+                    && refresh_auth.is_some()
+                    && automatic_credentials
+                    && refresh_auth.as_mut().and_then(|refresh| refresh()).is_some()
+                {
+                    auth_refreshed = true;
+                    drop(response);
+                    continue;
+                }
+
                 if crate::transport::retry::is_retryable_status(status) && attempt < retry_cfg.max_retries {
+                    record_failure(breaker.as_ref());
                     let retry_delay = match retry_delay_ms(
                         response.headers(),
                         &retry_cfg,
@@ -261,23 +363,32 @@ where
                         cancel.as_ref(),
                         deadline,
                     ).await {
-                        Ok(()) => continue,
+                        Ok(()) => {
+                            attempt += 1;
+                            continue;
+                        }
                         Err(wait_error) => {
                             yield wait_error_event(
                                 &api_name,
                                 &model_id,
                                 &provider,
                                 wait_error,
+                                scrubber.as_deref(),
                             );
                             return;
                         }
                     }
                 }
 
+                record_failure(breaker.as_ref());
                 last_error = Some(ProviderError::http_status(
                     &api_name, &model_id, &provider, status,
                 ));
                 break;
+            }
+
+            if let Some(breaker) = breaker.as_ref() {
+                breaker.record_success();
             }
 
             let body_stream: Box<dyn futures::Stream<Item = Result<bytes::Bytes, String>> + Send + Unpin> =
@@ -296,6 +407,7 @@ where
                             &model_id,
                             &provider,
                             wait_error,
+                            scrubber.as_deref(),
                         );
                         return;
                     }
@@ -314,11 +426,61 @@ where
         ) {
             msg.stop_reason = StopReason::Aborted;
         }
+        scrub_error_message(scrubber.as_deref(), &mut msg);
         yield AssistantMessageEvent::Error {
             reason: msg.stop_reason.clone(),
             message: msg,
         };
     })
+}
+
+/// Credential slot wired between a 401 refresh callback and the request
+/// builder: the refresh writes the rotated options, the builder reads them on
+/// every attempt. Returns the refreshed builder and the refresh closure the
+/// send loop should call (which updates the slot before answering).
+pub(crate) fn credential_refresh_slot<F>(
+    mut build: F,
+    refresh: Option<AuthRefresh>,
+    initial: Option<StreamOptions>,
+) -> (
+    impl FnMut(&serde_json::Value) -> Result<reqwest::RequestBuilder, String> + Send,
+    Option<AuthRefresh>,
+)
+where
+    F: FnMut(Option<&StreamOptions>, &serde_json::Value) -> Result<reqwest::RequestBuilder, String>
+        + Send
+        + 'static,
+{
+    let slot: Arc<RwLock<Option<StreamOptions>>> = Arc::new(RwLock::new(initial));
+    let refresh_for_http: Option<AuthRefresh> = refresh.map(|mut refresh| {
+        let slot = slot.clone();
+        Box::new(move || {
+            let fresh = refresh()?;
+            fresh.api_key.as_ref()?;
+            *slot.write().unwrap() = Some(fresh.clone());
+            Some(fresh)
+        }) as AuthRefresh
+    });
+    let build_request = move |payload: &serde_json::Value| {
+        let current = slot.read().unwrap().clone();
+        build(current.as_ref(), payload)
+    };
+    (build_request, refresh_for_http)
+}
+
+fn record_failure(breaker: Option<&Arc<CircuitBreaker>>) {
+    if let Some(breaker) = breaker {
+        breaker.record_failure();
+    }
+}
+
+pub(crate) fn scrub_error_message(scrubber: Option<&SecretsScrubber>, msg: &mut AssistantMessage) {
+    let Some(scrubber) = scrubber else {
+        return;
+    };
+    if let Some(message) = msg.error_message.take() {
+        msg.error_message = Some(scrubber.scrub(&message));
+    }
 }
 
 pub(crate) fn validate_options(api: &str, opts: Option<&StreamOptions>) -> Result<(), String> {
@@ -445,6 +607,7 @@ fn wait_error_event(
     model_id: &str,
     provider: &str,
     error: WaitError,
+    scrubber: Option<&SecretsScrubber>,
 ) -> AssistantMessageEvent {
     let provider_error = match error {
         WaitError::Cancelled => ProviderError::cancelled(api_name, model_id, provider),
@@ -458,6 +621,7 @@ fn wait_error_event(
         WaitError::Timeout { .. } => StopReason::Error,
     };
     message.stop_reason = reason.clone();
+    scrub_error_message(scrubber, &mut message);
     AssistantMessageEvent::Error { reason, message }
 }
 

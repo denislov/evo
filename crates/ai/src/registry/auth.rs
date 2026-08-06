@@ -106,7 +106,26 @@ pub(super) fn resolver_auth_will_apply(opts: Option<&StreamOptions>, auth: &Prov
     (!explicit_api_key && auth.api_key.is_some()) || auth.headers.is_some()
 }
 
-pub(super) fn options_contain_automatic_credentials(opts: Option<&StreamOptions>) -> bool {
+/// Overwrite credentials from a fresh resolver snapshot after a 401. Unlike
+/// [`apply_auth_material`] this replaces an existing key: a rotated credential
+/// must win over the stale one. Header merging keeps the same precedence as
+/// the initial application (resolver headers are the base, explicit options
+/// win).
+pub(crate) fn apply_auth_material_refresh(
+    mut opts: Option<StreamOptions>,
+    auth: ProviderAuth,
+) -> Option<StreamOptions> {
+    let options = opts.get_or_insert_with(StreamOptions::default);
+    if let Some(api_key) = auth.api_key {
+        options.api_key = Some(api_key);
+    }
+    if let Some(headers) = auth.headers {
+        options.headers = merge_auth_headers(Some(headers), options.headers.take());
+    }
+    opts
+}
+
+pub(crate) fn options_contain_automatic_credentials(opts: Option<&StreamOptions>) -> bool {
     opts.is_some_and(|options| {
         options.auth_diagnostics.iter().any(|diagnostic| {
             diagnostic.field == "api_key" && !diagnostic.source.starts_with("cli:")

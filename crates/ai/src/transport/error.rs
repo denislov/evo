@@ -5,6 +5,7 @@ pub enum ProviderErrorKind {
     Timeout,
     Cancelled,
     HttpStatus,
+    CircuitOpen,
     RetryAfterTooLong,
     HookFailed,
     StreamParse,
@@ -117,6 +118,25 @@ impl ProviderError {
             status: None,
             message: message.into(),
             retry_after_ms: None,
+        }
+    }
+
+    pub(crate) fn circuit_open(
+        api: &str,
+        model_id: &str,
+        provider: &str,
+        retry_after_ms: u64,
+    ) -> Self {
+        Self {
+            kind: ProviderErrorKind::CircuitOpen,
+            api: api.to_string(),
+            provider: Some(provider.to_string()),
+            model: Some(model_id.to_string()),
+            status: None,
+            message: format!(
+                "provider circuit is open, no request was sent; retry in {retry_after_ms}ms"
+            ),
+            retry_after_ms: Some(retry_after_ms),
         }
     }
 

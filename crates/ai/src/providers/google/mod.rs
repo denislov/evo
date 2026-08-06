@@ -11,7 +11,9 @@ use crate::protocol::{
 use crate::model::Model;
 use crate::protocol::stream::EventStream;
 use crate::registry::ApiProvider;
-use crate::transport::http::send_json_stream;
+use crate::transport::http::{
+    SendResilience, credential_refresh_slot, send_json_stream_with_resilience,
+};
 use convert::build_request;
 
 pub struct GoogleGenerativeAiProvider {
@@ -31,11 +33,21 @@ impl GoogleGenerativeAiProvider {
 
 impl ApiProvider for GoogleGenerativeAiProvider {
     fn stream(&self, model: &Model, ctx: Context, opts: Option<StreamOptions>) -> EventStream {
+        self.stream_with_resilience(model, ctx, opts, SendResilience::default())
+    }
+
+    fn stream_with_resilience(
+        &self,
+        model: &Model,
+        ctx: Context,
+        opts: Option<StreamOptions>,
+        resilience: SendResilience,
+    ) -> EventStream {
         let key = opts
             .as_ref()
             .and_then(|o| o.api_key.clone())
             .or_else(|| self.resolve_key());
-        let Some(api_key) = key else {
+        let Some(_api_key) = key else {
             let model_id = model.id.clone();
             let provider = model.provider.clone();
             return Box::pin(stream! {
@@ -69,29 +81,49 @@ impl ApiProvider for GoogleGenerativeAiProvider {
             "{}/models/{}:streamGenerateContent?alt=sse",
             base_url, model.id
         );
+        let client = self.client.clone();
+        let initial_opts = opts.clone();
+        let model_headers = model.headers.clone();
+        let self_api_key = self.api_key.clone();
+        let (build_request, refresh) = credential_refresh_slot(
+            move |current: Option<&StreamOptions>, payload| {
+                let current = current.or(initial_opts.as_ref());
+                let key = current
+                    .and_then(|o| o.api_key.clone())
+                    .or_else(|| self_api_key.clone());
+                let mut generated: Vec<(String, String)> = vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("accept".into(), "text/event-stream".into()),
+                ];
+                if let Some(key) = key {
+                    generated.push(("x-goog-api-key".into(), key));
+                }
+                let mut request = client.post(&url);
+                for (name, value) in crate::transport::headers::merge_headers(
+                    model_headers.as_ref(),
+                    current.and_then(|o| o.headers.as_ref()),
+                    generated,
+                ) {
+                    request = request.header(name, value);
+                }
+                Ok(request.json(payload))
+            },
+            resilience.refresh_auth,
+            opts.clone(),
+        );
 
-        let mut request = self.client.post(&url);
-
-        for (key, value) in crate::transport::headers::merge_headers(
-            model.headers.as_ref(),
-            opts.as_ref().and_then(|o| o.headers.as_ref()),
-            [
-                ("x-goog-api-key".into(), api_key),
-                ("content-type".into(), "application/json".into()),
-                ("accept".into(), "text/event-stream".into()),
-            ],
-        ) {
-            request = request.header(key, value);
-        }
-
-        send_json_stream(
-            &self.client,
+        send_json_stream_with_resilience(
             model,
             opts.as_ref(),
             "google-generative-ai",
-            request,
             payload,
+            build_request,
             |body, model, cancel| stream::process(body, model, cancel),
+            SendResilience {
+                breaker: resilience.breaker,
+                refresh_auth: refresh,
+                scrubber: resilience.scrubber,
+            },
         )
     }
 }

@@ -10,7 +10,9 @@ use crate::protocol::{
 };
 use crate::registry::ApiProvider;
 use crate::transport::headers::merge_headers;
-use crate::transport::http::send_json_stream;
+use crate::transport::http::{
+    SendResilience, credential_refresh_slot, send_json_stream_with_resilience,
+};
 
 const API_NAME: &str = "deepseek-responses";
 
@@ -50,7 +52,17 @@ pub fn resolve_responses_url(base_url: &str) -> String {
 
 impl ApiProvider for DeepSeekResponsesProvider {
     fn stream(&self, model: &Model, ctx: Context, opts: Option<StreamOptions>) -> EventStream {
-        let Some(api_key) = self.resolve_key(opts.as_ref()) else {
+        self.stream_with_resilience(model, ctx, opts, SendResilience::default())
+    }
+
+    fn stream_with_resilience(
+        &self,
+        model: &Model,
+        ctx: Context,
+        opts: Option<StreamOptions>,
+        resilience: SendResilience,
+    ) -> EventStream {
+        let Some(_api_key) = self.resolve_key(opts.as_ref()) else {
             return error_stream(
                 model,
                 "No DeepSeek API key found. Set DEEPSEEK_API_KEY or pass apiKey in options.",
@@ -72,29 +84,51 @@ impl ApiProvider for DeepSeekResponsesProvider {
         };
 
         let url = resolve_responses_url(&model.base_url);
-        let mut request = self.client.post(url).bearer_auth(api_key);
-        for (name, value) in merge_headers(
-            model.headers.as_ref(),
-            opts.as_ref().and_then(|options| options.headers.as_ref()),
-            [
-                ("content-type".into(), "application/json".into()),
-                ("accept".into(), "text/event-stream".into()),
-            ],
-        ) {
-            request = request.header(name, value);
-        }
+        let client = self.client.clone();
+        let initial_opts = opts.clone();
+        let model_headers = model.headers.clone();
+        let self_api_key = self.api_key.clone();
+        let (build_request, refresh) = credential_refresh_slot(
+            move |current: Option<&StreamOptions>, payload| {
+                let current = current.or(initial_opts.as_ref());
+                let key = current
+                    .and_then(|o| o.api_key.clone())
+                    .or_else(|| self_api_key.clone());
+                let mut request = client.post(&url);
+                if let Some(key) = key {
+                    request = request.bearer_auth(key);
+                }
+                for (name, value) in merge_headers(
+                    model_headers.as_ref(),
+                    current.and_then(|o| o.headers.as_ref()),
+                    [
+                        ("content-type".into(), "application/json".into()),
+                        ("accept".into(), "text/event-stream".into()),
+                    ],
+                ) {
+                    request = request.header(name, value);
+                }
+                Ok(request.json(payload))
+            },
+            resilience.refresh_auth,
+            opts.clone(),
+        );
 
-        send_json_stream(
-            &self.client,
+        send_json_stream_with_resilience(
             model,
             opts.as_ref(),
             API_NAME,
-            request,
             payload,
+            build_request,
             |body, model, cancel| {
                 crate::providers::responses::stream::process_with_api_name(
                     body, model, cancel, API_NAME,
                 )
+            },
+            SendResilience {
+                breaker: resilience.breaker,
+                refresh_auth: refresh,
+                scrubber: resilience.scrubber,
             },
         )
     }

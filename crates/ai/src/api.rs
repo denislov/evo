@@ -37,3 +37,15 @@ pub mod transport {
     pub use crate::transport::client::TransportConfig;
     pub use crate::transport::retry::{RetryConfig, is_retryable_status, parse_retry_after_ms};
 }
+
+/// Provider resilience primitives: circuit breaking, secret redaction, and
+/// injectable clocks for deterministic tests. Consumers outside `ai` feed
+/// [`SecretsScrubber`](SecretsScrubber) output into logs, telemetry, hook
+/// payloads, and crash reports.
+pub mod resilience {
+    pub use crate::scrub::{SecretStore, SecretsScrubber, scrub_text};
+    pub use crate::transport::circuit_breaker::{
+        BreakerKey, BreakerStateName, BreakerVerdict, CircuitBreaker, CircuitBreakerConfig,
+        CircuitBreakerRegistry, Clock, SystemClock,
+    };
+}

@@ -7,12 +7,17 @@ use crate::providers;
 use crate::registry::{
     ApiProvider, EnvProviderAuthResolver, ProviderAuthResolver, ProviderRegistry,
 };
+use crate::scrub::SecretStore;
+use crate::transport::circuit_breaker::{BreakerKey, CircuitBreakerConfig, CircuitBreakerRegistry};
+use crate::transport::http::SendResilience;
 
 #[derive(Clone)]
 pub struct AiClient {
     registry: ProviderRegistry,
     auth_resolver: Arc<dyn ProviderAuthResolver>,
     transport_client: reqwest::Client,
+    breaker_registry: Arc<CircuitBreakerRegistry>,
+    secrets: Arc<SecretStore>,
 }
 
 impl Default for AiClient {
@@ -42,6 +47,10 @@ impl AiClient {
             registry: ProviderRegistry::new(),
             auth_resolver,
             transport_client: crate::transport::client::authenticated_client(&transport)?,
+            breaker_registry: Arc::new(
+                CircuitBreakerRegistry::new(CircuitBreakerConfig::default()),
+            ),
+            secrets: Arc::new(SecretStore::default()),
         })
     }
 
@@ -49,14 +58,31 @@ impl AiClient {
         registry: ProviderRegistry,
         auth_resolver: Arc<dyn ProviderAuthResolver>,
     ) -> Self {
-        Self {
-            registry,
+        let mut client = Self::try_with_auth_resolver_and_transport(
             auth_resolver,
-            transport_client: crate::transport::client::authenticated_client(
-                &crate::transport::client::TransportConfig::default(),
-            )
-            .expect("the default rustls HTTP client configuration should build"),
-        }
+            crate::transport::client::TransportConfig::default(),
+        )
+        .expect("the default rustls HTTP client configuration should build");
+        client.registry = registry;
+        client
+    }
+
+    /// Replace the shared circuit breaker registry. All subsequent
+    /// invocations isolate failure state per `(provider, api)` key.
+    pub fn with_breaker_registry(mut self, registry: Arc<CircuitBreakerRegistry>) -> Self {
+        self.breaker_registry = registry;
+        self
+    }
+
+    pub fn breaker_registry(&self) -> Arc<CircuitBreakerRegistry> {
+        self.breaker_registry.clone()
+    }
+
+    /// Register a credential value so outgoing error messages are redacted.
+    /// Automatic credentials are remembered on every invocation; explicit
+    /// callers can register additional values.
+    pub fn remember_secret(&self, secret: impl Into<String>) {
+        self.secrets.remember(secret);
     }
 
     pub fn provider_registry(&self) -> ProviderRegistry {
@@ -85,8 +111,24 @@ impl AiClient {
         ctx: Context,
         opts: Option<StreamOptions>,
     ) -> EventStream {
-        self.registry
-            .stream_model_with_auth(model, ctx, opts, self.auth_resolver.as_ref())
+        if let Some(api_key) = opts.as_ref().and_then(|o| o.api_key.as_deref()) {
+            self.secrets.remember(api_key);
+        }
+        let breaker = self
+            .breaker_registry
+            .breaker_for(BreakerKey::new(&model.provider, &model.api));
+        let scrubber = Arc::new(self.secrets.snapshot());
+        self.registry.stream_model_with_resilience(
+            model,
+            ctx,
+            opts,
+            self.auth_resolver.clone(),
+            SendResilience {
+                breaker: Some(breaker),
+                scrubber: Some(scrubber),
+                refresh_auth: None,
+            },
+        )
     }
 
     /// Execute a model request and collect its stream into one terminal message.
@@ -166,5 +208,44 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn invalid_extra_ca_pem_fails_construction() {
+        let transport = TransportConfig::new(None, None).with_extra_ca(vec![
+            b"-----BEGIN CERTIFICATE-----\nnot-valid-base64-content\n-----END CERTIFICATE-----"
+                .to_vec(),
+        ]);
+        let error = AiClient::try_with_auth_resolver_and_transport(
+            Arc::new(EnvProviderAuthResolver),
+            transport,
+        )
+        .err()
+        .expect("invalid PEM fails before registration");
+        assert!(
+            error.contains("invalid extra CA certificate PEM")
+                || error.contains("failed to build provider HTTP client"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn valid_extra_ca_builds_a_client() {
+        let transport = TransportConfig::new(None, None).with_extra_ca(vec![
+            include_bytes!("transport/fixtures/test-ca.pem").to_vec(),
+        ]);
+        let client = AiClient::try_with_auth_resolver_and_transport(
+            Arc::new(EnvProviderAuthResolver),
+            transport,
+        )
+        .expect("valid CA PEM builds a client");
+        client.register_builtins();
+        assert!(client.lookup_provider("openai-responses").is_some());
+    }
+
+    #[test]
+    fn empty_ca_bundle_is_normalized_away() {
+        let transport = TransportConfig::new(None, None).with_extra_ca(vec![]);
+        assert!(transport.extra_ca_certificates.is_none());
     }
 }

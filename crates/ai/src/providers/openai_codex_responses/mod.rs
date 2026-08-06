@@ -13,7 +13,9 @@ use crate::model::Model;
 use crate::protocol::stream::EventStream;
 use crate::providers::responses;
 use crate::registry::ApiProvider;
-use crate::transport::http::send_json_stream;
+use crate::transport::http::{
+    SendResilience, credential_refresh_slot, send_json_stream_with_resilience,
+};
 use convert::build_request;
 
 const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
@@ -105,12 +107,22 @@ fn extract_account_id(token: &str) -> Result<String, String> {
 
 impl ApiProvider for OpenAICodexResponsesProvider {
     fn stream(&self, model: &Model, ctx: Context, opts: Option<StreamOptions>) -> EventStream {
+        self.stream_with_resilience(model, ctx, opts, SendResilience::default())
+    }
+
+    fn stream_with_resilience(
+        &self,
+        model: &Model,
+        ctx: Context,
+        opts: Option<StreamOptions>,
+        resilience: SendResilience,
+    ) -> EventStream {
         let key = opts
             .as_ref()
             .and_then(|o| o.api_key.clone())
             .or_else(|| self.resolve_key());
 
-        let Some(api_key) = key else {
+        let Some(_api_key) = key else {
             let model_id = model.id.clone();
             return Box::pin(stream! {
                 let mut msg = AssistantMessage::empty("openai-codex-responses", &model_id);
@@ -142,29 +154,44 @@ impl ApiProvider for OpenAICodexResponsesProvider {
                 });
             }
         };
-        let headers = match build_sse_headers(
-            model.headers.as_ref(),
-            opts.as_ref().and_then(|o| o.headers.as_ref()),
-            &api_key,
-            opts.as_ref().and_then(|o| o.session_id.as_deref()),
-        ) {
-            Ok(headers) => headers,
-            Err(error) => return error_stream(model, error),
-        };
 
         let url = resolve_codex_url(&model.base_url);
-        let mut request = self.client.post(url);
-        for (key, value) in headers {
-            request = request.header(key, value);
-        }
+        let initial_opts = opts.clone();
+        let model_headers = model.headers.clone();
+        let self_api_key = self.api_key.clone();
+        let client = self.client.clone();
+        let (build_request, refresh) = credential_refresh_slot(
+            move |current: Option<&StreamOptions>, payload| {
+                let current = current.or(initial_opts.as_ref());
+                let key = current
+                    .and_then(|o| o.api_key.clone())
+                    .or_else(|| self_api_key.clone())
+                    .ok_or_else(|| {
+                        "No OpenAI Codex token found. Set OPENAI_CODEX_API_KEY or pass apiKey in options."
+                            .to_string()
+                    })?;
+                let headers = build_sse_headers(
+                    model_headers.as_ref(),
+                    current.and_then(|o| o.headers.as_ref()),
+                    &key,
+                    current.and_then(|o| o.session_id.as_deref()),
+                )?;
+                let mut request = client.post(&url);
+                for (name, value) in headers {
+                    request = request.header(name, value);
+                }
+                Ok(request.json(payload))
+            },
+            resilience.refresh_auth,
+            opts.clone(),
+        );
 
-        send_json_stream(
-            &self.client,
+        send_json_stream_with_resilience(
             model,
             opts.as_ref(),
             "openai-codex-responses",
-            request,
             payload,
+            build_request,
             |body, model, cancel| {
                 responses::stream::process_with_api_name(
                     body,
@@ -172,6 +199,11 @@ impl ApiProvider for OpenAICodexResponsesProvider {
                     cancel,
                     "openai-codex-responses",
                 )
+            },
+            SendResilience {
+                breaker: resilience.breaker,
+                refresh_auth: refresh,
+                scrubber: resilience.scrubber,
             },
         )
     }
