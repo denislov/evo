@@ -601,6 +601,15 @@ impl CodingAgentEmbeddingContext {
         self.prompt_operation(prompt.into_invocation(), thinking_level)
     }
 
+    pub fn rewind_operation(&self, checkpoint_id: impl Into<String>) -> CodingAgentOperation {
+        self.operation_factory().rewind_operation(checkpoint_id)
+    }
+
+    pub fn create_rewind_checkpoint_operation(&self) -> CodingAgentOperation {
+        self.operation_factory()
+            .create_rewind_checkpoint_operation()
+    }
+
     /// Return an opaque product-owned operation factory for this resolved
     /// project context.
     ///

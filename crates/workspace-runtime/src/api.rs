@@ -13,6 +13,11 @@ pub use crate::process::{
     EnvPolicy, OutputBudget, ProcessOutcome, ProcessOutput, ProcessSpec, ProcessUpdateCallback,
     ProgramKind, path_exists, resolve_shell_path, run,
 };
+pub use crate::rewind::{
+    WorkspaceFileSnapshot, WorkspaceRestoreEntry, WorkspaceRestoreError, WorkspaceRestorePlan,
+    WorkspaceRestoreReport, WorkspaceSnapshot, WorkspaceSnapshotError, capture_workspace_snapshot,
+    restore_workspace_snapshot,
+};
 pub use crate::worktree::merge::{
     ChangeEntry, ChangeKind, ChangeSet, MergeError, MergeProposal, MergeReport, apply_merge,
     apply_merge_cancellable, build_changeset, build_changeset_cancellable,

@@ -216,6 +216,16 @@ impl CodingAgentOperationFactory {
         CodingAgentOperation::ForkSession { target_leaf_id }
     }
 
+    pub fn rewind_operation(&self, checkpoint_id: impl Into<String>) -> CodingAgentOperation {
+        CodingAgentOperation::Rewind {
+            checkpoint_id: checkpoint_id.into(),
+        }
+    }
+
+    pub fn create_rewind_checkpoint_operation(&self) -> CodingAgentOperation {
+        CodingAgentOperation::CreateRewindCheckpoint
+    }
+
     pub fn model_repair_options(
         &self,
         thinking_level: Option<CodingAgentThinkingLevel>,

@@ -250,7 +250,7 @@ impl CodingAgentSession {
             .current_generation()?;
         let committed_session_sequence = match &self.runtime_host.session_coordinator.persistence {
             SessionPersistence::Persistent(session_service) => {
-                session_service.committed_session_sequence()
+                session_service.active_branch_session_sequence()?
             }
             SessionPersistence::NonPersistent(_) => 0,
         };

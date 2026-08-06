@@ -1,10 +1,17 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use change_tracker::{
-    ChangeReceipt, ChangeSource, HunkTrackerHandle, HunkTrackerOptions, HunkTrackerSnapshot,
-    HunkTrackingService, ReconcileState, TrackingContext, WatchOptions,
+    ChangeReceipt, ChangeSource, HunkTrackerCheckpoint, HunkTrackerHandle, HunkTrackerOptions,
+    HunkTrackerSnapshot, HunkTrackingService, ReconcileState, TrackingContext, WatchOptions,
 };
+use sha2::Digest;
+use workspace_runtime::api::{
+    WorkspaceAccessHandle, WorkspaceFileSnapshot, WorkspaceRestoreEntry, WorkspaceRestoreError,
+    WorkspaceRestorePlan, WorkspaceSnapshot, WorkspaceSnapshotError, capture_workspace_snapshot,
+    restore_workspace_snapshot,
+};
+#[cfg(test)]
 use workspace_runtime::api::{WorkspaceHandle, WorkspaceKind};
 
 use crate::application::snapshot::SnapshotCoordinator;
@@ -16,13 +23,13 @@ use crate::runtime::client::context_fold::MAX_CONTEXT_CHANGES;
 use crate::services::event::EventService;
 
 struct ReviewTrackingOwner {
-    _service: HunkTrackingService,
-    _projection_task: tokio::task::JoinHandle<()>,
+    service: HunkTrackingService,
+    projection_task: tokio::task::JoinHandle<()>,
 }
 
 /// Session-lifetime owner for filesystem facts and their product projection.
 pub(crate) struct ReviewService {
-    project_root: PathBuf,
+    workspace: WorkspaceAccessHandle,
     snapshots: Arc<SnapshotCoordinator>,
     events: EventService,
     latest: Arc<Mutex<HunkTrackerSnapshot>>,
@@ -47,14 +54,20 @@ pub(crate) struct MutationTracking {
     operation_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewCheckpoint {
+    pub(crate) tracker: HunkTrackerCheckpoint,
+    pub(crate) workspace: WorkspaceSnapshot,
+}
+
 impl ReviewService {
     pub(crate) fn new(
-        project_root: PathBuf,
+        workspace: WorkspaceAccessHandle,
         snapshots: Arc<SnapshotCoordinator>,
         events: EventService,
     ) -> Self {
         Self {
-            project_root,
+            workspace,
             snapshots,
             events,
             latest: Arc::new(Mutex::new(empty_snapshot())),
@@ -89,6 +102,91 @@ impl ReviewService {
         self.ensure_started()
     }
 
+    pub(crate) async fn checkpoint(&self) -> Result<ReviewCheckpoint, CodingSessionError> {
+        let tracker = self
+            .ensure_started()?
+            .checkpoint()
+            .await
+            .map_err(review_tracker_error)?;
+        let workspace = capture_workspace_snapshot(&self.workspace)
+            .await
+            .map_err(review_snapshot_error)?;
+        validate_tracker_workspace(&tracker, &workspace)?;
+        Ok(ReviewCheckpoint { tracker, workspace })
+    }
+
+    pub(crate) async fn restore_checkpoint(
+        &self,
+        checkpoint: &ReviewCheckpoint,
+    ) -> Result<(), CodingSessionError> {
+        let workspace = capture_workspace_snapshot(&self.workspace)
+            .await
+            .map_err(review_snapshot_error)?;
+        if workspace != checkpoint.workspace {
+            return Err(CodingSessionError::Stale {
+                message: "workspace no longer matches the rewind checkpoint".into(),
+            });
+        }
+        let handle = self.ensure_started()?;
+        handle
+            .restore_checkpoint(checkpoint.tracker.clone())
+            .await
+            .map_err(review_tracker_error)?;
+        self.refresh_latest(&handle)
+    }
+
+    pub(crate) async fn restore_workspace_and_tracker(
+        &self,
+        current: &ReviewCheckpoint,
+        target: &ReviewCheckpoint,
+        operation_id: &str,
+    ) -> Result<(), CodingSessionError> {
+        self.stop_tracking().await?;
+        let plan = workspace_restore_plan(&current.workspace, &target.workspace);
+        if let Err(error) = restore_workspace_snapshot(&self.workspace, plan).await {
+            let mapped = review_restore_error(error, operation_id);
+            if matches!(mapped, CodingSessionError::PartialCommit { .. }) {
+                return Err(mapped);
+            }
+            if let Err(restart_error) = self.restore_checkpoint(current).await {
+                return Err(CodingSessionError::PartialCommit {
+                    operation_id: operation_id.to_owned(),
+                    message: format!(
+                        "workspace rewind failed: {mapped}; tracker restart failed: {restart_error}"
+                    ),
+                });
+            }
+            return Err(mapped);
+        }
+        if let Err(error) = self.restore_checkpoint(target).await {
+            self.stop_tracking().await?;
+            let rollback = restore_workspace_snapshot(
+                &self.workspace,
+                workspace_restore_plan(&target.workspace, &current.workspace),
+            )
+            .await
+            .map(|_| ());
+            if let Err(rollback_error) = rollback {
+                return Err(CodingSessionError::PartialCommit {
+                    operation_id: operation_id.to_owned(),
+                    message: format!(
+                        "tracker restore failed: {error}; workspace rollback failed: {rollback_error}"
+                    ),
+                });
+            }
+            if let Err(restart_error) = self.restore_checkpoint(current).await {
+                return Err(CodingSessionError::PartialCommit {
+                    operation_id: operation_id.to_owned(),
+                    message: format!(
+                        "tracker restore failed: {error}; tracker rollback failed: {restart_error}"
+                    ),
+                });
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(crate) fn refresh_latest(
         &self,
         handle: &HunkTrackerHandle,
@@ -114,12 +212,10 @@ impl ReviewService {
     fn ensure_started(&self) -> Result<HunkTrackerHandle, CodingSessionError> {
         let mut owner = self.owner.lock_resource("review tracker owner")?;
         if let Some(owner) = owner.as_ref() {
-            return Ok(owner._service.handle());
+            return Ok(owner.service.handle());
         }
-        let workspace = WorkspaceHandle::new(WorkspaceKind::Source, &self.project_root)
-            .map_err(review_start_error)?;
         let service = HunkTrackingService::start(
-            &workspace,
+            self.workspace.identity(),
             WatchOptions::default(),
             HunkTrackerOptions::default(),
         )
@@ -149,10 +245,28 @@ impl ReviewService {
             }
         });
         *owner = Some(ReviewTrackingOwner {
-            _service: service,
-            _projection_task: projection_task,
+            service,
+            projection_task,
         });
         Ok(handle)
+    }
+
+    async fn stop_tracking(&self) -> Result<(), CodingSessionError> {
+        let owner = self.owner.lock_resource("review tracker owner")?.take();
+        let Some(ReviewTrackingOwner {
+            service,
+            projection_task,
+        }) = owner
+        else {
+            return Ok(());
+        };
+        service.shutdown().await.map_err(review_tracker_error)?;
+        projection_task
+            .await
+            .map_err(|error| CodingSessionError::Resource {
+                message: format!("review projection task failed during rewind: {error}"),
+            })?;
+        Ok(())
     }
 }
 
@@ -305,6 +419,94 @@ fn review_start_error(error: impl std::fmt::Display) -> CodingSessionError {
     }
 }
 
+fn review_tracker_error(error: change_tracker::ChangeTrackerError) -> CodingSessionError {
+    CodingSessionError::Resource {
+        message: format!("review tracker checkpoint failed: {error}"),
+    }
+}
+
+fn review_snapshot_error(error: WorkspaceSnapshotError) -> CodingSessionError {
+    match error {
+        WorkspaceSnapshotError::UnsupportedWorkspace { kind } => {
+            CodingSessionError::UnsupportedCapability {
+                capability: format!("workspace kind {kind:?} does not support rewind"),
+            }
+        }
+        WorkspaceSnapshotError::Capture { .. }
+        | WorkspaceSnapshotError::Invalid { .. }
+        | WorkspaceSnapshotError::BudgetExceeded { .. } => CodingSessionError::Resource {
+            message: format!("cannot capture rewind workspace snapshot: {error}"),
+        },
+    }
+}
+
+fn review_restore_error(error: WorkspaceRestoreError, operation_id: &str) -> CodingSessionError {
+    if let WorkspaceRestoreError::Rollback { message } = error {
+        CodingSessionError::PartialCommit {
+            operation_id: operation_id.to_owned(),
+            message: format!("workspace rewind rollback was incomplete: {message}"),
+        }
+    } else {
+        CodingSessionError::Resource {
+            message: format!("workspace rewind restore failed: {error}"),
+        }
+    }
+}
+
+fn workspace_restore_plan(
+    current: &WorkspaceSnapshot,
+    target: &WorkspaceSnapshot,
+) -> WorkspaceRestorePlan {
+    let mut paths = std::collections::BTreeSet::new();
+    for file in current.files.iter().chain(&target.files) {
+        paths.insert(file.path.clone());
+    }
+    let entries = paths
+        .into_iter()
+        .map(|path| WorkspaceRestoreEntry {
+            expected: workspace_snapshot(current, &path),
+            replacement: workspace_snapshot(target, &path),
+        })
+        .collect();
+    WorkspaceRestorePlan { entries }
+}
+
+fn workspace_snapshot(snapshot: &WorkspaceSnapshot, path: &Path) -> WorkspaceFileSnapshot {
+    match snapshot.file(path) {
+        Some(file) => file.clone(),
+        None => WorkspaceFileSnapshot {
+            path: path.to_path_buf(),
+            exists: false,
+            revision: format!("{:x}", sha2::Sha256::digest([])),
+            content: Some(Vec::new()),
+        },
+    }
+}
+
+fn validate_tracker_workspace(
+    tracker: &HunkTrackerCheckpoint,
+    workspace: &WorkspaceSnapshot,
+) -> Result<(), CodingSessionError> {
+    for file in &tracker.files {
+        let Some(current) = &file.current else {
+            continue;
+        };
+        let matches = match workspace.file(&file.path) {
+            Some(snapshot) => current.exists && snapshot.revision == current.revision,
+            None => !current.exists,
+        };
+        if !matches {
+            return Err(CodingSessionError::Stale {
+                message: format!(
+                    "workspace changed while creating rewind checkpoint: {}",
+                    file.path.display()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use sha2::{Digest, Sha256};
@@ -325,7 +527,13 @@ mod tests {
         let snapshots = SnapshotCoordinator::new();
         let events = EventService::with_snapshot_coordinator(snapshots.clone());
         let mut receiver = events.subscribe_product_events();
-        let service = ReviewService::new(dir.path().to_path_buf(), snapshots.clone(), events);
+        let workspace = WorkspaceAccessHandle::open(
+            WorkspaceHandle::new(WorkspaceKind::Projectless, dir.path()).unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+        let service = ReviewService::new(workspace, snapshots.clone(), events);
         let tracking = service
             .mutation_tracking("session-1", "turn-1", "operation-1")
             .unwrap();

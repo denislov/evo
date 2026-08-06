@@ -68,6 +68,8 @@ impl ReplayBuilder {
             }
             SessionEventData::SessionCloned { .. }
             | SessionEventData::SessionForked { .. }
+            | SessionEventData::SessionRewound { .. }
+            | SessionEventData::RewindCheckpointCreated { .. }
             | SessionEventData::SessionCompactionStarted { .. }
             | SessionEventData::TurnStarted {}
             | SessionEventData::SelfHealingEditStarted { .. }

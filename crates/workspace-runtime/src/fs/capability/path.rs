@@ -167,6 +167,44 @@ pub(super) fn target_object_fingerprint(
     }
 }
 
+pub(super) fn remove_vacant_created_parents(target: &FilesystemTarget) -> Result<(), String> {
+    let Some(FilesystemTargetObject::Vacant {
+        parent,
+        missing_parents,
+        ..
+    }) = target.object.as_ref()
+    else {
+        return Ok(());
+    };
+    if missing_parents.is_empty() {
+        return Ok(());
+    }
+
+    let mut directories = Vec::with_capacity(missing_parents.len());
+    let mut current = parent.clone();
+    for component in missing_parents {
+        let child = current.open_dir(component).map_err(|error| {
+            format!(
+                "write: cannot reopen created parent {} for {}: {error}",
+                component.display(),
+                target.display.display()
+            )
+        })?;
+        directories.push((current, component.clone()));
+        current = Arc::new(child);
+    }
+    for (parent, component) in directories.into_iter().rev() {
+        parent.remove_dir(&component).map_err(|error| {
+            format!(
+                "write: cannot remove created parent {} for {}: {error}",
+                component.display(),
+                target.display.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub(super) fn audit_identity_fingerprint(identity: &str) -> String {
     format!("{:x}", Sha256::digest(identity.as_bytes()))
 }

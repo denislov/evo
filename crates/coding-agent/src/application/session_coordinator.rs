@@ -64,7 +64,10 @@ impl SessionCoordinator {
         &self,
         class: OperationClass,
     ) -> Result<(), CodingSessionError> {
-        if class != OperationClass::SessionWriteRoot {
+        if !matches!(
+            class,
+            OperationClass::SessionWriteRoot | OperationClass::RuntimeWrite
+        ) {
             return Ok(());
         }
         let SessionPersistence::Persistent(service) = &self.persistence else {
@@ -191,6 +194,31 @@ impl SessionWriterCommand {
         }
     }
 
+    pub(crate) fn commit_rewind(
+        operation_id: impl Into<String>,
+        capability_generation: CapabilityGeneration,
+        checkpoint: crate::session::rewind::RewindCheckpoint,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            capability_generation,
+            mutation: SessionMutation::CommitRewind { checkpoint },
+        }
+    }
+
+    pub(crate) fn create_rewind_checkpoint(
+        operation_id: impl Into<String>,
+        capability_generation: CapabilityGeneration,
+        tracker: change_tracker::HunkTrackerCheckpoint,
+        workspace: workspace_runtime::api::WorkspaceSnapshot,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            capability_generation,
+            mutation: SessionMutation::CreateRewindCheckpoint { tracker, workspace },
+        }
+    }
+
     pub(crate) fn reject_delegation(
         operation_id: impl Into<String>,
         capability_generation: CapabilityGeneration,
@@ -289,6 +317,13 @@ pub(crate) enum SessionMutation {
     ForkSession {
         target_leaf_id: Option<String>,
     },
+    CommitRewind {
+        checkpoint: crate::session::rewind::RewindCheckpoint,
+    },
+    CreateRewindCheckpoint {
+        tracker: change_tracker::HunkTrackerCheckpoint,
+        workspace: workspace_runtime::api::WorkspaceSnapshot,
+    },
     RejectDelegation {
         source_operation_id: String,
         tool_call_id: String,
@@ -329,6 +364,12 @@ pub(crate) enum SessionWriterReply {
     },
     ForkedSession {
         session_id: String,
+    },
+    Rewound {
+        new_branch_id: String,
+    },
+    RewindCheckpointCreated {
+        checkpoint: crate::session::rewind::RewindCheckpoint,
     },
     DelegationRejected {
         request: DelegationRequest,
@@ -436,6 +477,29 @@ impl SessionCoordinator {
                 let session_id = forked_service.session_id().to_owned();
                 self.install_forked_session(forked_service, owner_state)?;
                 Ok(SessionWriterReply::ForkedSession { session_id })
+            }
+            SessionMutation::CommitRewind { checkpoint } => {
+                let SessionPersistence::Persistent(session_service) = &mut self.persistence else {
+                    return Err(CodingSessionError::UnsupportedCapability {
+                        capability: "rewind requires a persistent Rust-native session".into(),
+                    });
+                };
+                let new_branch_id = session_service
+                    .commit_rewind(&checkpoint, &command.operation_id)
+                    .await?;
+                Ok(SessionWriterReply::Rewound { new_branch_id })
+            }
+            SessionMutation::CreateRewindCheckpoint { tracker, workspace } => {
+                let SessionPersistence::Persistent(session_service) = &mut self.persistence else {
+                    return Err(CodingSessionError::UnsupportedCapability {
+                        capability: "rewind checkpoints require a persistent Rust-native session"
+                            .into(),
+                    });
+                };
+                let checkpoint = session_service
+                    .create_rewind_checkpoint(tracker, workspace, &command.operation_id)
+                    .await?;
+                Ok(SessionWriterReply::RewindCheckpointCreated { checkpoint })
             }
             SessionMutation::RejectDelegation {
                 source_operation_id,

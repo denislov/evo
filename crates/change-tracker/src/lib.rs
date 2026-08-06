@@ -16,7 +16,8 @@ mod watch;
 pub use error::ChangeTrackerError;
 pub use event::{FsChangeKind, FsEvent, GitEvent, GitMetaEvent, SemanticEvent};
 pub use hunk::{
-    ChangeFactSnapshot, ChangeSource, HunkId, HunkRange, HunkSnapshot, HunkTracker,
+    ChangeFactSnapshot, ChangeSource, HunkCheckpointFile, HunkCheckpointIdentity,
+    HunkCheckpointVersion, HunkId, HunkRange, HunkSnapshot, HunkTracker, HunkTrackerCheckpoint,
     HunkTrackerHandle, HunkTrackerOptions, HunkTrackerSnapshot, HunkTrackingService,
     ReconcileState, RejectPlan, RejectReplacement, TrackedFileSnapshot, TrackingContext,
 };

@@ -99,15 +99,16 @@ impl SessionManifest {
         created_at: impl Into<String>,
         workspace_scope: PersistedWorkspaceScope,
     ) -> Self {
+        let session_id = session_id.into();
         let created_at = created_at.into();
         Self {
             schema: SESSION_SCHEMA.into(),
             version: SESSION_VERSION,
-            session_id: session_id.into(),
+            session_id: session_id.clone(),
             name: None,
             updated_at: created_at.clone(),
             created_at,
-            active_branch_id: None,
+            active_branch_id: Some(root_branch_id(&session_id)),
             active_leaf_id: None,
             default_agent_profile_id: default_agent_profile_id(),
             workspace_scope: Some(workspace_scope),
@@ -126,6 +127,10 @@ impl SessionManifest {
         self.name = name;
         self
     }
+}
+
+pub(crate) fn root_branch_id(session_id: &str) -> String {
+    format!("branch_root_{session_id}")
 }
 
 pub(crate) fn default_agent_profile_id() -> ProfileId {

@@ -58,6 +58,25 @@ impl CodingAgentOperationOutcome {
                 Self::WorktreeDiscarded { worktree_id }
             }
             OperationOutcome::MergeProposals(proposals) => Self::MergeProposals(proposals),
+            OperationOutcome::RewindCheckpointCreated {
+                checkpoint_id,
+                branch_id,
+                leaf_id,
+                session_sequence,
+            } => Self::RewindCheckpointCreated {
+                checkpoint_id,
+                branch_id,
+                leaf_id,
+                session_sequence,
+            },
+            OperationOutcome::Rewound {
+                checkpoint_id,
+                new_branch_id,
+                ..
+            } => Self::Rewound {
+                checkpoint_id,
+                new_branch_id,
+            },
         }
     }
 

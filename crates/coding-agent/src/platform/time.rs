@@ -10,6 +10,7 @@ pub(crate) trait IdGenerator {
     fn next_message_id(&mut self) -> String;
     fn next_tool_call_id(&mut self) -> String;
     fn next_leaf_id(&mut self) -> String;
+    fn next_branch_id(&mut self) -> String;
 }
 
 pub(crate) trait Clock {
@@ -54,6 +55,10 @@ impl IdGenerator for SystemIdGenerator {
 
     fn next_leaf_id(&mut self) -> String {
         prefixed_id("leaf")
+    }
+
+    fn next_branch_id(&mut self) -> String {
+        prefixed_id("branch")
     }
 }
 

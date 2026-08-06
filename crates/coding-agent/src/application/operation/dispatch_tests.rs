@@ -33,9 +33,13 @@ use crate::operations::self_healing_edit::runner::{
     SelfHealingEditReplacement, SelfHealingEditRequest,
 };
 use crate::runtime::facade::{
-    CodingAgentClientId, CodingAgentSession, CodingAgentSessionOptions, CodingAgentShutdownOutcome,
+    CodingAgentClientId, CodingAgentDraft, CodingAgentDraftId, CodingAgentDraftKind,
+    CodingAgentSession, CodingAgentSessionOptions, CodingAgentShutdownOutcome,
 };
+use crate::session::replay::TranscriptItem;
+use crate::session::service::SessionPersistence;
 use crate::test_support::{ProcessFixture, ProviderGuard};
+use crate::workspace::CodingAgentWorkspaceSelection;
 
 fn model(api: &str) -> Model {
     Model {
@@ -401,6 +405,358 @@ async fn run_internal_routes_every_dispatch_family_to_its_runner() {
         ),
         "sync mutable family must produce a session-name outcome, got {sync_mut_outcome:?}"
     );
+}
+
+#[tokio::test]
+async fn durable_rewind_restores_workspace_tracker_branch_and_client_state() {
+    let api = "coding-session-durable-rewind";
+    let provider_guard = ProviderGuard::register(
+        api,
+        Arc::new(FauxProvider::with_call_queue(vec![
+            FauxProvider::text_call("checkpoint answer", StopReason::Stop),
+            FauxProvider::text_call("excluded answer", StopReason::Stop),
+            FauxProvider::text_call("continued answer", StopReason::Stop),
+        ])),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let resolved_workspace = CodingAgentWorkspaceSelection::projectless("rewind-workspace")
+        .resolve(temp.path().join("config"))
+        .unwrap();
+    let workspace = resolved_workspace.execution_cwd.clone();
+    std::fs::write(workspace.join("tracked.txt"), "base\n").unwrap();
+    std::fs::write(workspace.join("first-edit.txt"), "checkpoint value\n").unwrap();
+    std::fs::write(workspace.join("deleted.txt"), "restore me\n").unwrap();
+    let session_root = temp.path().join("sessions");
+    let options = CodingAgentSessionOptions::new()
+        .with_ai_client(provider_guard.ai_client())
+        .with_resolved_workspace(resolved_workspace)
+        .with_session_id("sess_durable_rewind")
+        .with_session_log_root(&session_root);
+    let mut session = CodingAgentSession::create_internal(options.clone())
+        .await
+        .unwrap();
+    let old_connection = session
+        .connect_internal(CodingAgentClientId::new("rewind-client"))
+        .unwrap();
+
+    session
+        .run_internal(CodingAgentOperation::Prompt(prompt_options(
+            api,
+            "checkpoint prompt",
+        )))
+        .await
+        .unwrap();
+    record_tracked_edit(
+        &session,
+        &workspace,
+        "tracked.txt",
+        "base",
+        "checkpoint state",
+    )
+    .await;
+    let outcome = session
+        .run_internal(CodingAgentOperation::CreateRewindCheckpoint)
+        .await
+        .unwrap();
+    let CodingAgentOperationOutcome::RewindCheckpointCreated {
+        checkpoint_id,
+        branch_id: source_branch_id,
+        session_sequence: checkpoint_sequence,
+        ..
+    } = outcome
+    else {
+        panic!("checkpoint operation returned an unexpected outcome: {outcome:?}");
+    };
+    let checkpoint_tracker = session.runtime_host.review_service.latest().unwrap();
+    let checkpoint_hunk_id = checkpoint_tracker
+        .files
+        .iter()
+        .find(|file| file.path == std::path::Path::new("tracked.txt"))
+        .unwrap_or_else(|| panic!("tracked change missing: {checkpoint_tracker:?}"))
+        .hunks[0]
+        .id
+        .clone();
+    let sidecar = session_root
+        .join("sess_durable_rewind/rewind")
+        .join(format!("{checkpoint_id}.json"));
+    assert!(sidecar.is_file());
+
+    record_tracked_edit(
+        &session,
+        &workspace,
+        "tracked.txt",
+        "checkpoint state",
+        "after checkpoint",
+    )
+    .await;
+    record_tracked_edit(
+        &session,
+        &workspace,
+        "first-edit.txt",
+        "checkpoint value",
+        "changed later",
+    )
+    .await;
+    std::fs::write(workspace.join("created.txt"), "remove me\n").unwrap();
+    std::fs::remove_file(workspace.join("deleted.txt")).unwrap();
+    session
+        .run_internal(CodingAgentOperation::Prompt(prompt_options(
+            api,
+            "excluded prompt",
+        )))
+        .await
+        .unwrap();
+
+    old_connection
+        .set_prompt_draft_internal(CodingAgentDraftId("prompt-draft".into()), "draft prompt")
+        .unwrap();
+    for (id, kind) in [
+        ("steer-draft", CodingAgentDraftKind::Steer),
+        ("follow-up-draft", CodingAgentDraftKind::FollowUp),
+    ] {
+        old_connection
+            .enqueue_control_draft(CodingAgentDraft {
+                id: CodingAgentDraftId(id.into()),
+                kind,
+                text: id.into(),
+            })
+            .unwrap();
+    }
+    let old_state = old_connection.state_internal().unwrap();
+    assert_eq!(old_state.drafts.len(), 3);
+
+    let before_failed_rewind = session.runtime_host.review_service.latest().unwrap();
+    let event_log = session_root.join("sess_durable_rewind/events.jsonl");
+    let event_log_backup = session_root.join("sess_durable_rewind/events.backup");
+    std::fs::rename(&event_log, &event_log_backup).unwrap();
+    std::fs::create_dir(&event_log).unwrap();
+    let failed_rewind = session
+        .run_internal(CodingAgentOperation::Rewind {
+            checkpoint_id: checkpoint_id.clone(),
+        })
+        .await;
+    std::fs::remove_dir(&event_log).unwrap();
+    std::fs::rename(&event_log_backup, &event_log).unwrap();
+    assert!(failed_rewind.is_err());
+    assert_eq!(
+        std::fs::read(workspace.join("tracked.txt")).unwrap(),
+        b"after checkpoint\n"
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("first-edit.txt")).unwrap(),
+        b"changed later\n"
+    );
+    assert!(workspace.join("created.txt").is_file());
+    assert!(!workspace.join("deleted.txt").exists());
+    assert_eq!(
+        session.runtime_host.review_service.latest().unwrap(),
+        before_failed_rewind
+    );
+
+    let outcome = session
+        .run_internal(CodingAgentOperation::Rewind {
+            checkpoint_id: checkpoint_id.clone(),
+        })
+        .await
+        .unwrap();
+    let CodingAgentOperationOutcome::Rewound { new_branch_id, .. } = outcome else {
+        panic!("rewind operation returned an unexpected outcome: {outcome:?}");
+    };
+    assert_ne!(new_branch_id, source_branch_id);
+    assert_eq!(
+        std::fs::read(workspace.join("tracked.txt")).unwrap(),
+        b"checkpoint state\n"
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("first-edit.txt")).unwrap(),
+        b"checkpoint value\n"
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("deleted.txt")).unwrap(),
+        b"restore me\n"
+    );
+    assert!(!workspace.join("created.txt").exists());
+    let restored_tracker = session.runtime_host.review_service.latest().unwrap();
+    assert_eq!(restored_tracker, checkpoint_tracker);
+    assert_eq!(restored_tracker.files[0].hunks[0].id, checkpoint_hunk_id);
+
+    assert!(matches!(
+        old_connection.state_internal(),
+        Err(CodingSessionError::Lifecycle {
+            reason: crate::kernel::error::CodingAgentLifecycleRejection::StaleGeneration
+        })
+    ));
+    let new_connection = session
+        .connect_internal(CodingAgentClientId::new("rewind-client"))
+        .unwrap();
+    let reset_state = new_connection.state_internal().unwrap();
+    assert_ne!(reset_state.cursor.stream_id, old_state.cursor.stream_id);
+    assert!(reset_state.cursor.capability_generation > old_state.cursor.capability_generation);
+    assert_eq!(reset_state.cursor.last_event_sequence, 0);
+    assert_eq!(
+        reset_state.cursor.last_session_sequence,
+        checkpoint_sequence
+    );
+    assert!(reset_state.drafts.is_empty());
+    assert!(matches!(
+        new_connection.reconnect_from_cursor_internal(&old_state.cursor),
+        Err(CodingSessionError::Input { .. })
+    ));
+
+    session
+        .run_internal(CodingAgentOperation::Prompt(prompt_options(
+            api,
+            "continued prompt",
+        )))
+        .await
+        .unwrap();
+    let (active_inputs, source_inputs) = match &session.runtime_host.session_coordinator.persistence
+    {
+        SessionPersistence::Persistent(service) => (
+            user_inputs(service.replay().unwrap().transcript),
+            user_inputs(service.replay_branch(&source_branch_id).unwrap().transcript),
+        ),
+        SessionPersistence::NonPersistent(_) => panic!("rewind test requires persistence"),
+    };
+    assert_eq!(active_inputs, ["checkpoint prompt", "continued prompt"]);
+    assert_eq!(source_inputs, ["checkpoint prompt", "excluded prompt"]);
+
+    session.shutdown_internal().await.unwrap();
+    drop(session);
+    let export = temp.path().join("source-branch.html");
+    CodingAgentSession::export_session_branch_html_internal(
+        options.clone(),
+        &source_branch_id,
+        &export,
+    )
+    .unwrap();
+    let exported = std::fs::read_to_string(export).unwrap();
+    assert!(exported.contains("excluded prompt"));
+    assert!(!exported.contains("continued prompt"));
+
+    let sidecar_bytes = std::fs::read(&sidecar).unwrap();
+    std::fs::remove_file(&sidecar).unwrap();
+    assert!(
+        CodingAgentSession::open_internal(options.clone())
+            .await
+            .is_err()
+    );
+    std::fs::write(&sidecar, b"not-json").unwrap();
+    assert!(
+        CodingAgentSession::open_internal(options.clone())
+            .await
+            .is_err()
+    );
+    let mut wrong_owner: serde_json::Value = serde_json::from_slice(&sidecar_bytes).unwrap();
+    wrong_owner["session_id"] = serde_json::Value::String("another-session".into());
+    std::fs::write(&sidecar, serde_json::to_vec(&wrong_owner).unwrap()).unwrap();
+    assert!(
+        CodingAgentSession::open_internal(options.clone())
+            .await
+            .is_err()
+    );
+    std::fs::write(&sidecar, &sidecar_bytes).unwrap();
+    let orphan = sidecar.parent().unwrap().join(".orphan.tmp-123");
+    std::fs::write(&orphan, "orphan").unwrap();
+
+    let mut reopened = CodingAgentSession::open_internal(options.clone())
+        .await
+        .unwrap();
+    assert!(!orphan.exists());
+    assert_eq!(
+        reopened.runtime_host.review_service.latest().unwrap(),
+        checkpoint_tracker
+    );
+    reopened.shutdown_internal().await.unwrap();
+    drop(reopened);
+
+    std::fs::write(workspace.join("tracked.txt"), "external after shutdown\n").unwrap();
+    let error = CodingAgentSession::open_internal(options)
+        .await
+        .expect_err("stale workspace must reject startup rewind restoration");
+    assert!(matches!(error, CodingSessionError::Stale { .. }));
+    assert_eq!(
+        std::fs::read(workspace.join("tracked.txt")).unwrap(),
+        b"external after shutdown\n"
+    );
+}
+
+#[tokio::test]
+async fn source_workspace_rejects_rewind_checkpoint_before_sidecar_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("notes.txt"), "do not rewind\n").unwrap();
+    let session_root = temp.path().join("sessions");
+    let mut session = CodingAgentSession::create_internal(
+        CodingAgentSessionOptions::new()
+            .with_cwd(&workspace)
+            .with_session_id("sess_source_rewind")
+            .with_session_log_root(&session_root),
+    )
+    .await
+    .unwrap();
+
+    let error = session
+        .run_internal(CodingAgentOperation::CreateRewindCheckpoint)
+        .await
+        .expect_err("source workspace rewind checkpoint must be rejected");
+    assert!(matches!(
+        error,
+        CodingSessionError::UnsupportedCapability { ref capability }
+            if capability.contains("Source")
+    ));
+    assert!(!session_root.join("sess_source_rewind/rewind").exists());
+    assert_eq!(
+        std::fs::read(workspace.join("notes.txt")).unwrap(),
+        b"do not rewind\n"
+    );
+    session.shutdown_internal().await.unwrap();
+}
+
+async fn record_tracked_edit(
+    session: &CodingAgentSession,
+    workspace: &std::path::Path,
+    path: &str,
+    old: &str,
+    new: &str,
+) {
+    let before = format!("{old}\n").into_bytes();
+    let after = format!("{new}\n").into_bytes();
+    let tracking = session
+        .runtime_host
+        .review_service
+        .mutation_tracking(
+            "sess_durable_rewind",
+            format!("turn-{path}"),
+            format!("operation-{path}"),
+        )
+        .unwrap();
+    std::fs::write(workspace.join(path), &after).unwrap();
+    tracking
+        .record(
+            &format!("tool-{path}"),
+            crate::tools::filesystem::mutation_receipt::receipt(
+                path.into(),
+                format!("target-{path}"),
+                Some(&before),
+                Some(&after),
+                "edit",
+                Some(format!("@@ -1,1 +1,1 @@\n-{old}\n+{new}\n")),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+fn user_inputs(transcript: Vec<TranscriptItem>) -> Vec<String> {
+    transcript
+        .into_iter()
+        .filter_map(|item| match item {
+            TranscriptItem::UserInput { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A sync-mutable operation that its runner rejects must surface the runner's

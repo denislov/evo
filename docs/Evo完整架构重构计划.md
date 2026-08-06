@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～3 完成，Phase 4 / ARC-400～420 完成，准备进入 ARC-430）
+> 状态：执行中（Phase 0～3 完成，Phase 4 / ARC-400～430 完成，准备进入 ARC-440）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -41,6 +41,7 @@
 | Phase 4 / ARC-400 | 完成（复验 2026-08-06） | `docs/refactor/phase4-change-tracker.md`；`change-tracker` crate（仅依赖 workspace-runtime）：单 actor fs event service、bounded debounce、directory type fact、dynamic directory 补扫、rename chain/ambiguous/malformed/root/ignore 边界、nested `.git` 隔离、相对 gitdir canonical ownership、watch budget fail-closed、可靠 shutdown、带 root/sequence 的 Git HEAD/index/lock 元数据事件，36 个 watcher 测试覆盖 |
 | Phase 4 / ARC-410 | 完成（复验 2026-08-06） | `docs/refactor/phase4-hunk-tracker.md`；baseline→current HunkTracker actor、receipt/event 因果关联、稳定 HunkId、来源归因、bounded diff/content/history、accept/reject plan 与 creation/deletion/empty-file fail-closed 语义；45 个 `change-tracker` 测试通过 |
 | Phase 4 / ARC-420 | 完成（复验 2026-08-06） | `docs/refactor/phase4-review-domain.md`；统一 list/open/accept/reject/discard API、typed receipt 直连 filesystem tools、共享 Review DTO、live Review product event、Desktop/CLI projection 与 capability/revision/target 复验；coding-agent 178、Desktop 303 测试通过，workspace/release API/architecture/clippy Gate 通过 |
+| Phase 4 / ARC-430 | 完成（复验 2026-08-06） | `docs/refactor/phase4-rewind.md`；三域一致恢复（session event cursor/branch + workspace snapshot restore + hunk tracker checkpoint）、新 branch 不截断历史、事务双向 rollback、startup recovery、capability/cursor/drafts 同步、fail-closed（source/stale/sidecar）；change-tracker 60、workspace-runtime 91、coding-agent 182 测试通过，architecture Gate 通过（oversized_debts=35，execution_debts=0） |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -556,6 +557,8 @@ Phase 3 Gate：完成（2026-08-05）。并行 child 默认完全隔离；父 wo
 - Desktop/CLI 使用同一 product DTO，不自行解析 tool output 推断修改。
 
 ### ARC-430 Rewind
+
+执行状态：完成（复验 2026-08-06）。完成证据见 `docs/refactor/phase4-rewind.md`。
 
 - rewind 目标是 session event cursor + workspace snapshot + active branch 三域一致恢复。
 - 首版只支持 managed worktree/session 内 rewind，不直接回滚用户父 workspace。

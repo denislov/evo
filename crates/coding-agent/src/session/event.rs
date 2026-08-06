@@ -69,6 +69,11 @@ impl SessionEventEnvelope {
         self.turn_id = Some(turn_id.into());
         self
     }
+
+    pub(crate) fn with_branch_id(mut self, branch_id: impl Into<String>) -> Self {
+        self.branch_id = Some(branch_id.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,6 +99,21 @@ pub(crate) enum SessionEventData {
     SessionForked {
         source_session_id: String,
         source_leaf_id: String,
+    },
+    #[serde(rename = "session.rewound")]
+    SessionRewound {
+        source_branch_id: String,
+        new_branch_id: String,
+        checkpoint_id: String,
+        target_leaf_id: String,
+        restored_session_sequence: u64,
+    },
+    #[serde(rename = "rewind.checkpoint.created")]
+    RewindCheckpointCreated {
+        checkpoint_id: String,
+        leaf_id: String,
+        workspace_identity: String,
+        digest: String,
     },
     #[serde(rename = "session.compaction.started")]
     SessionCompactionStarted {

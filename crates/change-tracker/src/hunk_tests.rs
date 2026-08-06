@@ -876,6 +876,102 @@ async fn directory_events_do_not_stop_file_tracking() {
     service.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn checkpoint_round_trip_restores_state_and_hunk_identity() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, "before\n").unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+
+    std::fs::write(&path, "after\n").unwrap();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(b"before\n"),
+                b"after\n",
+                Some(&patch(1, 1, "before", "after")),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    let checkpoint = handle.checkpoint().await.unwrap();
+    let hunk_id = checkpoint.snapshot().files[0].hunks[0].id.clone();
+    let encoded = serde_json::to_vec(&checkpoint).unwrap();
+    let decoded: HunkTrackerCheckpoint = serde_json::from_slice(&encoded).unwrap();
+    tracker.shutdown().await.unwrap();
+
+    let restored = HunkTracker::start(dir.path(), options()).unwrap();
+    let restored_handle = restored.handle();
+    restored_handle.restore_checkpoint(decoded).await.unwrap();
+    assert_eq!(
+        restored_handle.snapshot().await.unwrap(),
+        checkpoint.snapshot()
+    );
+
+    std::fs::write(&path, "later\n").unwrap();
+    restored_handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(b"after\n"),
+                b"later\n",
+                Some(&patch(1, 1, "after", "later")),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored_handle.snapshot().await.unwrap().files[0].hunks[0].id,
+        hunk_id
+    );
+    restored.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_restore_rejects_stale_workspace_and_corrupt_content() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, "before\n").unwrap();
+    let tracker = HunkTracker::start(dir.path(), options()).unwrap();
+    let handle = tracker.handle();
+    std::fs::write(&path, "after\n").unwrap();
+    handle
+        .record_receipt(
+            receipt(
+                "notes.txt",
+                Some(b"before\n"),
+                b"after\n",
+                Some(&patch(1, 1, "before", "after")),
+            ),
+            ChangeSource::AgentEdit,
+            context(),
+        )
+        .await
+        .unwrap();
+    let checkpoint = handle.checkpoint().await.unwrap();
+
+    std::fs::write(&path, "external\n").unwrap();
+    assert!(matches!(
+        handle.restore_checkpoint(checkpoint.clone()).await,
+        Err(ChangeTrackerError::InvalidFact { .. })
+    ));
+
+    std::fs::write(&path, "after\n").unwrap();
+    let mut corrupt = checkpoint;
+    corrupt.files[0].current.as_mut().unwrap().content = Some(b"corrupt\n".to_vec());
+    assert!(matches!(
+        handle.restore_checkpoint(corrupt).await,
+        Err(ChangeTrackerError::InvalidFact { .. })
+    ));
+    tracker.shutdown().await.unwrap();
+}
+
 #[test]
 fn start_without_a_tokio_runtime_returns_a_structured_error() {
     let dir = TempDir::new().unwrap();

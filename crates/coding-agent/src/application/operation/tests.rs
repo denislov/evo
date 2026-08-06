@@ -276,6 +276,32 @@ fn contract_table() -> Vec<(&'static str, CodingAgentOperation, ExpectedContract
                 has_root_evidence: false,
             },
         ),
+        (
+            "CreateRewindCheckpoint",
+            CodingAgentOperation::CreateRewindCheckpoint,
+            ExpectedContract {
+                kind: OperationKind::CreateRewindCheckpoint,
+                class: OperationClass::SessionWriteRoot,
+                dispatch: OperationDispatchMode::SyncMutable,
+                outcome_family: OperationOutcomeFamily::RewindCheckpointCreated,
+                terminal_policy: OperationTerminalPolicy::OutcomeAcknowledgement,
+                has_root_evidence: false,
+            },
+        ),
+        (
+            "Rewind",
+            CodingAgentOperation::Rewind {
+                checkpoint_id: "cp_test".into(),
+            },
+            ExpectedContract {
+                kind: OperationKind::Rewind,
+                class: OperationClass::RuntimeWrite,
+                dispatch: OperationDispatchMode::SyncMutable,
+                outcome_family: OperationOutcomeFamily::Rewound,
+                terminal_policy: OperationTerminalPolicy::OutcomeAcknowledgement,
+                has_root_evidence: false,
+            },
+        ),
     ]
 }
 
@@ -436,7 +462,7 @@ fn priority_cancellation_and_child_policy_follow_kind_and_dispatch() {
 /// contract review.
 #[test]
 fn every_operation_variant_is_covered() {
-    const PUBLIC_VARIANT_COUNT: usize = 17;
+    const PUBLIC_VARIANT_COUNT: usize = 19;
 
     let table = contract_table();
     assert_eq!(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::rewind::{self, RewindCheckpoint};
 
 impl SessionService {
     pub(crate) async fn set_tree_label(
@@ -228,6 +229,7 @@ impl SessionService {
             OperationKind::Prompt,
             snapshot.persisted_runtime_generation_ref(),
             snapshot.operation_id.clone(),
+            self.active_branch_id(),
         )
     }
 
@@ -243,6 +245,7 @@ impl SessionService {
             OperationKind::ManualCompaction,
             snapshot.persisted_runtime_generation_ref(),
             snapshot.operation_id.clone(),
+            self.active_branch_id(),
         )
     }
 
@@ -258,6 +261,7 @@ impl SessionService {
             OperationKind::BranchSummary,
             snapshot.persisted_runtime_generation_ref(),
             snapshot.operation_id.clone(),
+            self.active_branch_id(),
         )
     }
 
@@ -273,6 +277,7 @@ impl SessionService {
             OperationKind::SelfHealingEdit,
             snapshot.persisted_runtime_generation_ref(),
             snapshot.operation_id.clone(),
+            self.active_branch_id(),
         )
     }
 
@@ -362,6 +367,9 @@ impl SessionService {
             updated_at.clone(),
             data,
         );
+        if let Some(branch_id) = self.active_branch_id() {
+            event = event.with_branch_id(branch_id);
+        }
         event.operation_id = operation_id.clone();
         event.turn_id = turn_id;
         self.commit_writer_mutation(
@@ -371,6 +379,129 @@ impl SessionService {
         )
         .await?;
         Ok(())
+    }
+
+    pub(crate) fn active_branch_id(&self) -> Option<String> {
+        self.transaction_writer
+            .manifest_snapshot()
+            .ok()
+            .and_then(|manifest| manifest.active_branch_id)
+    }
+
+    pub(crate) fn load_rewind_checkpoint(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<RewindCheckpoint, CodingSessionError> {
+        rewind::load(&self.handle, checkpoint_id)
+    }
+
+    pub(crate) async fn create_rewind_checkpoint(
+        &mut self,
+        tracker: change_tracker::HunkTrackerCheckpoint,
+        workspace: workspace_runtime::api::WorkspaceSnapshot,
+        operation_id: &str,
+    ) -> Result<RewindCheckpoint, CodingSessionError> {
+        let branch_id = self
+            .active_branch_id()
+            .ok_or_else(|| CodingSessionError::Session {
+                message: "session has no active branch".into(),
+            })?;
+        let leaf_id = self
+            .transaction_writer
+            .manifest_snapshot()?
+            .active_leaf_id
+            .ok_or_else(|| CodingSessionError::Session {
+                message: "session has no committed active leaf for rewind checkpoint".into(),
+            })?;
+        let mut ids = SystemIdGenerator;
+        let active_branch_sequence = self.active_branch_session_sequence()?;
+        let checkpoint = RewindCheckpoint::create(
+            format!("cp_{}", ids.next_branch_id()),
+            self.session_id().to_owned(),
+            branch_id.clone(),
+            leaf_id.clone(),
+            active_branch_sequence,
+            tracker,
+            workspace,
+        )?;
+        rewind::save(&self.handle, &checkpoint)?;
+        let event = SessionEventEnvelope::new(
+            self.session_id().to_owned(),
+            ids.next_event_id(),
+            SystemClock.now_rfc3339(),
+            SessionEventData::RewindCheckpointCreated {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                leaf_id,
+                workspace_identity: self.session_id().to_owned(),
+                digest: checkpoint.digest.clone(),
+            },
+        )
+        .with_operation_id(operation_id.to_owned())
+        .with_branch_id(branch_id);
+        let result = self
+            .commit_writer_mutation(
+                vec![event],
+                ManifestPatch::new().updated_at(SystemClock.now_rfc3339()),
+                Some(operation_id.to_owned()),
+            )
+            .await;
+        if result.is_err() {
+            let _ = rewind::remove(&self.handle, &checkpoint.checkpoint_id);
+        }
+        result.map(|()| checkpoint)
+    }
+
+    pub(crate) async fn commit_rewind(
+        &mut self,
+        checkpoint: &RewindCheckpoint,
+        operation_id: &str,
+    ) -> Result<String, CodingSessionError> {
+        checkpoint.validate(self.session_id())?;
+        let source_branch_id =
+            self.active_branch_id()
+                .ok_or_else(|| CodingSessionError::Session {
+                    message: "session has no active branch".into(),
+                })?;
+        if checkpoint.branch_id != source_branch_id {
+            return Err(CodingSessionError::Input {
+                message: format!(
+                    "rewind checkpoint {} belongs to branch {}, active branch is {}",
+                    checkpoint.checkpoint_id, checkpoint.branch_id, source_branch_id
+                ),
+            });
+        }
+        if checkpoint.session_sequence > self.committed_session_sequence() {
+            return Err(CodingSessionError::Input {
+                message: "rewind checkpoint is ahead of the current session cursor".into(),
+            });
+        }
+        let mut ids = SystemIdGenerator;
+        let new_branch_id = ids.next_branch_id();
+        let updated_at = SystemClock.now_rfc3339();
+        let event = SessionEventEnvelope::new(
+            self.session_id().to_owned(),
+            ids.next_event_id(),
+            updated_at.clone(),
+            SessionEventData::SessionRewound {
+                source_branch_id: source_branch_id.clone(),
+                new_branch_id: new_branch_id.clone(),
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                target_leaf_id: checkpoint.leaf_id.clone(),
+                restored_session_sequence: checkpoint.session_sequence,
+            },
+        )
+        .with_operation_id(operation_id.to_owned())
+        .with_branch_id(source_branch_id);
+        self.commit_writer_mutation(
+            vec![event],
+            ManifestPatch::new()
+                .updated_at(updated_at)
+                .active_branch_id(Some(new_branch_id.clone()))
+                .active_leaf_id(Some(checkpoint.leaf_id.clone())),
+            Some(operation_id.to_owned()),
+        )
+        .await?;
+        Ok(new_branch_id)
     }
 }
 

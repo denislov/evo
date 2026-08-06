@@ -29,6 +29,13 @@ impl SessionService {
         &self.handle.manifest().session_id
     }
 
+    pub(crate) fn persisted_workspace_scope(&self) -> Option<PersistedWorkspaceScope> {
+        self.transaction_writer
+            .manifest_snapshot()
+            .ok()
+            .and_then(|manifest| manifest.workspace_scope)
+    }
+
     pub(crate) fn current_active_leaf_id(&self) -> Result<Option<String>, CodingSessionError> {
         Ok(self.transaction_writer.manifest_snapshot()?.active_leaf_id)
     }
@@ -66,11 +73,82 @@ impl SessionService {
     }
 
     pub(crate) fn replay(&self) -> Result<SessionReplay, CodingSessionError> {
-        self.store.replay_session(&self.handle)
+        let manifest = self.transaction_writer.manifest_snapshot()?;
+        match manifest.active_branch_id.as_deref() {
+            Some(branch_id) => self.store.replay_branch(&self.handle, branch_id),
+            None => self.store.replay_session(&self.handle),
+        }
+    }
+
+    pub(crate) fn replay_branch(
+        &self,
+        branch_id: &str,
+    ) -> Result<SessionReplay, CodingSessionError> {
+        self.store.replay_branch(&self.handle, branch_id)
+    }
+
+    pub(crate) fn startup_rewind_checkpoint(
+        &self,
+    ) -> Result<Option<crate::session::rewind::RewindCheckpoint>, CodingSessionError> {
+        let manifest = self.transaction_writer.manifest_snapshot()?;
+        let Some(active_branch_id) = manifest.active_branch_id.as_deref() else {
+            return Ok(None);
+        };
+        if active_branch_id == crate::session::manifest::root_branch_id(&manifest.session_id) {
+            return Ok(None);
+        }
+        let events = self.store.read_events(&self.handle)?;
+        let rewind = events.iter().rev().find_map(|event| match &event.data {
+            SessionEventData::SessionRewound {
+                source_branch_id,
+                new_branch_id,
+                checkpoint_id,
+                target_leaf_id,
+                restored_session_sequence,
+            } if new_branch_id == active_branch_id => Some((
+                event,
+                source_branch_id,
+                checkpoint_id,
+                target_leaf_id,
+                *restored_session_sequence,
+            )),
+            _ => None,
+        });
+        let Some((event, source_branch_id, checkpoint_id, target_leaf_id, restored_sequence)) =
+            rewind
+        else {
+            return Err(CodingSessionError::Session {
+                message: format!(
+                    "active rewind branch {active_branch_id} has no durable parent metadata"
+                ),
+            });
+        };
+        if event.branch_id.as_deref() != Some(source_branch_id.as_str()) {
+            return Err(CodingSessionError::Session {
+                message: "rewind metadata event is not owned by its source branch".into(),
+            });
+        }
+        let checkpoint = self.load_rewind_checkpoint(checkpoint_id)?;
+        if checkpoint.branch_id != *source_branch_id
+            || checkpoint.leaf_id != *target_leaf_id
+            || checkpoint.session_sequence != restored_sequence
+        {
+            return Err(CodingSessionError::Session {
+                message: format!(
+                    "rewind checkpoint {} does not match active branch metadata",
+                    checkpoint.checkpoint_id
+                ),
+            });
+        }
+        Ok(Some(checkpoint))
     }
 
     pub(crate) fn committed_session_sequence(&self) -> u64 {
         self.committed_session_sequence.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn active_branch_session_sequence(&self) -> Result<u64, CodingSessionError> {
+        Ok(self.replay()?.committed_through_session_sequence)
     }
 
     pub(crate) fn view(&self) -> Result<CodingAgentSessionView, CodingSessionError> {
@@ -98,6 +176,18 @@ impl SessionService {
             options,
             summary: self.summary()?,
             replay: self.replay()?,
+        })
+    }
+
+    pub(crate) fn session_export_branch(
+        &self,
+        branch_id: &str,
+        options: ExportOptions,
+    ) -> Result<SessionExport, CodingSessionError> {
+        Ok(SessionExport {
+            options,
+            summary: self.summary()?,
+            replay: self.replay_branch(branch_id)?,
         })
     }
 

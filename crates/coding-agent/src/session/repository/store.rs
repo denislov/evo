@@ -478,16 +478,34 @@ impl SessionLogStore {
         &self,
         handle: &SessionHandle,
     ) -> Result<SessionReplay, CodingSessionError> {
+        let events = self.read_events(handle)?;
+        let events = active_branch_events(&events, handle.manifest().active_branch_id.as_deref())?;
         let mut index = ReplayIndex::default();
-        self.visit_events(handle, |event| {
-            index.observe(&event);
-            Ok(())
-        })?;
+        for event in &events {
+            index.observe(event);
+        }
         let mut fold = ReplayFold::new(index);
-        self.visit_events(handle, |event| {
-            fold.observe(&event);
-            Ok(())
-        })?;
+        for event in &events {
+            fold.observe(event);
+        }
+        Ok(fold.finish())
+    }
+
+    pub(crate) fn replay_branch(
+        &self,
+        handle: &SessionHandle,
+        branch_id: &str,
+    ) -> Result<SessionReplay, CodingSessionError> {
+        let events = self.read_events(handle)?;
+        let events = branch_events(&events, branch_id)?;
+        let mut index = ReplayIndex::default();
+        for event in &events {
+            index.observe(event);
+        }
+        let mut fold = ReplayFold::new(index);
+        for event in &events {
+            fold.observe(event);
+        }
         Ok(fold.finish())
     }
 
@@ -635,6 +653,89 @@ impl SessionLogStore {
     }
 }
 
+fn active_branch_events(
+    events: &[SessionEventEnvelope],
+    active_branch_id: Option<&str>,
+) -> Result<Vec<SessionEventEnvelope>, CodingSessionError> {
+    let Some(active_branch_id) = active_branch_id else {
+        return Ok(events.to_vec());
+    };
+    branch_events(events, active_branch_id)
+}
+
+fn branch_events(
+    events: &[SessionEventEnvelope],
+    branch_id: &str,
+) -> Result<Vec<SessionEventEnvelope>, CodingSessionError> {
+    if branch_id.trim().is_empty() {
+        return Err(session_error("cannot replay an empty branch id"));
+    }
+    let mut parents = std::collections::HashMap::<String, (String, u64)>::new();
+    for event in events {
+        let SessionEventData::SessionRewound {
+            source_branch_id,
+            new_branch_id,
+            restored_session_sequence,
+            ..
+        } = &event.data
+        else {
+            continue;
+        };
+        if source_branch_id.trim().is_empty()
+            || new_branch_id.trim().is_empty()
+            || source_branch_id == new_branch_id
+            || *restored_session_sequence >= event.session_sequence.unwrap_or(0)
+        {
+            return Err(session_error("invalid session rewind branch metadata"));
+        }
+        if parents
+            .insert(
+                new_branch_id.clone(),
+                (source_branch_id.clone(), *restored_session_sequence),
+            )
+            .is_some()
+        {
+            return Err(session_error(format!(
+                "duplicate rewind parent for branch {new_branch_id}"
+            )));
+        }
+    }
+    if !parents.contains_key(branch_id)
+        && !events
+            .iter()
+            .any(|event| event.branch_id.as_deref() == Some(branch_id))
+    {
+        return Err(session_error(format!("unknown session branch {branch_id}")));
+    }
+    let mut cutoffs =
+        std::collections::HashMap::<String, u64>::from([(branch_id.to_owned(), u64::MAX)]);
+    let mut current = branch_id.to_owned();
+    let mut visited = std::collections::HashSet::new();
+    while let Some((source, cutoff)) = parents.get(&current).cloned() {
+        if !visited.insert(current.clone()) {
+            return Err(session_error("cycle in session rewind branch metadata"));
+        }
+        let entry = cutoffs.entry(source.clone()).or_insert(u64::MAX);
+        *entry = (*entry).min(cutoff);
+        current = source;
+    }
+    Ok(events
+        .iter()
+        .filter(|event| {
+            let Some(event_branch_id) = event.branch_id.as_deref() else {
+                return false;
+            };
+            let Some(cutoff) = cutoffs.get(event_branch_id) else {
+                return false;
+            };
+            event
+                .session_sequence
+                .is_some_and(|sequence| sequence <= *cutoff)
+        })
+        .cloned()
+        .collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CreateSessionOptions {
     pub(crate) session_id: String,
@@ -642,4 +743,90 @@ pub(crate) struct CreateSessionOptions {
     pub(crate) created_at: String,
     pub(crate) default_agent_profile_id: ProfileId,
     pub(crate) workspace_scope: PersistedWorkspaceScope,
+}
+
+#[cfg(test)]
+mod rewind_branch_tests {
+    use super::*;
+
+    fn event(sequence: u64, branch_id: &str, data: SessionEventData) -> SessionEventEnvelope {
+        SessionEventEnvelope::new(
+            "session_test",
+            format!("event_{sequence}"),
+            "2026-08-06T00:00:00Z",
+            data,
+        )
+        .with_session_sequence(sequence)
+        .with_branch_id(branch_id)
+    }
+
+    fn leaf(sequence: u64, branch_id: &str, label: &str) -> SessionEventEnvelope {
+        event(
+            sequence,
+            branch_id,
+            SessionEventData::ActiveLeafChanged {
+                leaf_id: label.into(),
+            },
+        )
+    }
+
+    fn rewind(sequence: u64, source: &str, target: &str, restored: u64) -> SessionEventEnvelope {
+        event(
+            sequence,
+            source,
+            SessionEventData::SessionRewound {
+                source_branch_id: source.into(),
+                new_branch_id: target.into(),
+                checkpoint_id: format!("cp_{target}"),
+                target_leaf_id: format!("leaf_{restored}"),
+                restored_session_sequence: restored,
+            },
+        )
+    }
+
+    fn sequences(events: &[SessionEventEnvelope]) -> Vec<u64> {
+        events
+            .iter()
+            .map(|event| event.session_sequence.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn active_rewind_branch_applies_recursive_source_cutoffs() {
+        let events = vec![
+            leaf(1, "root", "a"),
+            leaf(2, "root", "checkpoint-a"),
+            leaf(3, "root", "old-b"),
+            rewind(4, "root", "branch-b", 2),
+            leaf(5, "branch-b", "continued-b"),
+            leaf(6, "branch-b", "checkpoint-b"),
+            leaf(7, "branch-b", "old-c"),
+            rewind(8, "branch-b", "branch-c", 6),
+            leaf(9, "branch-c", "continued-c"),
+        ];
+
+        assert_eq!(
+            sequences(&branch_events(&events, "branch-b").unwrap()),
+            vec![1, 2, 5, 6, 7, 8]
+        );
+        assert_eq!(
+            sequences(&branch_events(&events, "branch-c").unwrap()),
+            vec![1, 2, 5, 6, 9]
+        );
+        assert_eq!(
+            sequences(&branch_events(&events, "root").unwrap()),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn malformed_or_unknown_branch_metadata_fails_closed() {
+        let duplicate = vec![
+            leaf(1, "root", "a"),
+            rewind(2, "root", "branch-b", 1),
+            rewind(3, "root", "branch-b", 1),
+        ];
+        assert!(branch_events(&duplicate, "branch-b").is_err());
+        assert!(branch_events(&duplicate[..1], "missing").is_err());
+    }
 }

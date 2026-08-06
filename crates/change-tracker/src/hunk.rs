@@ -14,6 +14,7 @@ use crate::{
 };
 
 mod actor;
+mod checkpoint;
 mod diff;
 mod observation;
 mod reconstruct;
@@ -28,6 +29,10 @@ use observation::{ObservedFile, normalize_relative, read_observed};
 use reconstruct::baseline_from_receipt;
 use state::{FileState, FileVersion};
 use validation::{validate_context, validate_options, validate_revision};
+
+pub use checkpoint::{
+    HunkCheckpointFile, HunkCheckpointIdentity, HunkCheckpointVersion, HunkTrackerCheckpoint,
+};
 
 #[derive(Debug, Clone)]
 pub struct HunkTrackerOptions {
@@ -363,6 +368,22 @@ impl HunkTrackerHandle {
         receiver.await.map_err(|_| ChangeTrackerError::Shutdown)?
     }
 
+    pub async fn checkpoint(&self) -> Result<HunkTrackerCheckpoint, ChangeTrackerError> {
+        let (reply, receiver) = oneshot::channel();
+        self.commands
+            .try_send(Command::Checkpoint { reply })
+            .map_err(map_send_error)?;
+        receiver.await.map_err(|_| ChangeTrackerError::Shutdown)?
+    }
+
+    pub async fn restore_checkpoint(
+        &self,
+        checkpoint: HunkTrackerCheckpoint,
+    ) -> Result<(), ChangeTrackerError> {
+        self.request(CommandKind::RestoreCheckpoint(checkpoint))
+            .await
+    }
+
     pub async fn accept_hunk(
         &self,
         path: impl Into<PathBuf>,
@@ -468,6 +489,9 @@ enum Command {
     Snapshot {
         reply: oneshot::Sender<Result<HunkTrackerSnapshot, ChangeTrackerError>>,
     },
+    Checkpoint {
+        reply: oneshot::Sender<Result<HunkTrackerCheckpoint, ChangeTrackerError>>,
+    },
     PrepareRejectHunk {
         path: PathBuf,
         expected_sequence: u64,
@@ -505,6 +529,7 @@ enum CommandKind {
         expected_revision: String,
         expected_target_fingerprint: String,
     },
+    RestoreCheckpoint(HunkTrackerCheckpoint),
     Shutdown,
 }
 
@@ -556,6 +581,13 @@ async fn run_actor(
             return;
         };
         match command {
+            Command::Checkpoint { reply } => {
+                let result = state.checkpoint();
+                if let Ok(checkpoint) = &result {
+                    publish_snapshot(&snapshots, checkpoint.snapshot());
+                }
+                let _ = reply.send(result);
+            }
             Command::Snapshot { reply } => {
                 let result = state.snapshot();
                 if let Ok(snapshot) = &result {
@@ -628,6 +660,9 @@ async fn run_actor(
                         expected_revision,
                         expected_target_fingerprint,
                     ),
+                    CommandKind::RestoreCheckpoint(checkpoint) => {
+                        state.restore_checkpoint(checkpoint)
+                    }
                     CommandKind::Shutdown => state.flush_all_events(),
                 };
                 if result.is_ok()

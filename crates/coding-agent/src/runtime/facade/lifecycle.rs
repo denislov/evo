@@ -29,6 +29,7 @@ impl CodingAgentSession {
             project_root,
             worktree_registry,
         )
+        .await
     }
 
     pub async fn open(options: CodingAgentSessionOptions) -> Result<Self, CodingAgentPublicError> {
@@ -57,6 +58,7 @@ impl CodingAgentSession {
             project_root,
             worktree_registry,
         )
+        .await
     }
 
     pub async fn open_or_create(
@@ -87,6 +89,7 @@ impl CodingAgentSession {
             project_root,
             worktree_registry,
         )
+        .await
     }
 
     pub async fn non_persistent(
@@ -183,7 +186,32 @@ impl CodingAgentSession {
         })
     }
 
-    fn from_services(
+    pub fn export_session_branch_html(
+        options: CodingAgentSessionOptions,
+        branch_id: impl AsRef<str>,
+        path: impl AsRef<Path>,
+    ) -> Result<PathBuf, CodingAgentPublicError> {
+        Self::export_session_branch_html_internal(options, branch_id, path)
+            .map_err(CodingAgentPublicError::from)
+    }
+
+    pub(crate) fn export_session_branch_html_internal(
+        options: CodingAgentSessionOptions,
+        branch_id: impl AsRef<str>,
+        path: impl AsRef<Path>,
+    ) -> Result<PathBuf, CodingSessionError> {
+        let session_service = SessionService::open(&options)?;
+        let mut context = session_service
+            .session_export_branch(branch_id.as_ref(), ExportOptions::html(path.as_ref()))?
+            .into_context();
+        let outcome =
+            crate::operations::export::runner::ExportRunner::new()?.run_typed(&mut context)?;
+        outcome.path.ok_or_else(|| CodingSessionError::Session {
+            message: "branch export completed without a written html path".into(),
+        })
+    }
+
+    async fn from_services(
         session_service: SessionService,
         profile_registry: ProfileRegistry,
         runtime_service: RuntimeService,
@@ -192,6 +220,7 @@ impl CodingAgentSession {
         worktree_registry: Arc<workspace_runtime::api::WorktreeRegistry>,
     ) -> Result<Self, CodingSessionError> {
         let mut session_service = session_service;
+        let startup_rewind = session_service.startup_rewind_checkpoint()?;
         let replay_state = replay_derived_owner_state(&mut session_service)?;
         let startup_outbox_records = session_service.take_startup_outbox_records();
         let snapshot_coordinator = SnapshotCoordinator::new();
@@ -202,6 +231,10 @@ impl CodingAgentSession {
             snapshot_coordinator.clone(),
             event_service.clone(),
         );
+        let review_workspace = review_workspace_for(
+            &project_root,
+            review_workspace_kind(&session_service, &project_root, &worktree_registry)?,
+        )?;
 
         let session = Self {
             runtime_host: crate::runtime::owners::RuntimeHost {
@@ -229,13 +262,23 @@ impl CodingAgentSession {
                 profile_registry,
                 authorization_service,
                 review_service: crate::services::review::ReviewService::new(
-                    project_root.clone(),
+                    review_workspace,
                     snapshot_coordinator.clone(),
                     event_service,
                 ),
                 project_root: crate::runtime::owners::ProjectRoot::new(project_root),
             },
         };
+        if let Some(checkpoint) = startup_rewind {
+            session
+                .runtime_host
+                .review_service
+                .restore_checkpoint(&crate::services::review::ReviewCheckpoint {
+                    tracker: checkpoint.tracker,
+                    workspace: checkpoint.workspace,
+                })
+                .await?;
+        }
         session.refresh_snapshot_projection()?;
         let opened_session_id = match &session.runtime_host.session_coordinator.persistence {
             SessionPersistence::Persistent(session_service) => {
@@ -272,6 +315,8 @@ impl CodingAgentSession {
             snapshot_coordinator.clone(),
             event_service.clone(),
         );
+        let review_workspace =
+            review_workspace_for(&project_root, workspace_runtime::api::WorkspaceKind::Source)?;
         let session = Self {
             runtime_host: crate::runtime::owners::RuntimeHost {
                 operation_supervisor: crate::runtime::owners::OperationSupervisor {
@@ -298,7 +343,7 @@ impl CodingAgentSession {
                 profile_registry,
                 authorization_service,
                 review_service: crate::services::review::ReviewService::new(
-                    project_root.clone(),
+                    review_workspace,
                     snapshot_coordinator.clone(),
                     event_service,
                 ),
@@ -307,6 +352,55 @@ impl CodingAgentSession {
         };
         session.refresh_snapshot_projection()?;
         Ok(session)
+    }
+}
+
+fn review_workspace_for(
+    project_root: &Path,
+    kind: workspace_runtime::api::WorkspaceKind,
+) -> Result<workspace_runtime::api::WorkspaceAccessHandle, CodingSessionError> {
+    let identity =
+        workspace_runtime::api::WorkspaceHandle::new(kind, project_root).map_err(|error| {
+            CodingSessionError::Resource {
+                message: format!("cannot construct managed review workspace: {error}"),
+            }
+        })?;
+    workspace_runtime::api::WorkspaceAccessHandle::open(identity, None, None).map_err(|error| {
+        CodingSessionError::Resource {
+            message: format!("cannot open managed review workspace: {error}"),
+        }
+    })
+}
+
+fn review_workspace_kind(
+    session_service: &SessionService,
+    project_root: &Path,
+    worktree_registry: &workspace_runtime::api::WorktreeRegistry,
+) -> Result<workspace_runtime::api::WorkspaceKind, CodingSessionError> {
+    if matches!(
+        session_service.persisted_workspace_scope(),
+        Some(crate::session::manifest::PersistedWorkspaceScope::Projectless { .. })
+    ) {
+        return Ok(workspace_runtime::api::WorkspaceKind::Projectless);
+    }
+    let canonical_root =
+        project_root
+            .canonicalize()
+            .map_err(|error| CodingSessionError::Resource {
+                message: format!(
+                    "cannot resolve review workspace root {}: {error}",
+                    project_root.display()
+                ),
+            })?;
+    let records = worktree_registry
+        .load_all()
+        .map_err(|error| CodingSessionError::Resource {
+            message: format!("cannot inspect managed worktree registry: {error}"),
+        })?;
+    if records.iter().any(|record| record.dest == canonical_root) {
+        Ok(workspace_runtime::api::WorkspaceKind::ManagedChild)
+    } else {
+        Ok(workspace_runtime::api::WorkspaceKind::Source)
     }
 }
 

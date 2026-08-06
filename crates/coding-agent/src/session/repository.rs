@@ -268,6 +268,11 @@ impl ManifestPatch {
         self
     }
 
+    pub(crate) fn active_branch_id(mut self, active_branch_id: Option<String>) -> Self {
+        self.active_branch_id = Some(active_branch_id);
+        self
+    }
+
     fn workspace_migration(mut self, scope: PersistedWorkspaceScope) -> Self {
         self.workspace_migration = Some(scope);
         self

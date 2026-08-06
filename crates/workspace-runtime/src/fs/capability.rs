@@ -877,6 +877,10 @@ impl FilesystemTarget {
     pub fn remove_file(&self) -> Result<(), String> {
         remove_bound_file(self)
     }
+
+    pub(crate) fn remove_vacant_created_parents(&self) -> Result<(), String> {
+        path::remove_vacant_created_parents(self)
+    }
 }
 
 #[cfg(test)]

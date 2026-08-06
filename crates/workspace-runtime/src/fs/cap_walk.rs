@@ -70,6 +70,17 @@ pub enum CapWalkRoot {
 }
 
 pub fn walk_target(target: &FilesystemTarget) -> Result<CapWalkRoot, String> {
+    walk_target_with_filters(target, true)
+}
+
+pub(crate) fn walk_target_unfiltered(target: &FilesystemTarget) -> Result<CapWalkRoot, String> {
+    walk_target_with_filters(target, false)
+}
+
+fn walk_target_with_filters(
+    target: &FilesystemTarget,
+    apply_workspace_filters: bool,
+) -> Result<CapWalkRoot, String> {
     if let Ok(directory) = target.opened_directory() {
         let mut entries = Vec::new();
         walk_directory(
@@ -79,6 +90,7 @@ pub fn walk_target(target: &FilesystemTarget) -> Result<CapWalkRoot, String> {
             0,
             &mut entries,
             &[],
+            apply_workspace_filters,
         )?;
         return Ok(CapWalkRoot::Directory(entries));
     }
@@ -102,6 +114,7 @@ fn walk_directory(
     depth: usize,
     entries: &mut Vec<CapWalkEntry>,
     inherited_ignores: &[Arc<Gitignore>],
+    apply_workspace_filters: bool,
 ) -> Result<(), String> {
     if depth > MAX_WALK_DEPTH {
         return Err(format!(
@@ -109,7 +122,7 @@ fn walk_directory(
         ));
     }
     let mut ignores = inherited_ignores.to_vec();
-    if let Some(ignore) = load_gitignore(&directory, prefix) {
+    if apply_workspace_filters && let Some(ignore) = load_gitignore(&directory, prefix) {
         ignores.push(Arc::new(ignore));
     }
     let discovered = {
@@ -128,7 +141,7 @@ fn walk_directory(
                 ));
             }
             let name = entry.file_name();
-            if matches!(name.to_str(), Some(".git" | "node_modules")) {
+            if name == ".git" || (apply_workspace_filters && name == "node_modules") {
                 continue;
             }
             let name_path = PathBuf::from(&name);
@@ -144,7 +157,9 @@ fn walk_directory(
             } else {
                 CapWalkEntryKind::Other
             };
-            if is_ignored(&ignores, &relative, kind == CapWalkEntryKind::Directory) {
+            if apply_workspace_filters
+                && is_ignored(&ignores, &relative, kind == CapWalkEntryKind::Directory)
+            {
                 continue;
             }
             discovered.push((relative, kind));
@@ -177,6 +192,7 @@ fn walk_directory(
                 depth + 1,
                 entries,
                 &ignores,
+                apply_workspace_filters,
             )?;
         }
     }

@@ -179,4 +179,15 @@ pub(crate) enum OperationOutcome {
         worktree_id: String,
     },
     MergeProposals(Vec<crate::events::CodingAgentMergeProposal>),
+    RewindCheckpointCreated {
+        checkpoint_id: String,
+        branch_id: String,
+        leaf_id: String,
+        session_sequence: u64,
+    },
+    Rewound {
+        checkpoint_id: String,
+        new_branch_id: String,
+        restored_session_sequence: u64,
+    },
 }

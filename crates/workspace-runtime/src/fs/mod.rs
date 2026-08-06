@@ -6,6 +6,7 @@ mod capability;
 mod edit_file;
 mod mutation;
 
+pub(crate) use cap_walk::walk_target_unfiltered;
 pub use cap_walk::{
     CapWalkEntry, CapWalkEntryKind, CapWalkRoot, MAX_WALK_DEPTH, MAX_WALK_ENTRIES, walk_target,
 };

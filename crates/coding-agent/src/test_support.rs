@@ -169,6 +169,10 @@ impl IdGenerator for SeqIdGenerator {
     fn next_leaf_id(&mut self) -> String {
         self.next_id("leaf")
     }
+
+    fn next_branch_id(&mut self) -> String {
+        self.next_id("branch")
+    }
 }
 
 /// Real session persistence rooted in a temporary directory, with one-shot

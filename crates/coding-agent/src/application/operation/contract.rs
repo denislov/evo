@@ -92,6 +92,12 @@ pub enum CodingAgentOperation {
     DiscardChildWorktree {
         worktree_id: String,
     },
+    /// Persist a rewind checkpoint at the current committed leaf and file state.
+    CreateRewindCheckpoint,
+    /// Restore a durable rewind checkpoint into a new session branch.
+    Rewind {
+        checkpoint_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -127,6 +133,16 @@ pub enum CodingAgentOperationOutcome {
         worktree_id: String,
     },
     MergeProposals(Vec<crate::events::CodingAgentMergeProposal>),
+    RewindCheckpointCreated {
+        checkpoint_id: String,
+        branch_id: String,
+        leaf_id: String,
+        session_sequence: u64,
+    },
+    Rewound {
+        checkpoint_id: String,
+        new_branch_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -385,7 +401,9 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::Export
         | OperationKind::ListMergeProposals
         | OperationKind::MergeChildWorktree
-        | OperationKind::DiscardChildWorktree => return None,
+        | OperationKind::DiscardChildWorktree
+        | OperationKind::CreateRewindCheckpoint
+        | OperationKind::Rewind => return None,
     };
     if !permitted.contains(&evidence) {
         return None;
@@ -410,6 +428,9 @@ pub(crate) fn product_terminal_operation(
         | OperationKind::ListMergeProposals
         | OperationKind::MergeChildWorktree
         | OperationKind::DiscardChildWorktree => {
+            unreachable!("non-terminal operation kind filtered above")
+        }
+        OperationKind::CreateRewindCheckpoint | OperationKind::Rewind => {
             unreachable!("non-terminal operation kind filtered above")
         }
     };
@@ -438,7 +459,9 @@ pub(crate) fn terminal_operation_kind(
         | OperationKind::Export
         | OperationKind::ListMergeProposals
         | OperationKind::MergeChildWorktree
-        | OperationKind::DiscardChildWorktree => None,
+        | OperationKind::DiscardChildWorktree
+        | OperationKind::CreateRewindCheckpoint
+        | OperationKind::Rewind => None,
     }
 }
 
@@ -477,7 +500,9 @@ fn recovery_terminal_operation_kind(
         | OperationKind::SwitchActiveLeaf
         | OperationKind::SetSessionTreeLabel
         | OperationKind::SetSessionName
-        | OperationKind::ListMergeProposals => return None,
+        | OperationKind::ListMergeProposals
+        | OperationKind::CreateRewindCheckpoint
+        | OperationKind::Rewind => return None,
         OperationKind::MergeChildWorktree => {
             CodingAgentProductEventTerminalOperationKind::MergeChildWorktree
         }
@@ -517,7 +542,9 @@ pub(crate) fn descriptor_for_child_kind(kind: OperationKind) -> Option<Operation
         | OperationKind::Export
         | OperationKind::ListMergeProposals
         | OperationKind::MergeChildWorktree
-        | OperationKind::DiscardChildWorktree => return None,
+        | OperationKind::DiscardChildWorktree
+        | OperationKind::CreateRewindCheckpoint
+        | OperationKind::Rewind => return None,
     };
     contract.descriptor().for_child()
 }
@@ -677,6 +704,22 @@ impl OperationContract {
         OperationTerminalPolicy::OutcomeAcknowledgement,
         &[],
     );
+    const REWIND: Self = Self::new(
+        OperationKind::Rewind,
+        OperationClass::RuntimeWrite,
+        OperationDispatchMode::SyncMutable,
+        OperationOutcomeFamily::Rewound,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
+    const CREATE_REWIND_CHECKPOINT: Self = Self::new(
+        OperationKind::CreateRewindCheckpoint,
+        OperationClass::SessionWriteRoot,
+        OperationDispatchMode::SyncMutable,
+        OperationOutcomeFamily::RewindCheckpointCreated,
+        OperationTerminalPolicy::OutcomeAcknowledgement,
+        &[],
+    );
 
     fn descriptor(self) -> OperationDescriptor {
         let Self {
@@ -773,6 +816,8 @@ impl CodingAgentOperation {
             Self::ListMergeProposals => OperationContract::LIST_MERGE_PROPOSALS,
             Self::MergeChildWorktree { .. } => OperationContract::MERGE_CHILD_WORKTREE,
             Self::DiscardChildWorktree { .. } => OperationContract::DISCARD_CHILD_WORKTREE,
+            Self::CreateRewindCheckpoint => OperationContract::CREATE_REWIND_CHECKPOINT,
+            Self::Rewind { .. } => OperationContract::REWIND,
         }
     }
 
@@ -821,7 +866,9 @@ impl CodingAgentOperation {
             | Self::ExportCurrentHtml(_)
             | Self::ListMergeProposals
             | Self::MergeChildWorktree { .. }
-            | Self::DiscardChildWorktree { .. } => None,
+            | Self::DiscardChildWorktree { .. }
+            | Self::CreateRewindCheckpoint
+            | Self::Rewind { .. } => None,
         }
     }
 
@@ -852,7 +899,9 @@ impl CodingAgentOperation {
             | Self::ExportCurrentHtml(_)
             | Self::ListMergeProposals
             | Self::MergeChildWorktree { .. }
-            | Self::DiscardChildWorktree { .. } => None,
+            | Self::DiscardChildWorktree { .. }
+            | Self::CreateRewindCheckpoint
+            | Self::Rewind { .. } => None,
         }
     }
 

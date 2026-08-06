@@ -1,6 +1,52 @@
 use super::*;
 
 impl SnapshotCoordinator {
+    pub(crate) fn reset_after_rewind(
+        &self,
+        restored_session_sequence: u64,
+    ) -> Result<CapabilityGeneration, CodingSessionError> {
+        let _transition = self.capability_transition_guard()?;
+        let mut prompt_control = self
+            .prompt_control
+            .lock_resource("prompt control binding")?;
+        let mut cancellations = self
+            .operation_cancellations
+            .lock_resource("operation cancellation bindings")?;
+        let mut state = self.lock_state()?;
+        let next = state.capability_generation.next()?;
+        state.capability_generation = next;
+        state.event_stream_id = crate::platform::time::new_product_event_stream_id();
+        state.next_event_sequence = 1;
+        state.committed_session_sequence = restored_session_sequence;
+        state.retained_product_events.clear();
+        state.dropped_before = None;
+        state.operation_event_contexts.clear();
+        state.pending_authorizations.clear();
+        state.published_outbox_record_ids.clear();
+        state.shutdown_drain_boundary = None;
+        state.shutdown_drain_eligibility.clear();
+        state.context_projection = UiContextProjection::default();
+        state.clients.clear();
+        state.recovery_revision = state.recovery_revision.saturating_add(1);
+        state.lifecycle_epoch = state.lifecycle_epoch.saturating_add(1);
+        let lifecycle_epoch = state.lifecycle_epoch;
+        if let Some(projection) = state.projection.as_mut() {
+            projection.revision = projection.revision.checked_add(1).ok_or_else(|| {
+                CodingSessionError::UnsupportedCapability {
+                    capability: "snapshot projection revision is exhausted".into(),
+                }
+            })?;
+            projection.capability_generation = next;
+        }
+        *prompt_control = None;
+        cancellations.clear();
+        drop(state);
+        drop(cancellations);
+        drop(prompt_control);
+        self.lifecycle_sender.send_replace(lifecycle_epoch);
+        Ok(next)
+    }
+
     pub(crate) fn current_capability_generation(
         &self,
     ) -> Result<CapabilityGeneration, CodingSessionError> {

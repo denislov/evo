@@ -276,6 +276,7 @@ where
     clock: C,
     operation_id: String,
     turn_id: String,
+    branch_id: Option<String>,
     pending_events: Vec<SessionEventEnvelope>,
     committed_session_sequence: Option<u64>,
     open_messages: HashSet<String>,
@@ -289,6 +290,7 @@ where
     G: IdGenerator,
     C: Clock,
 {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn begin_admitted_with_runtime_generation(
         writer: SessionTransactionWriter,
         session_id: String,
@@ -297,6 +299,7 @@ where
         operation: OperationKind,
         runtime_generation: PersistedRuntimeGenerationRef,
         operation_id: String,
+        branch_id: Option<String>,
     ) -> Self {
         let turn_id = ids.next_turn_id();
         let mut transaction = Self {
@@ -306,6 +309,7 @@ where
             clock,
             operation_id,
             turn_id,
+            branch_id,
             pending_events: Vec::new(),
             committed_session_sequence: None,
             open_messages: HashSet::new(),
@@ -739,7 +743,10 @@ where
         )
         .with_operation_id(self.operation_id.clone())
         .with_turn_id(self.turn_id.clone());
-        self.pending_events.push(event);
+        self.pending_events.push(match &self.branch_id {
+            Some(branch_id) => event.with_branch_id(branch_id.clone()),
+            None => event,
+        });
     }
 
     fn outbox_record(

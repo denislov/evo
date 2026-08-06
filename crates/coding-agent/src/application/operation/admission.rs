@@ -55,7 +55,9 @@ impl CodingAgentSession {
             | CodingAgentOperation::ExportCurrentHtml(_)
             | CodingAgentOperation::ListMergeProposals
             | CodingAgentOperation::MergeChildWorktree { .. }
-            | CodingAgentOperation::DiscardChildWorktree { .. } => {}
+            | CodingAgentOperation::DiscardChildWorktree { .. }
+            | CodingAgentOperation::CreateRewindCheckpoint
+            | CodingAgentOperation::Rewind { .. } => {}
         }
         Ok(())
     }

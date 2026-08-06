@@ -15,6 +15,8 @@ pub(crate) enum OperationKind {
     ListMergeProposals,
     MergeChildWorktree,
     DiscardChildWorktree,
+    CreateRewindCheckpoint,
+    Rewind,
 }
 
 impl OperationKind {
@@ -35,6 +37,8 @@ impl OperationKind {
             Self::ListMergeProposals => "list_merge_proposals",
             Self::MergeChildWorktree => "merge_child_worktree",
             Self::DiscardChildWorktree => "discard_child_worktree",
+            Self::CreateRewindCheckpoint => "create_rewind_checkpoint",
+            Self::Rewind => "rewind",
         }
     }
 
@@ -55,6 +59,8 @@ impl OperationKind {
             "list_merge_proposals" => Self::ListMergeProposals,
             "merge_child_worktree" => Self::MergeChildWorktree,
             "discard_child_worktree" => Self::DiscardChildWorktree,
+            "create_rewind_checkpoint" => Self::CreateRewindCheckpoint,
+            "rewind" => Self::Rewind,
             _ => return None,
         })
     }
@@ -112,6 +118,8 @@ pub(crate) enum OperationOutcomeFamily {
     MergeApplied,
     WorktreeDiscarded,
     MergeProposals,
+    RewindCheckpointCreated,
+    Rewound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

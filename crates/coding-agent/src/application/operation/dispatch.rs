@@ -94,6 +94,20 @@ impl CodingAgentSession {
         if let Some(guard) = submission.as_mut() {
             guard.finish(&decision, &commit_result)?;
         }
+        if let Ok(OperationOutcome::Rewound {
+            restored_session_sequence,
+            ..
+        }) = &result
+        {
+            self.runtime_host
+                .authorization_service
+                .cancel_all("tool authorization invalidated by session rewind")?;
+            self.runtime_host
+                .client_projection
+                .snapshots
+                .reset_after_rewind(*restored_session_sequence)?;
+            self.refresh_snapshot_projection()?;
+        }
         self.schedule_session_naming_after_prompt(session_naming_seed, &result);
         result
     }
@@ -285,6 +299,114 @@ impl CodingAgentSession {
                     unreachable!("session-name writer command returns its typed reply")
                 };
                 Ok(OperationOutcome::SessionNameChanged { name, updated_at })
+            }
+            CodingAgentOperation::CreateRewindCheckpoint => {
+                SessionWriteCapability::require(
+                    operation_permit
+                        .capability_snapshot()
+                        .session_write
+                        .as_ref(),
+                )?;
+                let review = self.runtime_host.review_service.checkpoint().await?;
+                let reply = self
+                    .runtime_host
+                    .session_coordinator
+                    .execute_writer_command(
+                        crate::application::session_coordinator::SessionWriterCommand::create_rewind_checkpoint(
+                            operation_permit.execution().operation_id.clone(),
+                            operation_permit.execution().capability_generation,
+                            review.tracker,
+                            review.workspace,
+                        ),
+                    )
+                    .await?;
+                let crate::application::session_coordinator::SessionWriterReply::RewindCheckpointCreated {
+                    checkpoint,
+                } = reply
+                else {
+                    unreachable!("rewind checkpoint writer command returns its typed reply")
+                };
+                Ok(OperationOutcome::RewindCheckpointCreated {
+                    checkpoint_id: checkpoint.checkpoint_id,
+                    branch_id: checkpoint.branch_id,
+                    leaf_id: checkpoint.leaf_id,
+                    session_sequence: checkpoint.session_sequence,
+                })
+            }
+            CodingAgentOperation::Rewind { checkpoint_id } => {
+                SessionWriteCapability::require(
+                    operation_permit
+                        .capability_snapshot()
+                        .session_write
+                        .as_ref(),
+                )?;
+                let checkpoint = match &self.runtime_host.session_coordinator.persistence {
+                    SessionPersistence::Persistent(session_service) => {
+                        session_service.load_rewind_checkpoint(&checkpoint_id)?
+                    }
+                    SessionPersistence::NonPersistent(_) => {
+                        return Err(CodingSessionError::UnsupportedCapability {
+                            capability: "rewind requires a persistent Rust-native session".into(),
+                        });
+                    }
+                };
+                if checkpoint.checkpoint_id != checkpoint_id {
+                    return Err(CodingSessionError::Input {
+                        message: "rewind checkpoint identity does not match the request".into(),
+                    });
+                }
+                let current = self.runtime_host.review_service.checkpoint().await?;
+                let target = crate::services::review::ReviewCheckpoint {
+                    tracker: checkpoint.tracker.clone(),
+                    workspace: checkpoint.workspace.clone(),
+                };
+                let rewind_operation_id = operation_permit.execution().operation_id.clone();
+                self.runtime_host
+                    .review_service
+                    .restore_workspace_and_tracker(&current, &target, &rewind_operation_id)
+                    .await?;
+                let restored_session_sequence = checkpoint.session_sequence;
+                let command =
+                    crate::application::session_coordinator::SessionWriterCommand::commit_rewind(
+                        operation_permit.execution().operation_id.clone(),
+                        operation_permit.execution().capability_generation,
+                        checkpoint.clone(),
+                    );
+                let reply = match self
+                    .runtime_host
+                    .session_coordinator
+                    .execute_writer_command(command)
+                    .await
+                {
+                    Ok(reply) => reply,
+                    Err(commit_error) => {
+                        if let Err(rollback_error) = self
+                            .runtime_host
+                            .review_service
+                            .restore_workspace_and_tracker(&target, &current, &rewind_operation_id)
+                            .await
+                        {
+                            return Err(CodingSessionError::PartialCommit {
+                                operation_id: operation_permit.execution().operation_id.clone(),
+                                message: format!(
+                                    "rewind session commit failed: {commit_error}; workspace rollback failed: {rollback_error}"
+                                ),
+                            });
+                        }
+                        return Err(commit_error);
+                    }
+                };
+                let crate::application::session_coordinator::SessionWriterReply::Rewound {
+                    new_branch_id,
+                } = reply
+                else {
+                    unreachable!("rewind writer command returns its typed reply")
+                };
+                Ok(OperationOutcome::Rewound {
+                    checkpoint_id,
+                    new_branch_id,
+                    restored_session_sequence,
+                })
             }
             _ => unreachable!("descriptor routed a non-mutable operation to the mutable handler"),
         }

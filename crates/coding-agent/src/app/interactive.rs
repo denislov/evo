@@ -455,6 +455,14 @@ impl CodingAgentApplicationStartup {
             .fork_session_operation(target_leaf_id)
     }
 
+    pub fn rewind_operation(&self, checkpoint_id: impl Into<String>) -> CodingAgentOperation {
+        self.operation_factory.rewind_operation(checkpoint_id)
+    }
+
+    pub fn create_rewind_checkpoint_operation(&self) -> CodingAgentOperation {
+        self.operation_factory.create_rewind_checkpoint_operation()
+    }
+
     pub fn model_repair_options(&self, max_attempts: usize) -> SelfHealingEditModelRepairOptions {
         self.operation_factory
             .model_repair_options(self.thinking_level, max_attempts)

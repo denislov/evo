@@ -5,6 +5,7 @@ impl SessionService {
         store: SessionLogStore,
         handle: SessionHandle,
     ) -> Result<Self, CodingSessionError> {
+        crate::session::rewind::cleanup_orphans(&handle)?;
         // The writer lease repairs only a torn final frame before any durable
         // records are decoded, published, or redelivered after restart.
         let transaction_writer = SessionTransactionWriter::new(store.clone(), handle.clone())?;
@@ -550,6 +551,13 @@ impl SessionService {
                 cwd,
                 workspace_scope: Some(persisted_workspace_scope),
             },
+        )
+        .with_branch_id(
+            handle
+                .manifest()
+                .active_branch_id
+                .clone()
+                .expect("new session manifest always has a root branch"),
         );
         let service = Self::from_handle(store, handle)?;
         let receipt = match service
