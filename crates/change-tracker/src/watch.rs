@@ -393,6 +393,7 @@ impl Worker {
     fn handle_event(&mut self, event: notify::Event) {
         if let EventKind::Modify(ModifyKind::Name(RenameMode::Both)) = event.kind
             && let [from, to] = event.paths.as_slice()
+            && from != to
         {
             self.handle_both(from, to);
             return;
@@ -409,6 +410,11 @@ impl Worker {
         let Some(change) = classify_change(&event) else {
             return;
         };
+        let is_fragmented_rename = matches!(change, Change::RenameFrom(_) | Change::RenameTo(_));
+        if event.paths.is_empty() || (is_fragmented_rename && event.paths.len() != 1) {
+            self.lost.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let paths = event.paths.clone();
         for path in &paths {
             if let Some((root, rel)) = self.git_path(path) {
@@ -694,7 +700,11 @@ impl Worker {
         is_directory: Option<bool>,
     ) -> Option<(PathBuf, PathBuf)> {
         let (root, rel) = self.locate(path)?;
-        if rel.starts_with(".git") || self.ignored(&root, &rel, is_directory) {
+        if rel
+            .components()
+            .any(|component| component.as_os_str() == ".git")
+            || self.ignored(&root, &rel, is_directory)
+        {
             return None;
         }
         Some((root, rel))
@@ -824,7 +834,7 @@ fn classify_change(event: &notify::Event) -> Option<Change> {
 fn resolve_gitdir(root: &Path) -> Option<PathBuf> {
     let git = root.join(".git");
     if git.is_dir() {
-        return Some(git);
+        return std::fs::canonicalize(git).ok();
     }
     if !git.is_file() {
         return None;
@@ -832,11 +842,12 @@ fn resolve_gitdir(root: &Path) -> Option<PathBuf> {
     let contents = std::fs::read_to_string(&git).ok()?;
     let line = contents.lines().next()?.strip_prefix("gitdir:")?.trim();
     let path = Path::new(line);
-    if path.is_absolute() {
-        Some(path.to_path_buf())
+    let path = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        Some(root.join(path))
-    }
+        root.join(path)
+    };
+    std::fs::canonicalize(path).ok()
 }
 
 #[cfg(test)]

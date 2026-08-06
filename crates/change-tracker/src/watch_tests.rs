@@ -630,6 +630,145 @@ fn rename_any_with_two_paths_requires_reconciliation() {
 }
 
 #[test]
+fn malformed_recognized_events_require_reconciliation() {
+    use notify::event::{CreateKind, ModifyKind, RenameMode};
+
+    let root = tempfile::tempdir().expect("root");
+    let (service, mut events) = start(root.path());
+    for event in [
+        notify::Event::new(notify::EventKind::Create(CreateKind::File)),
+        notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::From,
+        ))),
+    ] {
+        service
+            .command
+            .lock()
+            .expect("command channel")
+            .try_send(Incoming::Event(event))
+            .expect("raw event accepted");
+    }
+
+    let seen = recv_until(&mut events, Duration::from_secs(1), |event| {
+        matches!(event, FsEvent::WatchGap { lost: 2 })
+    });
+    assert!(workspace_events(&seen).is_empty());
+}
+
+#[test]
+fn fragmented_rename_with_multiple_paths_requires_reconciliation() {
+    use notify::event::{ModifyKind, RenameMode};
+
+    let root = tempfile::tempdir().expect("root");
+    let (service, mut events) = start(root.path());
+    let event = notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+        RenameMode::From,
+    )))
+    .add_path(root.path().join("old.txt"))
+    .add_path(root.path().join("also-old.txt"))
+    .set_tracker(11);
+    service
+        .command
+        .lock()
+        .expect("command channel")
+        .try_send(Incoming::Event(event))
+        .expect("raw event accepted");
+
+    let seen = recv_until(&mut events, Duration::from_secs(1), |event| {
+        matches!(event, FsEvent::WatchGap { lost: 1 })
+    });
+    assert!(workspace_events(&seen).is_empty());
+}
+
+#[test]
+fn rename_from_and_to_the_same_path_requires_reconciliation() {
+    use notify::event::{ModifyKind, RenameMode};
+
+    let root = tempfile::tempdir().expect("root");
+    let (service, mut events) = start(root.path());
+    let path = root.path().join("same.txt");
+    let event = notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+        RenameMode::Both,
+    )))
+    .add_path(path.clone())
+    .add_path(path);
+    service
+        .command
+        .lock()
+        .expect("command channel")
+        .try_send(Incoming::Event(event))
+        .expect("raw event accepted");
+
+    let seen = recv_until(&mut events, Duration::from_secs(1), |event| {
+        matches!(event, FsEvent::WatchGap { lost: 1 })
+    });
+    assert!(workspace_events(&seen).is_empty());
+}
+
+#[test]
+fn nested_git_metadata_never_enters_workspace_stream() {
+    use notify::event::{DataChange, ModifyKind};
+
+    let root = tempfile::tempdir().expect("root");
+    std::fs::create_dir_all(root.path().join("nested/.git")).expect("nested git dir");
+    let (service, mut events) = start(root.path());
+    let event = notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(
+        DataChange::Content,
+    )))
+    .add_path(root.path().join("nested/.git/HEAD"));
+    service
+        .command
+        .lock()
+        .expect("command channel")
+        .try_send(Incoming::Event(event))
+        .expect("raw event accepted");
+
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(workspace_events(&collect_quiet(&mut events, Duration::from_millis(100))).is_empty());
+}
+
+#[test]
+fn linked_gitdir_paths_are_canonicalized_before_matching_events() {
+    use notify::event::CreateKind;
+
+    let root = tempfile::tempdir().expect("root");
+    let external = tempfile::tempdir().expect("external gitdir");
+    std::fs::create_dir(external.path().join(".git")).expect("external .git");
+    std::fs::write(
+        root.path().join(".git"),
+        format!(
+            "gitdir: ../{}/.git\n",
+            external.path().file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .expect("gitdir file");
+    let expected = std::fs::canonicalize(external.path().join(".git")).expect("canonical gitdir");
+    assert_eq!(super::resolve_gitdir(root.path()), Some(expected.clone()));
+
+    let handle = workspace_runtime::api::WorkspaceHandle::new(
+        workspace_runtime::api::WorkspaceKind::ManagedChild,
+        root.path(),
+    )
+    .expect("workspace handle");
+    let service = FsEventService::start(&handle, WatchOptions::default()).expect("service starts");
+    let mut events = service.events();
+    let event = notify::Event::new(notify::EventKind::Create(CreateKind::File))
+        .add_path(expected.join("HEAD"));
+    service
+        .command
+        .lock()
+        .expect("command channel")
+        .try_send(Incoming::Event(event))
+        .expect("raw event accepted");
+    let root = std::fs::canonicalize(root.path()).expect("canonical root");
+    recv_until(
+        &mut events,
+        Duration::from_secs(1),
+        |event| matches!(event, FsEvent::Git(git) if git.root == root && git.kind == GitMetaEvent::HeadMoved),
+    );
+}
+
+#[test]
 fn ambiguous_single_path_rename_requires_reconciliation() {
     use notify::event::{ModifyKind, RenameMode};
 

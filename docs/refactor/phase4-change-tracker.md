@@ -70,18 +70,24 @@
 
 ```text
 cargo test --locked -p change-tracker --all-features
-53 passed，其中 ARC-400 watcher 31 项（create/modify/remove、目录类型事实、Both rename 配对、
+60 passed，其中 ARC-400 watcher 36 项（create/modify/remove、目录类型事实、Both rename 配对、
 ambiguous rename fail-closed、连续 rename、rename 后目标变化、新建后 rename、
 跨 root/ignore 边界降级、bounded debounce、dynamic directory、gitignore
 目录/rename 过滤、Git add/commit/ref/lock、普通 repo 与 linked worktree 的 root
-归属、.git 不泄漏、多 root/嵌套 root、root 幂等、budget fail-closed、WatchGap、
-启动订阅窗口、sequence 单调、非法配置、shutdown 幂等与即时唤醒）
+归属、.git 不泄漏（含嵌套 `.git`）、相对 gitdir canonical ownership、多 root/嵌套
+root、root 幂等、budget fail-closed、malformed event WatchGap、启动订阅窗口、
+sequence 单调、非法配置、shutdown 幂等与即时唤醒）
 
-cargo test --locked --workspace --all-features
-全部通过
+cargo test --locked -p workspace-runtime --all-features
+100 passed（97 unit/doc tests + 3 API contract tests）
 
-bash scripts/gate.sh
-architecture gate 必须保持 execution_debts=0
+scripts/architecture-gate.sh
+architecture_gate rust_files=632 dependency_edges=17 oversized_debts=32 execution_debts=0
+
+本次 workspace 全量复验已执行；Desktop 的 `desktop-runtime` 测试线程发生 stack
+overflow，失败点不在 ARC-400 或 `change-tracker`。`scripts/release-api-snapshots.sh`
+另被既有 `agent-core` API 测试的 `CARGO_MANIFEST_DIR` 路径解析失败阻断；两项均登记为
+后续全仓 Gate 问题，不作为 ARC-400 语义通过的替代证据。
 ```
 
 ## 后续
