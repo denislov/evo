@@ -128,3 +128,42 @@ Local modifications:
   - 新增 `mcp_search`/`mcp_use` meta tools（Grok 无此概念，全部工具直注册）
   - tools/list_changed 热更新 + `tools_version` 订阅（Grok 仅 ACP 推送）
 Sync policy: 不跟随上游（一次性适配）；ACP 与 HTTP SSE 若后续实现需单独登记。
+
+---
+
+## ARC-800 `code-intelligence` 抽取（2026-08-07）
+
+Status: adapted（小步改写 + 重新设计，未整文件复制；参考文件均标注 `Adapted from xai-codebase-graph` 来源注释）
+Upstream repository: https://github.com/bytecodealliance/xai-grok（vendored at `third-party/grok-build`）
+Upstream revision: `d6937fe255dce4133c3d000a50f9cb94de12f06f`
+Source paths: `third-party/grok-build/crates/codegen/xai-codebase-graph/src/`
+  - `scope_graph/graph.rs`（前 120 行：`QueryVersion` —— Legacy 强制重建 +
+    `Version(u64)` 比对；移植为 `ParserVersion` 并扩展为三维 identity）
+  - `manager/cache.rs`（106 行：缓存文件 + 格式检测/错误分类思路；Evo 改为
+    JSON + 长度前置头 + 原子写，legacy bincode 标记改为结构化错误变体）
+  - `types/mod.rs`（`FileMeta`：size + mtime 秒/纳秒的 staleness 检测；
+    移植为 `CachedFileEntry`）
+  - `languages/mod.rs` + `languages/types.rs`（registry 双索引查询结构 +
+    `TSLanguageConfig` 形状 + `compute_query_hash` 排序哈希思路；Evo 骨架
+    去掉 tree-sitter 依赖，grammar/query 字段留给 ARC-810）
+  - `index_manager.rs`（前 100 行：channel-based actor 思想；Evo 的服务
+    生命周期为自研，参照 extension-host 的 handle/task/shutdown/panic 模式）
+License/notices: Apache-2.0（`third-party/grok-build/THIRD-PARTY-NOTICES`）
+Destination paths: `crates/code-intelligence/src/{lib,api,error,identity,cache,budget,languages,service}.rs`、`crates/code-intelligence/src/{identity,cache,budget,languages,service}_tests.rs`
+Tests carried over: 无直接复制；按 Evo 语义重写 —— identity 三要素 mismatch、
+fault injection（截断/垃圾 magic/坏 JSON/未知 schema）、crash-reopen 恢复、
+预算边界（文件数/字节/并发/时长）、生命周期 transition（start/stop/
+shutdown 幂等/join 拒绝）、panic fail-closed、round-trip golden
+Local modifications:
+  - identity 三维：Grok 只有 QueryVersion；Evo 扩展 workspace（复用
+    workspace-runtime `WorkspaceId`）+ revision + parser-version，逐要素
+    mismatch 报告
+  - 缓存格式：Grok bincode + `SGIX` magic + legacy 变体；Evo JSON +
+    长度前置头 + 原子 rename，损坏/格式/identity 均为结构化错误
+  - 服务生命周期：Grok IndexManager 无 start/shutdown/join；Evo 参照
+    extension-host 自研（handle/task/watch/panic fail-closed/队列 cancel）
+  - 预算四维（文件数/总字节/解析时长/并发）：Grok 无预算概念
+  - 语言注册表：Evo 骨架无 tree-sitter；`query_hash` 基于 id/扩展名，
+    ARC-810 切换为 query 文本哈希
+Sync policy: 不跟随上游（一次性适配）；tree-sitter grammar 与增量 reindex
+若后续移植需单独登记。

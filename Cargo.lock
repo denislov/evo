@@ -1211,6 +1211,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-intelligence"
+version = "0.7.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "workspace-runtime",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

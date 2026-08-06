@@ -15,6 +15,7 @@ coding-agent	extension-host
 coding-agent	tool-contract
 coding-agent	tool-runtime
 coding-agent	workspace-runtime
+code-intelligence	workspace-runtime
 desktop	coding-agent
 extension-host	tool-contract
 extension-host	tool-runtime
