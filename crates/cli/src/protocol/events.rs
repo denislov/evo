@@ -941,6 +941,7 @@ impl CodingProtocolEventAdapter {
                 .into(),
                 reason: reason.clone(),
             }],
+            CodingAgentProductEventKind::BackgroundTask(_) => Vec::new(),
         }
     }
 

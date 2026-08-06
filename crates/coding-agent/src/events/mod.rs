@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod agent;
+pub(crate) mod background_task;
 pub(crate) mod capability;
 pub(crate) mod delegation;
 pub(crate) mod diagnostic;
@@ -58,6 +59,7 @@ pub enum CodingAgentProductEventFamily {
     Diagnostic,
     Capability,
     Review,
+    BackgroundTask,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -84,6 +86,7 @@ impl CodingAgentProductEventFamily {
             Self::Diagnostic => "diagnostic",
             Self::Capability => "capability",
             Self::Review => "review",
+            Self::BackgroundTask => "background_task",
         }
     }
 }
@@ -475,6 +478,35 @@ pub enum CodingAgentRuntimeProductEvent {
     ShutDown,
 }
 
+/// Background task lifecycle events emitted while the owning session lives.
+/// Output bytes are never embedded; consumers read them through the cursor
+/// API. `dropped_bytes` on completion reports the explicit output gap so a
+/// truncated spool is never mistaken for the complete stream.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CodingAgentBackgroundTaskProductEvent {
+    Started {
+        task_id: String,
+        owner: String,
+    },
+    Completed {
+        task_id: String,
+        exit_code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dropped_bytes: Option<u64>,
+    },
+    Cancelled {
+        task_id: String,
+    },
+    TimedOut {
+        task_id: String,
+    },
+    Failed {
+        task_id: String,
+        message: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CodingAgentDelegationEventContext {
     pub operation_id: String,
@@ -694,6 +726,7 @@ pub enum CodingAgentProductEventKind {
     Diagnostic(CodingAgentDiagnosticProductEvent),
     Capability(CodingAgentCapabilityProductEvent),
     Review(CodingAgentReviewProductEvent),
+    BackgroundTask(CodingAgentBackgroundTaskProductEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

@@ -774,4 +774,11 @@ impl EventService {
             |_, _| None,
         )
     }
+
+    pub(crate) fn emit_background_task(
+        &self,
+        event: crate::events::background_task::BackgroundTaskEvent,
+    ) -> Result<ProductEvent, CodingSessionError> {
+        self.publish_without_root_terminal(event.into_product_draft())
+    }
 }

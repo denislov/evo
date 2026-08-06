@@ -13,7 +13,7 @@ production	900	1470	Phase 9	crates/cli/src/interactive/prompt_task.rs
 production	900	1342	Phase 9	crates/desktop/src/ui/conversation/model.rs
 production	900	1302	Phase 9	crates/cli/src/interactive/transcript.rs
 production	900	1273	Phase 9	crates/cli/src/rpc/prompt.rs
-production	900	1255	Phase 9	crates/cli/src/protocol/events.rs
+production	900	1256	Phase 9	crates/cli/src/protocol/events.rs
 production	900	1243	Phase 9	crates/tui/src/component/markdown.rs
 production	900	1205	Phase 9	crates/cli/src/protocol/types.rs
 production	900	1199	Phase 5	crates/agent-core/src/agent/turn/nodes.rs
@@ -33,4 +33,4 @@ test	1200	1489	Phase 9	crates/desktop/src/runtime/tests/admission.rs
 test	1200	1315	Phase 9	crates/desktop/src/app/native_shell/tests/workspace.rs
 production	900	909	Phase 10	crates/coding-agent/src/app/embedding.rs
 production	900	930	Phase 10	crates/coding-agent/src/application/operation/contract.rs
-production	900	915	Phase 10	crates/coding-agent/src/application/operation/dispatch.rs
+production	900	918	Phase 10	crates/coding-agent/src/application/operation/dispatch.rs

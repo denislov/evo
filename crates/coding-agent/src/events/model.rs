@@ -15,6 +15,7 @@ impl CodingAgentProductEventKind {
             Self::Diagnostic(_) => CodingAgentProductEventFamily::Diagnostic,
             Self::Capability(_) => CodingAgentProductEventFamily::Capability,
             Self::Review(_) => CodingAgentProductEventFamily::Review,
+            Self::BackgroundTask(_) => CodingAgentProductEventFamily::BackgroundTask,
         }
     }
 
@@ -128,6 +129,19 @@ impl CodingAgentProductEventKind {
             Self::Diagnostic(CodingAgentDiagnosticProductEvent::Diagnostic { .. }) => "diagnostic",
             Self::Capability(CodingAgentCapabilityProductEvent::Changed { .. }) => "changed",
             Self::Review(CodingAgentReviewProductEvent::Changed { .. }) => "changed",
+            Self::BackgroundTask(CodingAgentBackgroundTaskProductEvent::Started { .. }) => {
+                "started"
+            }
+            Self::BackgroundTask(CodingAgentBackgroundTaskProductEvent::Completed { .. }) => {
+                "completed"
+            }
+            Self::BackgroundTask(CodingAgentBackgroundTaskProductEvent::Cancelled { .. }) => {
+                "cancelled"
+            }
+            Self::BackgroundTask(CodingAgentBackgroundTaskProductEvent::TimedOut { .. }) => {
+                "timed_out"
+            }
+            Self::BackgroundTask(CodingAgentBackgroundTaskProductEvent::Failed { .. }) => "failed",
         }
     }
 }

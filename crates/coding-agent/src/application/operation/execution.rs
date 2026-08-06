@@ -91,6 +91,9 @@ impl CodingAgentSession {
             self.runtime_host
                 .runtime_service
                 .install_provider_runtime(provider_runtime);
+            self.runtime_host
+                .runtime_service
+                .install_background_tasks(provider_runtime);
         }
 
         let mut submission = self.consume_submission_lease(descriptor, fingerprint.as_ref())?;

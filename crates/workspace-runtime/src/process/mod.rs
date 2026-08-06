@@ -1,11 +1,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
+
+mod background;
+
+pub use background::{
+    OutputGap, TaskHandle, TaskId, TaskOutputChunk, TaskOwner, TaskRegistry, TaskReport,
+    TaskSnapshot, TaskSpawnError, TaskState,
+};
 
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
@@ -110,6 +118,14 @@ pub enum ProcessOutcome {
 enum StreamKind {
     Stdout,
     Stderr,
+}
+
+/// Destination for process output bytes shared by the one-shot `run()` and the
+/// background task spool. Both the bounded tail renderer and the cursor-based
+/// spool consume the same spawn/collect core without altering its semantics.
+pub(crate) trait OutputSink {
+    fn push_stdout(&mut self, data: &[u8], on_update: Option<&ProcessUpdateCallback>);
+    fn push_stderr(&mut self, data: &[u8], on_update: Option<&ProcessUpdateCallback>);
 }
 
 #[derive(Debug)]
@@ -240,7 +256,17 @@ impl OutputCollector {
     }
 }
 
-enum PendingTermination {
+impl OutputSink for OutputCollector {
+    fn push_stdout(&mut self, data: &[u8], on_update: Option<&ProcessUpdateCallback>) {
+        self.push(StreamKind::Stdout, data, on_update);
+    }
+
+    fn push_stderr(&mut self, data: &[u8], on_update: Option<&ProcessUpdateCallback>) {
+        self.push(StreamKind::Stderr, data, on_update);
+    }
+}
+
+pub(crate) enum PendingTermination {
     Completed(Option<i32>),
     TimedOut,
     Cancelled,
@@ -258,90 +284,25 @@ pub async fn run(
             output: output.finish(),
         };
     }
-
-    let mut command = command_from_spec(&spec);
-    configure_process(&mut command, &spec);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
+    let mut process = match SpawnedProcess::spawn(&spec).await {
+        Ok(process) => process,
+        Err(message) => {
             return ProcessOutcome::Failed {
-                message: format!("failed to spawn: {error}"),
+                message,
                 output: output.finish(),
             };
         }
     };
-    let mut process_tree = match ProcessTree::attach(&child) {
-        Ok(process_tree) => process_tree,
-        Err(error) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return ProcessOutcome::Failed {
-                message: format!("failed to attach process tree containment: {error}"),
-                output: output.finish(),
-            };
-        }
-    };
-    let mut stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            terminate_child_process_tree(&mut child, &process_tree).await;
-            return ProcessOutcome::Failed {
-                message: "failed to capture stdout".into(),
-                output: output.finish(),
-            };
-        }
-    };
-    let mut stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            terminate_child_process_tree(&mut child, &process_tree).await;
-            return ProcessOutcome::Failed {
-                message: "failed to capture stderr".into(),
-                output: output.finish(),
-            };
-        }
-    };
-
-    let mut stdout_open = true;
-    let mut stderr_open = true;
-    let mut stdout_buffer = vec![0_u8; READ_CHUNK_BYTES];
-    let mut stderr_buffer = vec![0_u8; READ_CHUNK_BYTES];
-    let timeout = tokio::time::sleep(spec.timeout);
-    tokio::pin!(timeout);
-    let termination = loop {
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => break PendingTermination::Cancelled,
-            _ = &mut timeout => break PendingTermination::TimedOut,
-            status = child.wait() => {
-                break match status {
-                    Ok(status) => PendingTermination::Completed(status.code()),
-                    Err(error) => PendingTermination::Failed(format!("wait failed: {error}")),
-                };
-            }
-            read = stdout.read(&mut stdout_buffer), if stdout_open => {
-                match read {
-                    Ok(0) => stdout_open = false,
-                    Ok(read) => output.push(StreamKind::Stdout, &stdout_buffer[..read], on_update),
-                    Err(error) => break PendingTermination::Failed(format!("stdout read failed: {error}")),
-                }
-            }
-            read = stderr.read(&mut stderr_buffer), if stderr_open => {
-                match read {
-                    Ok(0) => stderr_open = false,
-                    Ok(read) => output.push(StreamKind::Stderr, &stderr_buffer[..read], on_update),
-                    Err(error) => break PendingTermination::Failed(format!("stderr read failed: {error}")),
-                }
-            }
-        }
-    };
-
+    let timeout = Box::pin(tokio::time::sleep(spec.timeout)) as BoxTimeout;
+    let termination = process
+        .run_until_terminated(&mut output, cancellation, Some(timeout), on_update)
+        .await;
     if !matches!(termination, PendingTermination::Completed(_)) {
-        terminate_child_process_tree(&mut child, &process_tree).await;
+        process.terminate_tree().await;
     } else {
-        process_tree.disarm();
+        process.disarm();
     }
-    drain_with_grace(stdout, stderr, &mut output, on_update).await;
+    process.drain_remaining(&mut output, on_update).await;
     output.emit_final_update(on_update);
     let output = output.finish();
     match termination {
@@ -352,6 +313,123 @@ pub async fn run(
     }
 }
 
+/// A spawned child with process-tree containment and captured pipes, shared by
+/// the one-shot `run()` and the background task driver. Owns the spawn-time
+/// failure cleanup (kill and reap a partially attached child) so both callers
+/// cannot leak descendants on early failure.
+pub(crate) struct SpawnedProcess {
+    child: tokio::process::Child,
+    process_tree: ProcessTree,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+}
+
+impl SpawnedProcess {
+    async fn spawn(spec: &ProcessSpec) -> Result<Self, String> {
+        let mut command = command_from_spec(spec);
+        configure_process(&mut command, spec);
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return Err(format!("failed to spawn: {error}"));
+            }
+        };
+        let process_tree = match ProcessTree::attach(&child) {
+            Ok(process_tree) => process_tree,
+            Err(error) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(format!(
+                    "failed to attach process tree containment: {error}"
+                ));
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => Some(stdout),
+            None => {
+                terminate_child_process_tree(&mut child, &process_tree).await;
+                return Err("failed to capture stdout".into());
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => Some(stderr),
+            None => {
+                terminate_child_process_tree(&mut child, &process_tree).await;
+                return Err("failed to capture stderr".into());
+            }
+        };
+        Ok(Self {
+            child,
+            process_tree,
+            stdout,
+            stderr,
+        })
+    }
+
+    /// The shared read/await loop: cancellation, optional timeout, child
+    /// exit, and pipe reads are all observed in one place so foreground and
+    /// background execution terminate descendants identically.
+    async fn run_until_terminated(
+        &mut self,
+        sink: &mut (dyn OutputSink + Send),
+        cancellation: &CancellationToken,
+        timeout: Option<BoxTimeout>,
+        on_update: Option<&ProcessUpdateCallback>,
+    ) -> PendingTermination {
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+        let mut stdout_buffer = vec![0_u8; READ_CHUNK_BYTES];
+        let mut stderr_buffer = vec![0_u8; READ_CHUNK_BYTES];
+        let mut timeout = timeout;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => break PendingTermination::Cancelled,
+                _ = async { timeout.as_mut().expect("timeout guarded").await }, if timeout.is_some() => break PendingTermination::TimedOut,
+                status = self.child.wait() => {
+                    break match status {
+                        Ok(status) => PendingTermination::Completed(status.code()),
+                        Err(error) => PendingTermination::Failed(format!("wait failed: {error}")),
+                    };
+                }
+                read = self.stdout.as_mut().expect("stdout pipe owned").read(&mut stdout_buffer), if stdout_open => {
+                    match read {
+                        Ok(0) => stdout_open = false,
+                        Ok(read) => sink.push_stdout(&stdout_buffer[..read], on_update),
+                        Err(error) => break PendingTermination::Failed(format!("stdout read failed: {error}")),
+                    }
+                }
+                read = self.stderr.as_mut().expect("stderr pipe owned").read(&mut stderr_buffer), if stderr_open => {
+                    match read {
+                        Ok(0) => stderr_open = false,
+                        Ok(read) => sink.push_stderr(&stderr_buffer[..read], on_update),
+                        Err(error) => break PendingTermination::Failed(format!("stderr read failed: {error}")),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn terminate_tree(&mut self) {
+        terminate_child_process_tree(&mut self.child, &self.process_tree).await;
+    }
+
+    fn disarm(&mut self) {
+        self.process_tree.disarm();
+    }
+
+    async fn drain_remaining(
+        &mut self,
+        sink: &mut (dyn OutputSink + Send),
+        on_update: Option<&ProcessUpdateCallback>,
+    ) {
+        let stdout = self.stdout.take().expect("stdout pipe still owned");
+        let stderr = self.stderr.take().expect("stderr pipe still owned");
+        drain_with_grace(stdout, stderr, sink, on_update).await;
+    }
+}
+
+pub(crate) type BoxTimeout = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 fn command_from_spec(spec: &ProcessSpec) -> tokio::process::Command {
     match &spec.program {
         ProgramKind::Shell { path, command_arg } => {
@@ -393,16 +471,16 @@ fn configure_process(command: &mut tokio::process::Command, spec: &ProcessSpec) 
 async fn drain_with_grace(
     stdout: tokio::process::ChildStdout,
     stderr: tokio::process::ChildStderr,
-    output: &mut OutputCollector,
+    sink: &mut (dyn OutputSink + Send),
     on_update: Option<&ProcessUpdateCallback>,
 ) {
-    let _ = tokio::time::timeout(DRAIN_GRACE, drain_pipes(stdout, stderr, output, on_update)).await;
+    let _ = tokio::time::timeout(DRAIN_GRACE, drain_pipes(stdout, stderr, sink, on_update)).await;
 }
 
 async fn drain_pipes(
     mut stdout: tokio::process::ChildStdout,
     mut stderr: tokio::process::ChildStderr,
-    output: &mut OutputCollector,
+    sink: &mut (dyn OutputSink + Send),
     on_update: Option<&ProcessUpdateCallback>,
 ) {
     let mut stdout_open = true;
@@ -414,13 +492,13 @@ async fn drain_pipes(
             read = stdout.read(&mut stdout_buffer), if stdout_open => {
                 match read {
                     Ok(0) | Err(_) => stdout_open = false,
-                    Ok(read) => output.push(StreamKind::Stdout, &stdout_buffer[..read], on_update),
+                    Ok(read) => sink.push_stdout(&stdout_buffer[..read], on_update),
                 }
             }
             read = stderr.read(&mut stderr_buffer), if stderr_open => {
                 match read {
                     Ok(0) | Err(_) => stderr_open = false,
-                    Ok(read) => output.push(StreamKind::Stderr, &stderr_buffer[..read], on_update),
+                    Ok(read) => sink.push_stderr(&stderr_buffer[..read], on_update),
                 }
             }
         }

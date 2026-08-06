@@ -28,6 +28,9 @@ impl CodingAgentSession {
                 self.runtime_host
                     .runtime_service
                     .install_provider_runtime(runtime);
+                self.runtime_host
+                    .runtime_service
+                    .install_background_tasks(runtime);
             }
         }
 

@@ -146,16 +146,16 @@ pub mod api {
     /// Durable and live product-event contracts.
     pub mod event {
         pub use crate::runtime::facade::{
-            CodingAgentAgentProductEvent, CodingAgentCapabilityProductEvent,
-            CodingAgentDelegationEventContext, CodingAgentDelegationProductEvent,
-            CodingAgentDiagnosticProductEvent, CodingAgentImageContent, CodingAgentMergeChange,
-            CodingAgentMergeChangeKind, CodingAgentMergeProductEvent, CodingAgentMergeProposal,
-            CodingAgentMessageProductEvent, CodingAgentProductEvent,
-            CodingAgentProductEventCapabilityRevocation, CodingAgentProductEventCheckOutput,
-            CodingAgentProductEventDeliveryClass, CodingAgentProductEventDiagnostic,
-            CodingAgentProductEventDurability, CodingAgentProductEventError,
-            CodingAgentProductEventFamily, CodingAgentProductEventKind,
-            CodingAgentProductEventProfileKind, CodingAgentProductEventReceiver,
+            CodingAgentAgentProductEvent, CodingAgentBackgroundTaskProductEvent,
+            CodingAgentCapabilityProductEvent, CodingAgentDelegationEventContext,
+            CodingAgentDelegationProductEvent, CodingAgentDiagnosticProductEvent,
+            CodingAgentImageContent, CodingAgentMergeChange, CodingAgentMergeChangeKind,
+            CodingAgentMergeProductEvent, CodingAgentMergeProposal, CodingAgentMessageProductEvent,
+            CodingAgentProductEvent, CodingAgentProductEventCapabilityRevocation,
+            CodingAgentProductEventCheckOutput, CodingAgentProductEventDeliveryClass,
+            CodingAgentProductEventDiagnostic, CodingAgentProductEventDurability,
+            CodingAgentProductEventError, CodingAgentProductEventFamily,
+            CodingAgentProductEventKind, CodingAgentProductEventProfileKind,
             CodingAgentProductEventReplacement, CodingAgentProductEventTerminalOperation,
             CodingAgentProductEventTerminalOperationKind, CodingAgentProductEventTerminalStatus,
             CodingAgentProductEventUsage, CodingAgentRecoveryResolution, CodingAgentReviewChange,
@@ -164,6 +164,15 @@ pub mod api {
             CodingAgentSessionWriteFailureStatus, CodingAgentSubmittedEventDurability,
             CodingAgentTeamProductEvent, CodingAgentToolProductEvent,
             CodingAgentWorkflowProductEvent, PRODUCT_EVENT_PROTOCOL_VERSION,
+        };
+    }
+
+    /// Background task queries and controls (started through the `bash` tool
+    /// with `background: true`).
+    pub mod background {
+        pub use crate::runtime::facade::{
+            CodingAgentBackgroundTaskOutput, CodingAgentBackgroundTaskReport,
+            CodingAgentBackgroundTaskSnapshot, CodingAgentBackgroundTaskState,
         };
     }
 

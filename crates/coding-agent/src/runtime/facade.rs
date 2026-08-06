@@ -1,3 +1,4 @@
+mod background;
 mod connection;
 pub(crate) mod context;
 mod control;
@@ -10,11 +11,11 @@ pub use crate::application::operation::contract::{
 };
 pub use crate::application::operation::execution::CodingAgentOperationTask;
 pub use crate::events::{
-    CodingAgentAgentProductEvent, CodingAgentCapabilityProductEvent,
-    CodingAgentDelegationEventContext, CodingAgentDelegationProductEvent,
-    CodingAgentDiagnosticProductEvent, CodingAgentImageContent, CodingAgentMergeChange,
-    CodingAgentMergeChangeKind, CodingAgentMergeProductEvent, CodingAgentMergeProposal,
-    CodingAgentMessageProductEvent, CodingAgentProductEvent,
+    CodingAgentAgentProductEvent, CodingAgentBackgroundTaskProductEvent,
+    CodingAgentCapabilityProductEvent, CodingAgentDelegationEventContext,
+    CodingAgentDelegationProductEvent, CodingAgentDiagnosticProductEvent, CodingAgentImageContent,
+    CodingAgentMergeChange, CodingAgentMergeChangeKind, CodingAgentMergeProductEvent,
+    CodingAgentMergeProposal, CodingAgentMessageProductEvent, CodingAgentProductEvent,
     CodingAgentProductEventCapabilityRevocation, CodingAgentProductEventCheckOutput,
     CodingAgentProductEventDeliveryClass, CodingAgentProductEventDiagnostic,
     CodingAgentProductEventDurability, CodingAgentProductEventError, CodingAgentProductEventFamily,
@@ -101,6 +102,10 @@ pub use crate::runtime::file_review::{
 };
 pub use crate::runtime::version::{
     PRODUCT_EVENT_PROTOCOL_VERSION, ProtocolFamilyVersion, UI_SNAPSHOT_PROTOCOL_VERSION,
+};
+pub use crate::services::background::{
+    CodingAgentBackgroundTaskOutput, CodingAgentBackgroundTaskReport,
+    CodingAgentBackgroundTaskSnapshot, CodingAgentBackgroundTaskState,
 };
 pub(crate) use crate::services::event::ProductEventReceiver;
 

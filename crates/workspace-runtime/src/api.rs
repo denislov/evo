@@ -10,8 +10,10 @@ pub use crate::fs::{
     MAX_WALK_ENTRIES, MutationGuard, OpenedEditFile, walk_target,
 };
 pub use crate::process::{
-    EnvPolicy, OutputBudget, ProcessOutcome, ProcessOutput, ProcessSpec, ProcessUpdateCallback,
-    ProgramKind, path_exists, resolve_shell_path, run,
+    EnvPolicy, OutputBudget, OutputGap, ProcessOutcome, ProcessOutput, ProcessSpec,
+    ProcessUpdateCallback, ProgramKind, TaskHandle, TaskId, TaskOutputChunk, TaskOwner,
+    TaskRegistry, TaskReport, TaskSnapshot, TaskSpawnError, TaskState, path_exists,
+    resolve_shell_path, run,
 };
 pub use crate::rewind::{
     WorkspaceFileSnapshot, WorkspaceRestoreEntry, WorkspaceRestoreError, WorkspaceRestorePlan,

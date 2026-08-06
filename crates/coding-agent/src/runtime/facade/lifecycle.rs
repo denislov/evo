@@ -231,6 +231,8 @@ impl CodingAgentSession {
             snapshot_coordinator.clone(),
             event_service.clone(),
         );
+        let background_tasks =
+            crate::services::background::BackgroundTaskService::new(event_service.clone());
         let review_workspace = review_workspace_for(
             &project_root,
             review_workspace_kind(&session_service, &project_root, &worktree_registry)?,
@@ -258,7 +260,8 @@ impl CodingAgentSession {
                     clients: client_service,
                     pending_submission: None,
                 },
-                runtime_service,
+                runtime_service: runtime_service.with_background_tasks(background_tasks.clone()),
+                background_tasks,
                 profile_registry,
                 authorization_service,
                 review_service: crate::services::review::ReviewService::new(
@@ -315,6 +318,8 @@ impl CodingAgentSession {
             snapshot_coordinator.clone(),
             event_service.clone(),
         );
+        let background_tasks =
+            crate::services::background::BackgroundTaskService::new(event_service.clone());
         let review_workspace =
             review_workspace_for(&project_root, workspace_runtime::api::WorkspaceKind::Source)?;
         let session = Self {
@@ -339,7 +344,8 @@ impl CodingAgentSession {
                     clients: client_service,
                     pending_submission: None,
                 },
-                runtime_service,
+                runtime_service: runtime_service.with_background_tasks(background_tasks.clone()),
+                background_tasks,
                 profile_registry,
                 authorization_service,
                 review_service: crate::services::review::ReviewService::new(

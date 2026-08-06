@@ -1,4 +1,6 @@
 pub(crate) mod admission;
+#[cfg(test)]
+mod background_tests;
 pub(crate) mod contract;
 pub(crate) mod control;
 mod dispatch;

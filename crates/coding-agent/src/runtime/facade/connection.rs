@@ -128,6 +128,10 @@ impl CodingAgentSession {
             .operation_supervisor
             .control
             .cancel_open_operations_for_shutdown()?;
+        // Session-close ownership policy: every background task of this
+        // session is terminated and its driver joined before the session
+        // commits its terminal state.
+        self.runtime_host.background_tasks.shutdown().await;
         self.runtime_host
             .client_projection
             .snapshots

@@ -374,6 +374,7 @@ pub(crate) struct RuntimeSnapshot {
     profile_skill_allowlist: Option<Vec<String>>,
     profile_diagnostics: Vec<CodingDiagnostic>,
     provider_streamer: Option<ProviderStreamer>,
+    background_tasks: Option<crate::services::background::BackgroundTaskService>,
     child_workspace: Option<ChildWorkspaceContext>,
 }
 
@@ -475,6 +476,7 @@ impl RuntimeSnapshot {
                     });
                 provider_streamer
             }),
+            background_tasks: None,
             child_workspace: None,
         }
     }
@@ -703,6 +705,19 @@ impl RuntimeSnapshot {
 
     pub(crate) fn set_provider_streamer(&mut self, provider_streamer: ProviderStreamer) {
         self.provider_streamer = Some(provider_streamer);
+    }
+
+    pub(crate) fn background_tasks(
+        &self,
+    ) -> Option<&crate::services::background::BackgroundTaskService> {
+        self.background_tasks.as_ref()
+    }
+
+    pub(crate) fn set_background_tasks(
+        &mut self,
+        background_tasks: Option<crate::services::background::BackgroundTaskService>,
+    ) {
+        self.background_tasks = background_tasks;
     }
 }
 

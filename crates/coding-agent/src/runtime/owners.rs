@@ -8,6 +8,7 @@ use crate::application::session_coordinator::SessionCoordinator;
 use crate::application::snapshot::SnapshotCoordinator;
 use crate::profiles::ProfileRegistry;
 use crate::services::authorization::AuthorizationService;
+use crate::services::background::BackgroundTaskService;
 use crate::services::event::EventService;
 use crate::services::review::ReviewService;
 use crate::services::runtime::RuntimeService;
@@ -42,6 +43,7 @@ pub(crate) struct RuntimeHost {
     pub(crate) events: EventService,
     pub(crate) client_projection: ClientProjectionCoordinator,
     pub(crate) runtime_service: RuntimeService,
+    pub(crate) background_tasks: BackgroundTaskService,
     pub(crate) profile_registry: ProfileRegistry,
     pub(crate) authorization_service: AuthorizationService,
     pub(crate) review_service: ReviewService,

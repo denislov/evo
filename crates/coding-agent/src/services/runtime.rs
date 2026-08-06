@@ -1,6 +1,7 @@
 #[derive(Clone)]
 pub(crate) struct RuntimeService {
     ai_client: Arc<AiClient>,
+    background_tasks: Option<BackgroundTaskService>,
 }
 
 impl std::fmt::Debug for RuntimeService {
@@ -10,6 +11,7 @@ impl std::fmt::Debug for RuntimeService {
                 "registered_apis",
                 &self.ai_client.provider_registry().registered_apis(),
             )
+            .field("background_tasks", &self.background_tasks)
             .finish()
     }
 }
@@ -33,6 +35,7 @@ use crate::operations::prompt::context::{
     CodingDiagnostic, DelegationToolExecutor, RuntimeSnapshot,
 };
 use crate::services::authorization::{AuthorizationHookContext, ToolAuthorizationInventory};
+use crate::services::background::BackgroundTaskService;
 use crate::services::review::MutationTracking;
 use crate::session::event::PersistedContentBlock;
 use crate::session::replay::{MessageStatus, SessionReplay, ToolCallStatus, TranscriptItem};
@@ -82,7 +85,21 @@ impl RuntimeService {
     pub(crate) fn with_ai_client(ai_client: AiClient) -> Self {
         Self {
             ai_client: Arc::new(ai_client),
+            background_tasks: None,
         }
+    }
+
+    pub(crate) fn with_background_tasks(mut self, background_tasks: BackgroundTaskService) -> Self {
+        self.background_tasks = Some(background_tasks);
+        self
+    }
+
+    /// Inject the session's background task service into a runtime snapshot
+    /// at operation submission time, so tools built inside operation runners
+    /// (which construct their own `RuntimeService`) still reach the session
+    /// registry.
+    pub(crate) fn install_background_tasks(&self, runtime: &mut RuntimeSnapshot) {
+        runtime.set_background_tasks(self.background_tasks.clone());
     }
 
     pub(crate) fn install_provider_runtime(&self, runtime: &mut RuntimeSnapshot) {
@@ -219,7 +236,12 @@ impl RuntimeService {
                 "bash" => snapshot
                     .workspace
                     .clone()
-                    .map(crate::tools::shell::bash_runtime_tool)
+                    .map(|shell| {
+                        crate::tools::shell::bash_runtime_tool(
+                            shell,
+                            runtime.background_tasks().cloned(),
+                        )
+                    })
                     .transpose()
                     .map_err(|error| CodingSessionError::Tool {
                         message: error.to_string(),
