@@ -805,6 +805,7 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 - `interactive/loop.rs` 已拆出 `loop/completion.rs`，集中 PromptTask completion、session hydration、terminal/error completion；不同任务结果继续按各自类型独立完成，不引入兼容层或统一 payload 抽象。
 - `interactive/loop.rs` 已拆出 `loop/effects.rs`，集中 delegation/session mutation、prompt、agent/team、self-healing、compact、fork 与 branch-summary 的异步任务启动；effect executor 统一产出 `PromptTask`，完成结果仍只经 `PromptTaskCompletion` 回灌主循环。
 - `interactive/loop.rs` 已拆出 `loop/input.rs`，集中 terminal input、`InteractiveAction` dispatch、settings/auth/session mutation 与 effect 触发；主 loop 仅保留 event select、render scheduling 和 TUI lifecycle，降至 818 行并清偿 oversized debt。
+- `interactive/render.rs` 已拆出 `render/cache.rs`、`render/tools.rs` 与 `render_tests.rs`：row metadata/cache/delta、tool-specific formatting、测试 fixture 各自独立；主 renderer 降至 742 行，两个 production 子模块均低于 900 行，并清偿 oversized debt。
 - CLI 现有全量测试通过：`cargo test -p cli --all-targets --quiet`（106 passed，0 failed）。
 
 ### ARC-910 Desktop reducer 收敛
