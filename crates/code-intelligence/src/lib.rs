@@ -21,13 +21,20 @@
 //!   查询（`GraphNavigator`）+ 全量构建（`IndexBuilder`，预算强制）+
 //!   增量 reindex（`IncrementalIndexer`，消费 change-tracker 事件流）+
 //!   持久化（`GraphCacheData`，JSON）。
+//! - **LSP（ARC-820）**：[`lsp`] 模块 —— 语言服务器生命周期治理：
+//!   Content-Length 帧 wire、生命周期状态机（restart + 指数退避 +
+//!   document replay）、push/pull 诊断 + stale policy、read-only 查询面、
+//!   `workspace/applyEdit` → mutation 计划 → 受限 applicator
+//!   （ChangeReceipt，绝不直接写磁盘）、SandboxProfile 强制 + background
+//!   task ownership。
 //!
 //! 扩展点（留给后续 ARC）：
 //!
 //! - [`service::QueryBackend`]：ARC-820 提供 LSP diagnostics backend；
 //!   实现该 trait 即接入服务，无需改动 actor。
 //! - [`service::QueryKind`]：`Diagnostics`（ARC-820）已声明，当前返回
-//!   `Unimplemented`。
+//!   `Unimplemented`（LSP 独立查询面见 [`lsp::server::LspHandle`]，
+//!   决策见 `docs/refactor/phase8-lsp.md`）。
 
 // Adapted from xai-codebase-graph, SOURCE_REV d6937fe255dce4133c3d000a50f9cb94de12f06f;
 // module organization (index_manager / manager/cache / languages / types)
@@ -39,6 +46,7 @@ pub mod error;
 pub mod graph;
 pub mod identity;
 pub mod languages;
+pub mod lsp;
 pub mod service;
 
 pub use crate::api::*;

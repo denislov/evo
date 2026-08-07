@@ -233,3 +233,37 @@ Local modifications:
     Evo 用 std 集合与 rayon 线程池（见债务登记）
 Sync policy: 不跟随上游（一次性适配）；LSP diagnostics（ARC-820）与
 tool adapter（ARC-830）若复用图结构需单独登记。
+
+## ARC-820 LSP lifecycle（2026-08-07）
+
+**LSP 参考 Grok 的 async-lsp 用法与 Evo 的 MCP 模式重建，无直接移植代码。**
+Grok 的 LSP 客户端（`implementations/lsp/`：client/manager/diagnostics/
+pull/refresh，基于 `async-lsp = 0.2.3`）在本仓库无 vendored 源码可对照；
+本实现按 Evo 语义自研（见 `docs/refactor/phase8-lsp.md`）：
+- **async-lsp 未引入**（评估：0.2.x 面向 server 角色，client 侧
+  ClientState 需自搭，SandboxProfile/TaskRegistry ownership/document
+  replay/edit 校验均在其外；手写 Content-Length 帧 wire 与 MCP wire
+  先例一致，见 `docs/refactor/phase8-lsp.md` 依赖决策）
+- 协议 wire 形状（JSON-RPC 2.0 消息判别/错误码）是协议标准，解析纪律
+  参照 Evo 自有 `crates/extension-host/src/mcp/wire.rs`（Phase 7）重写，
+  帧协议为 LSP 的 Content-Length 头（非 MCP 的 JSON lines）
+- 会话（id 分发 / 通知 fan-out / 取消 / 超时 / 进程治理）参照 Evo 自有
+  `crates/extension-host/src/mcp/transport.rs` 的 RpcSession 形状重写，
+  新增服务器→客户端请求回执与坏帧 fail closed（帧流无法恢复边界）
+- 生命周期状态机、document replay、diagnostics stale policy、edit
+  转换层（WorkspaceEdit → 校验 → EditPlan → 注入 applicator →
+  ChangeReceipt）均为 Evo 自研，无 Grok 对应物
+Destination paths: `crates/code-intelligence/src/lsp/{mod,wire,state,
+transport,documents,diagnostics,edit,query}.rs`、
+`crates/code-intelligence/src/lsp/server/{mod,actor}.rs`、
+`crates/code-intelligence/src/bin/fake_lsp_server.rs`（测试辅助）
+Tests carried over: 无直接复制；按 Evo 语义重写 —— wire 帧/严格解析/
+截断/超大帧、状态机 transition 表、document 版本单调/UTF-16 偏移、
+diagnostics stale 状态机、restart+backoff 指数与上限、replay、
+shutdown 顺序与在途取消、edit 校验（路径越界/版本不匹配/未打开）与
+受限 applicator、进程级 fake server 集成
+Local modifications: 全部（无上游源码）；Grok 的 diagnostics 无版本
+状态机（直接转发 UI），Evo 增加 stale policy；Grok 无 document 状态
+（async-lsp server 端才有）
+Sync policy: 不跟随上游；若后续引入真实语言服务器接入（ARC-830），
+LSP 查询语义映射与 async-lsp 无关。

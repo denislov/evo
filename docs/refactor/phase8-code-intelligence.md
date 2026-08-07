@@ -183,6 +183,10 @@ scripts/architecture-gate.sh  通过（dependency_edges=22，含新边）
 - ARC-810：实现 graph `QueryBackend`；`IndexCacheData` 追加 graph 字段；
   `LanguageConfig` 追加 grammar/query；`IndexBudgetTracker` 强制；增量
   reindex 事件面（channel actor 复用本骨架的 dispatch 结构）。
-- ARC-820：实现 LSP diagnostics `QueryBackend`；`Diagnostics` kind 落地。
+- ARC-820：**已实现**（见 `phase8-lsp.md`）——LSP 采用独立
+  `LspService`/`LspHandle` 查询面（async 网络往返，无法塞入同步
+  `QueryBackend::query`）；`QueryKind::Diagnostics` 保持
+  `Unimplemented` 占位，tool adapter（ARC-830）直接消费
+  `LspHandle::query`/`diagnostics`。
 - ARC-830：tool adapter 消费 `api.rs` 公开面，独立 ToolCapabilities 与
   output budget。

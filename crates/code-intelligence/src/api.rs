@@ -26,6 +26,27 @@ pub use crate::graph::range::{Position, Range};
 pub use crate::graph::scope::ScopeGraph;
 pub use crate::identity::{CacheIdentity, IdentityDiff, ParserVersion, RevisionId};
 pub use crate::languages::{GrammarFn, LanguageConfig, LanguageRegistry};
+pub use crate::lsp::diagnostics::{
+    DiagnosticItem, DiagnosticSeverity, DiagnosticStaleness, DiagnosticStore, StalePolicy,
+    StoredDiagnostics,
+};
+pub use crate::lsp::documents::{
+    ContentChange, DocumentError, DocumentStore, DocumentUri, OpenDocument,
+};
+/// LSP 位置类型（与 graph 的 [`crate::graph::range::Position`] 语义不同：
+/// 0-indexed + UTF-16 character；别名避免命名冲突）。
+pub use crate::lsp::documents::{Position as LspPosition, Range as LspRange};
+pub use crate::lsp::edit::{
+    EditApplicator, EditError, EditPlan, PlannedChange, TextDocumentEdit, TextEdit, WorkspaceEdit,
+};
+pub use crate::lsp::query::{LspQuery, LspQueryKind, LspQueryResult};
+pub use crate::lsp::server::{
+    BackoffConfig, DEFAULT_BACKOFF_INITIAL, DEFAULT_BACKOFF_MAX, DEFAULT_MAX_FRAME_BYTES,
+    DEFAULT_MAX_RESTART_ATTEMPTS, DEFAULT_PING_INTERVAL, DEFAULT_PING_TIMEOUT,
+    DEFAULT_REQUEST_TIMEOUT, LivenessConfig, LspError, LspExit, LspHandle, LspServerConfig,
+    LspService, LspShutdownReason, LspSnapshot, LspTask,
+};
+pub use crate::lsp::state::{LspEvent, LspLifecycleState};
 pub use crate::service::{
     CodeIntelligenceHandle, CodeIntelligenceService, CodeIntelligenceServiceOptions,
     CodeIntelligenceTask, IndexStatus, QueryBackend, QueryKind, QueryRequest, QueryResponse,

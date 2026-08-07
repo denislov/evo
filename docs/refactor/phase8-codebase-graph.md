@@ -224,8 +224,11 @@ scripts/architecture-gate.sh  通过（dependency_edges=23，含 code-intelligen
 
 ## 后续
 
-- ARC-820：LSP diagnostics backend 实现 `QueryBackend`；`Diagnostics` kind
-  落地（`QueryKind::phase` 归属已就绪）。
+- ARC-820：**已实现**（见 `phase8-lsp.md`）——LSP 采用独立
+  `LspService`/`LspHandle`（独立 actor，查询面 async 网络往返）；
+  `QueryKind::Diagnostics` 保持 `Unimplemented` 占位（不并入
+  `QueryBackend`，理由见 `phase8-lsp.md`）。
 - ARC-830：tool adapter 消费 `api.rs` 公开面（`GraphNavigator` /
-  `GraphQueryBackend` / `Location` / `FileSymbol`），独立 ToolCapabilities
-  与 output budget；需要时再做 export 过滤查询与跨语言引用解析增强。
+  `GraphQueryBackend` / `Location` / `FileSymbol` / `LspHandle`），
+  独立 ToolCapabilities 与 output budget；需要时再做 export 过滤查询
+  与跨语言引用解析增强。
