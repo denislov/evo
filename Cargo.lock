@@ -1129,6 +1129,7 @@ dependencies = [
  "base64",
  "coding-agent",
  "libc",
+ "scenario-testing",
  "serde",
  "serde_json",
  "syn 2.0.117",
@@ -1732,6 +1733,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "libc",
+ "scenario-testing",
  "serde",
  "serde_json",
  "syn 2.0.117",
@@ -6293,6 +6295,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "scenario-testing"
+version = "0.7.2"
+dependencies = [
+ "coding-agent",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tui",
 ]
 
 [[package]]

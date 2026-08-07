@@ -15,6 +15,8 @@ mod profile_menu;
 mod prompt_task;
 mod render;
 mod root;
+#[cfg(test)]
+mod scenario_tests;
 mod session_actions;
 mod session_selector;
 mod slash;

@@ -447,6 +447,13 @@ impl UiProjection {
             .as_ref()
             .map(|product| &product.snapshot().session)
     }
+
+    #[cfg(test)]
+    pub(crate) fn product_for_tests(&self) -> &CodingAgentClientProjection {
+        self.product
+            .as_ref()
+            .expect("test projection must be initialized from a product snapshot")
+    }
 }
 
 /// Stateless event bridge: converts typed product events to `Vec<UiEvent>`.

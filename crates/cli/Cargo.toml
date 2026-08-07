@@ -23,6 +23,7 @@ uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
 base64.workspace = true
+scenario-testing.workspace = true
 tui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 syn.workspace = true

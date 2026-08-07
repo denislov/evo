@@ -40,6 +40,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed.git", default-features = false, features = ["test-support"] }
+scenario-testing.workspace = true
 syn.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "test-util", "time"] }

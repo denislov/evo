@@ -20,6 +20,8 @@ desktop	coding-agent
 extension-host	tool-contract
 extension-host	tool-runtime
 extension-host	workspace-runtime
+scenario-testing	coding-agent
+scenario-testing	tui
 tool-runtime	tool-contract
 code-intelligence	change-tracker
 code-intelligence	tool-contract

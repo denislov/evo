@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/agent-core", "crates/ai-protocol", 'crates/ai', "crates/change-tracker", "crates/cli", "crates/coding-agent", "crates/code-intelligence", "crates/desktop", "crates/event-journal", "crates/extension-host", "crates/tool-contract", "crates/tool-runtime", "crates/tui", "crates/workspace-runtime",
+  "crates/agent-core", "crates/ai-protocol", 'crates/ai', "crates/change-tracker", "crates/cli", "crates/coding-agent", "crates/code-intelligence", "crates/desktop", "crates/event-journal", "crates/extension-host", "crates/scenario-testing", "crates/tool-contract", "crates/tool-runtime", "crates/tui", "crates/workspace-runtime",
 ]
 # The vendored `gpui-component` checkout carries its own workspace; leave it to
 # resolve against that one rather than inheriting this manifest's settings.
@@ -22,6 +22,7 @@ code-intelligence = { path = "crates/code-intelligence" }
 change-tracker = { path = "crates/change-tracker" }
 event-journal = { path = "crates/event-journal" }
 extension-host = { path = "crates/extension-host" }
+scenario-testing = { path = "crates/scenario-testing" }
 tool-contract = { path = "crates/tool-contract" }
 tool-runtime = { path = "crates/tool-runtime" }
 workspace-runtime = { path = "crates/workspace-runtime" }
@@ -38,6 +39,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 sha2 = "0.10"
 syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"

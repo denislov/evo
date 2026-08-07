@@ -14,6 +14,8 @@ mod assets;
 mod platform;
 mod preferences;
 mod projection;
+#[cfg(test)]
+mod projection_scenario_tests;
 mod runtime;
 mod ui;
 

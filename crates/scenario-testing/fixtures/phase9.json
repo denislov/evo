@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "name": "phase9-core-workflows",
+      "tags": [
+        "prompt",
+        "tool",
+        "authorization",
+        "review",
+        "rewind",
+        "team",
+        "background",
+        "mcp",
+        "reconnect"
+      ],
+      "event_fixture": "../../coding-agent/tests/fixtures/client_projection/cross-adapter-events.json",
+      "expected_fixture": "../../coding-agent/tests/fixtures/client_projection/cross-adapter-projection.json",
+      "reconnect": {
+        "replay_last_event": true
+      },
+      "terminal": [
+        {
+          "write": "> refactor the projection\n",
+          "expect": "refactor the projection"
+        },
+        {
+          "write": "tool read completed\n",
+          "expect": "tool read completed"
+        },
+        {
+          "write": "authorization approved\nreview ready\nrewind checkpoint restored\n",
+          "expect": "rewind checkpoint restored"
+        },
+        {
+          "write": "team reviewer completed\nbackground task running\nMCP server connected\n",
+          "expect": "MCP server connected"
+        },
+        {
+          "write": "reconnected at cursor 13\n",
+          "expect": "reconnected at cursor 13"
+        }
+      ],
+      "sse": [
+        {
+          "event": "response.output_text.delta",
+          "data": "{\"delta\":\"hello \"}"
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": "{\"delta\":\"world\"}"
+        },
+        {
+          "event": "response.completed",
+          "data": "{\"status\":\"completed\"}"
+        }
+      ],
+      "checkpoints": {
+        "prompt": "prompt_started through prompt_completed produces one completed operation",
+        "tool": "tool started, updated, and completed produces one completed tool row",
+        "authorization": "terminal replay exposes the authorization decision boundary",
+        "review": "review change is retained in the product context",
+        "rewind": "terminal replay exposes the restored checkpoint boundary",
+        "team": "delegation requested, started, and completed reaches a terminal child state",
+        "background": "terminal replay exposes background task state independently from prompt state",
+        "mcp": "terminal replay exposes MCP connection state independently from the renderer",
+        "reconnect": "replayed cursor event is ignored without changing semantic terminal state"
+      }
+    }
+  ]
+}
