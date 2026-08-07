@@ -1,5 +1,4 @@
 # kind	limit	baseline-max-lines	clear-by	path
-production	900	4460	Phase 9	crates/cli/src/interactive/root.rs
 production	900	2814	Phase 9	crates/desktop/src/ui/conversation/pane.rs
 production	900	1779	Phase 9	crates/cli/src/rpc/commands.rs
 production	900	1762	Phase 9	crates/cli/src/interactive/tree_selector.rs
