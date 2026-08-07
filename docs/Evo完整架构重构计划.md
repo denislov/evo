@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～7 完成，Phase 7 复验通过 2026-08-07，准备进入 Phase 8）
+> 状态：执行中（Phase 0～8 完成，Phase 8 复验通过 2026-08-07，准备进入 Phase 9）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -60,6 +60,11 @@
 | Phase 7 / ARC-720 | 完成（复验 2026-08-07） | `docs/refactor/phase7-mcp-adapter.md`；MCP external tool provider（不进入 agent-core）：手写 JSON-RPC 2.0 wire（`deny_unknown_fields` 严格解析 fail-closed）、stdio transport（复用 workspace-runtime process + SandboxProfile fail-closed，JSON lines framing）+ HTTP transport（reqwest 直连显式配置 endpoint，信任边界文档化，SSE 登记债务）、lifecycle 状态机（`apply_event` 纯决策层 + transition 表：initialize 握手 → initialized → tools/list 发现 → liveness ping → 指数退避重连重新 initialize + 重新发现 → 确定性 shutdown；初始失败不重试、曾 Ready 失败退避重连）、`notifications/tools/list_changed` 热更新、per-tool timeout + cancel 贯通、`McpCredentialStore` trait + `FileCredentialStore`（0600/原子写）+ OAuth RFC 8628 device flow 与 401 单次 refresh/retry（注入 clock/transport seam，不无限重试）、`mcp_search`/`mcp_use` meta tools（避免大量 MCP schema 塞入 context）；workspace-runtime 新增 `PeerProcess`（sandbox 强制交互式子进程）；extension-host 169、coding-agent 228、workspace-runtime 127 测试通过 |
 | Phase 7 / ARC-730 | 完成（复验 2026-08-07） | `docs/refactor/phase7-extension-tests.md`；产品接线补齐：subagent（`execute_agent`/`execute_team` 唯一汇聚点发 `subagent_start`/`subagent_stop`）、compaction（`compaction::run` 发 `pre_compact`/`post_compact`）、Stop gate `additional_context` 注入 agent-core 消息流（`ShouldStopAfterTurnResult` 替代裸 bool，旧语义保留在 `should_stop` 字段）；测试矩阵：untrusted hook 三态、OAuth 401 refresh 成功/失败、重连风暴（退避封顶 + 有界 + shutdown 不阻塞）、hunk 归因 + review 端到端（真实 hook 进程写文件 → `HookEdit` 归因 → review 列表 → open/accept/reject）、agent 循环 e2e（FauxProvider 驱动：Observe/Tool gate deny/Stop gate block + context 注入）；修复 ARC-720 缺陷（401 响应被折叠为 TransportClosed）；extension-host 182、coding-agent 242、change-tracker 66、agent-core 77 测试通过 |
 | Phase 7 Gate | 通过（复验 2026-08-07） | 用户扩展不能绕过 trust/authorization/sandbox：hook 与 MCP stdio server 进程强制 SandboxProfile 且能力不足平台 fail-closed（仅 sandbox 不支持对 Tool gate fail-closed，其余 fail-open 有 transition 表）；extension 修改文件经 `HookEdit` 归因进入 hunk review 且可 accept/reject；首次启用必须展示来源和能力（EnableRequest + 诊断事件）。extension-host 182、coding-agent 242、agent-core 77、workspace-runtime 127、change-tracker 66、cli 106、tui 34、ai 113、event-journal 4、tool-contract 4、tool-runtime 9 测试通过（gate.sh 复验全绿，round4/5/6 中除既有问题外无失败）；全 workspace clippy/fmt/architecture gate 通过（oversized_debts=36：既有基线 35 + dispatch.rs 965 与 team_invocation/runner.rs 908 新登记，execution_debts=0）；MCP 工具与内建工具共用 Tool contract/事件/取消语义（`mcp_search`/`mcp_use` 经 typed ToolRegistry 注册，cancel 贯通）；既有全仓 Gate 问题延续：desktop `desktop-runtime` 测试线程 stack overflow（Phase 4 登记）、coding-agent session writer flock 并行 flaky（`temp_session_env_repairs_a_partial_commit_on_reopen`/`durable_rewind_restores_workspace_tracker_branch_and_client_state`，ARC-710 登记，单跑稳定、`--test-threads=1` 全绿）；验证债务登记：HTTP hook runner（最迟 Phase 10）、MCP HTTP SSE/streaming、MCP resources 深度支持、ACP transport（仅真实需求才加入）、MCP 跨进程 credential flock、产品侧 OAuth device flow 引导 UI（Phase 9）、MCP 请求级取消（协议未定义）、stderr 日志呈现（Phase 9）、首次启用确认路径（Phase 9 CLI） |
+| Phase 8 / ARC-800 | 完成（复验 2026-08-07） | `docs/refactor/phase8-code-intelligence.md`；新 crate `code-intelligence`（依赖 workspace-runtime）：`CodeIntelligenceService`/`Handle`/`Task` actor（确定性退出：每请求后检查 shutdown 信号再进 select，避免 select 公平性导致排队请求在 shutdown 后仍被处理）、`QueryBackend` trait 扩展点（`QueryKind`：Status/Symbols/Definitions/References/Containment，骨架实现其余 `Unimplemented`）、`IndexCache`（identity 三要素 workspace/revision/parser-version 放缓存头先于 payload 校验，corruption recovery 不 panic）、`IndexBudget` 四维（文件数/总字节/解析时长/并发）、`LanguageRegistry`（Rust/TS/JS/Python/Go 内建）；无新外部依赖；code-intelligence 69 测试通过 |
+| Phase 8 / ARC-810 | 完成（复验 2026-08-07） | `docs/refactor/phase8-codebase-graph.md`；tree-sitter 五语言符号图（Grok `xai-codebase-graph` 移植裁剪：per-file `ScopeGraph` petgraph 五边 + containment 边新增、`CodebaseIndex` BTreeMap 二级索引 + reverse index）、`.scm` 查询契约 golden、`IndexBudget` 强制（收集阶段 reserve 记账、解析时长计时、rayon 并发池）、增量 reindex 接 change-tracker `FsEventService`（Modified/Created 重解析、Removed/Renamed 移动、WatchGap/Lagged 全量 reconcile）、JSON 持久化（identity mismatch 重建、corruption recovery、crash-reopen）、查询 API（symbols/definitions/references/containment、1-indexed 位置）；code-intelligence 150 测试通过（8 轮连跑稳定，修复 3 处 flaky：stop/消费 select 竞争 + 同步 recv_timeout 卡 worker 死锁） |
+| Phase 8 / ARC-820 | 完成（复验 2026-08-07） | `docs/refactor/phase8-lsp.md`；LSP lifecycle（手写 Content-Length 帧 wire 严格解析 fail-closed，不引入 async-lsp——0.2.x 面向 server 角色且进程治理在其外，与 MCP 手写先例一致）、生命周期状态机（spawn 失败终态不重试；成功后任何失败 → 指数退避重试，attempt 全局累计、超 max_restart_attempts GiveUp；transition 表测试）、document open/change/close replay（本地全文合并 + 全量 didChange range:null；重启后按 uri 重发 didOpen 最新文本+版本；server 未就绪期间文档操作仍生效）、diagnostics push/pull + Fresh/Stale/Unknown stale policy 三态状态机（Mark/Discard）、`workspace/applyEdit` → 路径/版本/range 校验 → `EditPlan` → 注入式 `EditApplicator`（ChangeReceipt，无 applicator 拒绝并记录 pending_edits，绝不直接写磁盘）、SandboxProfile 强制 + task_owner 必填、fake LSP server 测试辅助；修复 transport 服务器请求回执通道丢弃 bug 与 tokio interval reset 语义；code-intelligence 246 测试通过 |
+| Phase 8 / ARC-830 | 完成（复验 2026-08-07） | `docs/refactor/phase8-tools-context.md`；`code_graph`/`code_lsp` 两个 read-only DynamicTool（独立 ToolCapabilities：read_only/Parallel/cancel+timeout，`authorization_risk=WorkspaceLocalReadOnly`）、`QueryOutputBudget` 双层截断（100 条/64 KiB，截断显式标记不静默）、`SymbolSearch` 扩展查询面、按需 context 注入（`context.rs` 条数+字节双层预算 + coding-agent `code_context.rs` seam，agent-core 公共 API 零改动，不把符号图塞 system prompt）、共用排序接口 `tool-contract::ranking`（`RelevanceScorer`/`ResultRanker`/`TokenOverlapScorer`，精确名 1.0 > 整词 0.8 > 前缀 0.4 > 子串 0.2，稳定排序，graph 与 MCP 各自存储只共用排序）、coding-agent 三态装配（无配置行为不变）；纯 Evo 集成层无 Grok 移植；tool-contract 12、code-intelligence 304、extension-host 186、coding-agent 250 测试通过 |
+| Phase 8 Gate | 通过（复验 2026-08-07） | 索引可从 cache 恢复并增量更新：identity 三要素 mismatch 触发重建、corruption recovery、crash-reopen（ARC-800/810）；LSP crash 可重启并恢复 document state：指数退避重试 + 重启后 didOpen replay + stale policy（ARC-820）；所有 edit 可进入 review：LSP `applyEdit` 走 `EditPlan` + 注入式 `EditApplicator` 产出 `ChangeReceipt`，无 applicator 拒绝不落盘，扩展修改经 `HookEdit` 归因（ARC-710/820）。code-intelligence 304、coding-agent 250、extension-host 186、tool-contract 12、agent-core 77、workspace-runtime 127、change-tracker 66、cli 106、tui 34、ai 113、event-journal 4、tool-runtime 9 测试通过（gate.sh 复验 914 passed，唯一失败为既有 desktop-runtime stack overflow）；全 workspace clippy/fmt/architecture gate 通过（oversized_debts=36 既有基线、execution_debts=0、dependency_edges=26）；既有全仓 Gate 问题延续：desktop `desktop-runtime` stack overflow（Phase 4 登记）、coding-agent session writer flock 并行 flaky（ARC-710 登记，`--test-threads=4` 稳定全绿）；验证债务登记：export 边缺口（仅 TS/JS 有 export capture）、跨语言引用名字匹配、增量不做预算强制、alias 全局表残留、Git 事件不触发 revision 重建、containment O(n²)、`$/cancelRequest` 礼貌取消、`workspaceEdit.operations` 形态、多文件事务原子性（归 applicator）、pull diagnostics resultId 增量、context per-turn 接线占位、diagnostics 工具化（`code_lsp` 未覆盖诊断查询） |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -737,11 +742,15 @@ Phase 7 Gate：通过（复验 2026-08-07）。用户扩展不能绕过 trust/au
 
 ### ARC-800 抽取 `code-intelligence`
 
+执行状态：完成（复验 2026-08-07）。完成证据见 `docs/refactor/phase8-code-intelligence.md`。
+
 - 服务 API 与 tool adapter 分离；核心可被 CLI/Desktop/agent tool 共用。
 - 索引缓存有 workspace/revision/parser-version identity 和 corruption recovery。
 - 大仓库有文件数、字节、解析时间和并发预算。
 
 ### ARC-810 Codebase graph
+
+执行状态：完成（复验 2026-08-07）。完成证据见 `docs/refactor/phase8-codebase-graph.md`。
 
 - 首批支持 Rust、TypeScript/JavaScript、Python、Go。
 - 建立 symbol、definition、reference、import/export 和 containment 边。
@@ -750,6 +759,8 @@ Phase 7 Gate：通过（复验 2026-08-07）。用户扩展不能绕过 trust/au
 
 ### ARC-820 LSP lifecycle
 
+执行状态：完成（复验 2026-08-07）。完成证据见 `docs/refactor/phase8-lsp.md`。
+
 - server start/restart/backoff、workspace config、document open/change/close replay。
 - 支持 push/pull diagnostics 和 stale diagnostic policy。
 - server process 使用 background task ownership 与 sandbox profile。
@@ -757,11 +768,13 @@ Phase 7 Gate：通过（复验 2026-08-07）。用户扩展不能绕过 trust/au
 
 ### ARC-830 Tool/context 集成
 
+执行状态：完成（复验 2026-08-07）。完成证据见 `docs/refactor/phase8-tools-context.md`。
+
 - graph/LSP query 有独立 ToolCapabilities 和 output budget。
 - context 注入采用按需查询，不把完整符号图塞入 system prompt。
 - graph 与 MCP tool search 共用结果排序接口，但不共享存储实现。
 
-Phase 8 Gate：索引可从 cache 恢复并增量更新；LSP crash 可重启并恢复 document state；所有 edit 可进入 review。
+Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增量更新；LSP crash 可重启并恢复 document state；所有 edit 可进入 review。
 
 ---
 
