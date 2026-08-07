@@ -2,7 +2,6 @@
 production	900	4460	Phase 9	crates/cli/src/interactive/root.rs
 production	900	3192	Phase 9	crates/cli/src/interactive/render.rs
 production	900	2814	Phase 9	crates/desktop/src/ui/conversation/pane.rs
-production	900	2480	Phase 9	crates/cli/src/interactive/loop.rs
 production	900	1779	Phase 9	crates/cli/src/rpc/commands.rs
 production	900	1762	Phase 9	crates/cli/src/interactive/tree_selector.rs
 production	900	1470	Phase 9	crates/cli/src/interactive/prompt_task.rs

@@ -804,6 +804,7 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 - `interactive/loop.rs` 已拆出 `loop/client.rs`，集中 snapshot/projection apply、permission mode 下发、reconnect replay、delivery ack 和 terminal client error 处理；主 loop 仅保留 client event 调度。
 - `interactive/loop.rs` 已拆出 `loop/completion.rs`，集中 PromptTask completion、session hydration、terminal/error completion；不同任务结果继续按各自类型独立完成，不引入兼容层或统一 payload 抽象。
 - `interactive/loop.rs` 已拆出 `loop/effects.rs`，集中 delegation/session mutation、prompt、agent/team、self-healing、compact、fork 与 branch-summary 的异步任务启动；effect executor 统一产出 `PromptTask`，完成结果仍只经 `PromptTaskCompletion` 回灌主循环。
+- `interactive/loop.rs` 已拆出 `loop/input.rs`，集中 terminal input、`InteractiveAction` dispatch、settings/auth/session mutation 与 effect 触发；主 loop 仅保留 event select、render scheduling 和 TUI lifecycle，降至 818 行并清偿 oversized debt。
 - CLI 现有全量测试通过：`cargo test -p cli --all-targets --quiet`（106 passed，0 failed）。
 
 ### ARC-910 Desktop reducer 收敛
