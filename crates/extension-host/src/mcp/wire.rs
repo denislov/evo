@@ -316,26 +316,34 @@ mod tests {
     #[test]
     fn golden_wire_shapes_are_stable() {
         assert_eq!(
-            serde_json::to_string(&Request::new(
+            serde_json::to_value(Request::new(
                 1,
                 "initialize",
                 Some(json!({"protocolVersion": "2025-06-18", "capabilities": {}}))
             ))
             .unwrap(),
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"protocolVersion":"2025-06-18"}}"#
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "capabilities": {},
+                    "protocolVersion": "2025-06-18"
+                }
+            })
         );
         assert_eq!(
-            serde_json::to_string(&JsonRpcError::new(-32602, "bad params")).unwrap(),
-            r#"{"code":-32602,"message":"bad params"}"#
+            serde_json::to_value(JsonRpcError::new(-32602, "bad params")).unwrap(),
+            json!({"code": -32602, "message": "bad params"})
         );
         assert_eq!(
-            serde_json::to_string(&Notification {
+            serde_json::to_value(Notification {
                 jsonrpc: JSONRPC_VERSION.into(),
                 method: "notifications/initialized".into(),
                 params: None,
             })
             .unwrap(),
-            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
         );
     }
 
