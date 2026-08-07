@@ -24,6 +24,7 @@ fn data(files: Vec<CachedFileEntry>) -> IndexCacheData {
         schema_version: SCHEMA,
         built_at_unix_secs: 1_700_000_000,
         files,
+        graph: None,
     }
 }
 
@@ -256,6 +257,7 @@ fn save_rejects_unknown_schema() {
         schema_version: 999,
         built_at_unix_secs: 0,
         files: vec![],
+        graph: None,
     };
     assert!(matches!(
         cache.save(bad).unwrap_err(),

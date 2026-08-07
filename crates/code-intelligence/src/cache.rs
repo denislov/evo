@@ -75,7 +75,7 @@ impl CachedFileEntry {
     }
 }
 
-/// 索引载荷。骨架只携带文件基线元数据；ARC-810 在此追加 graph 序列化字段
+/// 索引载荷。骨架只携带文件基线元数据；ARC-810 追加 graph 序列化字段
 /// （新字段必须带 `#[serde(default)]`，否则破坏向后兼容）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexCacheData {
@@ -85,6 +85,10 @@ pub struct IndexCacheData {
     pub built_at_unix_secs: i64,
     /// 已索引文件的基线元数据。
     pub files: Vec<CachedFileEntry>,
+    /// ARC-810：codebase graph 持久化载荷；`None` = 无图数据（旧缓存，
+    /// 触发全量重建）。
+    #[serde(default)]
+    pub graph: Option<crate::graph::persist::GraphCacheData>,
 }
 
 /// `load` 的返回结果。

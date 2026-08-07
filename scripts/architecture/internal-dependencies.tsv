@@ -21,3 +21,4 @@ extension-host	tool-contract
 extension-host	tool-runtime
 extension-host	workspace-runtime
 tool-runtime	tool-contract
+code-intelligence	change-tracker

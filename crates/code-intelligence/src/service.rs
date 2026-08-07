@@ -127,12 +127,17 @@ pub struct IndexStatus {
     pub budget: BudgetSnapshot,
 }
 
-/// 查询响应。骨架只有 `status` 字段；ARC-810/820 在此追加各自的结果字段
-/// （新增字段必须带 `#[serde(default)]` 保持兼容）。
+/// 查询响应。骨架只有 `status` 字段；ARC-810 在此追加 `graph` 结果字段
+/// （新增字段带 `#[serde(default)]` 保持兼容）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub kind: QueryKind,
     pub status: IndexStatus,
+    /// ARC-810：图查询结果（`FileSymbols` / `Definition` / `Reference`）。
+    /// `status` 字段总是由 actor 用真实状态填充，backend 返回的占位值
+    /// 会被覆盖。
+    #[serde(default)]
+    pub graph: Option<crate::graph::backend::GraphQueryResult>,
 }
 
 /// 查询后端 trait：ARC-810（graph）与 ARC-820（LSP diagnostics）各自实现
@@ -140,6 +145,10 @@ pub struct QueryResponse {
 /// [`SkeletonQueryBackend`] 对未实现 kind 返回 `Unimplemented`。
 pub trait QueryBackend: Send + Sync {
     fn query(&self, request: &QueryRequest) -> Result<QueryResponse, CodeIntelligenceError>;
+
+    /// ARC-810：服务 actor 退出前调用——停止增量事件消费、等待在途、
+    /// 持久化索引。默认空实现；panic 被 actor 捕获（fail closed）。
+    fn shutdown(&self) {}
 }
 
 /// 骨架默认后端：全部非 `Status` kind 返回 `Unimplemented`。
@@ -398,12 +407,10 @@ async fn dispatch_loop(
                     break; // 所有 sender 已 drop。
                 };
                 if envelope.request.kind == QueryKind::Status {
-                    let state = shared.state.lock().unwrap().clone();
-                    let budget = shared.budget.lock().unwrap().snapshot();
-                    let cache = shared.cache_status.lock().unwrap().clone();
                     let response = QueryResponse {
                         kind: QueryKind::Status,
-                        status: IndexStatus { state, identity: identity.clone(), cache, budget },
+                        status: current_index_status(&shared, &identity),
+                        graph: None,
                     };
                     let _ = envelope.reply.send(Ok(response));
                     handled += 1;
@@ -413,15 +420,23 @@ async fn dispatch_loop(
                     continue;
                 }
                 let backend = backend.clone();
-                let task = tokio::spawn(async move {
-                    let result = backend.query(&envelope.request);
-                    let _ = envelope.reply.send(result);
-                });
-                match task.await {
-                    Ok(()) => {
+                // 查询在独立 task 中执行（panic fail-closed）；响应由 actor
+                // 回填真实 status 后发送（backend 返回的 status 是占位）。
+                let result = tokio::spawn(async move { backend.query(&envelope.request) }).await;
+                match result {
+                    Ok(Ok(mut response)) => {
+                        response.status = current_index_status(&shared, &identity);
+                        let _ = envelope.reply.send(Ok(response));
                         handled += 1;
                         // shutdown 信号已到：完成当前请求后确定性退出
                         // （避免 select 公平性导致已排队的请求被继续处理）。
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        let _ = envelope.reply.send(Err(error));
+                        handled += 1;
                         if *shutdown_rx.borrow() {
                             break;
                         }
@@ -445,6 +460,15 @@ async fn dispatch_loop(
             }));
     }
 
+    // ARC-810：backend 清理钩子（停止增量消费 → 等待在途 → 持久化）。
+    // panic 被捕获（fail closed，不改变退出语义）。backend shutdown 可能
+    // 同步阻塞（等待增量 actor 收尾）：用 block_in_place 避免卡死
+    // multi-thread runtime 的 worker（current_thread runtime 下 panic 被
+    // 捕获，shutdown 跳过，退出语义不变）。
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tokio::task::block_in_place(|| backend.shutdown());
+    }));
+
     let reason = if panicked {
         ServiceShutdownReason::Panic
     } else if *shutdown_rx.borrow() {
@@ -458,5 +482,18 @@ async fn dispatch_loop(
         reason,
         handled_queries: handled,
         panicked,
+    }
+}
+
+/// 构造 actor 视角的当前索引状态（`Status` 查询与响应回填共用）。
+fn current_index_status(shared: &ServiceShared, identity: &CacheIdentity) -> IndexStatus {
+    let state = shared.state.lock().unwrap().clone();
+    let budget = shared.budget.lock().unwrap().snapshot();
+    let cache = shared.cache_status.lock().unwrap().clone();
+    IndexStatus {
+        state,
+        identity: identity.clone(),
+        cache,
+        budget,
     }
 }

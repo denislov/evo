@@ -64,6 +64,11 @@ pub enum CodeIntelligenceError {
     #[error("query processing failed: backend task panicked")]
     QueryPanicked,
 
+    /// 图查询失败（文件未索引 / 位置越界 / 无符号 / 语言不支持 / 解析
+    /// 失败等，detail 携带结构化原因）。
+    #[error("graph query failed: {detail}")]
+    GraphQuery { detail: String },
+
     /// 透明包装的 IO 错误。
     #[error(transparent)]
     Io(#[from] std::io::Error),

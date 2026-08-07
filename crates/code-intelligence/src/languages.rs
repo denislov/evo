@@ -1,31 +1,63 @@
-//! 语言注册表：language id ↔ 文件扩展名映射与查询接口。
+//! 语言注册表：language id ↔ 文件扩展名映射、tree-sitter grammar / 查询
+//! 配置与 `query_hash()`。
 //!
-//! ARC-800 只落地 id / 扩展名映射与确定性 `query_hash()`（供
-//! `ParserVersion::Version` 使用）；tree-sitter grammar 与 query 由 ARC-810
-//! 填充（[`LanguageConfig`] 预留扩展点）。
+//! ARC-810 落地：`LanguageConfig` 追加 `namespaces` / `file_definition_queries`
+//! / `grammar`（参考 Grok `TSLanguageConfig`）；`query_hash()` 切换为按
+//! Grok `compute_query_hash` 方式哈希 primary id + query 文本；grammar 配置
+//! 在 `languages/{rust,typescript,javascript,python,golang}.rs`。
 
 // Adapted from xai-codebase-graph, SOURCE_REV d6937fe255dce4133c3d000a50f9cb94de12f06f
 // (languages/mod.rs: registry lookup structure + compute_query_hash;
-// languages/types.rs: TSLanguageConfig shape); rewritten for Evo skeleton
-// semantics — no tree-sitter dependency, grammar/query fields deferred to ARC-810.
+// languages/types.rs: TSLanguageConfig shape); extended with grammar/query
+// fields for ARC-810.
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
-/// 单个语言的配置。ARC-810 追加 `namespaces`、`file_definition_queries` 与
-/// grammar 函数（参考 Grok `TSLanguageConfig`）。
+/// grammar 函数：返回 tree-sitter 语言。
+pub type GrammarFn = fn() -> tree_sitter::Language;
+
+/// 单个语言的配置：id / 扩展名 + ARC-810 的 namespaces / query / grammar。
 #[derive(Debug, Clone)]
 pub struct LanguageConfig {
     language_ids: Vec<String>,
     file_extensions: Vec<String>,
+    /// 符号类型 namespace（`name.definition.{sym}` capture 的合法值集合，
+    /// 供 `symbol_id_of` 解析）。
+    namespaces: Vec<Vec<String>>,
+    /// 文件级 definitions query（`.scm` 文本，Grok 各语言查询直接移植）。
+    file_definition_queries: String,
+    /// tree-sitter grammar；`None` = 只做映射不可解析（骨架形态）。
+    grammar: Option<GrammarFn>,
 }
 
 impl LanguageConfig {
+    /// 骨架形态：只有 id / 扩展名（无 grammar / query）。
     pub fn new(language_ids: Vec<String>, file_extensions: Vec<String>) -> Self {
         Self {
             language_ids,
             file_extensions,
+            namespaces: Vec::new(),
+            file_definition_queries: String::new(),
+            grammar: None,
+        }
+    }
+
+    /// 完整形态：带 namespaces / query / grammar。
+    pub fn with_grammar(
+        language_ids: Vec<String>,
+        file_extensions: Vec<String>,
+        namespaces: Vec<Vec<String>>,
+        file_definition_queries: String,
+        grammar: GrammarFn,
+    ) -> Self {
+        Self {
+            language_ids,
+            file_extensions,
+            namespaces,
+            file_definition_queries,
+            grammar: Some(grammar),
         }
     }
 
@@ -46,6 +78,42 @@ impl LanguageConfig {
     pub fn file_extensions(&self) -> &[String] {
         &self.file_extensions
     }
+
+    /// 符号类型 namespace。
+    pub fn namespaces(&self) -> &[Vec<String>] {
+        &self.namespaces
+    }
+
+    /// 文件级 definitions query 文本。
+    pub fn file_definition_queries(&self) -> &str {
+        &self.file_definition_queries
+    }
+
+    /// tree-sitter 语言；无 grammar 时返回 `None`。
+    pub fn language(&self) -> Option<tree_sitter::Language> {
+        self.grammar.map(|grammar| grammar())
+    }
+
+    /// 编译 definitions query；无 grammar / 编译失败返回 `None`。
+    pub fn compile_query(&self) -> Option<tree_sitter::Query> {
+        let language = self.language()?;
+        if self.file_definition_queries.is_empty() {
+            return None;
+        }
+        tree_sitter::Query::new(&language, &self.file_definition_queries).ok()
+    }
+
+    /// 按符号类型名查 `SymbolId`（namespace 内第一个匹配）。
+    pub fn symbol_id_of(&self, symbol_type: &str) -> Option<crate::graph::nodes::SymbolId> {
+        for (ns_idx, namespace) in self.namespaces.iter().enumerate() {
+            for (sym_idx, sym) in namespace.iter().enumerate() {
+                if sym == symbol_type {
+                    return Some(crate::graph::nodes::SymbolId::new(ns_idx, sym_idx));
+                }
+            }
+        }
+        None
+    }
 }
 
 /// 语言注册表：提供按扩展名 / language id / 文件路径的查询。
@@ -58,23 +126,15 @@ pub struct LanguageRegistry {
 
 impl LanguageRegistry {
     /// 内建注册表：ARC-810 首批语言（Rust / TypeScript / JavaScript /
-    /// Python / Go），只含 id 与扩展名映射。
+    /// Python / Go），grammar / query / namespaces 见
+    /// `languages/{rust,typescript,javascript,python,golang}.rs`。
     pub fn builtin() -> Self {
         let configs: Vec<Arc<LanguageConfig>> = vec![
-            Arc::new(LanguageConfig::new(vec!["rust".into()], vec!["rs".into()])),
-            Arc::new(LanguageConfig::new(
-                vec!["typescript".into(), "ts".into()],
-                vec!["ts".into(), "tsx".into(), "mts".into(), "cts".into()],
-            )),
-            Arc::new(LanguageConfig::new(
-                vec!["javascript".into(), "js".into()],
-                vec!["js".into(), "jsx".into(), "mjs".into(), "cjs".into()],
-            )),
-            Arc::new(LanguageConfig::new(
-                vec!["python".into()],
-                vec!["py".into(), "pyi".into()],
-            )),
-            Arc::new(LanguageConfig::new(vec!["go".into()], vec!["go".into()])),
+            Arc::new(rust::rust_lang()),
+            Arc::new(typescript::ts_lang()),
+            Arc::new(javascript::js_lang()),
+            Arc::new(python::python_lang()),
+            Arc::new(golang::golang()),
         ];
 
         let mut by_extension = HashMap::new();
@@ -141,18 +201,16 @@ impl LanguageRegistry {
     /// 解析器（grammar / query）集合的确定性哈希，供
     /// [`crate::identity::ParserVersion::Version`] 使用。
     ///
-    /// 骨架阶段基于 language id + 扩展名计算（grammar 未落地，任何
-    /// id/扩展名变化都会触发重建）；ARC-810 落地 query 后改为按 Grok
-    /// `compute_query_hash` 的方式哈希 primary id + query 文本。
+    /// 按 Grok `compute_query_hash` 的方式：按 primary id 排序后哈希
+    /// primary id + query 文本（grammar 变化必然伴随 query 变化，因此
+    /// 查询文本足以代表解析器版本）。
     pub fn query_hash(&self) -> u64 {
         let mut sorted: Vec<&Arc<LanguageConfig>> = self.configs.iter().collect();
         sorted.sort_by(|a, b| a.primary_language_id().cmp(b.primary_language_id()));
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for config in sorted {
             config.primary_language_id().hash(&mut hasher);
-            for extension in config.file_extensions() {
-                extension.hash(&mut hasher);
-            }
+            config.file_definition_queries().hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -163,6 +221,12 @@ impl Default for LanguageRegistry {
         Self::builtin()
     }
 }
+
+mod golang;
+mod javascript;
+mod python;
+mod rust;
+mod typescript;
 
 impl LanguageRegistry {
     /// 依据 `configs` 重建 id / 扩展名索引（测试与后续 ARC 注册自定义语言

@@ -29,7 +29,10 @@ tui = { path = "crates/tui" }
 async-stream = "0.3"
 base64 = "0.22"
 futures = "0.3"
+ignore = "0.4"
 libc = "0.2"
+petgraph = "0.6.5"
+rayon = "1.10"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 schemars = "1.2.1"
@@ -42,6 +45,12 @@ time = "0.3"
 tokio = "1"
 tokio-util = "0.7"
 toml = "0.8"
+tree-sitter = "0.25.10"
+tree-sitter-go = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.0"
+tree-sitter-typescript = "0.23.2"
 uuid = "1"
 
 # Build `gpui-component` from a locally vendored checkout of the pinned upstream

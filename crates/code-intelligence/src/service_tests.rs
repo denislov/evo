@@ -271,6 +271,7 @@ async fn status_reports_cache_states() {
             schema_version: crate::INDEX_SCHEMA_VERSION,
             built_at_unix_secs: 0,
             files: vec![],
+            graph: None,
         })
         .unwrap();
     let options = CodeIntelligenceServiceOptions {

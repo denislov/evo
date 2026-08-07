@@ -167,3 +167,69 @@ Local modifications:
     ARC-810 切换为 query 文本哈希
 Sync policy: 不跟随上游（一次性适配）；tree-sitter grammar 与增量 reindex
 若后续移植需单独登记。
+
+---
+
+## ARC-810 codebase graph（2026-08-07）
+
+Status: adapted（小步改写 + 裁剪/重写，未整文件复制；参考文件均标注
+`Adapted from xai-codebase-graph` 来源注释）
+Upstream repository: https://github.com/bytecodealliance/xai-grok（vendored at `third-party/grok-build`）
+Upstream revision: `d6937fe255dce4133c3d000a50f9cb94de12f06f`
+Source paths: `third-party/grok-build/crates/codegen/xai-codebase-graph/src/`
+  - `scope_graph/graph.rs`（1726 行，必须裁剪拆分）：
+    - `ScopeGraph` / `ScopeStack` / `from_symbols` 段 → Evo
+      `graph/scope.rs`（去掉 src 依赖的名字切片——Evo 节点直接携带
+      name/symbol_type；新增 containment 边；去掉 QueryVersion/Snippet）
+    - `scope_graph_from_definitions_query` + `extract_symbols_fast` 段 →
+      Evo `graph/extract.rs`（合并单一入口；新增 containment 推导——
+      用 `@definition.{sym}` capture 的声明体范围而非名字标识符范围；
+      新增 exports 收集；def captures 去重——Grok 多 pattern 会重复
+      提取同一声明，Evo 收敛为单定义）
+    - `ScopeGraphIndex` 段 → Evo `graph/index.rs`（去掉 StringInterner
+      内存优化，改 BTreeMap 字符串键保证确定性；保留 reverse index
+      file_to_defs/file_to_refs 的 O(符号数) 删除/移动；新增文件级
+      exports 表与 to_persisted/from_persisted）
+  - `scope_graph/nodes.rs` → `graph/nodes.rs`（NodeKind/LocalDef/LocalImport/
+    LocalScope/Reference/SymbolId；Evo 扩展 name/symbol_type 字段）
+  - `scope_graph/edges.rs` → `graph/edges.rs`（EdgeKind 五边不变）
+  - `types/range.rs` → `graph/range.rs`（裁剪：去掉 line-end-index 辅助
+    与显示转换；保留 Position/Range/contains/1-indexed accessor）
+  - `languages/{rust,ts,javascript,python,golang}.rs` → `languages/*.rs`：
+    `.scm` 查询文本与 namespaces 逐字移植（数据/契约层，直接携带）；
+    language ids 归一化为 Evo 小写；TS/JS 扩展名按 Evo 注册表基线
+    （tsx/mts/cts、jsx/mjs/cjs、pyi）
+  - `manager/builder.rs` + `index_manager.rs`（process_file_fast/
+    reindex_file）→ `graph/build.rs`：Evo 新增 `IndexBudget` 四维强制
+    （文件数/字节在收集阶段 reserve_file 记账、并发用 rayon 线程池
+    大小、单文件解析时长计时）、结构化跳过记录（IndexSkipReason）、
+    5 MiB 上限与二进制前缀检测与 Grok 一致
+  - `index_manager.rs` 事件面（channel actor）→ `graph/incremental.rs`：
+    Evo 复用 change-tracker 的 FsEventService（debounce/rename 配对/
+    gitignore 过滤），本模块只消费语义事件；WatchGap/Lagged → 全量
+    reconcile；shutdown 用 std mpsc 完成信号同步等待在途
+  - `navigation.rs`（Navigator/NavigationResult/Location/
+    find_smallest_named_node_at_point）→ `graph/query.rs`：1-indexed
+    行/列契约保留；Evo 新增文件符号树查询（containment）与按名查询
+License/notices: Apache-2.0（`third-party/grok-build/THIRD-PARTY-NOTICES`）
+Destination paths: `crates/code-intelligence/src/graph/{mod,range,nodes,edges,scope,extract,index,query,build,incremental,backend,persist}.rs`、`crates/code-intelligence/src/languages/{rust,typescript,javascript,python,golang}.rs`、`crates/code-intelligence/src/graph/{test_support,graph_tests,build_tests,incremental_tests,query_tests,persistence_tests,backend_tests}.rs`
+Tests carried over: 无直接复制；按 Evo 语义重写 —— 每语言一个 fixture 的
+definition/reference/alias/export/containment 提取 golden（query 文本与
+树结构断言）、budget 四维超限与跳过记录、增量 modified/created/removed/
+renamed/reconcile、查询边界（无符号/越界/不支持语言/未索引）、持久化
+round-trip golden + identity mismatch + corruption recovery + crash-reopen、
+异步 shutdown/cancel/panic、真实 change-tracker 集成
+Local modifications:
+  - containment 边：Grok 只有 DefToScope（def→作用域）；Evo 新增
+    def→def 的父子符号边（`@definition.*` capture 声明体嵌套推导）
+  - import/export：RefToImport 边保留（Grok 同款）；export 由提取产物
+    exports 列表承载，无独立 export 边类型（与 Grok 相同，见债务登记）
+  - 增量策略：Grok rename 只 reindex；Evo Renamed 事件 = rename_file
+    （移动符号）+ 目标重解析；Grok 有 background refresh 与磁盘锁，
+    Evo 用 WatchGap 全量 reconcile 收敛（见债务登记）
+  - 持久化：Grok 自定义二进制 "SGIX"；Evo JSON（与 ARC-800 缓存层
+    统一格式，可诊断、复用 corruption 路径），只序列化查询所需结构
+  - 无 StringInterner / ahash / num_cpus / crossbeam / git2 / dunce：
+    Evo 用 std 集合与 rayon 线程池（见债务登记）
+Sync policy: 不跟随上游（一次性适配）；LSP diagnostics（ARC-820）与
+tool adapter（ARC-830）若复用图结构需单独登记。
