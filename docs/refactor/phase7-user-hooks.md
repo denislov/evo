@@ -249,7 +249,38 @@ ARC-710 在 ARC-700 的 `ExtensionEventPayload` 上**扩展字段与变体**，�
 
 ## 后续
 
-- ARC-720：`max_concurrent_extensions` 强制（MCP 并发启用）；manifest
+- ARC-720：`max_concurrent_extensions` 强制（MCP 并发启用，见
+  `phase7-mcp-adapter.md`「并发上限」；本次已完成）；manifest
   capabilities 驱动的 MCP 注册。
 - ARC-730：跨域矩阵（untrusted hook、超时、输出洪泛、非法 JSON、进程
   崩溃、重连风暴、hunk 归因）；本任务的 runner/gate 测试是其基础。
+
+## Hook 修改自动归因（ARC-730，本次修复）
+
+- **注入 seam**（`extension-host/src/hook_lifecycle.rs`）：[`HookLifecycle`]
+  trait（`before` / `after`，携带 event + hook spec；`after` 附运行结果），
+  由 `ExtensionHostOptions.hook_lifecycle` 注入、`dispatch_observe` 在每个
+  Observe hook 执行前后调用；默认 `NoopHookLifecycle`（行为不变），观察
+  失败不阻断 hook 执行。extension-host 不依赖 change-tracker（归因逻辑
+  在产品侧）。
+- **自动归因**（`coding-agent/src/services/hook_attribution.rs`）：
+  [`HookEditAttribution`] 实现该观察点——before 记录 tracker 已知文件
+  （files 快照 ∪ facts 历史）的磁盘基线；after 对比磁盘，对 revision
+  变化的文件生成 `ChangeReceipt` 并 `record_receipt(ChangeSource::HookEdit)`
+  （fingerprint 与 accept/reject 同源、diff 有界）。**修复**：此前 hook
+  修改不归因（ARC-730 的 hunk review 闭环未实现，测试手工构造 receipt）。
+- **因果窗口语义**（ARC-410）：receipt 与 fs event 按
+  `(path, after_exists, after_revision)` 双向匹配消费——hook 在窗口内
+  归因时，先到或后到的 fs event 都被消费（归因 `HookEdit`）；窗口过期
+  已归因 `ExternalEdit`/`ExternalEditOnAgentFile` 时不重新归因（先到
+  先得，失败落 `hook_attribution_failed` 诊断）；tracker 未知的新文件
+  由既有外部修改语义兜底。
+- **handle 生命周期**：`ReviewService` 与 host 共享 handle 槽（tracker
+  懒启动时填充、rewind 停用时清空）——观察点不长期持有 handle，避免
+  watch channel 永不关闭导致 rewind 的 projection task join 悬挂。
+- 测试：`services/hook_attribution_tests.rs`（5 项：未绑定 no-op、自动
+  归因、accept 后再归因、窗口过期保持外部归因、窗口内消费 fs event）；
+  `hooks_e2e_tests.rs::hook_edit_is_attributed_and_reviewable_end_to_end`
+  （真实 hook 进程写文件 → 自动 `HookEdit` → review 可见 → accept/reject
+  生效，不再手工构造 receipt）；extension-host 侧 seam 测试
+  `dispatcher/tests_dispatcher.rs::hook_lifecycle_*`。

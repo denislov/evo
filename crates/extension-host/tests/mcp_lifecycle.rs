@@ -14,6 +14,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 const FAKE_SERVER: &str = env!("CARGO_BIN_EXE_fake_mcp_server");
+const FAKE_HTTP_SERVER: &str = env!("CARGO_BIN_EXE_fake_mcp_http_server");
 
 fn stdio_config(mode: &str, extra: &[&str]) -> TransportConfig {
     let mut args = vec!["--mode".to_string(), mode.to_string()];
@@ -47,17 +48,17 @@ fn host_for(mode: &str, extra: &[&str], patch: impl FnOnce(&mut McpServerConfig)
     )
 }
 
-async fn wait_ready(host: &McpHost, timeout: Duration) {
+async fn wait_ready(host: &McpHost, server: &str, timeout: Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
-        if host.server_state("fake").is_ready() {
+        if host.server_state(server).is_ready() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!(
-        "fake server did not become Ready; state={:?}",
-        host.server_state("fake")
+        "fake server '{server}' did not become Ready; state={:?}",
+        host.server_state(server)
     );
 }
 
@@ -65,7 +66,7 @@ async fn wait_ready(host: &McpHost, timeout: Duration) {
 async fn initialize_handshake_and_tool_discovery() {
     let host = host_for("echo", &[], |_| {});
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let tools = host.tools();
     let fake = tools.get("fake").expect("fake server tools discovered");
@@ -80,7 +81,7 @@ async fn initialize_handshake_and_tool_discovery() {
 async fn tool_call_forwards_arguments_and_returns_content() {
     let host = host_for("echo", &[], |_| {});
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     let result = handle
@@ -101,7 +102,7 @@ async fn per_tool_timeout_applies() {
         config.tool_timeout = Duration::from_millis(150)
     });
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     let error = handle
@@ -121,7 +122,7 @@ async fn call_cancellation_applies() {
         config.tool_timeout = Duration::from_secs(10)
     });
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     let cancel = CancellationToken::new();
@@ -145,7 +146,7 @@ async fn call_cancellation_applies() {
 async fn liveness_ping_timeout_triggers_reconnect_and_rediscovery() {
     let host = host_for("ping-drop", &[], |_| {});
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
     let first_version = host.tools_version();
 
     // ping 被静默丢弃 → liveness 失败 → 重连（重新 initialize + 重新发现）。
@@ -175,7 +176,7 @@ async fn process_crash_triggers_reconnect_and_recovers() {
         |_| {},
     );
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     let first_call = handle
@@ -212,7 +213,7 @@ async fn tools_list_changed_refreshes_cache() {
         |_| {},
     );
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
     let before = host.tools();
     assert_eq!(
         before.get("fake").map(Vec::len),
@@ -242,7 +243,7 @@ async fn tools_list_changed_refreshes_cache() {
 async fn output_flood_does_not_kill_transport() {
     let host = host_for("flood", &[], |_| {});
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     for round in 0..3 {
@@ -259,7 +260,7 @@ async fn output_flood_does_not_kill_transport() {
 async fn bad_json_lines_are_skipped_not_fatal() {
     let host = host_for("bad-json", &[], |_| {});
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     // 每第 3 个请求前输出坏 JSON 行：transport 必须继续可用。
@@ -306,7 +307,7 @@ async fn shutdown_cancels_in_flight_call_and_terminates_child() {
         config.tool_timeout = Duration::from_secs(30)
     });
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     let cancel = CancellationToken::new();
@@ -491,7 +492,7 @@ async fn oauth_401_refreshes_token_and_retries_once() {
     config.oauth = Some(oauth_config(&device, &token));
     let host = McpHost::new(vec![config], store.clone());
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     let result = handle
@@ -533,7 +534,7 @@ async fn oauth_401_refresh_failure_falls_back_to_device_flow_and_surfaces_error(
         diagnostics.clone(),
     );
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     let error = handle
@@ -549,6 +550,310 @@ async fn oauth_401_refresh_failure_falls_back_to_device_flow_and_surfaces_error(
         records.iter().any(|(code, _)| code == "mcp_refresh_failed"),
         "refresh failure must be recorded: {records:?}"
     );
+    host.shutdown().await;
+}
+
+/// 启动 fake HTTP MCP server，返回监听地址（从 stdout 的 LISTENING 行）。
+async fn start_fake_http_server(extra: &[&str]) -> (String, tokio::process::Child) {
+    let mut child = tokio::process::Command::new(FAKE_HTTP_SERVER)
+        .args(extra)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn fake http server");
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut line = String::new();
+    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line)
+        .await
+        .expect("fake http server prints LISTENING");
+    assert!(
+        line.starts_with("LISTENING "),
+        "expected LISTENING line, got: {line}"
+    );
+    let addr = line.trim().trim_start_matches("LISTENING ").to_string();
+    (addr, child)
+}
+
+fn http_config(addr: &str, patch: impl FnOnce(&mut McpServerConfig)) -> McpServerConfig {
+    let mut config = McpServerConfig::new(
+        "fake",
+        TransportConfig::Http(HttpConfig {
+            url: format!("http://{addr}/mcp"),
+            headers: Vec::new(),
+        }),
+    );
+    config.tool_timeout = Duration::from_secs(5);
+    config.liveness = LivenessConfig {
+        ping_interval: Duration::from_millis(500),
+        ping_timeout: Duration::from_millis(200),
+    };
+    patch(&mut config);
+    config
+}
+
+fn read_headers_file(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn http_oauth_refresh_injects_refreshed_token_into_retry() {
+    // fake HTTP server：首个 tools/call 返回 401，之后正常；记录每个
+    // 请求收到的 Authorization。store 预置过期 token → 401 → refresh →
+    // 重试请求必须携带 `Bearer <new-token>`（服务端记录的 header 断言）。
+    let (device, token) = start_oauth_mock(|| {
+        (
+            200,
+            json!({"access_token": "at-refreshed", "refresh_token": "rt-rotated", "expires_in": 3600}),
+        )
+    });
+    let headers_dir = tempfile::tempdir().unwrap();
+    let headers_file = headers_dir.path().join("headers.log");
+    let (addr, mut server) = start_fake_http_server(&[
+        "--auth-fail-calls",
+        "1",
+        "--headers-file",
+        headers_file.to_str().unwrap(),
+    ])
+    .await;
+    let store = Arc::new(FileCredentialStore::new(
+        tempfile::tempdir().unwrap().path(),
+    ));
+    store
+        .set(
+            "fake",
+            McpCredentials {
+                access_token: "at-stale".into(),
+                refresh_token: Some("rt-1".into()),
+                expires_at: None,
+            },
+        )
+        .unwrap();
+    let mut config = http_config(&addr, |_| {});
+    config.oauth = Some(oauth_config(&device, &token));
+    let host = McpHost::with_diagnostics(
+        vec![config],
+        store,
+        fast_oauth_runtime(),
+        Arc::new(NoopDiagnosticSink),
+    );
+    host.start().unwrap();
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
+
+    let handle = host.servers().first().unwrap().clone();
+    let result = handle
+        .call_tool("echo", json!({"round": 1}), &CancellationToken::new())
+        .await
+        .expect("401 → refresh → retry must succeed");
+    assert_eq!(result["content"][0]["text"], "fake:echo:{\"round\":1}");
+    let lines = read_headers_file(&headers_file);
+    let calls: Vec<_> = lines
+        .iter()
+        .filter(|line| line.contains("method=tools/call"))
+        .collect();
+    assert_eq!(
+        calls.len(),
+        2,
+        "tools/call must be attempted exactly twice: {lines:?}"
+    );
+    assert!(
+        calls[0].contains("authorization=Bearer at-stale"),
+        "first call carries the stale token: {lines:?}"
+    );
+    assert!(
+        calls[1].contains("authorization=Bearer at-refreshed"),
+        "retry must carry the refreshed token: {lines:?}"
+    );
+    host.shutdown().await;
+    server.kill().await.ok();
+}
+
+#[tokio::test]
+async fn http_static_authorization_is_used_without_store_token() {
+    // 静态配置 Authorization + store 无 token → 请求带静态 header。
+    let headers_dir = tempfile::tempdir().unwrap();
+    let headers_file = headers_dir.path().join("headers.log");
+    let (addr, mut server) =
+        start_fake_http_server(&["--headers-file", headers_file.to_str().unwrap()]).await;
+    let store = Arc::new(FileCredentialStore::new(
+        tempfile::tempdir().unwrap().path(),
+    ));
+    let config = http_config(&addr, |config| {
+        if let TransportConfig::Http(http) = &mut config.transport {
+            http.headers = vec![("authorization".into(), "Bearer static-token".into())];
+        }
+    });
+    let host = McpHost::with_diagnostics(
+        vec![config],
+        store,
+        fast_oauth_runtime(),
+        Arc::new(NoopDiagnosticSink),
+    );
+    host.start().unwrap();
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
+
+    let handle = host.servers().first().unwrap().clone();
+    handle
+        .call_tool("echo", json!({}), &CancellationToken::new())
+        .await
+        .expect("call succeeds");
+    let lines = read_headers_file(&headers_file);
+    let calls: Vec<_> = lines
+        .iter()
+        .filter(|line| line.contains("method=tools/call"))
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].contains("authorization=Bearer static-token"),
+        "static authorization must be used: {lines:?}"
+    );
+    host.shutdown().await;
+    server.kill().await.ok();
+}
+
+#[tokio::test]
+async fn http_dynamic_credentials_override_static_authorization() {
+    // store 有 token（refresh 后）→ 动态 Authorization 覆盖静态配置。
+    let headers_dir = tempfile::tempdir().unwrap();
+    let headers_file = headers_dir.path().join("headers.log");
+    let (addr, mut server) =
+        start_fake_http_server(&["--headers-file", headers_file.to_str().unwrap()]).await;
+    let store = Arc::new(FileCredentialStore::new(
+        tempfile::tempdir().unwrap().path(),
+    ));
+    store
+        .set(
+            "fake",
+            McpCredentials {
+                access_token: "at-dynamic".into(),
+                refresh_token: None,
+                expires_at: None,
+            },
+        )
+        .unwrap();
+    let config = http_config(&addr, |config| {
+        if let TransportConfig::Http(http) = &mut config.transport {
+            http.headers = vec![("authorization".into(), "Bearer static-token".into())];
+        }
+    });
+    let host = McpHost::with_diagnostics(
+        vec![config],
+        store,
+        fast_oauth_runtime(),
+        Arc::new(NoopDiagnosticSink),
+    );
+    host.start().unwrap();
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
+
+    let handle = host.servers().first().unwrap().clone();
+    handle
+        .call_tool("echo", json!({}), &CancellationToken::new())
+        .await
+        .expect("call succeeds");
+    let lines = read_headers_file(&headers_file);
+    let calls: Vec<_> = lines
+        .iter()
+        .filter(|line| line.contains("method=tools/call"))
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].contains("authorization=Bearer at-dynamic"),
+        "dynamic credential must override the static header: {lines:?}"
+    );
+    host.shutdown().await;
+    server.kill().await.ok();
+}
+
+/// stdio transport：credential store 有 token 时不注入 header 也不崩溃。
+#[tokio::test]
+async fn stdio_path_ignores_credential_headers() {
+    let store = Arc::new(FileCredentialStore::new(
+        tempfile::tempdir().unwrap().path(),
+    ));
+    store
+        .set("fake", McpCredentials::new("at-for-stdio"))
+        .unwrap();
+    let host = McpHost::new(
+        vec![McpServerConfig::new("fake", stdio_config("echo", &[]))],
+        store,
+    );
+    host.start().unwrap();
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
+    let handle = host.servers().first().unwrap().clone();
+    let result = handle
+        .call_tool("echo", json!({"round": 1}), &CancellationToken::new())
+        .await
+        .expect("stdio call succeeds without header injection");
+    assert!(result["content"][0]["text"].is_string());
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_concurrency_limit_starts_only_the_first_servers() {
+    // 上限 2、3 个 enabled server：只 spawn 前 2 个（按 configs 顺序），
+    // 第 3 个保持 Disconnected，且发出 mcp_concurrency_limit 诊断。
+    let diagnostics = Arc::new(CollectingDiagnostics::default());
+    let configs = ["a", "b", "c"]
+        .iter()
+        .map(|name| McpServerConfig::new(*name, stdio_config("echo", &[])))
+        .collect();
+    let host = McpHost::with_diagnostics(
+        configs,
+        Arc::new(FileCredentialStore::new(
+            tempfile::tempdir().unwrap().path(),
+        )),
+        fast_oauth_runtime(),
+        diagnostics.clone(),
+    );
+    host.set_max_concurrent_extensions(2);
+    host.start().unwrap();
+
+    wait_ready(&host, "a", Duration::from_secs(10)).await;
+    assert!(host.server_state("a").is_ready());
+    assert!(host.server_state("b").is_ready());
+    // c 未 spawn：状态保持初始 Disconnected（不进入 Connecting/Ready）。
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    while tokio::time::Instant::now() < deadline {
+        assert_eq!(
+            host.server_state("c"),
+            ServerLifecycleState::Disconnected,
+            "c must never start"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(host.server_state("c"), ServerLifecycleState::Disconnected);
+    let records = diagnostics.records.lock().unwrap().clone();
+    assert!(
+        records
+            .iter()
+            .any(|(code, _)| code == "mcp_concurrency_limit"),
+        "limit violation must be diagnosed: {records:?}"
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_concurrency_limit_zero_means_unlimited() {
+    let configs = ["a", "b", "c"]
+        .iter()
+        .map(|name| McpServerConfig::new(*name, stdio_config("echo", &[])))
+        .collect();
+    let host = McpHost::new(
+        configs,
+        Arc::new(FileCredentialStore::new(
+            tempfile::tempdir().unwrap().path(),
+        )),
+    );
+    host.set_max_concurrent_extensions(0);
+    host.start().unwrap();
+    wait_ready(&host, "a", Duration::from_secs(10)).await;
+    assert!(host.server_state("a").is_ready());
+    assert!(host.server_state("b").is_ready());
+    assert!(host.server_state("c").is_ready());
     host.shutdown().await;
 }
 
@@ -569,7 +874,7 @@ async fn reconnect_storm_stays_bounded_and_recovers() {
         };
     });
     host.start().unwrap();
-    wait_ready(&host, Duration::from_secs(10)).await;
+    wait_ready(&host, "fake", Duration::from_secs(10)).await;
 
     let handle = host.servers().first().unwrap().clone();
     let started = std::time::Instant::now();

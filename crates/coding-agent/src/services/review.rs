@@ -34,6 +34,10 @@ pub(crate) struct ReviewService {
     events: EventService,
     latest: Arc<Mutex<HunkTrackerSnapshot>>,
     owner: Mutex<Option<ReviewTrackingOwner>>,
+    /// ARC-730：hook 修改归因共享的 tracker handle 槽。tracker 启动时
+    /// 填充、停用时清空 —— 观察点不长期持有 handle（否则 watch channel
+    /// 永不关闭，rewind 的 projection task join 会悬挂）。
+    hook_tracker_slot: Mutex<Option<Arc<Mutex<Option<HunkTrackerHandle>>>>>,
 }
 
 impl std::fmt::Debug for ReviewService {
@@ -72,6 +76,27 @@ impl ReviewService {
             events,
             latest: Arc::new(Mutex::new(empty_snapshot())),
             owner: Mutex::new(None),
+            hook_tracker_slot: Mutex::new(None),
+        }
+    }
+
+    /// 共享 tracker handle 槽（ARC-730）：hook 修改归因观察点从槽读取
+    /// 当前 handle；tracker 生命周期由本 service 维护（启动填充 / 停用
+    /// 清空），观察点不长期持有。
+    pub(crate) fn bind_hook_tracker_slot(&self, slot: Arc<Mutex<Option<HunkTrackerHandle>>>) {
+        *self
+            .hook_tracker_slot
+            .lock_or_recover("review hook tracker slot") = Some(slot);
+    }
+
+    /// 把当前 tracker handle 写入归因槽（`None` = tracker 已停用）。
+    fn set_hook_tracker(&self, handle: Option<HunkTrackerHandle>) {
+        if let Some(slot) = self
+            .hook_tracker_slot
+            .lock_or_recover("review hook tracker slot")
+            .as_ref()
+        {
+            *slot.lock_or_recover("review hook tracker slot") = handle;
         }
     }
 
@@ -248,6 +273,8 @@ impl ReviewService {
             service,
             projection_task,
         });
+        // ARC-730：把当前 handle 同步进 hook 归因槽。
+        self.set_hook_tracker(Some(handle.clone()));
         Ok(handle)
     }
 
@@ -260,6 +287,9 @@ impl ReviewService {
         else {
             return Ok(());
         };
+        // ARC-730：tracker 停用前清空归因槽（handle 随 service 释放，
+        // watch channel 关闭后 projection task 正常退出）。
+        self.set_hook_tracker(None);
         service.shutdown().await.map_err(review_tracker_error)?;
         projection_task
             .await

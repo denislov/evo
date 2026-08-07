@@ -20,6 +20,7 @@ pub use crate::event::{
     MAX_HOOK_PAYLOAD_BYTES, SubagentStopPhase, truncate_json_payload,
 };
 pub use crate::hook::{HookSpec, parse_event, parse_hooks, sort_hooks};
+pub use crate::hook_lifecycle::{HookLifecycle, NoopHookLifecycle};
 pub use crate::host::{
     ExtensionHost, ExtensionHostHandle, ExtensionHostOptions, ExtensionHostTask, HostExit,
     HostInfoView, HostState, ShutdownReason,

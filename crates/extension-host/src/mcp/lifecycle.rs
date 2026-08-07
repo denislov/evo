@@ -42,11 +42,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::diagnostic::{DiagnosticLevel, DiagnosticRecord, DiagnosticSink, NoopDiagnosticSink};
 use crate::mcp::credentials::McpCredentialStore;
-use crate::mcp::oauth::{
-    OAuthConfig, OAuthRuntime, device_flow_authenticate, refresh_access_token,
-};
+use crate::mcp::oauth::{OAuthConfig, OAuthRuntime};
 use crate::mcp::state::{LifecycleEvent, ServerLifecycleState, apply_event, backoff_for};
-use crate::mcp::transport::{RpcError, RpcSession, TransportConfig};
+use crate::mcp::transport::{RpcSession, TransportConfig};
 use crate::mcp::wire::Notification;
 
 /// 默认 per-tool 调用超时。
@@ -161,133 +159,15 @@ pub fn convert_tool(server: &str, raw: &Value) -> Result<DiscoveredTool, String>
     })
 }
 
-/// server 的调用句柄（`McpHost` 暴露给 meta tools / 产品）。
-#[derive(Debug, Clone)]
-pub struct McpServerHandle {
-    config: McpServerConfig,
-    /// 当前会话（`Ready` 时 `Some`；重连时被替换）。
-    session: Arc<tokio::sync::Mutex<Option<Arc<RpcSession>>>>,
-    /// host shutdown 时触发：在途调用立即失败。
-    host_cancel: CancellationToken,
-    credential_store: Arc<dyn McpCredentialStore>,
-    oauth_runtime: OAuthRuntime,
-    diagnostics: Arc<dyn DiagnosticSink>,
-}
-
-impl McpServerHandle {
-    pub fn name(&self) -> &str {
-        &self.config.name
-    }
-
-    /// 结构化诊断（坏工具 / 重连 / OAuth 恢复失败等）。
-    fn record(&self, code: &str, message: impl Into<String>) {
-        self.diagnostics.emit(DiagnosticRecord {
-            level: DiagnosticLevel::Warning,
-            code: code.into(),
-            message: message.into(),
-            extension_id: Some(self.config.name.clone()),
-            context: Default::default(),
-        });
-    }
-
-    /// 调用服务器工具。401 → 单次 refresh（有 refresh token）或
-    /// device flow（配置了 OAuth）后重试一次；失败返回结构化错误。
-    pub async fn call_tool(
-        &self,
-        tool_name: &str,
-        arguments: Value,
-        cancel: &CancellationToken,
-    ) -> Result<Value, RpcError> {
-        let timeout = self.config.tool_timeout;
-        let params = serde_json::json!({
-            "name": tool_name,
-            "arguments": arguments,
-        });
-        let first = self
-            .request("tools/call", Some(params.clone()), timeout, cancel)
-            .await;
-        match first {
-            Ok(result) => Ok(result),
-            Err(error) if error.is_unauthorized() => {
-                if self.try_credential_retry(cancel).await {
-                    self.request("tools/call", Some(params), timeout, cancel)
-                        .await
-                } else {
-                    Err(error)
-                }
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// 请求转发：服务器不在 `Ready`（无会话）时给出结构化错误；host
-    /// shutdown（`host_cancel`）时在途调用立即失败。
-    async fn request(
-        &self,
-        method: &str,
-        params: Option<Value>,
-        timeout: Duration,
-        cancel: &CancellationToken,
-    ) -> Result<Value, RpcError> {
-        let session_guard = self.session.lock().await;
-        let Some(session) = session_guard.as_ref() else {
-            return Err(RpcError::Other(
-                "MCP server is not connected (reconnecting or failed)".into(),
-            ));
-        };
-        // 取 Arc 后立即释放锁：请求等待期间不阻塞重连替换会话。
-        let session = Arc::clone(session);
-        drop(session_guard);
-        tokio::select! {
-            biased;
-            _ = self.host_cancel.cancelled() => Err(RpcError::Cancelled),
-            result = session.request(method, params, timeout, cancel) => result,
-        }
-    }
-}
-
-impl McpServerHandle {
-    /// 401 后的凭据恢复：refresh 优先，device flow 兜底；成功返回 `true`。
-    async fn try_credential_retry(&self, cancel: &CancellationToken) -> bool {
-        let Some(oauth) = self.config.oauth.as_ref() else {
-            return false;
-        };
-        if let Some(credentials) = self.credential_store.get(&self.config.name)
-            && let Some(refresh_token) = credentials.refresh_token
-        {
-            match refresh_access_token(oauth, &refresh_token, &self.oauth_runtime, cancel).await {
-                Ok(credentials) => {
-                    let _ = self.credential_store.set(&self.config.name, credentials);
-                    return true;
-                }
-                Err(error) => {
-                    self.record(
-                        "mcp_refresh_failed",
-                        format!("token refresh failed: {error}; falling back to device flow"),
-                    );
-                }
-            }
-        }
-        match device_flow_authenticate(oauth, &self.oauth_runtime, cancel).await {
-            Ok(credentials) => {
-                let _ = self.credential_store.set(&self.config.name, credentials);
-                true
-            }
-            Err(error) => {
-                self.record(
-                    "mcp_oauth_recovery_failed",
-                    format!("OAuth recovery failed: {error}"),
-                );
-                false
-            }
-        }
-    }
-}
+pub use crate::mcp::server_handle::McpServerHandle;
 
 /// host 级共享状态。
 #[derive(Debug)]
 struct McpHostShared {
     servers: Vec<McpServerHandle>,
+    /// 同时 spawn 的 server 数量上限（ARC-720 `ConcurrentExtensions`）；
+    /// `0` = 不限制。Atomic：setter 经任一 clone 修改后所有视图可见。
+    max_concurrent_extensions: std::sync::atomic::AtomicU32,
     /// server 名 → 已发现工具（`Ready` 时填充，`tools/list_changed` 刷新）。
     tools: RwLock<BTreeMap<String, Vec<DiscoveredTool>>>,
     /// 工具集版本号（每次发现 / 热更新 +1）。
@@ -347,23 +227,44 @@ impl McpHost {
         oauth_runtime: OAuthRuntime,
         diagnostics: Arc<dyn DiagnosticSink>,
     ) -> Self {
+        Self::with_options(
+            configs,
+            credential_store,
+            oauth_runtime,
+            diagnostics,
+            crate::budget::ExtensionBudget::default().max_concurrent_extensions,
+        )
+    }
+
+    /// 完整装配（测试 / 产品注入并发上限）。
+    pub fn with_options(
+        configs: Vec<McpServerConfig>,
+        credential_store: Arc<dyn McpCredentialStore>,
+        oauth_runtime: OAuthRuntime,
+        diagnostics: Arc<dyn DiagnosticSink>,
+        max_concurrent_extensions: u32,
+    ) -> Self {
         let (tools_version, tools_version_rx) = watch::channel(0u64);
         let cancel = CancellationToken::new();
         let servers = configs
             .into_iter()
             .filter(|config| config.enabled)
-            .map(|config| McpServerHandle {
-                config,
-                session: Arc::new(tokio::sync::Mutex::new(None)),
-                host_cancel: cancel.clone(),
-                credential_store: Arc::clone(&credential_store),
-                oauth_runtime: oauth_runtime.clone(),
-                diagnostics: diagnostics.clone(),
+            .map(|config| {
+                McpServerHandle::new(
+                    config,
+                    cancel.clone(),
+                    Arc::clone(&credential_store),
+                    oauth_runtime.clone(),
+                    diagnostics.clone(),
+                )
             })
             .collect();
         Self {
             inner: Arc::new(McpHostShared {
                 servers,
+                max_concurrent_extensions: std::sync::atomic::AtomicU32::new(
+                    max_concurrent_extensions,
+                ),
                 tools: RwLock::new(BTreeMap::new()),
                 tools_version,
                 _tools_version_rx: tools_version_rx,
@@ -375,8 +276,21 @@ impl McpHost {
         }
     }
 
-    /// 启动所有启用的 server task（幂等）。
+    /// 设置并发上限（`0` = 不限制）。共享实例：任一 clone 上调用
+    /// 对所有视图生效。默认与 [`crate::budget::ExtensionBudget::default`]
+    /// 的 `max_concurrent_extensions` 一致（32）。
+    pub fn set_max_concurrent_extensions(&self, limit: u32) {
+        use std::sync::atomic::Ordering;
+        self.inner
+            .max_concurrent_extensions
+            .store(limit, Ordering::Relaxed);
+    }
+
+    /// 启动 server task（幂等）。启用的 server 数量超过并发上限时只
+    /// 启动前 N 个（按 configs 顺序），其余保持 `Disconnected` 且不
+    /// spawn，并发出 `mcp_concurrency_limit` 诊断。
     pub fn start(&self) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
         let mut state = self.inner.state.lock().unwrap();
         match *state {
             HostMcpState::Running => return Ok(()),
@@ -384,7 +298,23 @@ impl McpHost {
             _ => return Err("MCP host is stopping or stopped".into()),
         }
         let shared = self.inner.clone();
-        for handle in self.inner.servers.clone() {
+        let limit = shared.max_concurrent_extensions.load(Ordering::Relaxed);
+        for (index, handle) in self.inner.servers.clone().into_iter().enumerate() {
+            if limit > 0 && index >= usize::try_from(limit).unwrap_or(usize::MAX) {
+                shared.diagnostics.emit(DiagnosticRecord {
+                    level: DiagnosticLevel::Warning,
+                    code: "mcp_concurrency_limit".into(),
+                    message: format!(
+                        "MCP server '{}' not started: concurrent extension limit {limit} \
+                         reached ({} enabled server(s))",
+                        handle.name(),
+                        self.inner.servers.len()
+                    ),
+                    extension_id: Some(handle.config().name.clone()),
+                    context: Default::default(),
+                });
+                continue;
+            }
             let task_shared = shared.clone();
             tokio::spawn(async move {
                 McpServerTask::run(handle, task_shared).await;
@@ -410,7 +340,8 @@ impl McpHost {
         self.inner.cancel.cancel();
         // 关闭所有会话（task 观察到取消后不再重建新会话）。
         for handle in &self.inner.servers {
-            let mut session = handle.session.lock().await;
+            let session_mutex = handle.session();
+            let mut session = session_mutex.lock().await;
             if let Some(session) = session.take() {
                 session.close().await;
             }
@@ -476,7 +407,7 @@ impl McpServerTask {
             .server_states
             .read()
             .unwrap()
-            .get(&handle.config.name)
+            .get(&handle.config().name)
             .cloned()
             .unwrap_or(ServerLifecycleState::Disconnected);
         let next = match apply_event(current.clone(), event) {
@@ -486,7 +417,7 @@ impl McpServerTask {
                     level: DiagnosticLevel::Warning,
                     code: "mcp_state_transition".into(),
                     message: error.to_string(),
-                    extension_id: Some(handle.config.name.clone()),
+                    extension_id: Some(handle.config().name.clone()),
                     context: Default::default(),
                 });
                 return None;
@@ -502,7 +433,7 @@ impl McpServerTask {
             .server_states
             .write()
             .unwrap()
-            .insert(handle.config.name.clone(), next.clone());
+            .insert(handle.config().name.clone(), next.clone());
         Some(next)
     }
 
@@ -516,7 +447,7 @@ impl McpServerTask {
             level: DiagnosticLevel::Warning,
             code: code.into(),
             message: message.into(),
-            extension_id: Some(handle.config.name.clone()),
+            extension_id: Some(handle.config().name.clone()),
             context: Default::default(),
         });
     }
@@ -548,7 +479,7 @@ impl McpServerTask {
                         .server_states
                         .read()
                         .unwrap()
-                        .get(&handle.config.name)
+                        .get(&handle.config().name)
                         .is_some_and(ServerLifecycleState::is_ready);
                     Self::transition(
                         &shared,
@@ -569,7 +500,8 @@ impl McpServerTask {
             }
         }
         // 收尾：清理残留会话。
-        let mut session = handle.session.lock().await;
+        let session_mutex = handle.session();
+        let mut session = session_mutex.lock().await;
         if let Some(session) = session.take() {
             session.close().await;
         }
@@ -585,7 +517,7 @@ impl McpServerTask {
         let (notifications, mut notification_rx) =
             tokio::sync::mpsc::unbounded_channel::<Notification>();
         let (session, mut died_rx) =
-            match RpcSession::open(handle.config.transport.clone(), notifications).await {
+            match RpcSession::open(handle.config().transport.clone(), notifications).await {
                 Ok(opened) => opened,
                 Err(error) => {
                     return ServeOutcome::Failed {
@@ -597,17 +529,20 @@ impl McpServerTask {
         Self::transition(shared, handle, LifecycleEvent::HandshakeStarted, None);
 
         // initialize 握手（capability 协商：接受服务器返回的协议版本）。
+        // 握手请求同样携带当前凭据派生的 Authorization（HTTP transport）。
+        let headers = handle.auth_headers();
         let initialize_params = serde_json::json!({
             "protocolVersion": "2025-06-18",
             "capabilities": {},
             "clientInfo": {"name": "evo", "version": env!("CARGO_PKG_VERSION")},
         });
         if let Err(error) = session
-            .request(
+            .request_with_headers(
                 "initialize",
                 Some(initialize_params),
                 Duration::from_secs(30),
                 cancel,
+                &headers,
             )
             .await
         {
@@ -617,7 +552,7 @@ impl McpServerTask {
             };
         }
         if session
-            .notify("notifications/initialized", None)
+            .notify_with_headers("notifications/initialized", None, &headers)
             .await
             .is_err()
         {
@@ -628,21 +563,23 @@ impl McpServerTask {
         }
 
         // 工具发现。
-        if let Err(reason) = Self::discover_tools(handle, shared, &session, cancel).await {
+        if let Err(reason) = Self::discover_tools(handle, shared, &session, cancel, &headers).await
+        {
             session.close().await;
             return ServeOutcome::Failed { reason };
         }
 
-        *handle.session.lock().await = Some(Arc::new(session));
+        *handle.session().lock().await = Some(Arc::new(session));
         Self::transition(shared, handle, LifecycleEvent::Ready, None);
 
         // Ready 服务循环：liveness ping / 通知 / transport 死亡 / 取消。
-        let liveness = handle.config.liveness.clone();
+        let liveness = handle.config().liveness.clone();
         let mut ping = tokio::time::interval(liveness.ping_interval);
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let session = {
-                let guard = handle.session.lock().await;
+                let session_mutex = handle.session();
+                let guard = session_mutex.lock().await;
                 guard.as_ref().cloned()
             };
             let Some(session) = session else {
@@ -669,17 +606,18 @@ impl McpServerTask {
                     };
                     if notification.method == "notifications/tools/list_changed"
                         && let Err(reason) =
-                            Self::discover_tools(handle, shared, &session, cancel).await
+                            Self::discover_tools(handle, shared, &session, cancel, &headers).await
                     {
                         Self::record(shared.as_ref(), handle, "mcp_tools_refresh_failed", reason);
                     }
                 }
                 _ = ping.tick() => {
-                    match session.request(
+                    match session.request_with_headers(
                         "ping",
                         None,
                         liveness.ping_timeout,
                         cancel,
+                        &headers,
                     ).await {
                         Ok(_) => {}
                         Err(error) => {
@@ -699,9 +637,10 @@ impl McpServerTask {
         shared: &Arc<McpHostShared>,
         session: &RpcSession,
         cancel: &CancellationToken,
+        headers: &[(String, String)],
     ) -> Result<(), String> {
         let result = session
-            .request("tools/list", None, Duration::from_secs(30), cancel)
+            .request_with_headers("tools/list", None, Duration::from_secs(30), cancel, headers)
             .await
             .map_err(|error| format!("tools/list: {error}"))?;
         let tools = result
@@ -710,7 +649,7 @@ impl McpServerTask {
             .ok_or_else(|| "tools/list result lacks 'tools' array".to_string())?;
         let mut discovered = Vec::new();
         for raw in tools {
-            match convert_tool(&handle.config.name, raw) {
+            match convert_tool(&handle.config().name, raw) {
                 Ok(tool) => discovered.push(tool),
                 Err(reason) => {
                     // 非法条目拒绝（fail closed）并诊断，其余继续。
@@ -722,7 +661,7 @@ impl McpServerTask {
             .tools
             .write()
             .unwrap()
-            .insert(handle.config.name.clone(), discovered);
+            .insert(handle.config().name.clone(), discovered);
         let version = shared.tools_version.borrow().saturating_add(1);
         let _ = shared.tools_version.send(version);
         Ok(())
@@ -735,7 +674,7 @@ impl McpServerTask {
         cancel: &CancellationToken,
     ) -> bool {
         *attempt = attempt.saturating_add(1);
-        let config = &handle.config.reconnect;
+        let config = &handle.config().reconnect;
         let backoff = backoff_for(*attempt, config.initial_backoff, config.max_backoff);
         tokio::select! {
             _ = cancel.cancelled() => false,

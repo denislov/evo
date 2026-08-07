@@ -100,7 +100,9 @@ pub(crate) fn record_diagnostic(
 /// 派发一个 Observe gate 事件到全部匹配 hook（串行，按确定优先级）。
 ///
 /// 任何 hook 失败都不阻断其余 hook（fail-open：观察类事件不得影响
-/// 产品行为）；结果统一落诊断。返回执行的 hook 数。
+/// 产品行为）；结果统一落诊断。每个 hook 执行前后调用注入的
+/// [`HookLifecycle`] 观察点（ARC-730 hook 修改归因；观察失败不阻断）。
+/// 返回执行的 hook 数。
 pub(crate) async fn dispatch_observe(
     registry: &HookRegistry,
     shared: &Arc<crate::host::HostShared>,
@@ -115,11 +117,13 @@ pub(crate) async fn dispatch_observe(
     let workspace_root = event.workspace_root.clone();
     let cancel = shared.cancel();
     let event_json = serde_json::to_string(event).unwrap_or_default();
+    let lifecycle = shared.hook_lifecycle().clone();
     let mut executed = 0;
     for spec in hooks {
         if !spec.matcher.matches(&context) {
             continue;
         }
+        lifecycle.before(event, spec).await;
         let ctx = RunContext {
             session_id: session_id.clone(),
             workspace_root: workspace_root.clone(),
@@ -128,6 +132,7 @@ pub(crate) async fn dispatch_observe(
         };
         let timeout = hook_timeout(spec, budget_max_run_secs);
         let outcome = run_hook(spec, &event_json, &ctx, timeout, GateKind::Observe).await;
+        lifecycle.after(event, spec, &outcome).await;
         executed += 1;
         record_hook_outcome(shared, spec, &outcome);
     }

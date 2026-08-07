@@ -51,6 +51,7 @@ pub mod dispatcher;
 pub mod error;
 pub mod event;
 pub mod hook;
+pub mod hook_lifecycle;
 pub mod host;
 pub mod matcher;
 pub mod mcp;

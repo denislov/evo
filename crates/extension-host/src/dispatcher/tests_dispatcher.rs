@@ -1,9 +1,12 @@
 use super::*;
 use crate::event::{EXTENSION_EVENT_VERSION, ExtensionEventPayload};
 use crate::hook::HookSpec;
+use crate::hook_lifecycle::HookLifecycle;
 use crate::host::HostShared;
 use crate::matcher::HookMatcher;
 use serde_json::json;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tool_contract::api::definition::ToolId;
 
@@ -605,5 +608,123 @@ async fn tool_gate_respects_path_and_tool_matchers() {
             .await,
         ToolGateDecision::Allow,
         "tool outside the matcher is allowed"
+    );
+}
+
+/// 记录 before/after 调用序列的生命周期观察点（ARC-730 注入 seam 测试）。
+#[derive(Debug, Clone, Default)]
+struct RecordingLifecycle {
+    calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl HookLifecycle for RecordingLifecycle {
+    fn before<'a>(
+        &'a self,
+        _event: &'a ExtensionEvent,
+        spec: &'a HookSpec,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let calls = self.calls.clone();
+        let name = spec.name.clone();
+        Box::pin(async move {
+            calls.lock().unwrap().push(format!("before:{name}"));
+        })
+    }
+
+    fn after<'a>(
+        &'a self,
+        _event: &'a ExtensionEvent,
+        spec: &'a HookSpec,
+        _outcome: &'a HookRunOutcome,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let calls = self.calls.clone();
+        let name = spec.name.clone();
+        Box::pin(async move {
+            calls.lock().unwrap().push(format!("after:{name}"));
+        })
+    }
+}
+
+fn post_tool_event(root: &std::path::Path) -> ExtensionEvent {
+    ExtensionEvent::new(
+        ExtensionEventKind::PostToolUse,
+        "s1",
+        root.to_string_lossy(),
+        "t",
+        ExtensionEventPayload::PostToolUse {
+            tool_name: ToolId::new("bash").unwrap(),
+            tool_input: json!({}),
+            tool_result: json!({"ok": true}),
+            tool_input_truncated: false,
+            tool_result_truncated: false,
+            duration_ms: None,
+            path: None,
+        },
+    )
+}
+
+/// 注入的 lifecycle 在每个匹配 hook 前后按执行顺序调用（两个 hook：
+/// before 先于 hook、after 后于 hook、hook 间串行）。
+#[tokio::test]
+async fn hook_lifecycle_is_invoked_before_and_after_each_hook() {
+    let lifecycle = RecordingLifecycle::default();
+    let shared = crate::host::HostShared::test_harness_with_lifecycle(Arc::new(lifecycle.clone()));
+    let registry = registry(vec![
+        spec("first", ExtensionEventKind::PostToolUse, "exit 0"),
+        spec("second", ExtensionEventKind::PostToolUse, "exit 0"),
+    ]);
+    let event = post_tool_event(ws().path());
+    let executed = dispatch_observe(&registry, &shared, &event).await;
+    assert_eq!(executed, 2);
+    let calls = lifecycle.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        vec![
+            "before:first".to_string(),
+            "after:first".to_string(),
+            "before:second".to_string(),
+            "after:second".to_string(),
+        ],
+        "before/after must bracket each hook in execution order"
+    );
+}
+
+/// lifecycle 观察失败不阻断 hook 执行（before 内部吞错，hook 照常运行
+/// 并落 hook_run 诊断）。
+#[tokio::test]
+async fn hook_lifecycle_failure_does_not_block_hook_execution() {
+    #[derive(Debug)]
+    struct FailingLifecycle;
+    impl HookLifecycle for FailingLifecycle {
+        fn before<'a>(
+            &'a self,
+            _event: &'a ExtensionEvent,
+            _spec: &'a HookSpec,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {
+                // 模拟归因前 IO 失败：吞掉，不让错误影响派发。
+                let _ = std::fs::read("/nonexistent/arc-730/hook-baseline");
+            })
+        }
+
+        fn after<'a>(
+            &'a self,
+            _event: &'a ExtensionEvent,
+            _spec: &'a HookSpec,
+            _outcome: &'a HookRunOutcome,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
+    }
+    let shared = crate::host::HostShared::test_harness_with_lifecycle(Arc::new(FailingLifecycle));
+    let registry = registry(vec![spec("h", ExtensionEventKind::PostToolUse, "exit 0")]);
+    let event = post_tool_event(ws().path());
+    let executed = dispatch_observe(&registry, &shared, &event).await;
+    assert_eq!(executed, 1, "hook still executes when observation fails");
+    assert!(
+        shared
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("hook 'h'")),
+        "hook_run diagnostic is still recorded"
     );
 }

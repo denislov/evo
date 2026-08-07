@@ -19,6 +19,7 @@ pub mod credentials;
 pub mod lifecycle;
 pub mod meta;
 pub mod oauth;
+mod server_handle;
 mod state;
 pub mod transport;
 pub mod wire;

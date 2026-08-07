@@ -309,11 +309,34 @@ impl ExtensionEventDispatch {
 #[derive(Debug, Clone)]
 pub(crate) struct ExtensionHostService {
     port: Arc<dyn ExtensionHostPort>,
+    /// ARC-730 hook 修改归因：review tracker handle 注入槽（session
+    /// 装配完成后绑定；未绑定时观察点 no-op）。
+    hook_tracker: Arc<std::sync::Mutex<Option<change_tracker::HunkTrackerHandle>>>,
 }
 
 impl ExtensionHostService {
     pub(crate) fn new(port: Arc<dyn ExtensionHostPort>) -> Self {
-        Self { port }
+        Self {
+            port,
+            hook_tracker: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// 装配时共享归因注入槽（observer 与 service 共用同一把 handle）。
+    pub(crate) fn with_hook_tracker_slot(
+        port: Arc<dyn ExtensionHostPort>,
+        hook_tracker: Arc<std::sync::Mutex<Option<change_tracker::HunkTrackerHandle>>>,
+    ) -> Self {
+        Self { port, hook_tracker }
+    }
+
+    /// ARC-730 hook 归因槽：review tracker 启动 / 停用时由
+    /// [`crate::services::review::ReviewService`] 填充 / 清空（观察点
+    /// 不长期持有 handle，避免阻塞 rewind 的 projection task 退出）。
+    pub(crate) fn hook_tracker_slot(
+        &self,
+    ) -> Arc<std::sync::Mutex<Option<change_tracker::HunkTrackerHandle>>> {
+        Arc::clone(&self.hook_tracker)
     }
 
     /// 事件提交入口（产品各接线点使用）。无 host 时 no-op。

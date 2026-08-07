@@ -186,6 +186,21 @@ impl RpcSession {
         timeout: std::time::Duration,
         cancel: &CancellationToken,
     ) -> Result<Value, RpcError> {
+        self.request_with_headers(method, params, timeout, cancel, &[])
+            .await
+    }
+
+    /// 发送一个请求并等待响应；HTTP 路径额外注入 `extra_headers`
+    /// （动态凭据等，同名覆盖静态配置的 header；无动态时不改变静态
+    /// header）。stdio 路径忽略额外 header（无 HTTP 请求语义）。
+    pub async fn request_with_headers(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: std::time::Duration,
+        cancel: &CancellationToken,
+        extra_headers: &[(String, String)],
+    ) -> Result<Value, RpcError> {
         let id = Id::Number(
             self.next_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -232,8 +247,9 @@ impl RpcSession {
                 endpoint,
                 headers,
             } => {
+                let merged = merge_headers(headers, extra_headers);
                 let response = await_with_controls(
-                    post_json(client, endpoint, headers, &request_bytes),
+                    post_json(client, endpoint, &merged, &request_bytes),
                     timeout,
                     cancel,
                 )
@@ -267,6 +283,17 @@ impl RpcSession {
 
     /// 发送通知（无响应期待）。
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), RpcError> {
+        self.notify_with_headers(method, params, &[]).await
+    }
+
+    /// 发送通知（无响应期待）；HTTP 路径额外注入 `extra_headers`
+    /// （语义同 [`RpcSession::request_with_headers`]）。
+    pub async fn notify_with_headers(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        extra_headers: &[(String, String)],
+    ) -> Result<(), RpcError> {
         let notification = Notification {
             jsonrpc: wire::JSONRPC_VERSION.into(),
             method: method.to_string(),
@@ -297,7 +324,8 @@ impl RpcSession {
                 endpoint,
                 headers,
             } => {
-                post_json(client, endpoint, headers, &bytes)
+                let merged = merge_headers(headers, extra_headers);
+                post_json(client, endpoint, &merged, &bytes)
                     .await
                     .map_err(|error| RpcError::Other(error.to_string()))??;
                 Ok(())
@@ -329,6 +357,20 @@ fn id_number(id: &Id) -> u64 {
         Id::Number(number) => *number,
         Id::String(_) => unreachable!("session ids are always numbers"),
     }
+}
+
+/// 合并静态与动态 header：动态（按请求注入，如 refresh 后的 access
+/// token）覆盖静态配置的同名 header（大小写不敏感）；静态保底。
+fn merge_headers(
+    static_headers: &[(String, String)],
+    dynamic: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut merged = static_headers.to_vec();
+    for (name, value) in dynamic {
+        merged.retain(|(existing, _)| !name.eq_ignore_ascii_case(existing));
+        merged.push((name.clone(), value.clone()));
+    }
+    merged
 }
 
 async fn await_with_controls<F, T>(

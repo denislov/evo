@@ -115,6 +115,15 @@
   refresh 一次并重试一次；refresh 失败或仍 401 → 配置了 OAuth 则触发
   一次 device flow；**不无限重试**——每次失败都是结构化错误
   （`RpcError::Unauthorized` / `OAuthError`）。
+- **refresh 后的新 token 立即进入请求（本次修复）**：`McpServerHandle`
+  每次 `request`/`notify`（含握手、liveness、tools 发现）从 credential
+  store 读取当前 access token，HTTP transport 按请求注入
+  `Authorization: Bearer <token>`（`RpcSession::request_with_headers` /
+  `notify_with_headers`，动态 header 覆盖静态配置的同名 header；无动态
+  凭据时静态保底；stdio 不注入）。此前 refresh 只更新 store，请求仍用
+  会话建立时的静态 headers——新 token 从未到达服务器。测试：fake
+  HTTP MCP server（`src/bin/fake_mcp_http_server.rs`）记录每个请求的
+  `Authorization`，断言 401 → refresh → 重试携带新 token。
 - 可测性：`OAuthRuntime` 注入 mock HTTP 客户端、poll_interval、
   flow_timeout、verification presenter；测试用本地 TcpListener mock
   端点。
@@ -151,6 +160,22 @@
   无 MCP 行为不变、显式工具不被覆盖）。
 - **默认（无 MCP 配置）行为与现在完全一致**；agent-core 零改动。
 
+## 并发上限（ARC-720 `ConcurrentExtensions`，本次强制）
+
+- `McpHost` 持有 `max_concurrent_extensions`（`set_max_concurrent_extensions`；
+  默认与 `ExtensionBudget::default()` 一致为 32；`0` = 不限制）。此前
+  `max_concurrent_extensions` 只是配置字段，MCP 并发上限未被强制。
+- `start()` 时启用的 server 数超过上限：**只启动前 N 个**（按 configs
+  顺序），其余不 spawn（状态保持 `Disconnected`、调用返回 not connected）
+  并发出 `mcp_concurrency_limit` 诊断。
+- 预算接线：`ExtensionHost::new` 在 config merge 后把合并预算的
+  `max_concurrent_extensions` 应用到 `options.mcp`（同一份
+  `ExtensionBudget` 同时约束 hooks 与 MCP）。
+- 测试：`mcp_lifecycle.rs::mcp_concurrency_limit_starts_only_the_first_servers`
+  （上限 2、3 个 server → 只启动 2 个 + 1 条超限诊断）、
+  `mcp_concurrency_limit_zero_means_unlimited`（0 不限制）、既有 13 项
+  mcp_lifecycle 测试（默认上限 32 不受影响）回归。
+
 ## 落点
 
 | 变更 | 位置 |
@@ -158,6 +183,7 @@
 | MCP wire（JSON-RPC 2.0 严格解析） | `crates/extension-host/src/mcp/wire.rs` |
 | transport（stdio 子进程 + HTTP） | `crates/extension-host/src/mcp/transport.rs` |
 | lifecycle（server 状态机 / McpHost 装配） | `crates/extension-host/src/mcp/lifecycle.rs` |
+| server 调用句柄（OAuth 动态 header 注入） | `crates/extension-host/src/mcp/server_handle.rs`（本次拆分） |
 | 状态机纯决策层 + transition 表 | `crates/extension-host/src/mcp/state.rs` |
 | credential store（trait + 文件实现） | `crates/extension-host/src/mcp/credentials.rs` |
 | OAuth device flow + refresh | `crates/extension-host/src/mcp/oauth.rs` |

@@ -68,6 +68,9 @@ pub struct ExtensionHostOptions {
     /// MCP host（ARC-720）：配置了 MCP server 时装配并随 host 启动 /
     /// 关闭；`None` = 无 MCP（行为不变）。
     pub mcp: Option<crate::mcp::lifecycle::McpHost>,
+    /// Hook 生命周期观察点（ARC-730）：每个 hook 执行前后回调；
+    /// `None` = no-op（行为不变）。产品注入实现做 hook 修改归因。
+    pub hook_lifecycle: Option<Arc<dyn crate::hook_lifecycle::HookLifecycle>>,
 }
 
 impl Default for ExtensionHostOptions {
@@ -81,6 +84,7 @@ impl Default for ExtensionHostOptions {
             diagnostics: None,
             diagnostic_capacity: DEFAULT_DIAGNOSTIC_CAPACITY,
             mcp: None,
+            hook_lifecycle: None,
         }
     }
 }
@@ -118,6 +122,8 @@ pub(crate) struct HostShared {
     registry: Option<Arc<HookRegistry>>,
     /// MCP host（ARC-720）：随 host start / shutdown 生命周期。
     mcp: Option<crate::mcp::lifecycle::McpHost>,
+    /// Hook 生命周期观察点（ARC-730）；默认 no-op。
+    hook_lifecycle: Arc<dyn crate::hook_lifecycle::HookLifecycle>,
 }
 
 impl HostShared {
@@ -144,6 +150,11 @@ impl HostShared {
         self.registry.as_ref()
     }
 
+    /// Hook 生命周期观察点（ARC-730）。
+    pub(crate) fn hook_lifecycle(&self) -> &Arc<dyn crate::hook_lifecycle::HookLifecycle> {
+        &self.hook_lifecycle
+    }
+
     /// 诊断快照（测试用）。
     #[cfg(test)]
     pub(crate) fn diagnostics(&self) -> Vec<DiagnosticRecord> {
@@ -153,6 +164,14 @@ impl HostShared {
     /// 测试 harness：默认运行态共享结构（无 registry、默认预算）。
     #[cfg(test)]
     pub(crate) fn test_harness() -> Arc<Self> {
+        Self::test_harness_with_lifecycle(Arc::new(crate::hook_lifecycle::NoopHookLifecycle))
+    }
+
+    /// 测试 harness：注入 hook 生命周期观察点（ARC-730）。
+    #[cfg(test)]
+    pub(crate) fn test_harness_with_lifecycle(
+        lifecycle: Arc<dyn crate::hook_lifecycle::HookLifecycle>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(HostState::Running),
             shutdown_tx: Mutex::new(None),
@@ -161,6 +180,7 @@ impl HostShared {
             cancel: CancellationToken::new(),
             registry: None,
             mcp: None,
+            hook_lifecycle: lifecycle,
         })
     }
 }
@@ -269,6 +289,15 @@ impl ExtensionHost {
         let registry = (!registry.is_empty()).then(|| Arc::new(registry));
 
         let mcp = options.mcp.clone();
+        // ARC-720 预算接线：MCP 并发上限取合并后的扩展预算
+        // （`ConcurrentExtensions` 维度，`0` = 不限制）。
+        if let Some(mcp) = mcp.as_ref() {
+            mcp.set_max_concurrent_extensions(budget.max_concurrent_extensions);
+        }
+        let hook_lifecycle = options
+            .hook_lifecycle
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::hook_lifecycle::NoopHookLifecycle));
         let info = Arc::new(HostInfo {
             options,
             records,
@@ -284,6 +313,7 @@ impl ExtensionHost {
             cancel: CancellationToken::new(),
             registry,
             mcp,
+            hook_lifecycle,
         });
         (Self { info, shared }, errors)
     }

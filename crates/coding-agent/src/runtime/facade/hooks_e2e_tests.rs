@@ -424,22 +424,25 @@ async fn stop_gate_block_continues_loop_and_injects_additional_context() {
         .expect("session shuts down");
 }
 
-/// extension（hook 命令）修改工作区文件 → review tracker 归因
-/// `HookEdit` → review 列表可见、open_change 可读、accept/reject 生效。
+/// extension（hook 命令）修改工作区文件 → host 生命周期观察点自动归因
+/// `HookEdit`（不再手工构造 receipt）→ review 列表可见（source=hook_edit）、
+/// open_change 可读、accept/reject 生效。
 #[tokio::test(flavor = "current_thread")]
 async fn hook_edit_is_attributed_and_reviewable_end_to_end() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let before = b"before\n";
-    std::fs::write(workspace.join("notes.txt"), before).unwrap();
+    let notes = workspace.join("notes.txt");
+    let marker = workspace.join("marker.txt");
+    std::fs::write(&notes, b"initial\n").unwrap();
     let sink = Arc::new(CollectingSink::default());
     let extensions_root = temp.path().join("extensions");
+    // hook 把 marker 内容拷入 notes.txt（测试侧写 marker 控制修改内容）。
     let formatter = trusted_extension(
         temp.path(),
         "formatter",
         serde_json::json!([
-            {"name": "formatter", "event": "post_tool_use", "command": "echo 'after' > \"$EVO_WORKSPACE_ROOT/notes.txt\""}
+            {"name": "formatter", "event": "post_tool_use", "command": "cat \"$EVO_WORKSPACE_ROOT/marker.txt\" > \"$EVO_WORKSPACE_ROOT/notes.txt\""}
         ]),
     );
     let mut session = CodingAgentSession::non_persistent_internal(
@@ -454,8 +457,45 @@ async fn hook_edit_is_attributed_and_reviewable_end_to_end() {
     .await
     .expect("session opens");
 
-    // 1) 触发 Observe hook：extension 进程修改工作区文件。
+    // 1) 产品归因路径建立 track：agent 编辑（AgentEdit）把文件纳入
+    //    review 基线（observer 只归因 tracker 已知文件）。
     let (session_id, workspace_root) = session.runtime_host.session_identity();
+    let fingerprint = {
+        let filesystem = workspace_runtime::api::WorkspaceAccessHandle::open_source(&workspace)
+            .expect("workspace authority opens");
+        filesystem
+            .prepare_workspace_review_target("notes.txt")
+            .await
+            .expect("review target opens")
+            .target_fingerprint()
+            .to_owned()
+    };
+    std::fs::write(&notes, b"before\n").unwrap();
+    let agent_diff = crate::tools::filesystem::diff::generate_unified_patch(
+        "notes.txt",
+        "initial\n",
+        "before\n",
+    );
+    session
+        .runtime_host
+        .review_service
+        .mutation_tracking(&session_id, "turn-1", "operation-1")
+        .expect("mutation tracking starts")
+        .record(
+            "tool-1",
+            crate::tools::filesystem::mutation_receipt::receipt(
+                "notes.txt".into(),
+                fingerprint.clone(),
+                Some(b"initial\n"),
+                Some(b"before\n"),
+                "write",
+                Some(agent_diff),
+            ),
+        )
+        .await
+        .expect("agent edit receipt is recorded");
+
+    // 2) 触发 Observe hook：extension 进程修改工作区文件。
     session.runtime_host.extension_host.submit_event(
         ExtensionEventKind::PostToolUse,
         &session_id,
@@ -470,69 +510,24 @@ async fn hook_edit_is_attributed_and_reviewable_end_to_end() {
             path: None,
         },
     );
+    // 3) 自动归因 `HookEdit`：真实 hook 进程写文件 → 观察点对比
+    //    before/after 磁盘状态 → record_receipt(HookEdit)。review 列表
+    //    可见且 source == "hook_edit"（不再需要手工构造 receipt）。
+    std::fs::write(&marker, b"after\n").unwrap();
     wait_for(
-        || sink.hook_runs.load(Ordering::SeqCst) >= 1,
-        "formatter hook runs and edits the file",
+        || {
+            session
+                .list_changes()
+                .map(|changes| {
+                    changes
+                        .iter()
+                        .any(|change| change.path == "notes.txt" && change.source == "hook_edit")
+                })
+                .unwrap_or(false)
+        },
+        "hook edit is automatically attributed",
     )
     .await;
-    let after = std::fs::read(workspace.join("notes.txt")).unwrap();
-    assert_eq!(after, b"after\n", "the extension process modified the file");
-
-    // 2) 产品把 extension 修改归因 `HookEdit`（review 管线的 record_receipt
-    //    路径，与 reject 路径同源）。target_fingerprint 取 review 目标
-    //    的真实身份指纹（accept 校验时重新打开同一文件必须一致）。
-    let handle = session
-        .runtime_host
-        .review_service
-        .tracker_handle()
-        .expect("review tracker starts");
-    let fingerprint = {
-        let filesystem = workspace_runtime::api::WorkspaceAccessHandle::open_source(&workspace)
-            .expect("workspace authority opens");
-        filesystem
-            .prepare_workspace_review_target("notes.txt")
-            .await
-            .expect("review target opens")
-            .target_fingerprint()
-            .to_owned()
-    };
-    let after_revision = crate::tools::filesystem::mutation_receipt::content_revision(&after);
-    let before_revision = crate::tools::filesystem::mutation_receipt::content_revision(before);
-    let diff = crate::tools::filesystem::diff::generate_unified_patch(
-        "notes.txt",
-        std::str::from_utf8(before).unwrap(),
-        std::str::from_utf8(&after).unwrap(),
-    );
-    handle
-        .record_receipt(
-            change_tracker::ChangeReceipt {
-                path: "notes.txt".into(),
-                target_fingerprint: fingerprint.clone(),
-                before_revision: Some(before_revision.clone()),
-                after_revision,
-                after_exists: true,
-                byte_delta: 0,
-                line_delta: 0,
-                origin: "hook_edit".into(),
-                unified_diff: Some(diff),
-            },
-            change_tracker::ChangeSource::HookEdit,
-            change_tracker::TrackingContext {
-                session_id: session_id.clone(),
-                turn_id: "review-turn".into(),
-                operation_id: "review-op".into(),
-                tool_call_id: None,
-            },
-        )
-        .await
-        .expect("hook edit receipt is recorded");
-    session
-        .runtime_host
-        .review_service
-        .refresh_latest(&handle)
-        .expect("review projection refreshes");
-
-    // 3) review 列表可见 + 归因 hook_edit + open_change 可读。
     let changes = session.list_changes().expect("review list is readable");
     let change = changes
         .iter()
@@ -564,46 +559,37 @@ async fn hook_edit_is_attributed_and_reviewable_end_to_end() {
         "accepted changes leave the review list"
     );
 
-    // 5) 第二次 extension 修改 + HookEdit 归因 → reject hunk 生效：文件
-    //    回退到上一 accepted baseline。
-    std::fs::write(workspace.join("notes.txt"), b"after2\n").unwrap();
-    let handle = session
-        .runtime_host
-        .review_service
-        .tracker_handle()
-        .expect("review tracker stays");
-    let after2_revision = crate::tools::filesystem::mutation_receipt::content_revision(b"after2\n");
-    let after_revision = crate::tools::filesystem::mutation_receipt::content_revision(b"after\n");
-    let diff =
-        crate::tools::filesystem::diff::generate_unified_patch("notes.txt", "after\n", "after2\n");
-    handle
-        .record_receipt(
-            change_tracker::ChangeReceipt {
-                path: "notes.txt".into(),
-                target_fingerprint: fingerprint,
-                before_revision: Some(after_revision),
-                after_revision: after2_revision,
-                after_exists: true,
-                byte_delta: 0,
-                line_delta: 0,
-                origin: "hook_edit".into(),
-                unified_diff: Some(diff),
-            },
-            change_tracker::ChangeSource::HookEdit,
-            change_tracker::TrackingContext {
-                session_id: session_id.clone(),
-                turn_id: "review-turn".into(),
-                operation_id: "review-op".into(),
-                tool_call_id: None,
-            },
-        )
-        .await
-        .expect("second hook edit receipt is recorded");
-    session
-        .runtime_host
-        .review_service
-        .refresh_latest(&handle)
-        .expect("review projection refreshes");
+    // 5) 第二次 extension 修改 → 自动归因 HookEdit → reject hunk 生效：
+    //    文件回退到上一 accepted baseline。
+    std::fs::write(&marker, b"after2\n").unwrap();
+    session.runtime_host.extension_host.submit_event(
+        ExtensionEventKind::PostToolUse,
+        &session_id,
+        &workspace_root,
+        ExtensionEventPayload::PostToolUse {
+            tool_name: ToolId::new("read_file").unwrap(),
+            tool_input: json!({}),
+            tool_result: json!({"ok": true}),
+            tool_input_truncated: false,
+            tool_result_truncated: false,
+            duration_ms: None,
+            path: None,
+        },
+    );
+    wait_for(
+        || {
+            session
+                .list_changes()
+                .map(|changes| {
+                    changes
+                        .iter()
+                        .any(|change| change.path == "notes.txt" && change.source == "hook_edit")
+                })
+                .unwrap_or(false)
+        },
+        "second hook edit is automatically attributed",
+    )
+    .await;
     let changes = session.list_changes().expect("review list is readable");
     let change = changes
         .iter()
@@ -617,7 +603,7 @@ async fn hook_edit_is_attributed_and_reviewable_end_to_end() {
         .await
         .expect("hook edit hunk is rejected");
     assert_eq!(
-        std::fs::read(workspace.join("notes.txt")).unwrap(),
+        std::fs::read(&notes).unwrap(),
         b"after\n",
         "reject restores the pre-edit (accepted baseline) content"
     );

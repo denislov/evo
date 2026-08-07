@@ -295,6 +295,12 @@ impl CodingAgentSession {
                 .await?;
         }
         session.refresh_snapshot_projection()?;
+        // ARC-730：hook 修改自动归因与 review tracker 共享 handle 槽
+        // （tracker 懒启动时填充、rewind 停用时清空，观察点不长期持有）。
+        session
+            .runtime_host
+            .review_service
+            .bind_hook_tracker_slot(extension_host.hook_tracker_slot());
         let opened_session_id = match &session.runtime_host.session_coordinator.persistence {
             SessionPersistence::Persistent(session_service) => {
                 session_service.session_id().to_owned()
@@ -412,6 +418,12 @@ impl CodingAgentSession {
         };
         session.refresh_snapshot_projection()?;
         let session_id = session.runtime_host.session_identity().0;
+        // ARC-730：hook 修改自动归因与 review tracker 共享 handle 槽
+        // （tracker 懒启动时填充、rewind 停用时清空，观察点不长期持有）。
+        session
+            .runtime_host
+            .review_service
+            .bind_hook_tracker_slot(extension_host.hook_tracker_slot());
         session.runtime_host.extension_host.submit_event(
             extension_host::api::ExtensionEventKind::SessionStart,
             &session_id,
@@ -437,6 +449,11 @@ impl CodingAgentSession {
 /// folder trust（[`ExtensionHostOptions::trust_store`]）共用判定；首次
 /// 启用（NotDecided）的扩展经 [`ExtensionHostService::first_enables`]
 /// 展示来源与能力。
+///
+/// ARC-730：产品未显式注入 hook 生命周期观察点时，装配
+/// [`HookEditAttribution`]（hook 修改自动归因 `HookEdit`）；review
+/// tracker handle 经 [`ExtensionHostService::bind_hook_tracker`] 在
+/// session 装配完成后注入。
 fn extension_host_service(
     options: Option<&extension_host::api::ExtensionHostOptions>,
     project_root: &std::path::Path,
@@ -452,11 +469,26 @@ fn extension_host_service(
             .project_dirs
             .push(project_root.join(".evo").join("extensions"));
     }
+    // ARC-730：未显式注入观察点时装配自动归因（hook 修改 → HookEdit）。
+    let hook_tracker = Arc::new(std::sync::Mutex::new(None));
+    if options.hook_lifecycle.is_none() {
+        options.hook_lifecycle = Some(Arc::new(
+            crate::services::hook_attribution::HookEditAttribution::new(
+                hook_tracker.clone(),
+                project_root,
+                options.diagnostics.clone(),
+            ),
+        ));
+    }
     match crate::services::ports::LiveExtensionHostPort::start(options) {
-        Ok(port) => crate::services::ports::ExtensionHostService::new(Arc::new(port)),
-        Err(_) => crate::services::ports::ExtensionHostService::new(std::sync::Arc::new(
-            crate::services::ports::NoopExtensionHostPort,
-        )),
+        Ok(port) => crate::services::ports::ExtensionHostService::with_hook_tracker_slot(
+            Arc::new(port),
+            hook_tracker,
+        ),
+        Err(_) => crate::services::ports::ExtensionHostService::with_hook_tracker_slot(
+            std::sync::Arc::new(crate::services::ports::NoopExtensionHostPort),
+            hook_tracker,
+        ),
     }
 }
 
