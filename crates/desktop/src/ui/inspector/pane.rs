@@ -2,22 +2,20 @@ use coding_agent::api::{
     event::{CodingAgentMergeChangeKind, CodingAgentMergeProposal},
     review::CodingAgentFileReviewRequest,
 };
-use desktop::projection::DesktopRecoveryStatus;
 use desktop::runtime::{DesktopRecoveryAction, DesktopRecoveryIdentity};
 use desktop::ui::inspector::review::{DesktopReviewLineKind, MAX_VISIBLE_FILE_CHANGES};
 use desktop::ui::shell::{
-    CONTEXT_PANEL_WIDTH, MONOSPACE_FONT_FAMILY, SemanticColor, SemanticTheme, truncate_label,
+    CONTEXT_PANEL_WIDTH, MONOSPACE_FONT_FAMILY, SemanticTheme, truncate_label,
 };
 use gpui::{
-    EventEmitter, FocusHandle, IntoElement, KeyDownEvent, ParentElement as _, Render, Role,
-    ScrollHandle, Styled as _, Window, div, prelude::*, px, rgb,
+    EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render, Role, ScrollHandle,
+    Styled as _, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::{Disableable as _, badge::Badge, button::Button};
 use std::sync::Arc;
 
 use crate::actions;
-use crate::app::native_shell::{InspectorSection, NativeDesktopState};
-use crate::application::commands::DesktopCommandIntent;
+use crate::app::native_shell::InspectorSection;
 use crate::application::workspace_state::DesktopFileReviewState;
 use crate::ui::components::{
     controls::{
@@ -25,11 +23,6 @@ use crate::ui::components::{
         DesktopIcon, DesktopIconButton, DesktopRowState,
     },
     style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _},
-};
-use crate::ui::shell::drawer::CenterDrawerKind;
-use crate::ui::shell::{
-    ShellUiState,
-    presentation::{recovery_status_label, runtime_state_label, usage_cost_label},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,206 +116,13 @@ pub(crate) struct InspectorPaneViewModel {
     pub(crate) cwd: String,
 }
 
-pub(crate) fn view_model(
-    app: &NativeDesktopState,
-    ui: &ShellUiState,
-    global_skill_count: usize,
-) -> InspectorPaneViewModel {
-    let workspace = app.workspaces.active();
-    let project = &workspace.project;
-    let pending = |predicate: fn(&DesktopCommandIntent) -> bool| {
-        app.commands
-            .contains_where(app.workspaces.active_key(), predicate)
-    };
-    let Some(projection) = workspace.projection.as_ref() else {
-        return InspectorPaneViewModel {
-            panel_width: app.preferences.context_panel_width,
-            presented_as_drawer: ui.active_drawer == Some(CenterDrawerKind::Inspector),
-            keyboard_focus_visible: ui.keyboard_focus_visible(),
-            selected_section: workspace.presentation.inspector_section,
-            composer_running: false,
-            awaiting_prompt_start: workspace.composer.submitted().is_some(),
-            recovery_pending: false,
-            file_review_pending: false,
-            external_editor_pending: false,
-            external_editor_configured: app.preferences.external_editor.is_some(),
-            changed_files: Vec::new(),
-            change_count: 0,
-            file_review: Arc::clone(&workspace.file_review),
-            merge_proposals: Arc::clone(&workspace.merge_proposals),
-            merge_proposal_pending: false,
-            runtime_attention_count: project.diagnostics.len(),
-            task_state: "ready".into(),
-            active_operation: "—".into(),
-            operation_count: 0,
-            delegation_count: 0,
-            selected_model: truncate_label(&project.selected_model_id, 28),
-            profile: truncate_label(project.default_agent_profile_id.as_str(), 28),
-            thinking: workspace
-                .thinking_selection
-                .label(project.settings.default_thinking_level.as_deref()),
-            usage_input: "0".into(),
-            usage_output: "0".into(),
-            usage_cache_read: "0".into(),
-            usage_cache_write: "0".into(),
-            usage_tokens: "0".into(),
-            usage_context: "—".into(),
-            usage_cost: "—".into(),
-            reduced_motion: app.preferences.reduced_motion,
-            stream_id: "—".into(),
-            sequence: "0".into(),
-            generation: "0".into(),
-            model_count: project.models.len(),
-            profile_count: project.profiles.len(),
-            skill_count: global_skill_count,
-            prompt_count: 0,
-            context_count: 0,
-            latest_recovery: None,
-            latest_diagnostic: None,
-            latest_config_diagnostic: project.diagnostics.last().map(|diagnostic| {
-                (
-                    truncate_label(&diagnostic.code, 28),
-                    truncate_label(&diagnostic.summary, 120),
-                )
-            }),
-            latest_issue: None,
-            cwd: truncate_label(&project.cwd.display().to_string(), 54),
-        };
-    };
+mod sections;
+mod view_model;
 
-    let snapshot = projection.snapshot();
-    let composer_running = snapshot.active_operation.is_some();
-    let awaiting_prompt_start = workspace.composer.submitted().is_some() && !composer_running;
-    let changed_files = snapshot
-        .context
-        .changes
-        .iter()
-        .take(MAX_VISIBLE_FILE_CHANGES)
-        .map(|change| InspectorChangedFileView {
-            request: CodingAgentFileReviewRequest::from(change),
-            mutation_kind: truncate_label(&change.mutation_kind, 10),
-            file_name: truncate_label(
-                change
-                    .path
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or(change.path.as_str()),
-                22,
-            ),
-            path: truncate_label(&change.path, 34),
-        })
-        .collect();
-    let latest_recovery = projection
-        .recoveries()
-        .front()
-        .map(|recovery| InspectorRecoveryView {
-            status: recovery_status_label(recovery.status).to_owned(),
-            recovery_id: truncate_label(&recovery.recovery_id, 22),
-            operation_id: truncate_label(&recovery.operation_id, 22),
-            detail: truncate_label(&recovery.reason, 120),
-            attempt_count: recovery.attempt_count.to_string(),
-            identity: recovery.identity.clone().filter(|_| {
-                recovery.status == DesktopRecoveryStatus::Pending && recovery.authoritative
-            }),
-        });
-    let latest_diagnostic =
-        projection
-            .diagnostics()
-            .back()
-            .map(|diagnostic| InspectorDiagnosticView {
-                sequence: diagnostic.sequence.to_string(),
-                operation: diagnostic
-                    .operation_id
-                    .as_deref()
-                    .map(|id| truncate_label(id, 22))
-                    .unwrap_or_else(|| "global".into()),
-                detail: truncate_label(&diagnostic.message, 120),
-                truncated: diagnostic.truncated,
-            });
-    let latest_config_diagnostic = project.diagnostics.last().map(|diagnostic| {
-        (
-            truncate_label(&diagnostic.code, 28),
-            truncate_label(&diagnostic.summary, 120),
-        )
-    });
-    let latest_issue = projection
-        .issues()
-        .back()
-        .map(|issue| truncate_label(&issue.code, 28));
-    let runtime_attention_count = projection
-        .diagnostics()
-        .len()
-        .saturating_add(projection.recoveries().len())
-        .saturating_add(project.diagnostics.len())
-        .saturating_add(projection.issues().len());
-    let usage = &snapshot.context.usage;
-    InspectorPaneViewModel {
-        panel_width: app.preferences.context_panel_width,
-        presented_as_drawer: ui.active_drawer == Some(CenterDrawerKind::Inspector),
-        keyboard_focus_visible: ui.keyboard_focus_visible(),
-        selected_section: workspace.presentation.inspector_section,
-        composer_running,
-        awaiting_prompt_start,
-        recovery_pending: pending(|intent| matches!(intent, DesktopCommandIntent::Recovery { .. })),
-        file_review_pending: pending(|intent| {
-            matches!(intent, DesktopCommandIntent::FileReview { .. })
-        }),
-        external_editor_pending: pending(|intent| {
-            matches!(intent, DesktopCommandIntent::ExternalEditor { .. })
-        }),
-        external_editor_configured: app.preferences.external_editor.is_some(),
-        changed_files,
-        change_count: snapshot.context.changes.len(),
-        file_review: Arc::clone(&workspace.file_review),
-        merge_proposals: Arc::clone(&workspace.merge_proposals),
-        merge_proposal_pending: pending(|intent| {
-            matches!(
-                intent,
-                DesktopCommandIntent::ListMergeProposals
-                    | DesktopCommandIntent::MergeProposal { .. }
-                    | DesktopCommandIntent::DiscardProposal { .. }
-            )
-        }),
-        runtime_attention_count,
-        task_state: runtime_state_label(projection.lifecycle(), composer_running).to_owned(),
-        active_operation: snapshot
-            .active_operation
-            .as_deref()
-            .map(|id| truncate_label(id, 24))
-            .unwrap_or_else(|| "—".into()),
-        operation_count: snapshot.context.operations.len(),
-        delegation_count: snapshot.context.delegations.len(),
-        selected_model: truncate_label(&project.selected_model_id, 28),
-        profile: truncate_label(snapshot.session.default_agent_profile_id.as_str(), 28),
-        thinking: workspace
-            .thinking_selection
-            .label(project.settings.default_thinking_level.as_deref()),
-        usage_input: usage.input.to_string(),
-        usage_output: usage.output.to_string(),
-        usage_cache_read: usage.cache_read.to_string(),
-        usage_cache_write: usage.cache_write.to_string(),
-        usage_tokens: usage.input.saturating_add(usage.output).to_string(),
-        usage_context: usage
-            .context_window
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "—".into()),
-        usage_cost: usage_cost_label(usage.cost),
-        reduced_motion: app.preferences.reduced_motion,
-        stream_id: truncate_label(&snapshot.cursor.stream_id, 18),
-        sequence: snapshot.cursor.last_event_sequence.to_string(),
-        generation: snapshot.cursor.capability_generation.to_string(),
-        model_count: project.models.len(),
-        profile_count: project.profiles.len(),
-        skill_count: project.resources.skill_names.len(),
-        prompt_count: project.resources.prompt_template_names.len(),
-        context_count: project.resources.context_files.len(),
-        latest_recovery,
-        latest_diagnostic,
-        latest_config_diagnostic,
-        latest_issue,
-        cwd: truncate_label(&project.cwd.display().to_string(), 54),
-    }
-}
+use self::sections::{
+    colored_section, inspector_section_index, inspector_section_tab, recovery_button, section,
+};
+pub(crate) use self::view_model::view_model;
 
 pub(crate) struct InspectorPane {
     focus: FocusHandle,
@@ -1002,136 +802,4 @@ impl Render for InspectorPane {
             )
             .into_any_element()
     }
-}
-
-fn section(label: &'static str, theme: SemanticTheme) -> gpui::Div {
-    colored_section(label, theme.accent)
-}
-
-fn colored_section(label: &'static str, color: SemanticColor) -> gpui::Div {
-    div()
-        .mt_token(DesignSpace::Sm)
-        .text_color(rgb(color.value()))
-        .child(label)
-}
-
-const INSPECTOR_SECTIONS: [InspectorSection; 4] = [
-    InspectorSection::Changes,
-    InspectorSection::Task,
-    InspectorSection::Usage,
-    InspectorSection::Runtime,
-];
-
-fn inspector_section_index(section: InspectorSection) -> usize {
-    INSPECTOR_SECTIONS
-        .iter()
-        .position(|candidate| *candidate == section)
-        .unwrap_or_default()
-}
-
-fn inspector_section_tab(
-    id: &'static str,
-    label: &'static str,
-    section: InspectorSection,
-    selected: InspectorSection,
-    tab_focus: [FocusHandle; 4],
-    tab_scroll: ScrollHandle,
-    cx: &gpui::Context<InspectorPane>,
-) -> impl IntoElement {
-    let active = section == selected;
-    let index = inspector_section_index(section);
-    let focus = tab_focus[index].clone().tab_stop(active);
-    let click_focus = focus.clone();
-    let click_scroll = tab_scroll.clone();
-    let key_focus = tab_focus;
-    let key_scroll = tab_scroll;
-    let theme = SemanticTheme::current(cx);
-    div()
-        .id(id)
-        .role(Role::Tab)
-        .aria_label(label)
-        .aria_selected(active)
-        .track_focus(&focus)
-        .h(px(DesktopControlSize::Compact.pixels()))
-        .px_token(DesignSpace::Md)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_token(DesignRadius::Sm)
-        .border_1()
-        .border_color(rgb(if active {
-            theme.accent.value()
-        } else {
-            theme.border.value()
-        }))
-        .bg(rgb(if active {
-            theme.selection.value()
-        } else {
-            theme.surface.value()
-        }))
-        .text_token(DesignText::Metadata)
-        .text_color(rgb(if active {
-            theme.text.value()
-        } else {
-            theme.muted_text.value()
-        }))
-        .cursor_pointer()
-        .hover(move |style| style.bg(rgb(theme.hover.value())))
-        .focus(move |style| style.border_color(rgb(theme.focus_ring.value())))
-        .child(label)
-        .debug_selector(move || format!("desktop-inspector-tab-{}", label.to_lowercase()))
-        .on_click(cx.listener(move |_, _, window, cx| {
-            click_focus.focus(window, cx);
-            click_scroll.scroll_to_item(index);
-            cx.emit(InspectorPaneEvent::SelectSection(section));
-        }))
-        .on_key_down(cx.listener(move |_, event: &KeyDownEvent, window, cx| {
-            let next_index = match event.keystroke.key.as_str() {
-                "left" => Some(index.checked_sub(1).unwrap_or(INSPECTOR_SECTIONS.len() - 1)),
-                "right" => Some((index + 1) % INSPECTOR_SECTIONS.len()),
-                "enter" | "space" => Some(index),
-                _ => None,
-            };
-            let Some(next_index) = next_index else {
-                return;
-            };
-            window.prevent_default();
-            cx.stop_propagation();
-            key_focus[next_index].focus(window, cx);
-            key_scroll.scroll_to_item(next_index);
-            cx.emit(InspectorPaneEvent::SelectSection(
-                INSPECTOR_SECTIONS[next_index],
-            ));
-        }))
-}
-
-fn recovery_button(
-    id: &'static str,
-    label: &'static str,
-    identity: DesktopRecoveryIdentity,
-    action: DesktopRecoveryAction,
-    disabled: bool,
-    cx: &gpui::Context<InspectorPane>,
-) -> Button {
-    let tooltip = match action {
-        DesktopRecoveryAction::Retry => "Retry this authoritative recovery",
-        DesktopRecoveryAction::MarkFailed => "Resolve this recovery as failed",
-        DesktopRecoveryAction::Abort => "Resolve this recovery as aborted",
-    };
-    let tone = match action {
-        DesktopRecoveryAction::Retry => DesktopCriticalTone::Neutral,
-        DesktopRecoveryAction::MarkFailed | DesktopRecoveryAction::Abort => {
-            DesktopCriticalTone::Dangerous
-        }
-    };
-    DesktopCriticalButton::new(id, label, tooltip, tone)
-        .disabled(disabled)
-        .build()
-        .on_click(cx.listener(move |_, _, _, cx| {
-            cx.emit(InspectorPaneEvent::Recovery {
-                identity: identity.clone(),
-                action,
-            });
-        }))
 }

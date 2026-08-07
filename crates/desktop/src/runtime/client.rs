@@ -242,9 +242,9 @@ impl DesktopRuntimeBridge {
         let (data_update_tx, data_updates) = mpsc::channel(DESKTOP_UPDATE_QUEUE_CAPACITY);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
-
         let runtime_thread = thread::Builder::new()
             .name("desktop-runtime".into())
+            .stack_size(16 * 1024 * 1024)
             .spawn(move || {
                 let runtime = match build_desktop_runtime() {
                     Ok(runtime) => runtime,

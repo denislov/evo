@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～8 完成，Phase 8 复验通过 2026-08-07，准备进入 Phase 9）
+> 状态：执行中（Phase 0～8 完成，Phase 9 / ARC-910/920 已完成，ARC-900 进行中，ARC-930 待推进；最近复验 2026-08-07）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -65,6 +65,10 @@
 | Phase 8 / ARC-820 | 完成（复验 2026-08-07） | `docs/refactor/phase8-lsp.md`；LSP lifecycle（手写 Content-Length 帧 wire 严格解析 fail-closed，不引入 async-lsp——0.2.x 面向 server 角色且进程治理在其外，与 MCP 手写先例一致）、生命周期状态机（spawn 失败终态不重试；成功后任何失败 → 指数退避重试，attempt 全局累计、超 max_restart_attempts GiveUp；transition 表测试）、document open/change/close replay（本地全文合并 + 全量 didChange range:null；重启后按 uri 重发 didOpen 最新文本+版本；server 未就绪期间文档操作仍生效）、diagnostics push/pull + Fresh/Stale/Unknown stale policy 三态状态机（Mark/Discard）、`workspace/applyEdit` → 路径/版本/range 校验 → `EditPlan` → 注入式 `EditApplicator`（ChangeReceipt，无 applicator 拒绝并记录 pending_edits，绝不直接写磁盘）、SandboxProfile 强制 + task_owner 必填、fake LSP server 测试辅助；修复 transport 服务器请求回执通道丢弃 bug 与 tokio interval reset 语义；code-intelligence 246 测试通过 |
 | Phase 8 / ARC-830 | 完成（复验 2026-08-07） | `docs/refactor/phase8-tools-context.md`；`code_graph`/`code_lsp` 两个 read-only DynamicTool（独立 ToolCapabilities：read_only/Parallel/cancel+timeout，`authorization_risk=WorkspaceLocalReadOnly`）、`QueryOutputBudget` 双层截断（100 条/64 KiB，截断显式标记不静默）、`SymbolSearch` 扩展查询面、按需 context 注入（`context.rs` 条数+字节双层预算 + coding-agent `code_context.rs` seam，agent-core 公共 API 零改动，不把符号图塞 system prompt）、共用排序接口 `tool-contract::ranking`（`RelevanceScorer`/`ResultRanker`/`TokenOverlapScorer`，精确名 1.0 > 整词 0.8 > 前缀 0.4 > 子串 0.2，稳定排序，graph 与 MCP 各自存储只共用排序）、coding-agent 三态装配（无配置行为不变）；纯 Evo 集成层无 Grok 移植；tool-contract 12、code-intelligence 304、extension-host 186、coding-agent 250 测试通过 |
 | Phase 8 Gate | 通过（复验 2026-08-07） | 索引可从 cache 恢复并增量更新：identity 三要素 mismatch 触发重建、corruption recovery、crash-reopen（ARC-800/810）；LSP crash 可重启并恢复 document state：指数退避重试 + 重启后 didOpen replay + stale policy（ARC-820）；所有 edit 可进入 review：LSP `applyEdit` 走 `EditPlan` + 注入式 `EditApplicator` 产出 `ChangeReceipt`，无 applicator 拒绝不落盘，扩展修改经 `HookEdit` 归因（ARC-710/820）。code-intelligence 304、coding-agent 250、extension-host 186、tool-contract 12、agent-core 77、workspace-runtime 127、change-tracker 66、cli 106、tui 34、ai 113、event-journal 4、tool-runtime 9 测试通过（gate.sh 复验 914 passed，唯一失败为既有 desktop-runtime stack overflow）；全 workspace clippy/fmt/architecture gate 通过（oversized_debts=36 既有基线、execution_debts=0、dependency_edges=26）；既有全仓 Gate 问题延续：desktop `desktop-runtime` stack overflow（Phase 4 登记）、coding-agent session writer flock 并行 flaky（ARC-710 登记，`--test-threads=4` 稳定全绿）；验证债务登记：export 边缺口（仅 TS/JS 有 export capture）、跨语言引用名字匹配、增量不做预算强制、alias 全局表残留、Git 事件不触发 revision 重建、containment O(n²)、`$/cancelRequest` 礼貌取消、`workspaceEdit.operations` 形态、多文件事务原子性（归 applicator）、pull diagnostics resultId 增量、context per-turn 接线占位、diagnostics 工具化（`code_lsp` 未覆盖诊断查询） |
+
+| Phase 9 / ARC-910 | 完成（2026-08-07） | Desktop reducer、projection、runtime protocol/worker、NativeShell、conversation/inspector/sessions/modal pane 与 native replay 按职责拆分；保留 typed `DesktopEvent -> Transition { changes, effects }`，UI 仅消费 product projection，不解析 raw diff 或自行推导 terminal；Desktop 全量测试、依赖边界、clippy、fmt、diff 与 architecture gate 均通过 |
+| Phase 9 / ARC-900 | 进行中（2026-08-07） | `interactive/event_bridge.rs`（870 行）与 `interactive/commands.rs`（769 行）已完成职责拆分并清偿对应 oversized debt；root/render/loop 仍待继续 Elm 化和收敛 |
+| Phase 9 / ARC-920 | 完成（复验 2026-08-07） | Markdown checkpoint + tail rerender、editor 与 surface 模块拆分已落地；默认 TUI 测试与 `test-support` checkpoint 测试均通过 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -784,25 +788,46 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 
 ### ARC-900 CLI Elm 化
 
+执行状态：进行中（2026-08-07）。已完成 product event bridge 与 slash settings/session/auth command 的职责拆分；interactive root/render/loop 主体仍待继续收敛，Phase 9 总 Gate 不变。
+
 - 将 interactive loop 改成 `Action -> reduce(State, Action) -> Transition{changes,effects}`。
 - async effect 完成后只通过 `TaskResult Action` 回灌。
 - command/key/action registry 单一事实来源，同时驱动快捷键、命令面板和帮助。
 - 拆分 `interactive/root.rs`、`render.rs`、`loop.rs`，production 文件全部低于 900 行。
 - RPC、headless 和 interactive 共用 product client，不共用 presentation state。
 
+当前完成证据：
+
+- `interactive/event_bridge.rs` 已拆出 `event_bridge/delegation.rs`，主文件降至 870 行；delegation tool arguments、status/result 映射和 profile kind label 由独立模块负责。
+- `interactive/commands.rs` 已拆出 `commands/settings.rs`，主文件降至 769 行；model、permission、resume、session、settings、hotkeys、login/logout 命令由独立模块负责。
+- CLI 现有全量测试通过：`cargo test -p cli --all-targets --quiet`（106 passed，0 failed）。
+
 ### ARC-910 Desktop reducer 收敛
+
+执行状态：完成（2026-08-07）。本任务完成 Desktop 适配器的结构收敛；Phase 9 总 Gate 仍需 ARC-900、ARC-920、ARC-930 完成后统一复验。
 
 - 保留现有 reducer/effect 架构，拆分超大 reducer/pane 为 domain reducer、effect executor 和 view model。
 - Desktop 不解析 raw diff，不自行推导 operation terminal；全部消费 product projection。
 - 统一 session/review/task/MCP/LSP inspector 状态机。
 - 保持 deterministic replay 和视觉回归 fixture。
 
+完成证据：
+
+- `application/reducer.rs` 已拆为 controller、projection、runtime 与 tests；`projection.rs`、`runtime/protocol.rs`、`runtime/worker/mod.rs` 继续按类型、命令、错误、快照、product event、session、shutdown 等职责拆分。
+- `NativeShell`、native replay、conversation controller/model、inspector pane、sessions pane、shell modal 均已拆分子模块；本次拆分涉及的 11 条 stale oversized Rust debt 登记已清偿。`runtime/client.rs` 已回到既有 968 行基线，仍保留全局 Phase 9 debt 登记，未继续增长。
+- reducer 继续输出 typed `Transition { changes, effects }`；runtime 事实经 product projection 进入 Desktop，未发现 raw diff 解析、`DirectCommandUpdate`、`reconcile_direct_update`、`RuntimeUpdatePort` 或自行推导 operation terminal 的旧路径。
+- 验证通过：`cargo check -p desktop --all-targets`；`cargo test -p desktop --all-targets --quiet`（Desktop 303 项单元测试、dependency boundary 11 项、5 项 ignored，0 failed）；`cargo clippy -p desktop --all-targets -- -D warnings`；`cargo fmt --all -- --check`；`git diff --check`；`scripts/architecture-gate.sh`（`rust_files=809`、`dependency_edges=26`、`oversized_debts=20`、`execution_debts=0`）。剩余 20 条 oversized debt 包含 `runtime/client.rs` 的既有 Phase 9 基线，以及其他 Phase 9/Phase 5/Phase 10 文件；本次任务未引入新的超限增长。
+
 ### ARC-920 TUI 渲染升级
+
+执行状态：完成（复验 2026-08-07）。基线 commit `d475aa9` 已完成 Markdown stable checkpoint + tail rerender、editor 与 surface 模块拆分；本次复验补齐 `markdown_image` integration test 的 `test-support` required feature 声明。
 
 - Markdown 引入 stable checkpoint + tail rerender，避免每个 stream chunk 全量解析。
 - scrollback 使用稳定 row identity、prefix height index 和 viewport window paint。
 - 只有 benchmark 证明必要时才引入完整虚拟化抽象。
 - Diff review、background task、MCP/LSP 状态提供 feature-complete views。
+
+完成证据：`cargo test -p tui --all-targets --quiet` 与 `cargo test -p tui --all-targets --features test-support --quiet` 均通过；checkpoint 测试覆盖可恢复追加、未闭合 inline 回退、替换文本丢弃 checkpoint 和宽度变化。
 
 ### ARC-930 Scripted scenarios
 

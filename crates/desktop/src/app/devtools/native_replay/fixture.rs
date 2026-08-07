@@ -1,6 +1,6 @@
 use coding_agent::api::client::CodingAgentFileChangeSnapshot;
 
-pub(super) fn visual_change(
+pub(in crate::app::devtools) fn visual_change(
     path: &'static str,
     first_changed_line: usize,
     added_lines: usize,

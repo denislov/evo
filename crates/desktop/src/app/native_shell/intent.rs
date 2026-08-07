@@ -18,7 +18,7 @@ use crate::ui::shell::CenterNavigationTarget;
 /// Mutation, command admission, focus, and platform effects are dispatched by
 /// the shell's single intent handler.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum UiIntent {
+pub(crate) enum UiIntent {
     Navigate(CenterNavigationTarget),
     NewConversationForProject(PathBuf),
     RefreshSessions,

@@ -93,7 +93,6 @@ fn fetch_client_config() -> FetchClientConfig {
         default_max_bytes: DEFAULT_MAX_BYTES,
         cache: Some(CacheConfig::default()),
         extra_ca_certificates: Vec::new(),
-        ..FetchClientConfig::default()
     }
 }
 

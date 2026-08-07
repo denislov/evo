@@ -22,7 +22,7 @@ pub use copy::{MAX_COPY_BYTES, conversation_copy_text};
 pub use layout::{TRANSCRIPT_COLLAPSED_PREVIEW_MAX_HEIGHT, conversation_width_bucket};
 pub use model::{
     ConversationBlockKind, ConversationItemKey, ConversationItemKind, ConversationProjection,
-    DELEGATION_TITLE_PREFIX, DelegationStatus, compact_duration,
+    DELEGATION_TITLE_PREFIX, compact_duration,
 };
 pub use render_cache::{
     ConversationRowRenderCache, ConversationRowRenderData, ConversationRowRenderSource,

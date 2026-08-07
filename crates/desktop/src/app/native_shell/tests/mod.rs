@@ -3,8 +3,12 @@ use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use crate::application::catalog::ProjectCatalogState;
 use crate::runtime::{DesktopPromptTarget, DesktopRuntimeOwnerTarget};
+use crate::ui::conversation::controller::ConversationController;
 use crate::ui::conversation::header::header_runtime_status_slot_width;
+use crate::ui::conversation::model::{ConversationBlockKind, DelegationStatus};
 use crate::ui::conversation::pane::CONVERSATION_RAIL_WIDTH;
+use desktop::ui::shell::SemanticStatus;
+use gpui::rgb;
 
 use desktop::projection::{DesktopProjectionLifecycle, ProjectionEvent};
 use desktop::runtime::MAX_PROMPT_ATTACHMENTS;
