@@ -267,3 +267,35 @@ Local modifications: 全部（无上游源码）；Grok 的 diagnostics 无版�
 （async-lsp server 端才有）
 Sync policy: 不跟随上游；若后续引入真实语言服务器接入（ARC-830），
 LSP 查询语义映射与 async-lsp 无关。
+
+## ARC-830 Tool/context 集成（2026-08-07）
+
+**纯 Evo 集成层，无 Grok 移植。** 本 ARC 是 read-only 查询工具、
+按需 context 注入与共用排序接口的产品集成，Grok 无对应物（其 graph/
+LSP 查询直接暴露给模型/UI，无 ToolCapabilities / output budget /
+截断标记概念；context 侧把符号图缓存整体给模型）：
+- `tool-contract::ranking`（RelevanceScorer / ResultRanker /
+  TokenOverlapScorer）为 Evo 自研共享排序契约，供 graph 符号搜索与
+  MCP `mcp_search` 两侧共用（不共享存储实现）
+- `code_graph` / `code_lsp` DynamicTool（`crates/code-intelligence/
+  src/tools/`）为 Evo 自研：独立 ToolCapabilities
+  （WorkspaceLocalReadOnly）+ 条数/字节双层 output budget（超限显式
+  标记）+ cancel 贯通；`QueryKind::SymbolSearch` 为 Evo 扩展查询面
+  （Grok 只有精确名导航）
+- 按需 context 注入（`crates/code-intelligence/src/context.rs` +
+  `crates/coding-agent/src/app/code_context.rs` seam）为 Evo 自研，
+  不把完整符号图塞入 system prompt；Grok 无此概念
+- LSP 结果语义映射（hover markdown 提取 / location 归一化）承接
+  ARC-820 的 Evo 查询面，与 async-lsp 无关
+Destination paths: `crates/tool-contract/src/ranking.rs`、
+`crates/code-intelligence/src/{context,tools/{mod,budget,graph,lsp}}.rs`
+及 `graph/query.rs`（search）、`service.rs`（QueryKind::SymbolSearch）、
+`graph/backend.rs`（Search 变体）、`tests/tools_lsp.rs`、
+`crates/extension-host/src/mcp/meta.rs`（rank_search_matches）、
+`crates/coding-agent/src/app/{bootstrap,startup,code_context}.rs`、
+`crates/coding-agent/src/tools/code_tools_tests.rs`
+Tests carried over: 无直接复制；全部按 Evo 语义重写 —— 工具参数校验/
+结果转换/预算截断标记/cancel 贯通/结构化错误、context 边界、排序契约
+（空结果/稳定顺序/limit）、三态装配
+Local modifications: 全部（无上游源码）
+Sync policy: 不跟随上游。

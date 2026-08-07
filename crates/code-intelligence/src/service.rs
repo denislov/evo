@@ -72,6 +72,9 @@ pub enum QueryKind {
     Definition,
     /// ARC-810：symbol 引用查询。
     Reference,
+    /// ARC-830：按名称片段搜索符号（相关度排序 + 预算内截断），供
+    /// read-only 查询工具与按需 context 注入共用。
+    SymbolSearch,
     /// ARC-820：文档诊断查询。
     Diagnostics,
 }
@@ -83,6 +86,7 @@ impl QueryKind {
             Self::FileSymbols => "file_symbols",
             Self::Definition => "definition",
             Self::Reference => "reference",
+            Self::SymbolSearch => "symbol_search",
             Self::Diagnostics => "diagnostics",
         }
     }
@@ -92,6 +96,7 @@ impl QueryKind {
         match self {
             Self::Status => "ARC-800",
             Self::FileSymbols | Self::Definition | Self::Reference => "ARC-810",
+            Self::SymbolSearch => "ARC-830",
             Self::Diagnostics => "ARC-820",
         }
     }

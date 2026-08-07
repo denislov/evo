@@ -30,7 +30,9 @@ use crate::service::{QueryBackend, QueryKind, QueryRequest, QueryResponse};
 use super::build::{BuildReport, IndexBuilder, IndexSkip};
 use super::incremental::{IncrementalIndexer, spawn_incremental_indexer};
 use super::index::CodebaseIndex;
-use super::query::{GraphNavigator, GraphQueryError, NavigationResult};
+use super::query::{
+    BoundedSymbolSearch, GraphNavigator, GraphQueryError, NavigationResult, search_symbols,
+};
 
 /// graph backend 的启动参数。
 #[derive(Debug, Clone)]
@@ -59,6 +61,8 @@ pub enum GraphQueryResult {
     Definitions(NavigationResult),
     /// `Reference`：符号引用位置。
     References(NavigationResult),
+    /// `SymbolSearch`：按名称片段搜索（相关度排序 + 预算内截断）。
+    Search(BoundedSymbolSearch),
 }
 
 /// 查询上下文 JSON 的字段名（ARC-810 契约）。
@@ -68,6 +72,8 @@ pub mod context_field {
     pub const COLUMN: &str = "column";
     pub const SYMBOL: &str = "symbol";
     pub const INCLUDE_DEFINITION: &str = "include_definition";
+    /// ARC-830：`SymbolSearch` 的结果条数上限（0 = 不限）。
+    pub const LIMIT: &str = "limit";
 }
 
 /// 共享内部状态。
@@ -221,6 +227,20 @@ impl GraphQueryBackend {
                     }
                 };
                 Ok(GraphQueryResult::References(result))
+            }
+            QueryKind::SymbolSearch => {
+                let symbol = context_string(&request.context, context_field::SYMBOL)
+                    .ok_or_else(|| GraphQueryError::ParseError("missing symbol".into()))?;
+                let limit = request
+                    .context
+                    .get(context_field::LIMIT)
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0) as usize;
+                Ok(GraphQueryResult::Search(search_symbols(
+                    &self.inner.index.read().unwrap(),
+                    &symbol,
+                    limit,
+                )))
             }
             QueryKind::Status | QueryKind::Diagnostics => Err(GraphQueryError::ParseError(
                 "kind not handled by graph backend".into(),

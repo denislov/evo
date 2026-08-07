@@ -42,12 +42,14 @@
 pub mod api;
 pub mod budget;
 pub mod cache;
+pub mod context;
 pub mod error;
 pub mod graph;
 pub mod identity;
 pub mod languages;
 pub mod lsp;
 pub mod service;
+pub mod tools;
 
 pub use crate::api::*;
 

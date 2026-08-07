@@ -1,6 +1,7 @@
 pub(crate) mod application;
 pub(crate) mod auth;
 pub(crate) mod bootstrap;
+pub(crate) mod code_context;
 pub(crate) mod embedding;
 pub(crate) mod error;
 pub(crate) mod interactive;

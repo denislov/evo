@@ -220,6 +220,7 @@ async fn unimplemented_kinds_report_their_phase() {
         (QueryKind::FileSymbols, "ARC-810"),
         (QueryKind::Definition, "ARC-810"),
         (QueryKind::Reference, "ARC-810"),
+        (QueryKind::SymbolSearch, "ARC-830"),
         (QueryKind::Diagnostics, "ARC-820"),
     ] {
         let err = handle
@@ -237,7 +238,7 @@ async fn unimplemented_kinds_report_their_phase() {
     }
     handle.shutdown("done");
     let exit = task.join().await;
-    assert_eq!(exit.handled_queries, 4);
+    assert_eq!(exit.handled_queries, 5);
 }
 
 #[tokio::test]

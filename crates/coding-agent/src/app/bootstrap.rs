@@ -80,6 +80,24 @@ pub(crate) struct ApplicationRunOptions {
     /// MCP server 时，`resolve_application_context` 会把 `mcp_search` /
     /// `mcp_use` meta tools 追加到工具列表。`None` = 无 MCP（行为不变）。
     pub extension_host_options: Option<extension_host::api::ExtensionHostOptions>,
+    /// ARC-830：code-intelligence 装配参数。配置了 graph handle 时，
+    /// `resolve_application_context` 追加 `code_graph`（LSP handle 一并
+    /// 配置时追加 `code_lsp`）。`None` = 无 code-intelligence（行为不变）。
+    pub code_intelligence: Option<CodeIntelligenceRunOptions>,
+}
+
+/// ARC-830：code-intelligence 的运行时装配参数。
+///
+/// 携带**已启动**服务的查询 handle（服务与 task 的生命周期由调用方
+/// 持有——CLI/Desktop 组合层负责 start / shutdown / join；本参数只
+/// 携带查询面）。`lsp` 为 `Some` 时同时装配 `code_lsp` 工具。
+#[derive(Clone)]
+pub struct CodeIntelligenceRunOptions {
+    /// graph 查询 handle（`CodeIntelligenceService::start` 返回）。
+    pub graph: code_intelligence::api::CodeIntelligenceHandle,
+    /// LSP 查询 handle + workspace 根（`code_lsp` 工具需要把相对路径
+    /// 拼成 `file://` uri）。
+    pub lsp: Option<(code_intelligence::api::LspHandle, std::path::PathBuf)>,
 }
 
 impl Default for ApplicationRunOptions {
@@ -92,6 +110,7 @@ impl Default for ApplicationRunOptions {
             ai_client: None,
             session: SessionRunOptions::disabled(PathBuf::from(".")),
             extension_host_options: None,
+            code_intelligence: None,
         }
     }
 }

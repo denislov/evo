@@ -159,6 +159,15 @@ pub fn resolve_application_context(
             mcp.clone(),
         )));
     }
+    // ARC-830：配置了 code-intelligence 时追加 read-only 查询工具
+    // （code_graph / code_lsp）。工具持有查询 handle，服务生命周期由
+    // 调用方治理；无配置时不追加任何工具（行为不变）。
+    if let Some(code_intelligence) = &options.code_intelligence {
+        tools.extend(code_intelligence::tools::code_tools(
+            code_intelligence.graph.clone(),
+            code_intelligence.lsp.clone(),
+        ));
+    }
 
     let session = resolve_session_options(&parsed, &config, options.session);
     let session_target = resolve_session_target(&parsed);

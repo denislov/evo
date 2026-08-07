@@ -12,6 +12,7 @@ default = []
 [dependencies]
 base64.workspace = true
 change-tracker.workspace = true
+code-intelligence.workspace = true
 dirs = "6"
 event-journal.workspace = true
 extension-host.workspace = true

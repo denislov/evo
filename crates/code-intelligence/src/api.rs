@@ -8,6 +8,11 @@ pub use crate::cache::{
     CACHE_FILE_NAME, CacheStatus, CachedFileEntry, INDEX_SCHEMA_VERSION, IndexCache,
     IndexCacheData, LoadOutcome, probe_cache,
 };
+pub use crate::context::{
+    DEFAULT_SYMBOL_CONTEXT_MAX_BYTES, DEFAULT_SYMBOL_CONTEXT_MAX_RESULTS, SymbolContextBudget,
+    SymbolContextEntry, SymbolContextSnippet, query_symbol_context, render_context_text,
+    render_symbol_context,
+};
 pub use crate::error::CodeIntelligenceError;
 pub use crate::graph::backend::{
     GraphBackendOptions, GraphQueryBackend, GraphQueryResult, context_field,
@@ -20,7 +25,8 @@ pub use crate::graph::incremental::{IncrementalIndexer, spawn_incremental_indexe
 pub use crate::graph::index::CodebaseIndex;
 pub use crate::graph::persist::{FileMeta, GRAPH_SCHEMA_VERSION, GraphCacheData, PersistedGraph};
 pub use crate::graph::query::{
-    FileSymbol, GraphNavigator, GraphQueryError, Location, NavigationResult,
+    BoundedSymbolSearch, FileSymbol, GraphNavigator, GraphQueryError, Location,
+    MAX_SYMBOL_SEARCH_CANDIDATES, NavigationResult, SymbolHit, search_symbols,
 };
 pub use crate::graph::range::{Position, Range};
 pub use crate::graph::scope::ScopeGraph;

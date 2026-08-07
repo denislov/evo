@@ -9,6 +9,8 @@ use tool_runtime::api::ToolCallContext;
 pub use workspace_runtime::api::FilesystemTarget;
 pub use workspace_runtime::api::WorkspaceAccessHandle;
 
+#[cfg(test)]
+mod code_tools_tests;
 pub(crate) mod filesystem;
 #[cfg(test)]
 mod mcp_meta_tools_tests;

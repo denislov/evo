@@ -32,6 +32,7 @@ pub(crate) fn default_application_options(
         ai_client: None,
         session,
         extension_host_options: None,
+        code_intelligence: None,
     })
 }
 

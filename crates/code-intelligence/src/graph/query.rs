@@ -17,10 +17,14 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use tool_contract::api::ranking::ResultRanker;
 
 use crate::languages::LanguageRegistry;
 
 use super::index::CodebaseIndex;
+
+/// 符号搜索候选收集上限（有界查询：防超大型符号集的无界遍历）。
+pub const MAX_SYMBOL_SEARCH_CANDIDATES: usize = 4_096;
 
 /// 查询结果中的一个位置（1-indexed 行 / 列）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +83,89 @@ impl std::fmt::Display for GraphQueryError {
             Self::ParseError(message) => write!(f, "parse error: {message}"),
             Self::FileNotIndexed(path) => write!(f, "file not indexed: {path}"),
         }
+    }
+}
+
+/// 符号搜索结果条目（一个定义位置）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolHit {
+    pub name: String,
+    /// 符号类型（`function` / `class` / `struct` / `variable` …）。
+    pub symbol_type: String,
+    /// 相对 workspace root 的路径（正斜杠分隔）。
+    pub path: String,
+    /// 1-indexed 定义行号。
+    pub line: usize,
+    /// 该符号的全局引用数（含 alias 解析）。
+    pub references: usize,
+}
+
+/// 有界符号搜索结果：相关度排序 + 显式截断标记（ARC-830）。
+///
+/// `total` 是匹配候选总数（受 [`MAX_SYMBOL_SEARCH_CANDIDATES`] 收集上限
+/// 约束，命中上限时是低估）；`truncated` 表示结果被丢弃过——候选收集
+/// 截断或 `limit` 截断任一发生即为 `true`，调用方必须显式展示该标记，
+/// 不得静默截断。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundedSymbolSearch {
+    pub query: String,
+    /// 匹配候选总数（受收集上限约束）。
+    pub total: usize,
+    /// 结果被截断（收集上限或 `limit` 截断）。
+    pub truncated: bool,
+    /// 相关度降序的定义位置（`limit` 截断后）。
+    pub results: Vec<SymbolHit>,
+}
+
+/// 按名称片段搜索符号（大小写不敏感子串匹配），相关度降序（共用
+/// `tool-contract` 的排序接口：精确名 / 整词 / 前缀 / 子串逐级降权），
+/// `limit` 截断（`0` = 不限）。
+pub fn search_symbols(index: &CodebaseIndex, query: &str, limit: usize) -> BoundedSymbolSearch {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return BoundedSymbolSearch {
+            query: query.to_string(),
+            total: 0,
+            truncated: false,
+            results: Vec::new(),
+        };
+    }
+    let mut candidates: Vec<SymbolHit> = Vec::new();
+    let mut capped = false;
+    'outer: for path in index.paths() {
+        let Some(graph) = index.get_graph(path) else {
+            continue;
+        };
+        for (_, def) in graph.definition_nodes() {
+            if !def.name.to_lowercase().contains(&needle) {
+                continue;
+            }
+            candidates.push(SymbolHit {
+                name: def.name.clone(),
+                symbol_type: def.symbol_type.clone(),
+                path: path.to_string(),
+                line: def.range.start_line_1indexed(),
+                references: 0,
+            });
+            if candidates.len() >= MAX_SYMBOL_SEARCH_CANDIDATES {
+                capped = true;
+                break 'outer;
+            }
+        }
+    }
+    let total = candidates.len();
+    let ranker = tool_contract::api::ranking::DefaultResultRanker::new();
+    // 相关度文本只取符号名：精确名 > 整词命中 > 前缀/子串；同分保持
+    // 输入顺序（路径按 BTreeMap 排序，稳定排序保持确定性）。
+    let mut ranked = ranker.rank(&needle, candidates, |hit| hit.name.clone(), limit);
+    for result in &mut ranked {
+        result.item.references = index.find_references(&result.item.name).len();
+    }
+    BoundedSymbolSearch {
+        query: query.to_string(),
+        total,
+        truncated: capped || (limit != 0 && total > limit),
+        results: ranked.into_iter().map(|result| result.item).collect(),
     }
 }
 

@@ -53,4 +53,7 @@ mod persistence_tests;
 #[cfg(test)]
 mod query_tests;
 #[cfg(test)]
-mod test_support;
+mod search_tests;
+/// 图模块测试共享辅助（ARC-830 起供 crate 内其他测试模块使用）。
+#[cfg(test)]
+pub(crate) mod test_support;

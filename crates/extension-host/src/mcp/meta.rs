@@ -25,6 +25,7 @@ use tool_contract::api::definition::{
     ToolId, ToolKind,
 };
 use tool_contract::api::output::{ToolContent, ToolError, ToolErrorKind, ToolOutput};
+use tool_contract::api::ranking::{DefaultResultRanker, ResultRanker};
 use tool_runtime::api::{DynamicTool, ToolCallContext, ToolFuture};
 
 use crate::mcp::lifecycle::McpHost;
@@ -208,6 +209,9 @@ async fn run_search(
             }));
         }
     }
+    // ARC-830：命中结果经共用排序接口（tool-contract::ranking）按与查询词
+    // 的相关度排序；无查询词时保持发现顺序（列表语义）。
+    let matches = rank_search_matches(matches, query.as_deref());
     drop(context);
     Ok(ToolOutput {
         content: vec![ToolContent::Json {
@@ -215,6 +219,42 @@ async fn run_search(
         }],
         ..Default::default()
     })
+}
+
+/// 排序接口的 MCP 侧接入：把命中结果按相关度降序稳定排序（同分保持
+/// 输入顺序）。过滤（子串匹配）在调用方完成，本函数只排序不增删。
+pub fn rank_search_matches(
+    matches: Vec<serde_json::Value>,
+    query: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return matches;
+    };
+    let ranker = DefaultResultRanker::new();
+    ranker
+        .rank(
+            query,
+            matches,
+            |value| {
+                let server = value
+                    .get("server")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let name = value
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let description = value
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                format!("{server} {name} {description}")
+            },
+            0,
+        )
+        .into_iter()
+        .map(|result| result.item)
+        .collect()
 }
 
 async fn run_use(
@@ -358,5 +398,56 @@ mod tests {
                 value: json!({"type": "image", "data": "x"})
             }
         );
+    }
+
+    fn match_item(server: &str, name: &str, description: &str) -> serde_json::Value {
+        json!({"server": server, "name": name, "description": description})
+    }
+
+    fn names(matches: &[serde_json::Value]) -> Vec<&str> {
+        matches
+            .iter()
+            .map(|value| value["name"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn rank_search_matches_orders_by_relevance() {
+        let matches = vec![
+            match_item("fs", "read", "Read file contents"),
+            match_item("net", "fetch", "Fetch a URL"),
+            match_item("fs", "read_dir", "List a directory"),
+        ];
+        let ranked = rank_search_matches(matches, Some("read"));
+        // 精确名 `read` 最前；`read_dir` 前缀命中次之；`fetch` 无命中。
+        assert_eq!(names(&ranked), ["read", "read_dir", "fetch"]);
+    }
+
+    #[test]
+    fn rank_search_matches_without_query_keeps_input_order() {
+        let matches = vec![
+            match_item("z", "alpha", "first"),
+            match_item("a", "beta", "second"),
+        ];
+        let ranked = rank_search_matches(matches.clone(), None);
+        assert_eq!(ranked, matches);
+        let ranked = rank_search_matches(matches.clone(), Some(""));
+        assert_eq!(ranked, matches);
+    }
+
+    #[test]
+    fn rank_search_matches_handles_empty_input() {
+        let ranked = rank_search_matches(Vec::new(), Some("query"));
+        assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn rank_search_matches_ties_keep_input_order() {
+        let matches = vec![
+            match_item("fs", "list", "List entries"),
+            match_item("db", "list", "List rows"),
+        ];
+        let ranked = rank_search_matches(matches, Some("list"));
+        assert_eq!(names(&ranked), ["list", "list"]);
     }
 }
