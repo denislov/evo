@@ -1,17 +1,5 @@
 # kind	limit	baseline-max-lines	clear-by	path
-production	900	2814	Phase 9	crates/desktop/src/ui/conversation/pane.rs
-production	900	1779	Phase 9	crates/cli/src/rpc/commands.rs
-production	900	1762	Phase 9	crates/cli/src/interactive/tree_selector.rs
-production	900	1470	Phase 9	crates/cli/src/interactive/prompt_task.rs
-production	900	1302	Phase 9	crates/cli/src/interactive/transcript.rs
-production	900	1273	Phase 9	crates/cli/src/rpc/prompt.rs
-production	900	1256	Phase 9	crates/cli/src/protocol/events.rs
-production	900	1205	Phase 9	crates/cli/src/protocol/types.rs
 production	900	1199	Phase 5	crates/agent-core/src/agent/turn/nodes.rs
-production	900	968	Phase 9	crates/desktop/src/runtime/client.rs
-test	1200	1510	Phase 9	crates/desktop/src/app/native_shell/tests/responsive.rs
-test	1200	1489	Phase 9	crates/desktop/src/runtime/tests/admission.rs
-test	1200	1315	Phase 9	crates/desktop/src/app/native_shell/tests/workspace.rs
 production	900	909	Phase 10	crates/coding-agent/src/app/embedding.rs
 production	900	930	Phase 10	crates/coding-agent/src/application/operation/contract.rs
 production	900	965	Phase 10	crates/coding-agent/src/application/operation/dispatch.rs
