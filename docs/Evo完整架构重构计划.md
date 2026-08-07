@@ -800,6 +800,7 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 
 - `interactive/event_bridge.rs` 已拆出 `event_bridge/delegation.rs`，主文件降至 870 行；delegation tool arguments、status/result 映射和 profile kind label 由独立模块负责。
 - `interactive/commands.rs` 已拆出 `commands/settings.rs`，主文件降至 769 行；model、permission、resume、session、settings、hotkeys、login/logout 命令由独立模块负责。
+- `interactive/loop.rs` 已拆出 `loop/bootstrap.rs`，集中 terminal resize source、startup resource banner 和 session resume hint；主 loop 不再持有启动展示细节。
 - CLI 现有全量测试通过：`cargo test -p cli --all-targets --quiet`（106 passed，0 failed）。
 
 ### ARC-910 Desktop reducer 收敛
