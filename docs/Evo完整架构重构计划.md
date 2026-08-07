@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～8 完成，Phase 9 / ARC-900/910/920 已完成，ARC-930 待推进；最近复验 2026-08-08）
+> 状态：执行中（Phase 0～9 完成，Phase 10 待推进；最近复验 2026-08-07）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -67,8 +67,10 @@
 | Phase 8 Gate | 通过（复验 2026-08-07） | 索引可从 cache 恢复并增量更新：identity 三要素 mismatch 触发重建、corruption recovery、crash-reopen（ARC-800/810）；LSP crash 可重启并恢复 document state：指数退避重试 + 重启后 didOpen replay + stale policy（ARC-820）；所有 edit 可进入 review：LSP `applyEdit` 走 `EditPlan` + 注入式 `EditApplicator` 产出 `ChangeReceipt`，无 applicator 拒绝不落盘，扩展修改经 `HookEdit` 归因（ARC-710/820）。code-intelligence 304、coding-agent 250、extension-host 186、tool-contract 12、agent-core 77、workspace-runtime 127、change-tracker 66、cli 106、tui 34、ai 113、event-journal 4、tool-runtime 9 测试通过（gate.sh 复验 914 passed，唯一失败为既有 desktop-runtime stack overflow）；全 workspace clippy/fmt/architecture gate 通过（oversized_debts=36 既有基线、execution_debts=0、dependency_edges=26）；既有全仓 Gate 问题延续：desktop `desktop-runtime` stack overflow（Phase 4 登记）、coding-agent session writer flock 并行 flaky（ARC-710 登记，`--test-threads=4` 稳定全绿）；验证债务登记：export 边缺口（仅 TS/JS 有 export capture）、跨语言引用名字匹配、增量不做预算强制、alias 全局表残留、Git 事件不触发 revision 重建、containment O(n²)、`$/cancelRequest` 礼貌取消、`workspaceEdit.operations` 形态、多文件事务原子性（归 applicator）、pull diagnostics resultId 增量、context per-turn 接线占位、diagnostics 工具化（`code_lsp` 未覆盖诊断查询） |
 
 | Phase 9 / ARC-910 | 完成（2026-08-07） | Desktop reducer、projection、runtime protocol/worker、NativeShell、conversation/inspector/sessions/modal pane 与 native replay 按职责拆分；保留 typed `DesktopEvent -> Transition { changes, effects }`，UI 仅消费 product projection，不解析 raw diff 或自行推导 terminal；Desktop 全量测试、依赖边界、clippy、fmt、diff 与 architecture gate 均通过 |
-| Phase 9 / ARC-900 | 完成（复验 2026-08-08） | typed action → input reduction → `LoopControl + RenderRequest` transition → task effect → `PromptTaskCompletion` 回灌闭合；command/key/action 各自保持单一 registry；root 631、render 742、loop 818 行且所有 production 子模块低于 900 行；CLI 106 tests、clippy/fmt/diff/architecture gate 全通过 |
+| Phase 9 / ARC-900 | 完成（复验 2026-08-07） | typed action → input reduction → `LoopControl + RenderRequest` transition → task effect → `PromptTaskCompletion` 回灌闭合；command/key/action 各自保持单一 registry；interactive、RPC 与 protocol production 热点全部拆分且低于 900 行；CLI 107 tests、clippy/fmt/diff/architecture gate 全通过 |
 | Phase 9 / ARC-920 | 完成（复验 2026-08-07） | Markdown checkpoint + tail rerender、editor 与 surface 模块拆分已落地；默认 TUI 测试与 `test-support` checkpoint 测试均通过 |
+| Phase 9 / ARC-930 | 完成（2026-08-07） | 新增版本化 `scenario-testing` crate、JSON/YAML loader、九域 checkpoint matrix、semantic terminal-state oracle、VirtualTerminal replay 与 mock inference SSE server；CLI/Desktop 对同一 ProductEvent fixture 得到一致终态，reconnect duplicate 不改变状态 |
+| Phase 9 Gate | 通过（2026-08-07） | CLI/Desktop production 文件全部不超过 900 行，Phase 9 oversized debt（含三项 test debt）全部清偿；CLI 107、Desktop 304 + 5 ignored、Desktop dependency boundary 11、scenario 4 项测试通过；workspace all-targets、clippy、fmt、diff 与 architecture gate 全通过（`rust_files=855`、`dependency_edges=28`、`oversized_debts=5`、`execution_debts=0`） |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -788,7 +790,7 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 
 ### ARC-900 CLI Elm 化
 
-执行状态：完成（复验 2026-08-08）。CLI adapter 已闭合 typed action/reduction/transition/effect/completion 流程，command/key/action registry、product client 边界与 root/render/loop 结构热点均已收敛；Phase 9 总 Gate 仍待 ARC-930 完成后统一复验。
+执行状态：完成（复验 2026-08-07）。CLI adapter 已闭合 typed action/reduction/transition/effect/completion 流程，command/key/action registry、product client 边界与全部 interactive/RPC/protocol 结构热点均已收敛；Phase 9 总 Gate 已通过。
 
 - 将 interactive loop 改成 `Action -> reduce(State, Action) -> Transition{changes,effects}`。
 - async effect 完成后只通过 `TaskResult Action` 回灌。
@@ -810,11 +812,12 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 - typed 流程已闭合：root input 只产出 `InteractiveAction` 与 `PendingInteractiveCommand`；`loop/input.rs` 归约 presentation state 并返回 `LoopControl + RenderRequest` transition；`loop/effects.rs` 统一启动 `PromptTask`；异步 terminal/error/success 只经 `PromptSourceEvent::Completed(PromptTaskCompletion)` 回灌 `loop/completion.rs`。
 - registry 保持单一事实来源：`slash::builtin_slash_commands()` 同时驱动 slash command palette 与 `/help`，`keybindings::APP_KEYBINDINGS` 同时驱动实际按键匹配与 `/hotkeys`，`PendingInteractiveCommand::action()` 是 pending command 到 typed `InteractiveAction` 的唯一映射。
 - RPC 与 interactive 均直接使用 product-owned `CodingAgentApplicationStartup` / `CodingAgentClientConnection`；interactive presentation state 留在 `InteractiveRoot`，RPC presentation/protocol state 留在 `rpc::state`，未共享 adapter state 或复制 product projection 规则。
-- CLI 现有全量测试通过：`cargo test -p cli --all-targets --quiet`（106 passed，0 failed）。
+- CLI 现有全量测试通过：`cargo test -p cli --all-targets --quiet`（107 passed，0 failed）。
+- Phase 9 总验收继续拆分 `interactive/prompt_task.rs`、`interactive/transcript.rs`、`interactive/tree_selector.rs`、`rpc/commands.rs`、`rpc/prompt.rs`、`protocol/events.rs` 与 `protocol/types.rs`；任务启动/control、view state/model/tests、dispatch/presentation、start/finish、adapter/RPC DTO 分别进入独立子模块，所有 CLI production Rust 文件均不超过 900 行。CLI 测试数随 ARC-930 scenario 增至 107。
 
 ### ARC-910 Desktop reducer 收敛
 
-执行状态：完成（2026-08-07）。本任务完成 Desktop 适配器的结构收敛；Phase 9 总 Gate 仍需 ARC-900、ARC-920、ARC-930 完成后统一复验。
+执行状态：完成（2026-08-07）。本任务完成 Desktop 适配器的结构收敛；Phase 9 总 Gate 已通过。
 
 - 保留现有 reducer/effect 架构，拆分超大 reducer/pane 为 domain reducer、effect executor 和 view model。
 - Desktop 不解析 raw diff，不自行推导 operation terminal；全部消费 product projection。
@@ -824,7 +827,7 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 完成证据：
 
 - `application/reducer.rs` 已拆为 controller、projection、runtime 与 tests；`projection.rs`、`runtime/protocol.rs`、`runtime/worker/mod.rs` 继续按类型、命令、错误、快照、product event、session、shutdown 等职责拆分。
-- `NativeShell`、native replay、conversation controller/model、inspector pane、sessions pane、shell modal 均已拆分子模块；本次拆分涉及的 11 条 stale oversized Rust debt 登记已清偿。`runtime/client.rs` 已回到既有 968 行基线，仍保留全局 Phase 9 debt 登记，未继续增长。
+- `NativeShell`、native replay、conversation controller/model、inspector pane、sessions pane、shell modal 均已拆分子模块；Phase 9 总验收进一步将 `runtime/client.rs` 的 command client 拆入 `runtime/client/commands.rs`，将 conversation pane 拆为 card/render/shell/tools/tests，并拆分 responsive/workspace/admission 测试热点；Desktop production 文件全部不超过 900 行，Phase 9 production/test oversized debt 已清偿。
 - reducer 继续输出 typed `Transition { changes, effects }`；runtime 事实经 product projection 进入 Desktop，未发现 raw diff 解析、`DirectCommandUpdate`、`reconcile_direct_update`、`RuntimeUpdatePort` 或自行推导 operation terminal 的旧路径。
 - 验证通过：`cargo check -p desktop --all-targets`；`cargo test -p desktop --all-targets --quiet`（Desktop 303 项单元测试、dependency boundary 11 项、5 项 ignored，0 failed）；`cargo clippy -p desktop --all-targets -- -D warnings`；`cargo fmt --all -- --check`；`git diff --check`；`scripts/architecture-gate.sh`（`rust_files=809`、`dependency_edges=26`、`oversized_debts=20`、`execution_debts=0`）。剩余 20 条 oversized debt 包含 `runtime/client.rs` 的既有 Phase 9 基线，以及其他 Phase 9/Phase 5/Phase 10 文件；本次任务未引入新的超限增长。
 
@@ -841,11 +844,22 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 
 ### ARC-930 Scripted scenarios
 
+执行状态：完成（2026-08-07）。共享 scenario contract 只固定 product 输入与语义终态，不共享 CLI/Desktop renderer；两个 adapter 仍各自拥有 presentation state。
+
 - 引入 mock inference SSE server、PTY terminal emulator 和 YAML/JSON scenario runner。
 - 场景覆盖 prompt/tool/auth/review/rewind/team/background/MCP/reconnect。
 - Desktop 使用同一 product scenario 输入生成 deterministic replay，不强行共享 UI renderer。
 
-Phase 9 Gate：CLI/Desktop 无超限 production 文件；核心 workflow 有 scripted e2e；两个 adapter 对同一 ProductEvent fixture 得到语义一致的终态。
+完成证据：
+
+- 新增独立 test-support crate `scenario-testing`：contract version 固定为 1，JSON/YAML loader 使用 `deny_unknown_fields`，校验版本、唯一场景名、fixture 路径、每个 tag 的非空 checkpoint，以及九类场景的完整覆盖。
+- `phase9.json` 与 `phase9.yaml` 加载为同一 typed scenario；共享使用 coding-agent 的 `cross-adapter-events.json` 与 reviewed semantic projection golden，避免复制 ProductEvent DTO。
+- product runner 从统一初始 snapshot 严格顺序 fold ProductEvent；prompt/tool/review/team 的真实终态进入 semantic oracle，auth/rewind/background/MCP 有明确 terminal checkpoint；reconnect 重放最后 cursor event 必须返回 duplicate 且终态逐字段不变。
+- `MockInferenceSseServer` 在 loopback 随机端口提供 bounded HTTP/SSE scripted frames，测试覆盖 Responses 风格 delta/completed 帧及请求路径；CLI 通过 TUI `VirtualTerminal` 执行确定性 terminal replay，不新增第三方 PTY 依赖。
+- CLI scenario test 通过 `UiProjection::apply_product_event`，Desktop scenario test 通过 `DesktopProjection::apply(ProjectionEvent::Product)`；两者从各自 adapter 内部抽取同一 `SemanticTerminalState`，均与 reviewed fixture 相等。
+- 验证通过：`cargo test -p scenario-testing --all-targets --quiet`（4 passed）；`cargo test -p cli --all-targets --quiet`（107 passed）；`cargo check -p desktop --all-targets`；`cargo test -p desktop --all-targets --quiet`（304 passed、5 ignored，dependency boundary 11 passed）。
+
+Phase 9 Gate：通过（2026-08-07）。CLI/Desktop 无超限 production 文件；核心 workflow 有 scripted e2e；两个 adapter 对同一 ProductEvent fixture 得到语义一致的终态。Phase 9 的 9 条 production oversized debt 与 3 条 test oversized debt 全部清偿；`scripts/architecture-gate.sh` 为 `rust_files=855`、`dependency_edges=28`、`oversized_debts=5`、`execution_debts=0`，剩余 5 条均属于 Phase 5 或 Phase 10。
 
 ---
 
