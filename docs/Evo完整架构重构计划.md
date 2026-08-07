@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～8 完成，Phase 9 / ARC-910/920 已完成，ARC-900 进行中，ARC-930 待推进；最近复验 2026-08-08）
+> 状态：执行中（Phase 0～8 完成，Phase 9 / ARC-900/910/920 已完成，ARC-930 待推进；最近复验 2026-08-08）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -67,7 +67,7 @@
 | Phase 8 Gate | 通过（复验 2026-08-07） | 索引可从 cache 恢复并增量更新：identity 三要素 mismatch 触发重建、corruption recovery、crash-reopen（ARC-800/810）；LSP crash 可重启并恢复 document state：指数退避重试 + 重启后 didOpen replay + stale policy（ARC-820）；所有 edit 可进入 review：LSP `applyEdit` 走 `EditPlan` + 注入式 `EditApplicator` 产出 `ChangeReceipt`，无 applicator 拒绝不落盘，扩展修改经 `HookEdit` 归因（ARC-710/820）。code-intelligence 304、coding-agent 250、extension-host 186、tool-contract 12、agent-core 77、workspace-runtime 127、change-tracker 66、cli 106、tui 34、ai 113、event-journal 4、tool-runtime 9 测试通过（gate.sh 复验 914 passed，唯一失败为既有 desktop-runtime stack overflow）；全 workspace clippy/fmt/architecture gate 通过（oversized_debts=36 既有基线、execution_debts=0、dependency_edges=26）；既有全仓 Gate 问题延续：desktop `desktop-runtime` stack overflow（Phase 4 登记）、coding-agent session writer flock 并行 flaky（ARC-710 登记，`--test-threads=4` 稳定全绿）；验证债务登记：export 边缺口（仅 TS/JS 有 export capture）、跨语言引用名字匹配、增量不做预算强制、alias 全局表残留、Git 事件不触发 revision 重建、containment O(n²)、`$/cancelRequest` 礼貌取消、`workspaceEdit.operations` 形态、多文件事务原子性（归 applicator）、pull diagnostics resultId 增量、context per-turn 接线占位、diagnostics 工具化（`code_lsp` 未覆盖诊断查询） |
 
 | Phase 9 / ARC-910 | 完成（2026-08-07） | Desktop reducer、projection、runtime protocol/worker、NativeShell、conversation/inspector/sessions/modal pane 与 native replay 按职责拆分；保留 typed `DesktopEvent -> Transition { changes, effects }`，UI 仅消费 product projection，不解析 raw diff 或自行推导 terminal；Desktop 全量测试、依赖边界、clippy、fmt、diff 与 architecture gate 均通过 |
-| Phase 9 / ARC-900 | 进行中（2026-08-08） | `interactive/event_bridge.rs`（870 行）与 `interactive/commands.rs`（769 行）已完成职责拆分并清偿对应 oversized debt；`loop.rs` 已拆出 bootstrap、product client 与 prompt completion；root/render/loop 仍待继续 Elm 化和收敛 |
+| Phase 9 / ARC-900 | 完成（复验 2026-08-08） | typed action → input reduction → `LoopControl + RenderRequest` transition → task effect → `PromptTaskCompletion` 回灌闭合；command/key/action 各自保持单一 registry；root 631、render 742、loop 818 行且所有 production 子模块低于 900 行；CLI 106 tests、clippy/fmt/diff/architecture gate 全通过 |
 | Phase 9 / ARC-920 | 完成（复验 2026-08-07） | Markdown checkpoint + tail rerender、editor 与 surface 模块拆分已落地；默认 TUI 测试与 `test-support` checkpoint 测试均通过 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
@@ -788,7 +788,7 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 
 ### ARC-900 CLI Elm 化
 
-执行状态：进行中（2026-08-08）。已完成 product event bridge、slash settings/session/auth command，以及 interactive loop 的 bootstrap、product client、prompt completion 职责拆分；interactive root/render/loop 主体仍待继续收敛，Phase 9 总 Gate 不变。
+执行状态：完成（复验 2026-08-08）。CLI adapter 已闭合 typed action/reduction/transition/effect/completion 流程，command/key/action registry、product client 边界与 root/render/loop 结构热点均已收敛；Phase 9 总 Gate 仍待 ARC-930 完成后统一复验。
 
 - 将 interactive loop 改成 `Action -> reduce(State, Action) -> Transition{changes,effects}`。
 - async effect 完成后只通过 `TaskResult Action` 回灌。
@@ -796,7 +796,7 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 - 拆分 `interactive/root.rs`、`render.rs`、`loop.rs`，production 文件全部低于 900 行。
 - RPC、headless 和 interactive 共用 product client，不共用 presentation state。
 
-当前完成证据：
+完成证据：
 
 - `interactive/event_bridge.rs` 已拆出 `event_bridge/delegation.rs`，主文件降至 870 行；delegation tool arguments、status/result 映射和 profile kind label 由独立模块负责。
 - `interactive/commands.rs` 已拆出 `commands/settings.rs`，主文件降至 769 行；model、permission、resume、session、settings、hotkeys、login/logout 命令由独立模块负责。
@@ -807,6 +807,9 @@ Phase 8 Gate：通过（复验 2026-08-07）。索引可从 cache 恢复并增�
 - `interactive/loop.rs` 已拆出 `loop/input.rs`，集中 terminal input、`InteractiveAction` dispatch、settings/auth/session mutation 与 effect 触发；主 loop 仅保留 event select、render scheduling 和 TUI lifecycle，降至 818 行并清偿 oversized debt。
 - `interactive/render.rs` 已拆出 `render/cache.rs`、`render/tools.rs` 与 `render_tests.rs`：row metadata/cache/delta、tool-specific formatting、测试 fixture 各自独立；主 renderer 降至 742 行，两个 production 子模块均低于 900 行，并清偿 oversized debt。
 - `interactive/root.rs` 已按 state/bootstrap、menus/authorization、session/render state、settings、shell input、shell rendering、context、transcript 与 layout 拆为 9 个子模块；父文件降至 631 行，所有 production 子模块均低于 900 行，并清偿 oversized debt。
+- typed 流程已闭合：root input 只产出 `InteractiveAction` 与 `PendingInteractiveCommand`；`loop/input.rs` 归约 presentation state 并返回 `LoopControl + RenderRequest` transition；`loop/effects.rs` 统一启动 `PromptTask`；异步 terminal/error/success 只经 `PromptSourceEvent::Completed(PromptTaskCompletion)` 回灌 `loop/completion.rs`。
+- registry 保持单一事实来源：`slash::builtin_slash_commands()` 同时驱动 slash command palette 与 `/help`，`keybindings::APP_KEYBINDINGS` 同时驱动实际按键匹配与 `/hotkeys`，`PendingInteractiveCommand::action()` 是 pending command 到 typed `InteractiveAction` 的唯一映射。
+- RPC 与 interactive 均直接使用 product-owned `CodingAgentApplicationStartup` / `CodingAgentClientConnection`；interactive presentation state 留在 `InteractiveRoot`，RPC presentation/protocol state 留在 `rpc::state`，未共享 adapter state 或复制 product projection 规则。
 - CLI 现有全量测试通过：`cargo test -p cli --all-targets --quiet`（106 passed，0 failed）。
 
 ### ARC-910 Desktop reducer 收敛
