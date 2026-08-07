@@ -39,7 +39,10 @@ pub use crate::mcp::meta::{
     MCP_SEARCH_TOOL_ID, MCP_USE_TOOL_ID, meta_tools, search_tool, use_tool,
 };
 pub use crate::mcp::oauth::{OAuthConfig, OAuthError, OAuthRuntime};
-pub use crate::mcp::transport::{HttpConfig, RpcError, RpcSession, StdioConfig, TransportConfig};
+pub use crate::mcp::transport::{
+    HttpConfig, MAX_HTTP_BODY_BYTES, MAX_LINE_BYTES, MAX_TOTAL_BYTES, RpcError, RpcSession,
+    StdioConfig, TransportConfig,
+};
 pub use crate::mcp::wire::{
     ErrorResponse, Id, JSONRPC_VERSION, JsonRpcError, Message, Notification, Request, Response,
     WireError, parse_message,

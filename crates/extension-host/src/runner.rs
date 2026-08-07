@@ -13,8 +13,14 @@
 //!   平台能力不足（[`SandboxCapability`] 探测）时**不 spawn**，返回
 //!   [`HookRunOutcome::SandboxUnsupported`]（Tool gate 据此 fail-closed）。
 //! - 输出按 [`OutputBudget`] 截断（洪泛保护）；截断是显式的
-//!   [`HookRunOutcome::OutputLimited`]，不静默丢弃。
+//!   [`HookRunOutcome::OutputLimited`]，不静默丢弃。**截断输出不驱动
+//!   gate 决策**：Tool / Stop gate 在 `output_limited` 时直接返回
+//!   `OutputLimited`（dispatcher fail-open），残留的 JSON 尾部不能产生
+//!   allow / deny / block；Observe 同样报告 `OutputLimited`。
 //! - 超时 / 取消 / spawn 失败 / 进程崩溃 / 非法 JSON 都有结构化结果。
+//! - 相对命令解析：direct 分支经 [`HookSpec::command_path`] 相对扩展目录
+//!   解析；shell 分支经 [`HookSpec::shell_command`] 把第一 token（相对
+//!   路径时）绝对化，其余文本不变（详见 hook.rs）。
 //!
 //! 决策协议（stdout JSON，Tool / Stop gate）：
 //!
@@ -183,7 +189,10 @@ pub async fn run_hook(
     let workspace_root = ctx.workspace_root.clone();
     let process_spec = ProcessSpec {
         program: spec_program,
-        command: spec.command.clone(),
+        // shell 分支：第一 token 是相对路径时由 [`HookSpec::shell_command`]
+        // 绝对化为扩展目录解析（其余文本不变）；否则原样传给 `sh -c`
+        // （PATH 命令 / `$VAR` / `~` / 管道 / 重定向由 shell 语义处理）。
+        command: spec.shell_command(),
         cwd: std::path::PathBuf::from(&workspace_root),
         env: EnvPolicy::AllowList(hook_env(event_json, spec, ctx)),
         timeout,
@@ -273,6 +282,12 @@ struct ToolDecisionJson {
 
 /// Tool gate：JSON allow/deny 优先，退出码兜底。
 fn interpret_tool(process: CompletedProcess<'_>, spec: &HookSpec) -> HookRunOutcome {
+    // 输出被预算截断（洪泛）时不解析截断内容：残留 JSON 尾部不能驱动
+    // 决策。返回 OutputLimited，dispatcher 对 Tool gate 按 fail-open 处理
+    // （等同无意见），与 Observe 的截断报告语义一致。
+    if process.output_limited {
+        return HookRunOutcome::OutputLimited;
+    }
     let parsed = parse_tool_json(process.stdout);
     if let Some(parsed) = parsed {
         return match parsed.decision.as_str() {
@@ -354,6 +369,12 @@ struct StopSpecificOutputJson {
 
 /// Stop gate：JSON 信号优先，退出码兜底。
 fn interpret_stop(process: CompletedProcess<'_>, spec: &HookSpec) -> HookRunOutcome {
+    // 输出被预算截断（洪泛）时不解析截断内容：残留 JSON 尾部不能产生
+    // block / force_stop 信号。返回 OutputLimited，dispatcher 对 Stop
+    // gate 按无信号处理（fail-open），与 Observe 的截断报告语义一致。
+    if process.output_limited {
+        return HookRunOutcome::OutputLimited;
+    }
     let mut signals = StopSignals::default();
     let parsed = parse_stop_json(process.stdout);
     if let Some(json) = parsed {

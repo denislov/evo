@@ -172,12 +172,16 @@ fn record_hook_outcome(
 }
 
 /// 单次运行超时：spec 声明优先（受预算封顶），否则预算或默认。
-fn hook_timeout(spec: &HookSpec, budget_max_run_secs: u64) -> std::time::Duration {
-    let budget = if budget_max_run_secs > 0 {
-        budget_max_run_secs
-    } else {
-        u64::MAX
+///
+/// 预算取值：**per-extension 优先**（[`HookSpec::budget`]，host 装配时
+/// 注入：全局合并预算作默认、manifest config 覆盖）；未装配时用全局
+/// 预算 `global_budget_max_run_secs`。预算 `0` = 不限制 → 默认超时。
+fn hook_timeout(spec: &HookSpec, global_budget_max_run_secs: u64) -> std::time::Duration {
+    let budget = match spec.budget {
+        Some(budget) => budget.max_run_secs,
+        None => global_budget_max_run_secs,
     };
+    let budget = if budget > 0 { budget } else { u64::MAX };
     let declared = spec
         .timeout_secs
         .filter(|secs| *secs > 0)

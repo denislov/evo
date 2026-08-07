@@ -113,6 +113,7 @@ fn hook_spec(name: &str) -> HookSpec {
         command: "true".into(),
         source_dir: std::path::PathBuf::from("/ext"),
         timeout_secs: None,
+        budget: None,
         enabled: true,
         matcher: extension_host::api::HookMatcher::match_all(),
     }

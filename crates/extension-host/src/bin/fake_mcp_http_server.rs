@@ -11,6 +11,11 @@
 //! - `--headers-file <path>`：每个 HTTP 请求追加一行
 //!   `<method> <path> authorization=<值或(none)>`（服务端记录收到的请求头）。
 //! - `--tools <json>`：`tools/list` 返回的工具数组（默认 echo / slow）。
+//! - `--huge-content-length`：所有响应声明 `content-length: 1 GiB` 但不
+//!   发送 body（客户端应在读取前按 content-length 预检拒绝）。
+//! - `--huge-body-bytes <n>`：所有响应以 close-delimited（无
+//!   content-length）发送 `n` 字节垃圾 body（客户端流式读取累计超限
+//!   拒绝）。
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -19,6 +24,8 @@ fn main() {
     let mut listen_addr = "127.0.0.1:0".to_string();
     let mut headers_file: Option<std::path::PathBuf> = None;
     let mut auth_fail_calls: u64 = 0;
+    let mut huge_content_length = false;
+    let mut huge_body_bytes: usize = 0;
     let mut tools = serde_json::json!([
         {"name": "echo", "description": "Echo the arguments back", "inputSchema": {"type": "object"}},
         {"name": "slow", "description": "Slow tool", "inputSchema": {"type": "object"}}
@@ -46,6 +53,13 @@ fn main() {
                 index += 1;
                 tools = serde_json::from_str(&args[index]).expect("--tools must be a JSON array");
             }
+            "--huge-content-length" => huge_content_length = true,
+            "--huge-body-bytes" => {
+                index += 1;
+                huge_body_bytes = args[index]
+                    .parse()
+                    .expect("--huge-body-bytes must be a number");
+            }
             other => panic!("unknown argument '{other}'"),
         }
         index += 1;
@@ -61,7 +75,14 @@ fn main() {
         let fail_remaining = fail_remaining.clone();
         std::thread::spawn(move || {
             let mut stream = stream;
-            let _ = handle_connection(&mut stream, &tools, &fail_remaining, &headers_file);
+            let _ = handle_connection(
+                &mut stream,
+                &tools,
+                &fail_remaining,
+                &headers_file,
+                huge_content_length,
+                huge_body_bytes,
+            );
         });
     }
 }
@@ -71,6 +92,8 @@ fn handle_connection(
     tools: &serde_json::Value,
     auth_fail_calls: &std::sync::Mutex<u64>,
     headers_file: &Option<std::path::PathBuf>,
+    huge_content_length: bool,
+    huge_body_bytes: usize,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -92,6 +115,32 @@ fn handle_connection(
     }
     let mut body = Vec::new();
     reader.take(content_length as u64).read_to_end(&mut body)?;
+
+    // 超大响应模拟：声明 1 GiB 但发送空 body（客户端预检拒绝，不读 body）。
+    if huge_content_length {
+        let response =
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1073741824\r\nconnection: close\r\n\r\n";
+        stream.write_all(response)?;
+        stream.flush()?;
+        return Ok(());
+    }
+    // 超大 body 模拟：close-delimited（无 content-length）发送 n 字节
+    // 垃圾（客户端流式累计超限拒绝）。
+    if huge_body_bytes > 0 {
+        let response =
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n";
+        stream.write_all(response)?;
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut remaining = huge_body_bytes;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len());
+            stream.write_all(&chunk[..n])?;
+            remaining -= n;
+        }
+        stream.flush()?;
+        return Ok(());
+    }
+
     let authorization = headers
         .iter()
         .find(|header| header.to_ascii_lowercase().starts_with("authorization:"))

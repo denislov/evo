@@ -15,6 +15,8 @@
 //! - `--auth-fail-on-call <n>`：前 n 次 `tools/call` 返回 JSON-RPC
 //!   `-32001`（UNAUTHORIZED），之后正常（OAuth 401 refresh 测试）。
 //! - `--mode <name>`：行为模式，见 [`Mode`]。
+//!   `huge-line` 在启动时输出 2 MiB 无换行字节流（transport 单行上限
+//!   测试：读循环应终止 transport 而非无界分配）。
 
 use std::io::{BufRead, Write};
 
@@ -82,6 +84,7 @@ fn main() {
                     "flood" => Mode::Flood,
                     "bad-json" => Mode::BadJson,
                     "garbage-init" => Mode::GarbageInit,
+                    "huge-line" => Mode::HugeLine,
                     "crash-after-init" => Mode::CrashAfterInit,
                     "crash-on-call" => Mode::CrashOnCall,
                     "ping-drop" => Mode::PingDrop,
@@ -99,6 +102,16 @@ fn main() {
         for _ in 0..3 {
             out_line("this is not json");
         }
+    }
+
+    if matches!(mode, Mode::HugeLine) {
+        // 2 MiB 无换行字节流：transport 读循环应在单行上限（1 MiB）处
+        // 终止，而非无界分配。
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        let bytes = vec![b'x'; 2 * 1024 * 1024];
+        let _ = handle.write_all(&bytes);
+        let _ = handle.flush();
     }
 
     let stdin = std::io::stdin();
@@ -269,6 +282,8 @@ enum Mode {
     BadJson,
     /// 启动时输出 3 行垃圾。
     GarbageInit,
+    /// 启动时输出 2 MiB 无换行字节流（transport 单行上限测试）。
+    HugeLine,
     /// initialize 后立即以退出码 7 崩溃。
     CrashAfterInit,
     /// 首个 tools/call 时以退出码 3 崩溃（`--crash-once` 下只崩一次）。

@@ -39,6 +39,14 @@
   - **单行解码失败跳过并继续读**（参考 grok `ResilientRwTransport`）：
     一个坏行不 collapse 整个 transport；通知行（无 id 有 method）静默
     忽略。stderr 由后台 drain task 丢弃（防止管道写满阻塞子进程）。
+  - **输入边界（fail-closed，本次修复）**：读循环按行有界读取——
+    **单行上限 `MAX_LINE_BYTES`（1 MiB，不含换行符）** + **累计上限
+    `MAX_TOTAL_BYTES`（64 MiB，含换行符）**。超单行上限或累计超限即
+    **终止 transport**：`fail_all_pending`（在途请求立即
+    `TransportClosed`）+ `report_died`（lifecycle 重连 / 诊断）——行格式
+    已不可信（合法 JSON-RPC 行不应超 1 MiB），不静默跳过、不无界分配。
+    stderr drain 同样按单行上限读取，超限终止 drain（服务器写满 stderr
+    管道自行阻塞，自噬而不耗尽宿主内存）。
   - 读写分离：stdin / stdout / stderr 在 spawn 后经 `take_*` 独立持有
     （tokio 1.52 已移除 `take_owned`），读循环独占 stdout 按 id 分发
     响应、推送通知；写侧经 `Mutex<ChildStdin>`。
@@ -54,6 +62,11 @@
     的 server 一律不可调用（fail closed）。
   - HTTP 下收不到服务端通知（无 SSE）：`tools/list_changed` 热更新仅
     stdio 生效，HTTP 侧登记债务。
+  - **响应体输入边界（本次修复）**：有界读取
+    （`MAX_HTTP_BODY_BYTES` = 64 MiB，与 stdio 累计同量级）——先检查
+    `content-length`（超限直接拒绝、不读 body），再流式累计
+    （`Response::chunk()`，覆盖 chunked / close-delimited 响应），超限
+    返回结构化 `RpcError::Other`（带大小信息），不分配无限内存。
 - 超时 / 取消：`request()` 内部 `select!` 超时与取消令牌；超时/取消后
   迟到响应按 id 丢弃；**transport 死亡时 `fail_all_pending`**——在途
   请求立即以 `TransportClosed` 失败，不悬挂到超时。
@@ -203,19 +216,23 @@
 
 ```text
 cargo test -p extension-host --all-features
-156 lib（wire 11 / state 5 含 transition 表 / lifecycle 13 / oauth 5 /
-      credentials 6 / meta 5 / host 22）+ 9 hook_runner + 13 mcp_lifecycle 全绿
-  - mcp_lifecycle：initialize 握手与工具发现 / tools/call 转发 / per-tool
-    timeout / 取消 / liveness 超时重连与重新发现 / 进程崩溃重连恢复 /
-    tools/list_changed 热更新 / 输出洪泛 / 非法 JSON 行跳过 / 初始失败
-    不重试 / shutdown 在途调用取消 / 未启动与已关闭 host 不可用 /
-    disabled server 不装配
-cargo test -p coding-agent --all-features   225 + 3（mcp_meta_tools 装配）
+175 lib（wire 11 / state 5 含 transition 表 / lifecycle 13 / oauth 5 /
+      credentials 6 / meta 5 / host 22 / transport 6 有界读行）/ 20
+      hook_runner / 26 mcp_lifecycle 全绿
+  - transport 输入边界（本次修复）：有界读行单元测试（短行 / EOF 残留 /
+    超长行 TooLong / 恰达上限）；集成测试：stdio 2 MiB 无换行字节流 →
+    transport 终止 + 在途请求 TransportClosed、正常行不回归、HTTP 超大
+    content-length 预检拒绝、HTTP close-delimited 超大 body 流式超限拒绝
+  - mcp_lifecycle 其余：initialize 握手与工具发现 / tools/call 转发 /
+    per-tool timeout / 取消 / liveness 超时重连与重新发现 / 进程崩溃
+    重连恢复 / tools/list_changed 热更新 / 输出洪泛 / 非法 JSON 行跳过 /
+    初始失败不重试 / shutdown 在途调用取消 / 未启动与已关闭 host
+    不可用 / disabled server 不装配
+cargo test -p coding-agent --all-features   244 + 2 + 2 + 7 全绿
 cargo test -p tool-runtime --all-features   9 全绿
 cargo clippy -p extension-host -p coding-agent --all-targets --all-features -- -D warnings 通过
 cargo fmt --all -- --check                   通过
-architecture-gate：21 依赖边（新增 extension-host → tool-runtime）、
-  无新增 oversized debt（全部文件 ≤900 行）
+architecture-gate：26 依赖边、无新增 oversized debt（全部文件 ≤900 行）
 ```
 
 ## 与 Grok 参考实现的差异

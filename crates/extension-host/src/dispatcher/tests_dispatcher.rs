@@ -21,6 +21,7 @@ fn spec(name: &str, event: ExtensionEventKind, command: &str) -> HookSpec {
         command: command.into(),
         source_dir: std::path::PathBuf::from("/ext"),
         timeout_secs: None,
+        budget: None,
         enabled: true,
         matcher: HookMatcher::match_all(),
     }
@@ -268,6 +269,25 @@ async fn tool_gate_fails_open_on_execution_failures() {
 }
 
 #[tokio::test]
+async fn tool_gate_fails_open_on_output_limited() {
+    // 洪泛输出（超预算）即使截断尾部含完整 deny JSON 也不驱动 deny：
+    // interpret_tool 返回 OutputLimited → fail-open（Allow）。
+    let flood = spec(
+        "flood",
+        ExtensionEventKind::PreToolUse,
+        "(head -c 200000 /dev/zero | tr '\\0' x; echo '{\"decision\":\"deny\",\"reason\":\"flood\"}')",
+    );
+    let shared = test_shared();
+    let gate = HookGate::new(registry(vec![flood]), shared);
+    assert_eq!(
+        gate.evaluate_tool(&tool_event_in("bash", None, ws().path()))
+            .await,
+        ToolGateDecision::Allow,
+        "truncated output must fail open for the Tool gate"
+    );
+}
+
+#[tokio::test]
 async fn tool_gate_closes_on_sandbox_unsupported() {
     let shared = test_shared();
     let gate = HookGate::with_sandbox_capability(
@@ -303,6 +323,27 @@ async fn stop_gate_fails_open_on_sandbox_unsupported() {
         "sandboxless platform must fail open for the Stop gate"
     );
     assert!(decision.blocks.is_empty());
+}
+
+#[tokio::test]
+async fn stop_gate_output_limited_produces_no_signals() {
+    // 洪泛输出（超预算）即使截断尾部含完整 block JSON 也不产生信号：
+    // interpret_stop 返回 OutputLimited → 无 block / force_stop / context。
+    let flood = spec(
+        "flood",
+        ExtensionEventKind::Stop,
+        "(head -c 200000 /dev/zero | tr '\\0' x; echo '{\"decision\":\"block\",\"reason\":\"flood\"}')",
+    );
+    let shared = test_shared();
+    let gate = HookGate::new(registry(vec![flood]), shared);
+    let decision = gate.evaluate_stop(&stop_event_in(ws().path())).await;
+    assert!(
+        !decision.wants_continuation(),
+        "truncated output must produce no stop signals"
+    );
+    assert!(decision.blocks.is_empty());
+    assert!(decision.force_stop.is_none());
+    assert!(decision.additional_context.is_empty());
 }
 
 // ---- Stop gate transition table ----
@@ -577,6 +618,46 @@ async fn hook_timeout_obeys_spec_then_budget() {
         hook_timeout(&s(Some(0)), 100),
         Duration::from_secs(100),
         "zero spec = unset"
+    );
+}
+
+#[tokio::test]
+async fn hook_timeout_prefers_per_extension_budget() {
+    use crate::budget::ExtensionBudget;
+    use std::time::Duration;
+    // per-extension budget 优先于全局（manifest 覆盖 host defaults）。
+    let with_budget = |max_run_secs: u64, timeout: Option<u64>| HookSpec {
+        budget: Some(ExtensionBudget {
+            max_run_secs,
+            ..Default::default()
+        }),
+        timeout_secs: timeout,
+        ..spec("h", ExtensionEventKind::Stop, "x")
+    };
+    assert_eq!(
+        hook_timeout(&with_budget(5, None), 3_600),
+        Duration::from_secs(5),
+        "per-extension budget wins over the global default"
+    );
+    assert_eq!(
+        hook_timeout(&with_budget(5, Some(100)), 3_600),
+        Duration::from_secs(5),
+        "declared timeout capped by the per-extension budget"
+    );
+    assert_eq!(
+        hook_timeout(&with_budget(0, None), 3_600),
+        Duration::from_secs(30),
+        "per-extension zero budget = unlimited -> default"
+    );
+    // 未装配（None）回落全局。
+    let s = |timeout: Option<u64>| HookSpec {
+        timeout_secs: timeout,
+        ..spec("h", ExtensionEventKind::Stop, "x")
+    };
+    assert_eq!(
+        hook_timeout(&s(None), 7),
+        Duration::from_secs(7),
+        "unassembled spec falls back to the global budget"
     );
 }
 

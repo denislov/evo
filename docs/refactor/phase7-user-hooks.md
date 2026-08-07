@@ -67,6 +67,16 @@ ARC-710 在 ARC-700 的 `ExtensionEventPayload` 上**扩展字段与变体**，�
   （`SandboxCapability` 探测，`fs_supported == false`）时**不 spawn**，
   返回 `SandboxUnsupported`（Tool gate 据此 fail-closed；Observe/Stop
   fail-open）。
+- **相对命令解析（本次修复，规则固定）**：
+  - direct 分支：相对路径相对扩展目录解析（`command_path()`）。
+  - shell 分支（`sh -c`）：若命令**第一 token 是相对路径**（含 `/` 或
+    以 `.` 开头、非绝对路径），执行前把该 token 替换为相对扩展目录
+    解析的**绝对路径**，其余命令文本（含前导空白）逐字节不变
+    （`shell_command()`）。**绝不对 PATH 命令做解析**（`echo hi` 第一
+    token 无 `/` 不以 `.` 开头 → 原样）；`$VAR` / `~` 开头、管道 /
+    重定向开头的命令同样原样（shell 负责展开与语义）。修复前 `sh -c`
+    在 workspace_root 下执行原始命令，`bin/format.sh --write` 会 127
+    失败。
 - 事件信封经**环境变量**注入（`EVO_HOOK_EVENT` / `EVO_HOOK_NAME` /
   `EVO_SESSION_ID` / `EVO_WORKSPACE_ROOT`）。与 Grok 的 stdin 注入不同：
   Evo 的 `ProcessSpec` 固定 `stdin = null`，env 是唯一不破坏共享进程契约
@@ -74,7 +84,12 @@ ARC-710 在 ARC-700 的 `ExtensionEventPayload` 上**扩展字段与变体**，�
   （覆盖同名白名单值），hook 无法伪造身份信号。
 - 输出按 `OutputBudget`（64 KB / 2000 行）截断：洪泛不丢进程、不爆内存，
   截断显式报告为 `OutputLimited`（`OutputLimited` 只出现在进程本身完成
-  时；超时/取消分别有 `TimedOut` / `Cancelled`）。
+  时；超时/取消分别有 `TimedOut` / `Cancelled`）。**截断输出不驱动 gate
+  决策（本次修复）**：`interpret_tool` / `interpret_stop` 在
+  `output_limited` 时直接返回 `OutputLimited`，不再解析截断 stdout——
+  洪泛后残留的 JSON 尾部不能产生 allow / deny / block（dispatcher 对
+  Tool gate 按 fail-open 放行、Stop gate 按无信号处理，Observe 行为
+  不变）。
 - 结构化结果 `HookRunOutcome`：`Success` / `ToolDecision{allow,reason}` /
   `StopSignals{block, force_stop, additional_context}` / `TimedOut` /
   `Cancelled` / `OutputLimited` / `Failed`（崩溃、非零退出、非法决策
@@ -86,8 +101,10 @@ ARC-710 在 ARC-700 的 `ExtensionEventPayload` 上**扩展字段与变体**，�
   exit 2+stderr=block。JSON 决策优先于退出码（与 Grok 一致）；未知
   decision 值是错误（typo 显式暴露，不静默 fail-open）。
 - 超时 = `min(spec.timeout_secs, budget.max_run_secs)`（spec 声明受预算
-  封顶；未声明用预算；预算 0=不限 → 默认 30s）。**`RunDurationSecs`
-  维度由此强制**。
+  封顶；未声明用预算；预算 0=不限 → 默认 30s）。**预算取值 per-extension
+  优先**（`HookSpec::budget`，host 装配时注入：全局合并预算作默认、
+  manifest config 覆盖，见 `phase7-extension-host.md`）；未装配时用全局
+  预算。**`RunDurationSecs` 维度由此强制**。
 
 ### gate（`dispatcher.rs`）
 
@@ -105,6 +122,7 @@ ARC-710 在 ARC-700 的 `ExtensionEventPayload` 上**扩展字段与变体**，�
   | force_stop         | —                        | —                             | **ForceStop**           |
   | 崩溃 / 非法 JSON   | 记录                     | fail-open（放行）             | fail-open（正常停止）   |
   | 超时 / 取消 / spawn | 记录                     | fail-open（放行）             | fail-open（正常停止）   |
+  | **输出截断（OutputLimited）** | 记录（且报告 OutputLimited） | **fail-open（放行）** | **无信号（正常停止）** |
   | **sandbox 不支持** | 记录                     | **fail-closed（拒绝工具）**   | fail-open（正常停止）   |
 
   唯一 fail-closed 类别是 sandbox 环境性失败：平台不能提供沙箱时 hook

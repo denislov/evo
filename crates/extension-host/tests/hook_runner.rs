@@ -23,6 +23,7 @@ fn spec(name: &str, event: ExtensionEventKind, command: &str, dir: &std::path::P
         command: command.into(),
         source_dir: dir.to_path_buf(),
         timeout_secs: None,
+        budget: None,
         enabled: true,
         matcher: HookMatcher::match_all(),
     }
@@ -245,6 +246,171 @@ async fn relative_command_resolves_against_extension_dir() {
 }
 
 #[tokio::test]
+async fn shell_relative_command_with_args_runs_in_extension_dir() {
+    // 带参数的相对命令（shell 路由）：第一 token 必须相对扩展目录解析。
+    // 修复前在 workspace_root 下找 bin/tool.sh → 127 失败。
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("tool.sh");
+    std::fs::write(&script, "#!/bin/sh\n[ \"$1\" = \"--flag\" ]\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    let hook = spec(
+        "rel-args",
+        ExtensionEventKind::PreToolUse,
+        "bin/tool.sh --flag",
+        root.path(),
+    );
+    let outcome = run_hook(
+        &hook,
+        &envelope(root.path()),
+        &ctx(root.path(), CancellationToken::new()),
+        Duration::from_secs(10),
+        GateKind::Tool,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        HookRunOutcome::Success,
+        "bin/tool.sh --flag must execute inside the extension dir"
+    );
+}
+
+#[tokio::test]
+async fn shell_path_command_with_args_is_not_rewritten() {
+    // PATH 命令 + 参数：第一 token 不是相对路径 → 不替换，shell 正常执行。
+    let root = tempfile::tempdir().unwrap();
+    let hook = spec(
+        "path-cmd",
+        ExtensionEventKind::PreToolUse,
+        "sh -c 'true'",
+        root.path(),
+    );
+    let outcome = run_hook(
+        &hook,
+        &envelope(root.path()),
+        &ctx(root.path(), CancellationToken::new()),
+        Duration::from_secs(10),
+        GateKind::Tool,
+    )
+    .await;
+    assert_eq!(outcome, HookRunOutcome::Success);
+}
+
+#[tokio::test]
+async fn shell_absolute_command_with_args_is_not_rewritten() {
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("abs.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    let command = format!("{} --flag", script.to_string_lossy());
+    let hook = spec(
+        "abs-cmd",
+        ExtensionEventKind::PreToolUse,
+        &command,
+        root.path(),
+    );
+    let outcome = run_hook(
+        &hook,
+        &envelope(root.path()),
+        &ctx(root.path(), CancellationToken::new()),
+        Duration::from_secs(10),
+        GateKind::Tool,
+    )
+    .await;
+    assert_eq!(outcome, HookRunOutcome::Success);
+}
+
+#[tokio::test]
+async fn shell_tilde_and_env_commands_are_not_rewritten() {
+    // `$VAR` / `~` 开头的命令不替换（shell 负责展开）。
+    let root = tempfile::tempdir().unwrap();
+    for command in ["$SHELL -c 'exit 0'", "echo hi"] {
+        let hook = spec(
+            "no-rewrite",
+            ExtensionEventKind::PreToolUse,
+            command,
+            root.path(),
+        );
+        let outcome = run_hook(
+            &hook,
+            &envelope(root.path()),
+            &ctx(root.path(), CancellationToken::new()),
+            Duration::from_secs(10),
+            GateKind::Tool,
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            HookRunOutcome::Success,
+            "{command:?} must run via the shell without rewriting"
+        );
+    }
+}
+
+#[tokio::test]
+async fn flooded_tool_output_does_not_drive_deny() {
+    // 洪泛（超预算）且截断尾部含完整 deny JSON → OutputLimited（fail-open），
+    // 截断输出不产生 deny 决策。
+    let root = tempfile::tempdir().unwrap();
+    let hook = spec(
+        "flood-deny",
+        ExtensionEventKind::PreToolUse,
+        "(head -c 200000 /dev/zero | tr '\\0' x; echo '{\"decision\":\"deny\",\"reason\":\"flood\"}')",
+        root.path(),
+    );
+    let outcome = run_hook(
+        &hook,
+        &envelope(root.path()),
+        &ctx(root.path(), CancellationToken::new()),
+        Duration::from_secs(10),
+        GateKind::Tool,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        HookRunOutcome::OutputLimited,
+        "truncated stdout must not yield a deny decision"
+    );
+}
+
+#[tokio::test]
+async fn flooded_stop_output_produces_no_signals() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = spec(
+        "flood-block",
+        ExtensionEventKind::Stop,
+        "(head -c 200000 /dev/zero | tr '\\0' x; echo '{\"decision\":\"block\",\"reason\":\"flood\"}')",
+        root.path(),
+    );
+    let outcome = run_hook(
+        &hook,
+        &envelope(root.path()),
+        &ctx(root.path(), CancellationToken::new()),
+        Duration::from_secs(10),
+        GateKind::Stop,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        HookRunOutcome::OutputLimited,
+        "truncated stdout must not produce stop signals"
+    );
+}
+
+#[tokio::test]
 async fn host_shutdown_cancels_in_flight_hook_and_drains() {
     let root = tempfile::tempdir().unwrap();
     let ext_dir = root.path().join("hooks-ext");
@@ -428,4 +594,190 @@ async fn untrusted_and_pending_extensions_never_run_hooks() {
     let _ = tokio::time::timeout(Duration::from_secs(10), task.join())
         .await
         .expect("host joins promptly");
+}
+
+// ---- manifest config 生效（P2）：per-extension enabled / budget ----
+
+fn write_extension(
+    dir: &std::path::Path,
+    id: &str,
+    config: serde_json::Value,
+    hooks: serde_json::Value,
+) {
+    let ext_dir = dir.join(id);
+    std::fs::create_dir_all(&ext_dir).unwrap();
+    std::fs::write(
+        ext_dir.join("extension.json"),
+        serde_json::json!({
+            "name": id,
+            "version": "0.1.0",
+            "config": config,
+            "hooks": hooks
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn manifest_disabled_extension_is_not_enabled_even_when_trusted() {
+    let root = tempfile::tempdir().unwrap();
+    write_extension(
+        root.path(),
+        "off-ext",
+        serde_json::json!({"enabled": false}),
+        serde_json::json!([{"name": "h", "event": "post_tool_use", "command": "exit 0"}]),
+    );
+    let trust = Arc::new(InMemoryTrustStore::new());
+    trust.trust(root.path().join("off-ext"));
+    let (host, errors) = ExtensionHost::new(ExtensionHostOptions {
+        project_dirs: vec![root.path().to_path_buf()],
+        trust_store: trust,
+        ..Default::default()
+    });
+    assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    assert!(
+        host.info().enabled().is_empty(),
+        "manifest config.enabled=false must disable even a trusted extension"
+    );
+    assert!(
+        host.gate().is_none(),
+        "no registry for a disabled extension"
+    );
+    let diags = host.diagnostics();
+    let codes: Vec<_> = diags.iter().map(|d| d.code.as_str()).collect();
+    assert!(
+        codes.contains(&"extension_disabled"),
+        "disabled extension must be diagnosed: {codes:?}"
+    );
+}
+
+#[tokio::test]
+async fn manifest_budget_overrides_global_for_hook_timeout() {
+    // manifest budget maxRunSecs=2 vs 全局默认 3600：hook（sleep 30）必须在
+    // ~2s 被 per-extension 预算杀死（TimedOut，fail-open → Allow），证明
+    // manifest 覆盖全局预算。
+    let root = tempfile::tempdir().unwrap();
+    write_extension(
+        root.path(),
+        "budget-ext",
+        serde_json::json!({"budget": {"maxRunSecs": 2}}),
+        serde_json::json!([{"name": "slow", "event": "pre_tool_use", "command": "sleep 30"}]),
+    );
+    let trust = Arc::new(InMemoryTrustStore::new());
+    trust.trust(root.path().join("budget-ext"));
+    let (host, errors) = ExtensionHost::new(ExtensionHostOptions {
+        project_dirs: vec![root.path().to_path_buf()],
+        trust_store: trust,
+        ..Default::default()
+    });
+    assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    let gate = host.gate().expect("budgeted extension has hooks");
+
+    let event = ExtensionEvent::new(
+        ExtensionEventKind::PreToolUse,
+        "s1",
+        root.path().to_string_lossy(),
+        "t",
+        ExtensionEventPayload::PreToolUse {
+            tool_name: ToolId::new("bash").unwrap(),
+            tool_input: json!({"command": "ls"}),
+            tool_input_truncated: false,
+            path: None,
+        },
+    );
+    let started = std::time::Instant::now();
+    let decision = gate.evaluate_tool(&event).await;
+    assert_eq!(
+        decision,
+        ToolGateDecision::Allow,
+        "timeout fails open for the Tool gate"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "per-extension budget (2s) must cap the timeout, not the global 3600s"
+    );
+    let messages: Vec<_> = host
+        .diagnostics()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("TimedOut")),
+        "hook run must record the timeout outcome: {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn manifest_without_config_behaves_unchanged() {
+    // manifest 无 config：per-extension 配置 == 全局默认 → 正常启用执行。
+    let root = tempfile::tempdir().unwrap();
+    write_extension(
+        root.path(),
+        "plain-ext",
+        serde_json::json!({}),
+        serde_json::json!([{"name": "h", "event": "pre_tool_use", "command": "exit 0"}]),
+    );
+    let trust = Arc::new(InMemoryTrustStore::new());
+    trust.trust(root.path().join("plain-ext"));
+    let (host, errors) = ExtensionHost::new(ExtensionHostOptions {
+        project_dirs: vec![root.path().to_path_buf()],
+        trust_store: trust,
+        ..Default::default()
+    });
+    assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    assert_eq!(host.info().enabled().len(), 1, "plain manifest enables");
+    let gate = host.gate().expect("plain extension has hooks");
+    let event = ExtensionEvent::new(
+        ExtensionEventKind::PreToolUse,
+        "s1",
+        root.path().to_string_lossy(),
+        "t",
+        ExtensionEventPayload::PreToolUse {
+            tool_name: ToolId::new("bash").unwrap(),
+            tool_input: json!({}),
+            tool_input_truncated: false,
+            path: None,
+        },
+    );
+    assert_eq!(gate.evaluate_tool(&event).await, ToolGateDecision::Allow);
+    let diags = host.diagnostics();
+    let codes: Vec<_> = diags.iter().map(|d| d.code.as_str()).collect();
+    assert!(!codes.contains(&"extension_disabled"), "got {codes:?}");
+}
+
+#[tokio::test]
+async fn config_layers_override_manifest_enabled_with_and_semantics() {
+    // 外部层禁用（高层优先）+ manifest enabled=true → 不启用（AND）。
+    let root = tempfile::tempdir().unwrap();
+    write_extension(
+        root.path(),
+        "ext",
+        serde_json::json!({"enabled": true}),
+        serde_json::json!([{"name": "h", "event": "post_tool_use", "command": "exit 0"}]),
+    );
+    let trust = Arc::new(InMemoryTrustStore::new());
+    trust.trust(root.path().join("ext"));
+    let layer = ExtensionConfigLayer::new(
+        ExtensionSource::Managed,
+        "managed",
+        ExtensionConfig {
+            enabled: false,
+            ..Default::default()
+        },
+    );
+    let (host, errors) = ExtensionHost::new(ExtensionHostOptions {
+        project_dirs: vec![root.path().to_path_buf()],
+        trust_store: trust,
+        config_layers: vec![layer],
+        ..Default::default()
+    });
+    assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    assert!(
+        host.info().enabled().is_empty(),
+        "higher-priority config layer must disable the extension"
+    );
+    let diags = host.diagnostics();
+    let codes: Vec<_> = diags.iter().map(|d| d.code.as_str()).collect();
+    assert!(codes.contains(&"extension_disabled"), "got {codes:?}");
 }

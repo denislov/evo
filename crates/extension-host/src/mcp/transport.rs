@@ -8,12 +8,20 @@
 //!   一个坏行不 collapse 整个 transport）。读循环在后台 task 中按 id 分发
 //!   响应、把通知推给订阅者；EOF / 读错误传播为
 //!   [`RpcError::TransportClosed`]。
+//!   **输入边界（fail-closed）**：单行超过 [`MAX_LINE_BYTES`]（1 MiB，
+//!   合法 JSON-RPC 单行不应超过）或累计读取超过 [`MAX_TOTAL_BYTES`]
+//!   （64 MiB）即终止读循环——行格式已不可信，继续按行解析无意义；
+//!   终止时 `fail_all_pending`（在途请求立即 `TransportClosed`）+
+//!   `report_died`（lifecycle 重连 / 诊断）。不静默跳过超长行。
 //! - **HTTP**：reqwest 直连用户显式配置的 endpoint（`POST` JSON-RPC 请求、
 //!   同步读响应）。**信任边界**：endpoint 来自显式配置（不是任意 URL 的
 //!   web_fetch 管线），本模块只校验 scheme 为 http/https；SSE / 服务端
 //!   推送不在本任务范围（HTTP 下收不到 `tools/list_changed`，见债务）。
 //!   401（HTTP 状态或 JSON-RPC `-32001`）归类为 [`RpcError::Unauthorized`]，
 //!   由调用方触发 credential refresh / OAuth。
+//!   **输入边界**：响应体有界读取（[`MAX_HTTP_BODY_BYTES`]，64 MiB）——
+//!   先检查 `content-length`（超限直接拒绝、不读 body），再流式累计，
+//!   超限返回结构化 [`RpcError::Other`]（带大小信息），不分配无限内存。
 //!
 //! 超时 / 取消：`request()` 内部 `select!` 超时与取消令牌；超时或被取消后
 //! 迟到的响应按 id 丢弃（stdin 读循环继续运行），不污染后续请求。
@@ -32,6 +40,26 @@ use tokio_util::sync::CancellationToken;
 use workspace_runtime::api::{EnvPolicy, PeerProcess, ProcessSpec, ProgramKind, SandboxProfile};
 
 use crate::mcp::wire::{self, Id, Message, Notification, Request, Response};
+
+/// stdio 读循环的**单行上限**（字节，不含换行符）。一条合法 JSON-RPC
+/// 消息（响应 / 通知 / 请求）不应超过 1 MiB；超过即终止 transport
+/// （fail-closed：行格式已不可信，不静默跳过）。
+pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+/// stdio 读循环的**累计读取上限**（字节，含换行符）。恶意 / 失控 server
+/// 持续输出（每行都不超上限但总量无限）时在此终止 transport
+/// （fail-closed + `fail_all_pending`）。
+pub const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+/// HTTP 响应体上限（字节）。单条 JSON-RPC 响应不应超过 64 MiB（与
+/// stdio 累计上限同量级）；先按 `content-length` 预检、再流式累计，
+/// 超限返回结构化错误，不分配无限内存。
+pub const MAX_HTTP_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// 边界不变式（编译期固定）：累计上限 ≥ 单行上限；HTTP 与 stdio 累计
+/// 同量级。
+const _: () = assert!(MAX_TOTAL_BYTES > MAX_LINE_BYTES);
+const _: () = assert!(MAX_HTTP_BODY_BYTES == MAX_TOTAL_BYTES);
 
 /// stdio transport 配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,7 +420,67 @@ where
     }
 }
 
+/// 有界读行结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundedLine {
+    /// 读到一行（含换行符；EOF 前残留内容也按行返回），字节数。
+    Line(usize),
+    /// EOF 且无残留数据。
+    Eof,
+    /// 单行超过上限（`len` 为已缓冲字节数）：行格式已不可信，调用方
+    /// 应终止 transport（fail-closed）。
+    TooLong(usize),
+}
+
+/// 有界读行：从 `reader` 读取到 `\n` 为止（含换行符）。
+///
+/// 单行内容超过 `max_bytes` 字节时返回 [`BoundedLine::TooLong`]，**不会
+/// 无界分配**（`fill_buf` 每次只暴露底层缓冲，`consume` 推进）。EOF 时
+/// 返回 `Eof`（缓冲区为空）或 `Line`（残留内容，与 `read_until` 一致）。
+async fn read_line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<BoundedLine> {
+    loop {
+        let filled = match reader.fill_buf().await {
+            Ok(filled) => filled,
+            Err(error) => return Err(error),
+        };
+        if filled.is_empty() {
+            return Ok(if buf.is_empty() {
+                BoundedLine::Eof
+            } else {
+                BoundedLine::Line(buf.len())
+            });
+        }
+        match filled.iter().position(|byte| *byte == b'\n') {
+            Some(index) => {
+                let take = index + 1;
+                buf.extend_from_slice(&filled[..take]);
+                reader.consume(take);
+                return Ok(BoundedLine::Line(buf.len()));
+            }
+            None => {
+                let n = filled.len();
+                if buf.len() + n > max_bytes {
+                    reader.consume(n);
+                    return Ok(BoundedLine::TooLong(buf.len() + n));
+                }
+                buf.extend_from_slice(filled);
+                reader.consume(n);
+            }
+        }
+    }
+}
+
 /// 后台读循环：读行 → 解析 → 响应按 id 分发 / 通知推送 / 坏行跳过。
+///
+/// 输入边界（fail-closed）：单行超 [`MAX_LINE_BYTES`] 或累计超
+/// [`MAX_TOTAL_BYTES`] 即终止循环——行格式已不可信（合法 JSON-RPC 行
+/// 不应超 1 MiB，累计 64 MiB 已足够全部合法流量），终止时
+/// `fail_all_pending`（在途请求立即失败）+ `report_died`（lifecycle
+/// 重连 / 诊断），不静默跳过超长行。
 async fn read_loop(
     stdout: tokio::process::ChildStdout,
     pending: Arc<Mutex<BTreeMap<Id, PendingReply>>>,
@@ -401,19 +489,43 @@ async fn read_loop(
 ) {
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
+    let mut total_bytes: usize = 0;
     loop {
         line.clear();
-        match reader.read_until(b'\n', &mut line).await {
-            Ok(0) => {
-                fail_all_pending(&pending, "stdout closed (end of stream)").await;
-                report_died(&died, "stdout closed (end of stream)");
-                return;
-            }
-            Ok(_) => {}
+        let read = match read_line_bounded(&mut reader, &mut line, MAX_LINE_BYTES).await {
+            Ok(read) => read,
             Err(error) => {
                 fail_all_pending(&pending, &format!("stdout read failed: {error}")).await;
                 report_died(&died, &format!("stdout read failed: {error}"));
                 return;
+            }
+        };
+        match read {
+            BoundedLine::Eof => {
+                fail_all_pending(&pending, "stdout closed (end of stream)").await;
+                report_died(&died, "stdout closed (end of stream)");
+                return;
+            }
+            BoundedLine::TooLong(len) => {
+                let reason = format!(
+                    "stdout line exceeds {MAX_LINE_BYTES} bytes ({len}); \
+                     line framing untrusted, transport terminated"
+                );
+                fail_all_pending(&pending, &reason).await;
+                report_died(&died, &reason);
+                return;
+            }
+            BoundedLine::Line(len) => {
+                total_bytes = total_bytes.saturating_add(len);
+                if total_bytes > MAX_TOTAL_BYTES {
+                    let reason = format!(
+                        "stdout exceeds {MAX_TOTAL_BYTES} bytes total ({total_bytes}); \
+                         transport terminated"
+                    );
+                    fail_all_pending(&pending, &reason).await;
+                    report_died(&died, &reason);
+                    return;
+                }
             }
         }
         if line.last() == Some(&b'\n') {
@@ -490,14 +602,19 @@ fn report_died(died: &tokio::sync::watch::Sender<bool>, reason: &str) {
 
 /// 后台 drain stderr：无人读取的 stderr 写满管道会阻塞子进程，丢弃即可
 /// （服务器日志不进入产品路径）。
+///
+/// 输入边界：单行超 [`MAX_LINE_BYTES`] 即**终止 drain**（不跳过）——与
+/// stdout 相同的 fail-closed 逻辑：超长行说明服务器输出不可信，继续
+/// 读取只会再次分配；终止后子进程写满 stderr 管道会自行阻塞（自噬，
+/// 不会耗尽宿主内存）。
 async fn drain_stderr(mut stderr: tokio::process::ChildStderr) {
     let mut reader = BufReader::new(&mut stderr);
     let mut buffer = Vec::new();
     loop {
         buffer.clear();
-        match reader.read_until(b'\n', &mut buffer).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
+        match read_line_bounded(&mut reader, &mut buffer, MAX_LINE_BYTES).await {
+            Ok(BoundedLine::Eof) | Ok(BoundedLine::TooLong(_)) | Err(_) => return,
+            Ok(BoundedLine::Line(_)) => {}
         }
     }
 }
@@ -582,10 +699,7 @@ async fn post_json(
         .await
         .map_err(|error| RpcError::Other(format!("http request failed: {error}")))?;
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| RpcError::Other(format!("http response body: {error}")))?;
+    let body = read_http_body(response).await?;
     if status.as_u16() == 401 {
         return Ok(Err(RpcError::Unauthorized));
     }
@@ -593,11 +707,42 @@ async fn post_json(
         return Ok(Err(RpcError::Other(format!(
             "http status {}: {}",
             status.as_u16(),
-            body.chars().take(200).collect::<String>()
+            String::from_utf8_lossy(&body)
+                .chars()
+                .take(200)
+                .collect::<String>()
         ))));
     }
-    Ok(serde_json::from_str(&body)
+    Ok(serde_json::from_slice(&body)
         .map_err(|error| RpcError::Other(format!("http response is not JSON: {error}"))))
+}
+
+/// 有界读取 HTTP 响应体：先按 `content-length` 预检（超限直接拒绝、不
+/// 读 body），再流式累计（chunked / close-delimited 响应），超限返回
+/// 结构化 [`RpcError::Other`]（带大小信息），不分配无限内存。
+async fn read_http_body(mut response: reqwest::Response) -> Result<Vec<u8>, RpcError> {
+    if let Some(length) = response.content_length()
+        && length > MAX_HTTP_BODY_BYTES as u64
+    {
+        return Err(RpcError::Other(format!(
+            "http response content-length {length} bytes exceeds \
+             {MAX_HTTP_BODY_BYTES} bytes limit"
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| RpcError::Other(format!("http response body: {error}")))?
+    {
+        if body.len() + chunk.len() > MAX_HTTP_BODY_BYTES {
+            return Err(RpcError::Other(format!(
+                "http response body exceeds {MAX_HTTP_BODY_BYTES} bytes limit"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn parse_http_response(value: Value) -> Result<Value, RpcError> {
@@ -612,5 +757,67 @@ fn parse_http_response(value: Value) -> Result<Value, RpcError> {
         _ => Err(RpcError::Other(
             "http endpoint returned a non-response message".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// 从游标读完全部有界行（EOF 终止），返回每行的结果。
+    async fn read_all(reader: &mut Cursor<Vec<u8>>, max: usize) -> Vec<BoundedLine> {
+        let mut buf = Vec::new();
+        let mut lines = Vec::new();
+        loop {
+            buf.clear();
+            match read_line_bounded(reader, &mut buf, max).await.unwrap() {
+                BoundedLine::Eof => break,
+                other => lines.push(other),
+            }
+        }
+        lines
+    }
+
+    #[tokio::test]
+    async fn bounded_line_reads_short_lines_and_eof() {
+        let mut cursor = Cursor::new(b"{\"a\":1}\n{\"b\":2}\n".to_vec());
+        let lines = read_all(&mut cursor, 1024).await;
+        assert_eq!(lines, vec![BoundedLine::Line(8), BoundedLine::Line(8)]);
+    }
+
+    #[tokio::test]
+    async fn bounded_line_handles_trailing_content_without_newline() {
+        // EOF 前残留内容按行返回（与 read_until 语义一致）。
+        let mut cursor = Cursor::new(b"{\"a\":1}\nrest".to_vec());
+        let lines = read_all(&mut cursor, 1024).await;
+        assert_eq!(lines, vec![BoundedLine::Line(8), BoundedLine::Line(4)]);
+    }
+
+    #[tokio::test]
+    async fn bounded_line_reports_too_long_without_unbounded_growth() {
+        // 10 KB 无换行字节流 vs 4 KB 上限 → TooLong（而非分配 10 KB 行）。
+        let mut cursor = Cursor::new(vec![b'x'; 10_000]);
+        let lines = read_all(&mut cursor, 4 * 1024).await;
+        assert_eq!(lines, vec![BoundedLine::TooLong(10_000)]);
+    }
+
+    #[tokio::test]
+    async fn bounded_line_allows_up_to_limit_plus_newline() {
+        // 恰好等于上限 + 换行符 → 合法行。
+        let mut data = vec![b'x'; 4 * 1024];
+        data.push(b'\n');
+        let mut cursor = Cursor::new(data);
+        let lines = read_all(&mut cursor, 4 * 1024).await;
+        assert_eq!(lines, vec![BoundedLine::Line(4 * 1024 + 1)]);
+    }
+
+    #[tokio::test]
+    async fn bounded_line_exact_limit_without_newline_is_a_line() {
+        // 无换行且恰好等于上限：不超上限（`>` 才超长），EOF 残留按行
+        // 返回（与 read_until 语义一致）。
+        let mut cursor = Cursor::new(vec![b'x'; 4 * 1024]);
+        let lines = read_all(&mut cursor, 4 * 1024).await;
+        assert_eq!(lines, vec![BoundedLine::Line(4 * 1024)]);
     }
 }

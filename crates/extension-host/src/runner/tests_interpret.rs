@@ -14,6 +14,7 @@ fn spec(name: &str) -> HookSpec {
         command: "run.sh".into(),
         source_dir: std::path::PathBuf::from("/ext"),
         timeout_secs: None,
+        budget: None,
         enabled: true,
         matcher: HookMatcher::match_all(),
     }
@@ -260,13 +261,59 @@ fn malformed_json_falls_back_to_exit_code() {
     );
     assert_eq!(outcome, HookRunOutcome::Success);
     let outcome = interpret_tool(
-        completed(Some(2), "{\"decision\":\"deny\"", "", true),
+        completed(Some(2), "{\"decision\":\"deny\"", "", false),
         &spec("t"),
     );
     assert!(
         deny_reason_of(outcome).contains("exit code 2"),
         "malformed JSON falls back to the exit-code ladder"
     );
+}
+
+#[test]
+fn truncated_tool_output_never_drives_a_decision() {
+    // 洪泛（output_limited）且截断内容含完整 deny JSON：不解析、不 deny，
+    // 返回 OutputLimited（dispatcher 按 fail-open 放行）。
+    let outcome = interpret_tool(
+        completed(Some(0), r#"{"decision":"deny","reason":"flood"}"#, "", true),
+        &spec("t"),
+    );
+    assert_eq!(
+        outcome,
+        HookRunOutcome::OutputLimited,
+        "truncated stdout must not produce a deny decision"
+    );
+    // 截断 + exit 2 + stderr 也一样：退出码兜底不跨过 output_limited。
+    let outcome = interpret_tool(
+        completed(Some(2), r#"{"decision":"allow"}"#, "stderr reason", true),
+        &spec("t"),
+    );
+    assert_eq!(outcome, HookRunOutcome::OutputLimited);
+}
+
+#[test]
+fn truncated_stop_output_never_produces_signals() {
+    // 洪泛且截断内容含完整 block JSON：无信号（fail-open，agent 正常
+    // 停止），与 Observe 的 OutputLimited 语义一致。
+    let outcome = interpret_stop(
+        completed(
+            Some(0),
+            r#"{"decision":"block","continue":false,"stopReason":"flood"}"#,
+            "",
+            true,
+        ),
+        &spec("s"),
+    );
+    assert_eq!(
+        outcome,
+        HookRunOutcome::OutputLimited,
+        "truncated stdout must not produce block/force_stop signals"
+    );
+    let outcome = interpret_stop(
+        completed(Some(2), r#"{"decision":"approve"}"#, "blocked", true),
+        &spec("s"),
+    );
+    assert_eq!(outcome, HookRunOutcome::OutputLimited);
 }
 
 #[test]

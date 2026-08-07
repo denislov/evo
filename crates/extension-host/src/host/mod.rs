@@ -3,8 +3,11 @@
 //!
 //! 生命周期：
 //!
-//! 1. [`ExtensionHost::new`]（同步）：discovery + config merge + trust
-//!    判定，产出启用列表、首次启用请求、hook 注册表与诊断。
+//! 1. [`ExtensionHost::new`]（同步）：discovery + config merge（全局 +
+//!    per-extension：外部层 > manifest config > host 默认）+ trust 判定，
+//!    产出启用列表（manifest `config.enabled: false` 即使 trusted 也不
+//!    启用，落 `extension_disabled` 诊断）、首次启用请求、hook 注册表
+//!    （每个 spec 注入 per-extension 预算）与诊断。
 //! 2. [`ExtensionHost::start`]（async）：启动后台 dispatch task，返回
 //!    [`ExtensionHostHandle`]（提交事件 / 触发 shutdown）与
 //!    [`ExtensionHostTask`]（join 回收结果）。
@@ -25,6 +28,7 @@
 
 // Evo 独立设计：Grok 的 xai-grok-hooks 无 host 概念（load-and-fire）；
 // host 生命周期 / shutdown 顺序 / panic 捕获为本 crate 自研机制。
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -34,7 +38,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::budget::{BudgetTracker, ExtensionBudget};
-use crate::config::{ExtensionConfig, ExtensionConfigLayer, ExtensionSource};
+use crate::config::{ExtensionConfig, ExtensionConfigLayer, ExtensionSource, merge_config_layers};
 use crate::diagnostic::{DiagnosticLevel, DiagnosticRecord, DiagnosticSink, DiagnosticsCollector};
 use crate::discovery::{ExtensionRecord, discover_extensions};
 use crate::dispatcher::{HookGate, HookRegistry, dispatch_observe, event_gate};
@@ -185,6 +189,30 @@ impl HostShared {
     }
 }
 
+/// 一个扩展的生效配置：外部层（高优先级在前）> manifest config >
+/// host-defaults（最低）。
+///
+/// `enabled` 走 AND 合并（manifest 或任一外部层禁用 → 该扩展禁用）；
+/// `budget` 等 scalar 取最高优先级层（外部层 > manifest > host 默认）。
+/// 全局合并的 `host_defaults` 复用同一层，保证「manifest 无 config →
+/// per-extension 配置 == 全局配置」。
+fn per_extension_config(
+    record: &ExtensionRecord,
+    external_layers: &[ExtensionConfigLayer],
+    host_defaults: &ExtensionConfigLayer,
+) -> ExtensionConfig {
+    let mut layers = external_layers.to_vec();
+    if let Some(manifest_config) = &record.manifest.config {
+        layers.push(ExtensionConfigLayer::new(
+            record.source,
+            "manifest",
+            manifest_config.clone(),
+        ));
+    }
+    layers.push(host_defaults.clone());
+    merge_config_layers(&layers).0
+}
+
 /// 扩展宿主。
 #[derive(Debug, Clone)]
 pub struct ExtensionHost {
@@ -220,7 +248,6 @@ impl ExtensionHost {
 
         // 2. config merge（层已按高优先级在前排列）；options.budget 作为
         //    最低优先级「host 默认」层参与合并，可被任何层覆盖。
-        let mut layers = options.config_layers.clone();
         let host_defaults = ExtensionConfigLayer::new(
             ExtensionSource::Global,
             "host-defaults",
@@ -229,18 +256,48 @@ impl ExtensionHost {
                 ..Default::default()
             },
         );
-        layers.push(host_defaults);
+        let mut layers = options.config_layers.clone();
+        layers.push(host_defaults.clone());
         let (config, merge_errors) = crate::config::merge_config_layers(&layers);
         errors.extend(merge_errors);
 
         let budget = config.budget;
 
-        // 3. trust 判定：Trusted 启用；Untrusted / NotDecided 不启用。
+        // 3. per-extension 生效配置：外部层（高）> manifest config（低）>
+        //    host-defaults。每个扩展的 `enabled` / `budget` 等以其最终
+        //    合并结果为准（manifest `config.enabled: false` 即使 trusted
+        //    也不启用；manifest budget 覆盖全局默认）。
+        let mut effective_configs: HashMap<String, ExtensionConfig> = HashMap::new();
+        for record in &records {
+            effective_configs.insert(
+                record.id.clone(),
+                per_extension_config(record, &options.config_layers, &host_defaults),
+            );
+        }
+
+        // 4. trust 判定：Trusted 启用；Untrusted / NotDecided 不启用；
+        //    任何来源禁用（manifest 或外部层）→ 不启用并诊断。
         let mut enabled = Vec::new();
         let mut first_enables = Vec::new();
         for record in &records {
+            let effective = &effective_configs[&record.id];
             let TrustDecision { status, .. } =
                 crate::trust::decide_trust(&record.dir, options.trust_store.as_ref());
+            if !effective.enabled {
+                if status == TrustStatus::Trusted {
+                    collector.record(DiagnosticRecord {
+                        level: DiagnosticLevel::Warning,
+                        code: "extension_disabled".into(),
+                        message: format!(
+                            "extension '{}' skipped: disabled by config (manifest or config layer)",
+                            record.id
+                        ),
+                        extension_id: Some(record.id.clone()),
+                        context: Default::default(),
+                    });
+                }
+                continue;
+            }
             match status {
                 TrustStatus::Trusted => enabled.push(record.clone()),
                 TrustStatus::Untrusted => {
@@ -268,13 +325,14 @@ impl ExtensionHost {
             }
         }
 
-        // 4. 从启用扩展解析 hook 注册表（容错：坏 hook 记录诊断并跳过）。
+        // 5. 从启用扩展解析 hook 注册表（容错：坏 hook 记录诊断并跳过）；
+        //    per-extension 预算注入 HookSpec（runner timeout 上限）。
         let mut registry = HookRegistry::new();
         for record in &enabled {
             let Some(hooks_value) = record.manifest.hooks.as_ref() else {
                 continue;
             };
-            let (specs, hook_errors) = parse_hooks(hooks_value, &record.dir);
+            let (mut specs, hook_errors) = parse_hooks(hooks_value, &record.dir);
             for detail in hook_errors {
                 collector.record(DiagnosticRecord {
                     level: DiagnosticLevel::Warning,
@@ -283,6 +341,10 @@ impl ExtensionHost {
                     extension_id: Some(record.id.clone()),
                     context: Default::default(),
                 });
+            }
+            let effective = &effective_configs[&record.id];
+            for spec in &mut specs {
+                spec.budget = Some(effective.budget);
             }
             registry.add_extension(&record.id, specs);
         }

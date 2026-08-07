@@ -18,9 +18,15 @@
 //! ```
 //!
 //! - `event`：绑定的事件（必填；同时是最严格的 matcher 事件条件）。
-//! - `command`：命令。绝对路径直接执行；相对路径相对扩展目录解析。
-//!   含 shell 元字符（空格/`|`/`&`/`;`/`>`/`<`/`$`/`~` 开头）时经
-//!   `sh -c` 执行（与 xai-grok-hooks 同款路由）。
+//! - `command`：命令。含 shell 元字符（空格/`|`/`&`/`;`/`>`/`<`/`$`/`~`
+//!   开头）时经 `sh -c` 执行（与 xai-grok-hooks 同款路由），否则直接
+//!   执行。相对路径解析规则：
+//!   - direct 执行：相对路径相对扩展目录解析（[`HookSpec::command_path`]）。
+//!   - shell 执行：若命令**第一 token 是相对路径**（含 `/` 或以 `.`
+//!     开头、非绝对路径），执行前将该 token 替换为相对扩展目录解析的
+//!     绝对路径，**其余命令文本逐字节不变**（[`HookSpec::shell_command`]）；
+//!     其余情况（PATH 命令如 `echo hi`、绝对路径、`$VAR`/`~` 开头、
+//!     管道/重定向开头）命令原样传给 shell。
 //! - `priority`：确定优先级。执行顺序：priority 降序，同优先级按
 //!   `name` 字典序升序（稳定、可预测）。未声明 = 0。
 //!
@@ -49,6 +55,18 @@ fn is_shell_command(command: &str) -> bool {
         || command.starts_with('~')
 }
 
+/// 命令第一 token 是否为「相对路径」：含 `/` 或以 `.` 开头、且非绝对
+/// 路径。`echo`（PATH 命令）不含 `/` 也不以 `.` 开头 → 不是；`$HOME/x` /
+/// `~/x` 以 `$` / `~` 开头 → 不是（shell 负责展开）；`|` / `>` / `&&` 等
+/// 运算符开头 → 不是。
+fn is_relative_path_token(token: &str) -> bool {
+    !token.is_empty()
+        && !token.starts_with('/')
+        && !token.starts_with('$')
+        && !token.starts_with('~')
+        && (token.contains('/') || token.starts_with('.'))
+}
+
 /// 解析后的 hook 规格（已编译 matcher，可直接派发）。
 #[derive(Debug, Clone)]
 pub struct HookSpec {
@@ -66,6 +84,10 @@ pub struct HookSpec {
     pub source_dir: PathBuf,
     /// 单次运行超时（秒）；`None` 用预算默认。
     pub timeout_secs: Option<u64>,
+    /// 该扩展的生效预算（host 装配时注入：全局合并预算作默认，manifest
+    /// config 覆盖）。`None` = 未装配（测试 / 直接构造），runner 用
+    /// 全局预算。
+    pub budget: Option<crate::budget::ExtensionBudget>,
     pub enabled: bool,
     /// 已编译 matcher。
     pub matcher: HookMatcher,
@@ -86,6 +108,42 @@ impl HookSpec {
             self.source_dir.join(command)
         }
     }
+
+    /// shell 分支（`sh -c`）实际执行的命令串。
+    ///
+    /// 规则（固定）：若命令**第一 token 是相对路径**（[`is_relative_path_token`]，
+    /// 含 `/` 或以 `.` 开头、非绝对），把该 token 替换为相对
+    /// [`HookSpec::source_dir`] 解析的**绝对路径**，其余命令文本（含前导
+    /// 空白）逐字节不变；其余情况（PATH 命令、绝对路径、`$VAR`/`~` 开头、
+    /// 管道/重定向开头）命令原样返回。**绝不对 PATH 命令做解析**，`$VAR` /
+    /// `~` / 管道 / 重定向交给 shell 自身语义。
+    pub fn shell_command(&self) -> String {
+        let trimmed = self.command.trim_start();
+        let first_end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        let first = &trimmed[..first_end];
+        if !is_relative_path_token(first) {
+            return self.command.clone();
+        }
+        let resolved = normalize_lexical_path(self.source_dir.join(first))
+            .to_string_lossy()
+            .into_owned();
+        let leading = self.command.len() - trimmed.len();
+        format!(
+            "{}{}{}",
+            &self.command[..leading],
+            resolved,
+            &trimmed[first_end..]
+        )
+    }
+}
+
+/// 词法路径归一化：移除 `.` 组件（`join` 是纯拼接，`source_dir + ./x`
+/// 会产生 `/ext/./x`）。`..` 不做解析（与 [`HookSpec::command_path`] 的
+/// lexical 语义一致）。
+fn normalize_lexical_path(path: PathBuf) -> PathBuf {
+    path.components()
+        .filter(|component| *component != std::path::Component::CurDir)
+        .collect()
 }
 
 /// wire 形状（严格字段校验在 [`HookSpec::parse`] 内完成）。
@@ -153,6 +211,7 @@ impl RawHookSpec {
             command: self.command,
             source_dir: source_dir.to_path_buf(),
             timeout_secs: self.timeout_secs,
+            budget: None,
             enabled: self.enabled,
             matcher,
         })
@@ -338,6 +397,7 @@ mod tests {
             command: "run.sh".into(),
             source_dir: std::path::PathBuf::from("/ext"),
             timeout_secs: None,
+            budget: None,
             enabled: true,
             matcher: HookMatcher::match_all(),
         }
@@ -355,5 +415,54 @@ mod tests {
             specs[0].command_path(),
             std::path::PathBuf::from("/usr/local/bin/hook")
         );
+    }
+
+    #[test]
+    fn shell_command_absolutizes_relative_first_token_only() {
+        let (specs, _) = parse_hooks(
+            &json!([{"name": "rel", "event": "stop", "command": "bin/format.sh --write"}]),
+            std::path::Path::new("/ext"),
+        );
+        assert!(specs[0].runs_via_shell());
+        assert_eq!(
+            specs[0].shell_command(),
+            "/ext/bin/format.sh --write",
+            "relative first token resolves against source_dir, rest verbatim"
+        );
+        let (specs, _) = parse_hooks(
+            &json!([{"name": "dot", "event": "stop", "command": "./tool.sh --flag"}]),
+            std::path::Path::new("/ext"),
+        );
+        assert_eq!(specs[0].shell_command(), "/ext/tool.sh --flag");
+        // 前导空白保留。
+        let (specs, _) = parse_hooks(
+            &json!([{"name": "pad", "event": "stop", "command": "  bin/tool.sh --x"}]),
+            std::path::Path::new("/ext"),
+        );
+        assert_eq!(specs[0].shell_command(), "  /ext/bin/tool.sh --x");
+    }
+
+    #[test]
+    fn shell_command_never_rewrites_non_relative_commands() {
+        for (command, label) in [
+            ("echo hi", "PATH command"),
+            ("sh -c 'x'", "shell command"),
+            ("a | b", "pipeline"),
+            ("cat > out", "redirect"),
+            ("/usr/bin/tool --x", "absolute path"),
+            ("$HOME/bin/tool --x", "env expansion"),
+            ("~/bin/tool --x", "tilde expansion"),
+            ("cd bin && ./tool", "builtin"),
+        ] {
+            let (specs, _) = parse_hooks(
+                &json!([{"name": "x", "event": "stop", "command": command}]),
+                std::path::Path::new("/ext"),
+            );
+            assert_eq!(
+                specs[0].shell_command(),
+                command,
+                "{label} ({command:?}) must be passed through verbatim"
+            );
+        }
     }
 }

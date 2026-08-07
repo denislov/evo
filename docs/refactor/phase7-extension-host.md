@@ -49,6 +49,22 @@
   `ExtensionError::InvalidConfig` 并跳过，其余层照常合并。
 - host 的 `options.budget` 作为最低优先级「host-defaults」层参与合并，
   可被任何配置层覆盖。
+- **manifest config 参与生效（本次修复，per-extension 语义）**：每个扩展
+  的 `manifest.config` 作为该扩展的**最低优先级配置层**（外部层 > 
+  manifest config > host-defaults）参与 `per_extension_config` 合并——
+  - `enabled: false` → 该扩展**不进 enabled 列表**（即使 trusted），并
+    记录 `extension_disabled` 诊断（trusted 时；untrusted / NotDecided
+    静默跳过，与「本就不会启用」一致）；AND 语义保持：manifest 或任一
+    外部层禁用即禁用，外部层（高优先级）覆盖 manifest。
+  - `budget`：per-extension 生效——host 装配时注入 `HookSpec::budget`
+    （runner timeout 上限优先扩展预算，见 `phase7-user-hooks.md`
+    「超时」）；manifest 无 config 时 per-extension 配置 == 全局配置。
+  - **MCP 不做 per-extension**（登记说明）：MCP 并发上限
+    `max_concurrent_extensions` 是 host 级装配时一次性决定的全局维度
+    （`McpHost::set_max_concurrent_extensions`），与扩展 hook 的
+    per-extension 预算无直接对应；MCP server 启停由 `McpServerConfig
+    .enabled` 控制，manifest config 不承载 MCP transport 配置（见
+    `phase7-mcp-adapter.md` 信任模型）。
 
 ### Trust 模型（`trust.rs`）
 
@@ -98,6 +114,7 @@
   环形缓冲（`diagnostic_capacity`）+ 可选 `DiagnosticSink`（ARC-710 接
   产品事件/日志）。
 - 稳定 code 集合：`extension_untrusted` / `extension_first_enable` /
+  `extension_disabled`（manifest 或外部层禁用，本次修复新增）/
   `budget_exceeded` / `dispatch_panic` / `host_shutdown_initiated` /
   `host_shutdown` / manifest 错误（`InvalidConfig`/`ParseFile` 由错误
   列表返回，不重复落诊断）。

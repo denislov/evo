@@ -922,3 +922,119 @@ async fn reconnect_storm_stays_bounded_and_recovers() {
         "shutdown must not be blocked by the reconnect storm"
     );
 }
+
+// ---- 输入大小边界（P2）：transport 不得无界分配 ----
+
+#[tokio::test]
+async fn stdio_oversized_line_terminates_transport() {
+    // fake server 输出 2 MiB 无换行字节流 → 读循环单行上限（1 MiB）触发
+    // fail-closed：终止 transport（在途请求 TransportClosed）。
+    let (notifications, _) = tokio::sync::mpsc::unbounded_channel();
+    let (session, died_rx) = RpcSession::open(stdio_config("huge-line", &[]), notifications)
+        .await
+        .expect("session opens");
+    let cancel = CancellationToken::new();
+    let request = session.request("initialize", None, Duration::from_secs(10), &cancel);
+    tokio::pin!(request);
+    let mut died_rx = died_rx;
+    let died_wait = async {
+        while !*died_rx.borrow() {
+            died_rx.changed().await.unwrap();
+        }
+    };
+    tokio::pin!(died_wait);
+    let error = tokio::select! {
+        result = &mut request => result.expect_err("in-flight request must fail"),
+        _ = &mut died_wait => {
+            request
+                .await
+                .expect_err("in-flight request must fail once the transport dies")
+        }
+    };
+    assert!(
+        matches!(&error, RpcError::TransportClosed { reason } if reason.contains("line exceeds")),
+        "oversized line must fail closed with TransportClosed, got {error:?}"
+    );
+    // 终止后会话不可用（close 幂等、无悬挂）。
+    session.close().await;
+}
+
+#[tokio::test]
+async fn stdio_normal_lines_within_bounds_stay_alive() {
+    // 回归：正常 server（echo）不受边界影响，坏行跳过语义保持。
+    let (notifications, _) = tokio::sync::mpsc::unbounded_channel();
+    let (session, _died) = RpcSession::open(stdio_config("echo", &[]), notifications)
+        .await
+        .expect("session opens");
+    let result = session
+        .request(
+            "initialize",
+            None,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("normal request succeeds within bounds");
+    assert!(result.get("serverInfo").is_some());
+    session.close().await;
+}
+
+#[tokio::test]
+async fn http_oversized_content_length_is_rejected_without_reading_body() {
+    let (addr, mut server) = start_fake_http_server(&["--huge-content-length"]).await;
+    let (notifications, _) = tokio::sync::mpsc::unbounded_channel();
+    let (session, _died) = RpcSession::open(
+        TransportConfig::Http(HttpConfig {
+            url: format!("http://{addr}/mcp"),
+            headers: Vec::new(),
+        }),
+        notifications,
+    )
+    .await
+    .expect("http session opens");
+    let error = session
+        .request(
+            "initialize",
+            None,
+            Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("oversized content-length must be rejected");
+    assert!(
+        matches!(&error, RpcError::Other(msg) if msg.contains("content-length")),
+        "expected a structured content-length error, got {error:?}"
+    );
+    server.kill().await.ok();
+}
+
+#[tokio::test]
+async fn http_oversized_body_is_rejected_while_streaming() {
+    // close-delimited 超大 body（无 content-length）：流式累计超限拒绝。
+    let body_bytes = (MAX_HTTP_BODY_BYTES + 1024 * 1024).to_string();
+    let (addr, mut server) = start_fake_http_server(&["--huge-body-bytes", &body_bytes]).await;
+    let (notifications, _) = tokio::sync::mpsc::unbounded_channel();
+    let (session, _died) = RpcSession::open(
+        TransportConfig::Http(HttpConfig {
+            url: format!("http://{addr}/mcp"),
+            headers: Vec::new(),
+        }),
+        notifications,
+    )
+    .await
+    .expect("http session opens");
+    let error = session
+        .request(
+            "initialize",
+            None,
+            Duration::from_secs(30),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("oversized body must be rejected while streaming");
+    assert!(
+        matches!(&error, RpcError::Other(msg) if msg.contains("exceeds")),
+        "expected a structured size-limit error, got {error:?}"
+    );
+    server.kill().await.ok();
+}
