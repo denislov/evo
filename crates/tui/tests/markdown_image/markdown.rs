@@ -917,3 +917,174 @@ fn blockquote_with_bold_restores_quote_style() {
         );
     }
 }
+
+// ── Stable checkpoint + tail rerender ───────────────────────────────
+
+/// Stream `source` into a single [`Markdown`] instance, appending one prefix
+/// slice at a time, and assert every intermediate render equals a fresh
+/// full-parse of the same text.
+fn assert_streaming_matches_full_parse(source: &str, split: &[usize], width: usize) {
+    let mut md = Markdown::new("");
+    for end in split.iter().copied().chain(std::iter::once(source.len())) {
+        let prefix = &source[..end];
+        md.set_text(prefix.to_string());
+        let streamed = md.render(width);
+        let full = Markdown::new(prefix.to_string()).render(width);
+        assert_eq!(
+            streamed, full,
+            "streamed render diverged from full parse at byte {end} of {source:?}"
+        );
+    }
+}
+
+fn split_points(source: &str, chunk: usize) -> Vec<usize> {
+    let mut points = Vec::new();
+    let mut at = chunk;
+    while at < source.len() {
+        points.push(at);
+        at += chunk;
+    }
+    points
+}
+
+#[test]
+fn streaming_paragraph_word_by_word_matches_full_parse() {
+    let source = "The quick brown fox jumps over the lazy dog while the\nrain falls softly on the quiet town.";
+    assert_streaming_matches_full_parse(source, &split_points(source, 8), 30);
+}
+
+#[test]
+fn streaming_char_by_char_matches_full_parse() {
+    for source in [
+        "The quick brown fox",
+        "A `code` span and **bold** inline mix.",
+        "line one\nline two\nline three",
+    ] {
+        assert_streaming_matches_full_parse(source, &split_points(source, 3), 25);
+    }
+}
+
+#[test]
+fn streaming_code_block_matches_full_parse() {
+    let source = "```rust\nfn main() {\n    println!(\"hello\");\n    let x = 1 + 2;\n}\n```";
+    assert_streaming_matches_full_parse(source, &split_points(source, 5), 40);
+}
+
+#[test]
+fn streaming_heading_and_rule_matches_full_parse() {
+    let source = "# Title\n\nsome body text\n\n---\n\ntrailing paragraph";
+    assert_streaming_matches_full_parse(source, &split_points(source, 4), 40);
+}
+
+#[test]
+fn streaming_list_matches_full_parse() {
+    let source = "- alpha\n- beta with **bold** item\n- gamma\n- delta";
+    assert_streaming_matches_full_parse(source, &split_points(source, 4), 30);
+}
+
+#[test]
+fn streaming_blockquote_matches_full_parse() {
+    let source = "> quoted line one\n> quoted line two\n\nplain paragraph after";
+    assert_streaming_matches_full_parse(source, &split_points(source, 5), 30);
+}
+
+#[test]
+fn streaming_table_matches_full_parse() {
+    let source = "| name | value |\n| --- | --- |\n| alpha | 1 |\n| beta | 2 |";
+    assert_streaming_matches_full_parse(source, &split_points(source, 6), 40);
+}
+
+#[test]
+fn streaming_mixed_document_matches_full_parse() {
+    let source = "# Report\n\nIntro paragraph with `code` and **strong** text.\n\n```ts\nconst x: number = 1;\n```\n\n- item one\n- item two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n> closing quote\n";
+    assert_streaming_matches_full_parse(source, &split_points(source, 7), 50);
+}
+
+#[test]
+fn streaming_softbreak_paragraph_matches_full_parse() {
+    let source = "first line\nsecond line\nthird line with **bold**";
+    assert_streaming_matches_full_parse(source, &split_points(source, 6), 30);
+}
+
+#[test]
+fn streaming_default_style_matches_full_parse() {
+    let style = DefaultTextStyle {
+        fg: Some(Color::Magenta),
+        ..DefaultTextStyle::default()
+    };
+    let mut md = Markdown::new("").with_default_style(Some(style));
+    let source = "styled paragraph one\n\nstyled paragraph two with `code`";
+    for end in split_points(source, 5)
+        .into_iter()
+        .chain(std::iter::once(source.len()))
+    {
+        let prefix = &source[..end];
+        md.set_text(prefix.to_string());
+        let streamed = md.render(40);
+        let full = Markdown::new(prefix.to_string())
+            .with_default_style(Some(style))
+            .render(40);
+        assert_eq!(
+            streamed, full,
+            "default-style stream diverged at byte {end}"
+        );
+    }
+}
+
+#[test]
+fn streaming_reuse_uses_checkpoint_resume() {
+    let mut md = Markdown::new("The quick brown fox");
+    md.render(40);
+    assert_eq!(md.checkpoint_resumes(), 0);
+    md.set_text("The quick brown fox jumps over");
+    md.render(40);
+    assert!(
+        md.checkpoint_resumes() > 0,
+        "appending to a clean paragraph tail should resume from the checkpoint"
+    );
+}
+
+#[test]
+fn streaming_unclosed_inline_falls_back_to_full_parse() {
+    let mut md = Markdown::new("**bold text");
+    md.render(40);
+    // The trailing block contains an unclosed `**` marker: resuming would be
+    // unsound, so the next render must fall back to a full parse.
+    md.set_text("**bold text** and more");
+    md.render(40);
+    assert_eq!(
+        md.checkpoint_resumes(),
+        0,
+        "unclosed inline markers must force a full re-parse"
+    );
+}
+
+#[test]
+fn set_text_replacement_drops_checkpoint() {
+    let mut md = Markdown::new("first paragraph");
+    md.render(40);
+    assert_eq!(md.checkpoint_resumes(), 0);
+    // Replacing (not extending) the text invalidates the checkpoint.
+    md.set_text("unrelated replacement");
+    md.render(40);
+    assert_eq!(md.checkpoint_resumes(), 0);
+    // Extending the new text resumes from its fresh checkpoint.
+    md.set_text("unrelated replacement, now extended");
+    md.render(40);
+    assert!(
+        md.checkpoint_resumes() > 0,
+        "extending the replacement text should resume"
+    );
+}
+
+#[test]
+fn streaming_resume_survives_width_change() {
+    let mut md = Markdown::new("The quick brown fox jumps over the lazy dog");
+    md.render(30);
+    md.set_text("The quick brown fox jumps over the lazy dog, and keeps running far beyond");
+    md.render(60);
+    let full =
+        Markdown::new("The quick brown fox jumps over the lazy dog, and keeps running far beyond")
+            .render(60);
+    assert_eq!(md.render(60), full);
+}
