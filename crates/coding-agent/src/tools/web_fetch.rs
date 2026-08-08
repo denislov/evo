@@ -31,9 +31,8 @@ enum WebFetchFormat {
 struct WebFetchArgs {
     /// URL to fetch. Only http and https schemes are accepted.
     url: String,
-    /// Projection of the fetched page. Defaults to markdown. Accepted as
-    /// `output_format` (schema) or `format` (alias).
-    #[serde(default, alias = "format")]
+    /// Projection of the fetched page. Defaults to markdown.
+    #[serde(default)]
     output_format: WebFetchFormat,
     /// Body byte budget override. Defaults to 2 MiB and must not exceed 16 MiB.
     #[serde(default)]
@@ -470,7 +469,7 @@ mod tests {
             Duration::from_secs(10),
             runtime.execute(
                 context(),
-                serde_json::json!({ "url": server.url, "format": "text" }),
+                serde_json::json!({ "url": server.url, "output_format": "text" }),
             ),
         )
         .await

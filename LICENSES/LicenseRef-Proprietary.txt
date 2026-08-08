@@ -1,0 +1,6 @@
+Evo proprietary source license
+
+All rights are reserved. No permission is granted to use, copy, modify, distribute, sublicense, or create derivative works from Evo first-party source code except under a separate written agreement from the rights holder.
+
+Third-party components remain governed by their own licenses and notices.
+

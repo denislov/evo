@@ -424,6 +424,71 @@ async fn stop_gate_block_continues_loop_and_injects_additional_context() {
         .expect("session shuts down");
 }
 
+/// 无用户扩展（`hook_gate()` 返回 `None`，没有 Stop gate）时，工具执行
+/// 后 agent 必须继续下一轮 provider 调用（总结工具结果），而不是在工具
+/// turn 后直接结束会话。
+#[tokio::test(flavor = "current_thread")]
+async fn tool_use_continues_without_extension_host() {
+    let api = "hooks-e2e-no-stop-gate";
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (recording, contexts) = RecordingProvider::new(FauxProvider::with_call_queue(vec![
+        FauxProvider::single_call(
+            vec![FauxResponse {
+                text_deltas: Vec::new(),
+                thinking_deltas: Vec::new(),
+                tool_calls: vec![FauxToolCall {
+                    id: "tool-call-first".into(),
+                    name: "work_tool".into(),
+                    deltas: vec!["{}".into()],
+                    final_arguments: serde_json::json!({}),
+                }],
+            }],
+            StopReason::ToolUse,
+        ),
+        FauxProvider::text_call("final answer", StopReason::Stop),
+    ]));
+    let provider_guard = ProviderGuard::register(api, Arc::new(recording));
+    let bash_executions = Arc::new(AtomicUsize::new(0));
+    let tool = recording_tool("work_tool", bash_executions.clone(), "ran");
+    let mut session = CodingAgentSession::create_internal(
+        CodingAgentSessionOptions::new()
+            .with_cwd(workspace.clone())
+            .with_ai_client(provider_guard.ai_client())
+            .with_tool_authorization_mode(ToolAuthorizationMode::Yolo)
+            .with_session_id("e2e-no-stop-gate")
+            .with_session_log_root(temp.path()),
+    )
+    .await
+    .expect("session opens without an extension host");
+
+    let outcome = session
+        .run_internal(CodingAgentOperation::Prompt(prompt_options(
+            api,
+            "use bash then finish",
+            vec![tool],
+        )))
+        .await
+        .expect("prompt completes");
+    assert!(matches!(outcome, CodingAgentOperationOutcome::Prompt(_)));
+    assert_eq!(bash_executions.load(Ordering::SeqCst), 1, "bash tool ran");
+    // 工具执行后 agent 继续第二轮 provider 调用（否则第一个工具 turn 后
+    // 就会 Done，命令成功会话也中断）。
+    wait_for(
+        || {
+            let contexts = contexts.lock_or_recover("recording provider contexts");
+            contexts.len() >= 2
+        },
+        "second provider request happens without an extension host",
+    )
+    .await;
+    session
+        .shutdown_internal()
+        .await
+        .expect("session shuts down");
+}
+
 /// extension（hook 命令）修改工作区文件 → host 生命周期观察点自动归因
 /// `HookEdit`（不再手工构造 receipt）→ review 列表可见（source=hook_edit）、
 /// open_change 可读、accept/reject 生效。

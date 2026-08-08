@@ -427,9 +427,13 @@ impl RuntimeService {
                         Ok(None)
                     })
                 }));
-                // user hooks Stop gate：每个 turn 自然结束时评估。block →
-                // 继续（false）；force_stop / 无信号 / 失败（fail-open）→
-                // 正常停止（true）。
+                // user hooks Stop gate：工具执行后与每个 turn 自然结束时
+                // 评估。工具执行后的决策点（模型还会继续总结/推进）只有
+                // 用户 hooks 显式 force_stop 才停止；turn 自然结束时
+                // block → 继续（false）；force_stop / 无信号 / 失败
+                // （fail-open）→ 正常停止（true）。无用户扩展（gate=None，
+                // 即没有 Stop gate）时：工具执行后必须继续，自然结束时
+                // 正常停止。
                 let events_for_stop = extension_events.clone();
                 let session_for_stop = extension_session_id.clone();
                 let workspace_for_stop = extension_workspace_root.clone();
@@ -455,12 +459,24 @@ impl RuntimeService {
                             &event.workspace_root,
                             event.payload.clone(),
                         );
+                        let after_tool_use =
+                            context.assistant_message.stop_reason == StopReason::ToolUse;
                         let Some(gate) = gate else {
-                            return Ok(agent_core::api::agent::ShouldStopAfterTurnResult::stop());
+                            return Ok(if after_tool_use {
+                                agent_core::api::agent::ShouldStopAfterTurnResult::continue_with(
+                                    Vec::new(),
+                                )
+                            } else {
+                                agent_core::api::agent::ShouldStopAfterTurnResult::stop()
+                            });
                         };
                         let decision = gate.evaluate_stop(&event).await;
                         Ok(agent_core::api::agent::ShouldStopAfterTurnResult {
-                            should_stop: !decision.wants_continuation(),
+                            should_stop: if after_tool_use {
+                                decision.force_stop.is_some()
+                            } else {
+                                !decision.wants_continuation()
+                            },
                             additional_context: decision.additional_context.clone(),
                         })
                     })

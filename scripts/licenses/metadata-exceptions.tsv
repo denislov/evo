@@ -1,0 +1,3 @@
+# package	source-prefix	reviewed-license-source	reason
+gpui_shared_string	git+https://github.com/zed-industries/zed.git#30730a305ae235f3be44643d5895e142048ef701	Zed LICENSE-APACHE and LICENSE-GPL	upstream package manifest omits license metadata
+gpui_util	git+https://github.com/zed-industries/zed.git#30730a305ae235f3be44643d5895e142048ef701	Zed LICENSE-APACHE and LICENSE-GPL	upstream package manifest omits license metadata

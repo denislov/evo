@@ -1,2 +1,1 @@
 # kind	limit	baseline-max-lines	clear-by	path
-production	900	1199	Phase 5	crates/agent-core/src/agent/turn/nodes.rs

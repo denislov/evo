@@ -1,5 +1,7 @@
 # grok-build架构学习与优化移植方案
 
+> 历史输入（2026-08-05）。本文记录重构启动时的学习材料，不是当前 backlog 或架构契约；已完成/删除的建议以 `docs/architecture.md` 和 `docs/Evo完整架构重构计划.md` 为准。
+
 **Session ID:** ses_031e93928ffehIxwmY4bAEUNV8
 **Created:** 8/5/2026, 2:43:47 AM
 **Updated:** 8/5/2026, 2:55:32 AM
@@ -4405,4 +4407,3 @@ grok 的 PTY e2e（alacritty 终端模拟器 + mock inference server + 声明式
 需要我针对其中某一项出具体的移植/改造计划吗？
 
 ---
-

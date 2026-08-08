@@ -74,7 +74,7 @@ pub fn convert_body(
     match media {
         MediaKind::PlainText => Ok(body.to_string()),
         MediaKind::Html => match format {
-            OutputFormat::Markdown => Ok(html2md::parse_html(body)),
+            OutputFormat::Markdown => html_to_markdown(body),
             OutputFormat::Text => Ok(html_to_text(body)),
         },
         MediaKind::Other(mime) => Err(FetchError::with_details(
@@ -87,8 +87,17 @@ pub fn convert_body(
     }
 }
 
+fn html_to_markdown(html: &str) -> Result<String, FetchError> {
+    htmd::convert(html).map_err(|error| {
+        FetchError::new(
+            FetchErrorKind::Transport,
+            format!("failed to convert HTML to Markdown: {error}"),
+        )
+    })
+}
+
 /// Strip tags and collapse whitespace to keep a text projection bounded and
-/// predictable. This is a fallback for `format: text`; Markdown is the
+/// predictable. This is a fallback for `output_format: text`; Markdown is the
 /// richer default projection.
 fn html_to_text(html: &str) -> String {
     let mut text = String::with_capacity(html.len() / 2);
@@ -171,7 +180,7 @@ mod tests {
     fn markdown_conversion_covers_common_structure() {
         let html = "<h1>Title</h1>\n<p>Hello <a href=\"https://example.com/x\">link</a>.</p>\n\
                     <ul><li>one</li><li>two</li></ul>\n<pre><code>fn main() {}</code></pre>";
-        let markdown = html2md::parse_html(html);
+        let markdown = html_to_markdown(html).unwrap();
         assert!(
             markdown.contains("Title"),
             "unexpected markdown: {markdown}"
@@ -181,7 +190,9 @@ mod tests {
             "unexpected markdown: {markdown}"
         );
         assert!(
-            markdown.contains("- one") || markdown.contains("* one"),
+            markdown.contains("- one")
+                || markdown.contains("* one")
+                || markdown.contains("*   one"),
             "unexpected markdown: {markdown}"
         );
         assert!(

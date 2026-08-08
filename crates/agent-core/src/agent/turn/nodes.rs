@@ -13,22 +13,24 @@ use crate::agent::turn::tools::{
 use crate::agent::types::{
     AgentEvent, AgentMessage, AgentToolResult, ProviderRequestSnapshot, ToolExecutionContext,
 };
-use crate::compaction::estimate::estimate_context_tokens;
-use crate::compaction::prepare::{prepare_compaction, should_compact};
-use crate::compaction::summarize::summarize_with_provider_streamer;
 use crate::context::conversion::{assemble_context, convert_to_context, default_convert_to_llm};
 use crate::hooks::{
     AfterToolCallContext, AfterToolCallHook, BeforeProviderRequestContext, BeforeToolCallContext,
-    PrepareNextTurnContext, ShouldStopAfterTurnContext,
 };
-use ai_protocol::api::conversation::{AssistantMessage, ContentBlock, StopReason, Usage};
+use ai_protocol::api::conversation::{AssistantMessage, ContentBlock, StopReason};
 use ai_protocol::api::stream::AssistantMessageEvent;
 use ai_protocol::api::stream::json::parse_terminal_json;
 use futures::{FutureExt, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tool_contract::api::output::ToolErrorKind;
 
-use super::context::{AgentTurnContext, PendingToolCall, RuntimeCompactionState};
+use super::context::{AgentTurnContext, PendingToolCall};
+
+mod compaction;
+mod continuation;
+
+pub(crate) use compaction::maybe_compact_runtime_context;
+pub(crate) use continuation::maybe_prepare_next_turn;
 
 const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 const MAX_CONCURRENT_TOOL_CALLS: usize = 8;
@@ -258,86 +260,6 @@ pub(crate) async fn apply_before_provider_request_hook(
     Ok(AgentTurnDecision::Next)
 }
 
-pub(crate) async fn maybe_compact_runtime_context(
-    ctx: &mut AgentTurnContext,
-) -> Result<(), AgentTurnError> {
-    let Some(config) = ctx.config.compaction.clone() else {
-        return Ok(());
-    };
-
-    let bytes_per_token = config.settings.token_estimation.bytes_per_token;
-    let usage_estimate = estimate_context_tokens(&ctx.messages, bytes_per_token);
-    let tokens_before = usage_estimate.tokens;
-    if !should_compact(
-        tokens_before,
-        ctx.config.model.context_window,
-        &config.settings,
-    ) {
-        return Ok(());
-    }
-
-    let (mut to_summarize, mut keep) = prepare_compaction(&ctx.messages, &config.settings);
-    if to_summarize.is_empty() {
-        (to_summarize, keep) =
-            split_for_compaction_after_usage_anchor(&ctx.messages, usage_estimate.last_usage_index);
-    }
-    if to_summarize.is_empty() {
-        return Ok(());
-    }
-
-    let summary = match summarize_with_provider_streamer(
-        &ctx.config.model,
-        &to_summarize,
-        config.custom_instructions.as_deref(),
-        ctx.config.stream_options.clone(),
-        Some(ctx.cancel_token.clone()),
-        ctx.config.provider_streamer.clone(),
-        Some(&config.settings.sampler),
-        config.settings.summary_max_chars,
-    )
-    .await
-    {
-        Ok(summary) => summary,
-        Err(error) => {
-            // Fitted fallback: summarization failed, so truncate without a
-            // summary rather than aborting the turn. The keep_recent window
-            // is still applied below; only the summary is synthetic.
-            format!(
-                "Compaction fallback: summarization failed ({}). History truncated without summary.",
-                error
-            )
-        }
-    };
-
-    let first_kept_message_id = keep.first().map(message_id).unwrap_or("none").to_string();
-    for message in &mut keep {
-        clear_assistant_usage(message);
-    }
-
-    let mut compacted = Vec::with_capacity(1 + keep.len());
-    compacted.push(AgentMessage::CompactionSummary {
-        message_id: unique_message_id(&ctx.messages, format!("compaction_{}", tokens_before)),
-        summary: summary.clone(),
-        tokens_before,
-    });
-    compacted.extend(keep);
-    ctx.messages = compacted;
-
-    ctx.runtime_compaction = RuntimeCompactionState {
-        summary: Some(summary.clone()),
-        first_kept_message_id: Some(first_kept_message_id.clone()),
-        tokens_before: Some(tokens_before),
-    };
-    ctx.emit(AgentEvent::SessionCompacted {
-        summary,
-        first_kept_message_id,
-        tokens_before,
-        details: None,
-    });
-
-    Ok(())
-}
-
 pub(crate) async fn stream_provider(
     ctx: &mut AgentTurnContext,
 ) -> Result<AgentTurnDecision, AgentTurnError> {
@@ -527,65 +449,6 @@ fn validate_terminal_tool_call_identity(
         }
     }
     Ok(())
-}
-
-pub(crate) async fn maybe_prepare_next_turn(
-    ctx: &mut AgentTurnContext,
-) -> Result<AgentTurnDecision, AgentTurnError> {
-    let assistant = ctx
-        .assistant_message
-        .clone()
-        .ok_or_else(|| AgentTurnError::Invariant("assistant message is not available".into()))?;
-
-    match assistant.stop_reason {
-        StopReason::Stop | StopReason::Length => {
-            let Some(should_stop) = should_stop_after_turn(ctx, &assistant).await? else {
-                return Ok(AgentTurnDecision::Error);
-            };
-            if should_stop {
-                ctx.emit(AgentEvent::AgentDone { message: assistant });
-                return Ok(AgentTurnDecision::Done);
-            }
-
-            if let Some(action) = prepare_next_turn_or_error(ctx).await? {
-                return Ok(action);
-            }
-
-            let has_more = !ctx.follow_up_queue.is_empty()
-                || !ctx.steering_queue.is_empty()
-                || !ctx.interjection_queue.is_empty();
-            if has_more {
-                let follow_ups = drain_queue(&mut ctx.follow_up_queue, ctx.config.follow_up_mode);
-                ctx.messages.extend(follow_ups);
-                Ok(AgentTurnDecision::Continue)
-            } else {
-                ctx.emit(AgentEvent::AgentDone { message: assistant });
-                Ok(AgentTurnDecision::Done)
-            }
-        }
-        StopReason::ToolUse => {
-            let Some(should_stop) = should_stop_after_turn(ctx, &assistant).await? else {
-                return Ok(AgentTurnDecision::Error);
-            };
-            if should_stop {
-                ctx.emit(AgentEvent::AgentDone { message: assistant });
-                return Ok(AgentTurnDecision::Done);
-            }
-
-            if ctx.tool_results_all_terminate {
-                ctx.emit(AgentEvent::AgentDone { message: assistant });
-                return Ok(AgentTurnDecision::Done);
-            }
-
-            if let Some(action) = prepare_next_turn_or_error(ctx).await? {
-                return Ok(action);
-            }
-
-            Ok(AgentTurnDecision::Continue)
-        }
-        StopReason::Error => Ok(AgentTurnDecision::Error),
-        StopReason::Aborted => Ok(AgentTurnDecision::Aborted),
-    }
 }
 
 pub(crate) async fn execute_tools(
@@ -924,7 +787,7 @@ fn aborted(ctx: &mut AgentTurnContext) -> Result<AgentTurnDecision, AgentTurnErr
     Ok(AgentTurnDecision::Aborted)
 }
 
-fn unique_message_id(messages: &[AgentMessage], preferred: String) -> String {
+pub(super) fn unique_message_id(messages: &[AgentMessage], preferred: String) -> String {
     let used = messages
         .iter()
         .map(AgentMessage::message_id)
@@ -945,121 +808,4 @@ fn unique_id(used: &HashSet<String>, preferred: String) -> String {
         }
         suffix += 1;
     }
-}
-
-async fn should_stop_after_turn(
-    ctx: &mut AgentTurnContext,
-    assistant: &AssistantMessage,
-) -> Result<Option<bool>, AgentTurnError> {
-    let Some(hook) = ctx.config.hooks.should_stop_after_turn.clone() else {
-        return Ok(Some(false));
-    };
-
-    match hook(ShouldStopAfterTurnContext {
-        messages: ctx.messages.clone(),
-        assistant_message: assistant.clone(),
-    })
-    .await
-    {
-        Ok(outcome) => {
-            // 继续运行时把 additional context 注入消息流（ARC-730：Stop
-            // gate 的 additionalContext 回填模型上下文）。
-            if !outcome.should_stop && !outcome.additional_context.is_empty() {
-                let turn = ctx.turn;
-                ctx.messages
-                    .extend(outcome.additional_context.into_iter().enumerate().map(
-                        |(index, text)| AgentMessage::UserText {
-                            message_id: format!("hook_additional_context_{turn}_{index}"),
-                            text,
-                        },
-                    ));
-            }
-            Ok(Some(outcome.should_stop))
-        }
-        Err(error) => {
-            ctx.emit(AgentEvent::AgentError {
-                error: error.clone(),
-            });
-            Ok(None)
-        }
-    }
-}
-
-async fn prepare_next_turn_or_error(
-    ctx: &mut AgentTurnContext,
-) -> Result<Option<AgentTurnDecision>, AgentTurnError> {
-    let Some(hook) = ctx.config.hooks.prepare_next_turn.clone() else {
-        return Ok(None);
-    };
-
-    let update = match hook(PrepareNextTurnContext {
-        messages: ctx.messages.clone(),
-        turn: ctx.turn,
-    })
-    .await
-    {
-        Ok(update) => update,
-        Err(error) => {
-            ctx.emit(AgentEvent::AgentError {
-                error: error.clone(),
-            });
-            return Ok(Some(AgentTurnDecision::Error));
-        }
-    };
-
-    let Some(update) = update else {
-        return Ok(None);
-    };
-
-    if let Some(messages) = update.messages {
-        ctx.messages = messages;
-    }
-    if let Some(model) = update.model {
-        ctx.config.model = model;
-    }
-    if let Some(thinking_level) = update.thinking_level {
-        ctx.config.thinking_level = thinking_level;
-    }
-    if let Some(stream_options) = update.stream_options {
-        ctx.config.stream_options = Some(stream_options);
-    }
-    Ok(None)
-}
-
-fn message_id(message: &AgentMessage) -> &str {
-    match message {
-        AgentMessage::UserText { message_id, .. }
-        | AgentMessage::Assistant { message_id, .. }
-        | AgentMessage::ToolResult { message_id, .. }
-        | AgentMessage::SystemPrompt { message_id, .. }
-        | AgentMessage::CompactionSummary { message_id, .. }
-        | AgentMessage::BashExecution { message_id, .. }
-        | AgentMessage::Custom { message_id, .. }
-        | AgentMessage::BranchSummary { message_id, .. } => message_id,
-    }
-}
-
-fn clear_assistant_usage(message: &mut AgentMessage) {
-    if let AgentMessage::Assistant { message, .. } = message {
-        message.usage = Usage::default();
-    }
-}
-
-fn split_for_compaction_after_usage_anchor(
-    messages: &[AgentMessage],
-    anchor_index: Option<usize>,
-) -> (Vec<AgentMessage>, Vec<AgentMessage>) {
-    let Some(anchor_index) = anchor_index else {
-        return (vec![], messages.to_vec());
-    };
-    if messages.is_empty() {
-        return (vec![], vec![]);
-    }
-
-    let mut split = anchor_index.saturating_add(1).min(messages.len());
-    while split < messages.len() && matches!(messages[split], AgentMessage::ToolResult { .. }) {
-        split += 1;
-    }
-
-    (messages[..split].to_vec(), messages[split..].to_vec())
 }

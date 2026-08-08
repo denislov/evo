@@ -7,6 +7,7 @@ ai	observability
 change-tracker	workspace-runtime
 cli	coding-agent
 cli	observability
+cli	release-updater
 cli	tui
 coding-agent	agent-core
 coding-agent	ai
@@ -21,6 +22,7 @@ coding-agent	workspace-runtime
 code-intelligence	workspace-runtime
 desktop	coding-agent
 desktop	observability
+desktop	release-updater
 extension-host	tool-contract
 extension-host	tool-runtime
 extension-host	workspace-runtime

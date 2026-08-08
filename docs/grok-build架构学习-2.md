@@ -1,3 +1,5 @@
+> 历史输入（2026-08-05）。本文是学习材料的续篇，不是待执行建议；当前所有权、依赖图和 Gate 以 `docs/architecture.md`、`docs/development-gates.md` 为准。
+
 总体判断：Evo 不需要复制 `grok-build` 约 70 个 crate 的规模，也不适合整体搬运它的 `shell/workspace/pager` 聚合层。Evo 当前真正需要吸收的是 Grok 在“工具协议、隔离工作区、文件变更归因、扩展机制和进程安全”上的成熟基础设施。
 
 最优先的问题不是 UI，也不是模型接入，而是：**多个 Agent 目前可能在同一个 cwd 中并发写文件，却没有 worktree 隔离和合并协议。** 这会限制 Team 并发能力，也是后续 hunk review、子 Agent 自治和并行开发的基础风险。

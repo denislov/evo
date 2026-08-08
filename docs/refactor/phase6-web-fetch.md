@@ -25,8 +25,8 @@
   超时独立预算：resolve 5s、connect 10s、total 30s（含 body）、转换 10s。
 - **缓存**：进程内存缓存（TTL 60s、64 条、总 16 MiB），key 为规范化 URL +
   format；只缓存成功且未截断的结果，失败/截断永不缓存。
-- **内容投影**：HTML→Markdown 用 `html2md`（`format: markdown`，默认）；
-  `format: text` 走内部 HTML 剥除器。无 Content-Type 或非 text/html、
+- **内容投影**：HTML→Markdown 使用 Apache-2.0 的 `htmd`（`output_format: markdown`，默认）；
+  `output_format: text` 走内部 HTML 剥除器。无 Content-Type 或非 text/html、
   text/plain 一律拒绝（fail-closed，`MediaKind::Other`），PDF/image/video
   明确留待 consumer 扩展。
 - **非 2xx 结构化错误**：非重定向非成功状态返回 `HttpStatus` 错误，携带
@@ -53,10 +53,10 @@
   确认，不安全；`SideEffect` 使 Ask 模式提示用户、Plan 模式 fail-closed
   拒绝，符合「网络读取需确认」的产品语义。
 - **参数 schema 约束**：`format` 是 JSON Schema 元数据键，tool-contract
-  schema 白名单将其作为生成元数据删除，参数以 `output_format` 声明并
-  `serde(alias = "format")` 兼容；`Option<枚举>` 会被 schemars 生成
-  `enum: [..., null]` 混入 null，通过 tool-contract 校验失败，故 format
-  用非 Option + `#[serde(default)]`。
+  schema 白名单会把它当作生成元数据处理，因此参数只以 `output_format`
+  声明；`deny_unknown_fields` 会拒绝旧 `format` 输入，不保留 legacy alias。
+  `Option<枚举>` 会被 schemars 生成 `enum: [..., null]` 混入 null，通过
+  tool-contract 校验失败，故 `output_format` 使用非 Option + `#[serde(default)]`。
 - **预算常量**：上限硬约束 `MAX_WEB_FETCH_BYTES = 16 MiB`、
   `MAX_WEB_FETCH_URL_BYTES = 8 KiB` 放 `kernel/limits.rs`；软默认 2 MiB
   及超时等产品配置显式列在工具内 `fetch_client_config()`（对齐管线默认，

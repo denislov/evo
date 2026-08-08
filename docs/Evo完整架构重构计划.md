@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～9、Phase 10 / ARC-1000～1010 完成；ARC-1020～1030 待推进；最近复验 2026-08-08）
+> 状态：执行中（Phase 0～9、Phase 10 / ARC-1000～1030 实现完成；Phase 10 Final Gate 待原生 Windows Release CI、ARC-351 真实平台验证与发行 license 决策；最近复验 2026-08-08）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -73,6 +73,9 @@
 | Phase 9 Gate | 通过（2026-08-07） | CLI/Desktop production 文件全部不超过 900 行，Phase 9 oversized debt（含三项 test debt）全部清偿；CLI 107、Desktop 304 + 5 ignored、Desktop dependency boundary 11、scenario 4 项测试通过；workspace all-targets、clippy、fmt、diff 与 architecture gate 全通过（`rust_files=855`、`dependency_edges=28`、`oversized_debts=5`、`execution_debts=0`） |
 | Phase 10 / ARC-1000 | 完成（2026-08-07） | `docs/refactor/phase10-coding-agent.md`；完成 FS/process/tool/journal/index 所有权审计，hook attribution 改走 workspace capability；4 条 coding-agent Phase 10 oversized debt 清零；删除过渡 module-layer AST 分类；更新真实 crate graph/API 文档并决定暂不拆 `coding-agent-protocol`；coding-agent 245 + API contract 2、workspace check、release API、clippy/fmt/architecture gate 全通过（`oversized_debts=1`，剩余为 Phase 5 agent-core） |
 | Phase 10 / ARC-1010 | 完成（2026-08-08） | `docs/refactor/phase10-observability.md`；新增独立 `observability` 外发边界，operation/session/tool/worktree/task/extension/index 全部发结构化 lifecycle tracing；telemetry 默认关闭且启用必须携带 consent/schema；telemetry、crash、extension diagnostic/hook payload 统一先 scrub 再执行 UTF-8/总量预算；crash report 不记录 panic message/backtrace/location，二次脱敏并以 0700 目录、0600 文件原子持久化；删除 `ai`/`coding-agent` 重复 scrubber 实现并接入 CLI/Desktop 启动；受影响 crate 测试、workspace clippy/check、release API、fmt/diff 与 architecture gate 全通过（`rust_files=862`、`dependency_edges=33`、`oversized_debts=1`、`execution_debts=0`） |
+| Phase 10 / ARC-1020 | 完成（2026-08-08） | 新增 `release-updater`、Linux/Windows 安装脚本与 GitHub Release workflow；CLI 非阻塞检查 + 显式 update、Desktop 确认安装均使用 staged download、SHA-256 校验与失败保留旧版本；固定四类 x86_64 资产和 `checksums.txt` contract；release updater 测试与 release API Gate 通过 |
+| Phase 10 / ARC-1030 | 完成（本地复验 2026-08-08） | `docs/refactor/phase10-final-cleanup.md`；ARC/oversized/execution debt 清零，`nodes.rs` 1199→811 行；删除 web_fetch legacy alias；GPL-3.0+ `html2md` 替换为 Apache-2.0 `htmd`；17 个 crate README、架构/迁移/Gate/notice/provenance 全量更新；完整 workspace all-targets 测试 exit code 0；Linux workspace check/clippy、release API、Architecture Final Gate、license audit、`git diff --check` 均通过 |
+| Phase 10 Final Gate | 待外部发行验证 | 本机 Windows MSVC cross-check 因缺少 `lib.exe` 且 tree-sitter/aws-lc 需要原生 C toolchain 无法完成；Windows GNU cross-check 同样因缺少 `x86_64-w64-mingw32-gcc` 在 `aws-lc-sys` C 构建阶段阻断；由 `.github/workflows/release.yml` 的 `windows-2025` job 执行原生 build/package。Zed/GPUI 依赖图中的 GPL metadata 已显式登记，最终 proprietary 发行兼容性需 release owner/legal 决策；其余本地 Gate 已通过 |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -536,7 +539,12 @@ Phase 2 Gate：完成。builtin、custom injected 与 delegation tools 全部由
 
 ### ARC-351 跨平台 Worktree 验证债务（非阻塞）
 
-执行状态：待清偿，不阻塞 Phase 4；最迟在 Phase 10 Final Gate 前完成并删除本债务。
+执行状态：待真实平台 CI 清偿（2026-08-08 复核）；不阻塞 ARC-1030 本地清算，但仍是 Phase 10 Final Gate 的外部验证条件。
+
+本地 Linux 主机已尝试两个 Windows target：MSVC 因缺少 `lib.exe` 及原生 C 工具链阻断，GNU 因缺少
+`x86_64-w64-mingw32-gcc` 在 `aws-lc-sys` C 构建阶段阻断。当前仓库只有 Windows release build
+job，尚无同时覆盖本债务要求的 Windows/macOS `workspace-runtime` test workflow；因此不伪造完成证据，
+保留该债务直到真实 runner 结果落盘。
 
 - 在真实 Windows 与 macOS runner 上验证路径、symlink 权限、文件锁、rename/delete、
   Git worktree create/discard/GC 和 crash-reopen；交叉编译不能替代运行测试。
@@ -891,6 +899,9 @@ Phase 9 Gate：通过（2026-08-07）。CLI/Desktop 无超限 production 文件�
 
 ### ARC-1020 Updater/发布
 
+执行状态：完成（2026-08-08）。发布 workflow、安装脚本、CLI/Desktop updater 与测试已落地；
+原生 Windows 打包由 Release CI 验证。
+
 - 发布源固定为 GitHub Releases：`https://github.com/denislov/evo/releases`；首版不接入
   crates.io、系统包管理器、企业分发或其他更新服务。
 - 首版只支持 Linux `x86_64` 与 Windows `x86_64`；暂不支持 macOS 和 ARM 架构。
@@ -913,13 +924,18 @@ Phase 9 Gate：通过（2026-08-07）。CLI/Desktop 无超限 production 文件�
 
 ### ARC-1030 最终清算
 
+执行状态：完成（本地复验 2026-08-08）。完成证据见
+`docs/refactor/phase10-final-cleanup.md`。
+
 - 删除所有 `TODO(ARC-*)`、legacy alias、dual-write、migration feature 和旧 fixture。
 - `cargo tree -d` 审计重复大依赖，清理不再使用的 notify/process/schema 库。
 - 审计第三方 notice、provenance 和本地修改声明。
 - 全量更新 `docs/architecture.md`、crate README、用户迁移说明和开发者 Gate 文档。
 - 删除两份学习文档中已失效的行动建议，或明确标记为历史输入。
 
-Phase 10 Final Gate：全 workspace Gate、跨平台 check、PTY scenarios、Desktop replay、license audit、数据 migration 和执行债务清零全部通过。
+Phase 10 Final Gate：本地 workspace check/clippy、完整 workspace all-targets test、release API、
+Architecture Final Gate、license audit、数据 migration/执行债务清零已通过；原生 Windows Release CI、
+ARC-351 真实 Windows/macOS worktree 验证与发行 license 决策仍是关闭整个 Phase 10 的外部条件。
 
 ---
 

@@ -10,29 +10,30 @@ impl NativeShell {
         #[cfg(test)]
         {
             let _ = cx;
-            return;
         }
 
         #[cfg(not(test))]
-        cx.spawn(async move |this, cx| {
-            let Some(version) = crate::update::check_for_update().await else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                if this.ui.available_update.is_some() {
+        {
+            cx.spawn(async move |this, cx| {
+                let Some(version) = crate::update::check_for_update().await else {
                     return;
-                }
-                this.ui.available_update = Some(DesktopUpdateAvailable {
-                    version,
-                    installing: false,
-                    installed: false,
-                    status: None,
+                };
+                let _ = this.update(cx, |this, cx| {
+                    if this.ui.available_update.is_some() {
+                        return;
+                    }
+                    this.ui.available_update = Some(DesktopUpdateAvailable {
+                        version,
+                        installing: false,
+                        installed: false,
+                        status: None,
+                    });
+                    this.refresh_views(UiChangeSet::one(UiRegion::Modal), cx);
+                    cx.notify();
                 });
-                this.refresh_views(UiChangeSet::one(UiRegion::Modal), cx);
-                cx.notify();
-            });
-        })
-        .detach();
+            })
+            .detach();
+        }
     }
 
     pub(super) fn install_available_update(&mut self, cx: &mut Context<Self>) {

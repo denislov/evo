@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [features]
 default = []
@@ -31,7 +32,7 @@ thiserror.workspace = true
 # connection target is the validated IP; tokio-rustls keeps SNI and
 # certificate verification pinned to the original hostname.
 encoding_rs = "0.8"
-html2md = "0.2"
+htmd.workspace = true
 http = "1"
 http-body-util = "0.1"
 hyper = "1"
