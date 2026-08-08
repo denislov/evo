@@ -7,9 +7,9 @@ use crate::providers;
 use crate::registry::{
     ApiProvider, EnvProviderAuthResolver, ProviderAuthResolver, ProviderRegistry,
 };
-use crate::scrub::SecretStore;
 use crate::transport::circuit_breaker::{BreakerKey, CircuitBreakerConfig, CircuitBreakerRegistry};
 use crate::transport::http::SendResilience;
+use observability::SecretStore;
 
 #[derive(Clone)]
 pub struct AiClient {

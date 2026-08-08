@@ -1,6 +1,6 @@
 # Evo 完整架构重构计划
 
-> 状态：执行中（Phase 0～9 完成，Phase 10 待推进；最近复验 2026-08-07）
+> 状态：执行中（Phase 0～9、Phase 10 / ARC-1000～1010 完成；ARC-1020～1030 待推进；最近复验 2026-08-08）
 > 决策日期：2026-08-05
 > 基线 commit：`2cd3ddf`
 > 输入材料：`docs/grok-build架构学习-1.md`、`docs/grok-build架构学习-2.md`
@@ -71,6 +71,8 @@
 | Phase 9 / ARC-920 | 完成（复验 2026-08-07） | Markdown checkpoint + tail rerender、editor 与 surface 模块拆分已落地；默认 TUI 测试与 `test-support` checkpoint 测试均通过 |
 | Phase 9 / ARC-930 | 完成（2026-08-07） | 新增版本化 `scenario-testing` crate、JSON/YAML loader、九域 checkpoint matrix、semantic terminal-state oracle、VirtualTerminal replay 与 mock inference SSE server；CLI/Desktop 对同一 ProductEvent fixture 得到一致终态，reconnect duplicate 不改变状态 |
 | Phase 9 Gate | 通过（2026-08-07） | CLI/Desktop production 文件全部不超过 900 行，Phase 9 oversized debt（含三项 test debt）全部清偿；CLI 107、Desktop 304 + 5 ignored、Desktop dependency boundary 11、scenario 4 项测试通过；workspace all-targets、clippy、fmt、diff 与 architecture gate 全通过（`rust_files=855`、`dependency_edges=28`、`oversized_debts=5`、`execution_debts=0`） |
+| Phase 10 / ARC-1000 | 完成（2026-08-07） | `docs/refactor/phase10-coding-agent.md`；完成 FS/process/tool/journal/index 所有权审计，hook attribution 改走 workspace capability；4 条 coding-agent Phase 10 oversized debt 清零；删除过渡 module-layer AST 分类；更新真实 crate graph/API 文档并决定暂不拆 `coding-agent-protocol`；coding-agent 245 + API contract 2、workspace check、release API、clippy/fmt/architecture gate 全通过（`oversized_debts=1`，剩余为 Phase 5 agent-core） |
+| Phase 10 / ARC-1010 | 完成（2026-08-08） | `docs/refactor/phase10-observability.md`；新增独立 `observability` 外发边界，operation/session/tool/worktree/task/extension/index 全部发结构化 lifecycle tracing；telemetry 默认关闭且启用必须携带 consent/schema；telemetry、crash、extension diagnostic/hook payload 统一先 scrub 再执行 UTF-8/总量预算；crash report 不记录 panic message/backtrace/location，二次脱敏并以 0700 目录、0600 文件原子持久化；删除 `ai`/`coding-agent` 重复 scrubber 实现并接入 CLI/Desktop 启动；受影响 crate 测试、workspace clippy/check、release API、fmt/diff 与 architecture gate 全通过（`rust_files=862`、`dependency_edges=33`、`oversized_debts=1`、`execution_debts=0`） |
 
 Phase 0 基线固定在重构前结构；后续 crate/LOC 变化不回写覆盖该基线，只新增阶段完成报告。
 
@@ -135,8 +137,8 @@ CLI/Desktop/TUI 适配器收敛
 
 - 除 worktree、review、hooks、web fetch 外，完整计划还必须处理 `Agent` 的 `Arc<RwLock<AgentState>>`、
   CLI 超大交互循环、provider resilience、prompt queue 乐观锁和 session rewind。
-- `coding-agent` 的五层 AST 守卫保留到 crate 抽取完成；最终由 Cargo 编译边界承担主约束，AST 守卫只检查
-  `coding-agent` crate 内剩余层次。
+- `coding-agent` 的五层 AST 守卫保留到 crate 抽取完成；ARC-1000 已删除该过渡目录分类，最终由
+  Cargo 编译边界、模块私有性、API contract 与 architecture gate 承担约束。
 - 当前根 package 必须删除，根 `Cargo.toml` 变为 virtual workspace manifest；不再保留 Hello World binary。
 
 ---
@@ -158,7 +160,7 @@ tui <- cli
 - session event log、outbox、recovery、bounded hydration、client projection/reconnect 已有可靠性测试。
 - filesystem capability 绑定实际目标并重验证，避免典型 TOCTOU。
 - process runner 已支持 timeout、bounded output、cancel、Unix process group 和 Windows Job Object。
-- `coding-agent` 已有 AST 分层守卫和 900 行文件上限。
+- `coding-agent` 有唯一 `api` facade、Cargo/模块边界守卫和 900 行文件上限。
 
 当前问题按严重度排序：
 
@@ -869,12 +871,18 @@ Phase 9 Gate：通过（2026-08-07）。CLI/Desktop 无超限 production 文件�
 
 ### ARC-1000 `coding-agent` 最终瘦身
 
+执行状态：完成（2026-08-07）。完成证据见
+`docs/refactor/phase10-coding-agent.md`。
+
 - 审计每个模块所有权，将残留 FS/process/tool/journal/index 实现迁入对应 crate。
 - `coding-agent` 只保留 product domain、application、composition 和 `api` facade。
 - 根据实际依赖决定是否把稳定 ProductEvent/operation DTO 抽成 `coding-agent-protocol`；没有第二个独立客户端需求则不拆。
 - 更新 crate graph 和 API 文档，删除过渡 AST 分类。
 
 ### ARC-1010 可观测性
+
+执行状态：完成（2026-08-08）。完成证据见
+`docs/refactor/phase10-observability.md`。
 
 - 结构化 tracing 覆盖 operation/session/tool/worktree/task/extension/index。
 - 所有外发数据先经过 secrets scrubber 和大小预算。

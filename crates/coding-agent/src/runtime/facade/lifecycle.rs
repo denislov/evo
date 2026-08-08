@@ -12,6 +12,7 @@ impl CodingAgentSession {
     pub(crate) async fn create_internal(
         options: CodingAgentSessionOptions,
     ) -> Result<Self, CodingSessionError> {
+        let observation_started = observe_session_started("create");
         let service_options = options.clone();
         let session_service =
             tokio::task::spawn_blocking(move || SessionService::create(&service_options))
@@ -21,7 +22,7 @@ impl CodingAgentSession {
         let profile_registry = profile_registry_for_options(&options, Some(&session_service))?;
         let runtime_service = runtime_service_for_options(&options);
         let worktree_registry = worktree_registry_for(&options, &project_root)?;
-        Self::from_services(
+        let result = Self::from_services(
             session_service,
             profile_registry,
             runtime_service,
@@ -30,7 +31,9 @@ impl CodingAgentSession {
             worktree_registry,
             options.extension_host_options().cloned(),
         )
-        .await
+        .await;
+        observe_session_finished("create", observation_started, &result);
+        result
     }
 
     pub async fn open(options: CodingAgentSessionOptions) -> Result<Self, CodingAgentPublicError> {
@@ -42,6 +45,7 @@ impl CodingAgentSession {
     pub(crate) async fn open_internal(
         options: CodingAgentSessionOptions,
     ) -> Result<Self, CodingSessionError> {
+        let observation_started = observe_session_started("open");
         let service_options = options.clone();
         let session_service =
             tokio::task::spawn_blocking(move || SessionService::open(&service_options))
@@ -51,7 +55,7 @@ impl CodingAgentSession {
         let profile_registry = profile_registry_for_options(&options, Some(&session_service))?;
         let runtime_service = runtime_service_for_options(&options);
         let worktree_registry = worktree_registry_for(&options, &project_root)?;
-        Self::from_services(
+        let result = Self::from_services(
             session_service,
             profile_registry,
             runtime_service,
@@ -60,7 +64,9 @@ impl CodingAgentSession {
             worktree_registry,
             options.extension_host_options().cloned(),
         )
-        .await
+        .await;
+        observe_session_finished("open", observation_started, &result);
+        result
     }
 
     pub async fn open_or_create(
@@ -74,6 +80,7 @@ impl CodingAgentSession {
     pub(crate) async fn open_or_create_internal(
         options: CodingAgentSessionOptions,
     ) -> Result<Self, CodingSessionError> {
+        let observation_started = observe_session_started("open_or_create");
         let service_options = options.clone();
         let session_service =
             tokio::task::spawn_blocking(move || SessionService::open_or_create(&service_options))
@@ -83,7 +90,7 @@ impl CodingAgentSession {
         let profile_registry = profile_registry_for_options(&options, Some(&session_service))?;
         let runtime_service = runtime_service_for_options(&options);
         let worktree_registry = worktree_registry_for(&options, &project_root)?;
-        Self::from_services(
+        let result = Self::from_services(
             session_service,
             profile_registry,
             runtime_service,
@@ -92,7 +99,9 @@ impl CodingAgentSession {
             worktree_registry,
             options.extension_host_options().cloned(),
         )
-        .await
+        .await;
+        observe_session_finished("open_or_create", observation_started, &result);
+        result
     }
 
     pub async fn non_persistent(
@@ -106,6 +115,7 @@ impl CodingAgentSession {
     pub(crate) async fn non_persistent_internal(
         options: CodingAgentSessionOptions,
     ) -> Result<Self, CodingSessionError> {
+        let observation_started = observe_session_started("non_persistent");
         if options.session_id().is_some() || options.session_path().is_some() {
             return Err(CodingSessionError::Input {
                 message: "non-persistent coding sessions do not accept a session id or path".into(),
@@ -113,7 +123,7 @@ impl CodingAgentSession {
         }
         let project_root = session_project_root(&options, None);
         let worktree_registry = worktree_registry_for(&options, &project_root)?;
-        Self::from_transient(
+        let result = Self::from_transient(
             TransientSessionState::new(option_default_agent_profile_id(&options)),
             profile_registry_for_options(&options, None)?,
             runtime_service_for_options(&options),
@@ -121,7 +131,9 @@ impl CodingAgentSession {
             project_root,
             worktree_registry,
             options.extension_host_options().cloned(),
-        )
+        );
+        observe_session_finished("non_persistent", observation_started, &result);
+        result
     }
 
     pub fn list(
@@ -440,6 +452,35 @@ impl CodingAgentSession {
         );
         Ok(session)
     }
+}
+
+fn observe_session_started(mode: &'static str) -> std::time::Instant {
+    tracing::info!(
+        target: "evo::lifecycle",
+        domain = "session",
+        phase = "started",
+        mode,
+    );
+    std::time::Instant::now()
+}
+
+fn observe_session_finished(
+    mode: &'static str,
+    started: std::time::Instant,
+    result: &Result<CodingAgentSession, CodingSessionError>,
+) {
+    let session_id = result
+        .as_ref()
+        .ok()
+        .map(|session| session.runtime_host.session_identity().0);
+    tracing::info!(
+        target: "evo::lifecycle",
+        domain = "session",
+        phase = if result.is_ok() { "ready" } else { "failed" },
+        mode,
+        session_id = session_id.as_deref().unwrap_or("unavailable"),
+        duration_ms = started.elapsed().as_millis() as u64,
+    );
 }
 
 /// 装配 extension host 服务：显式提供 host options 时启动真实 host

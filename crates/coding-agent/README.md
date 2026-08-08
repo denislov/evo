@@ -29,6 +29,7 @@
 | `api::settings` | 运行时设置、展示设置和主题 |
 | `api::view` | 会话、Profile、能力和 transcript 的只读 DTO |
 | `api::review` | changed-file review 和外部编辑器目标 |
+| `api::background` | background task 查询、输出、等待和取消 DTO |
 | `api::error` | 可安全展示的错误和诊断 |
 
 不要依赖 crate 根目录的符号，也不要引用 `app`、`runtime`、`services`、
@@ -38,18 +39,45 @@
 `coding-agent` 负责配置解析、认证材料保护、操作准入、会话持久化、工具授权、
 事件顺序、恢复语义和运行时关闭。
 
-内部实现遵循由 `tests/module_layering.rs` 自动守卫的五层单向依赖：
+内部实现按以下职责组织：
 
 ```text
-L4 api/adapters (app, runtime/facade, api::*)
-  -> L3 application (application, operations, services, session, events, tools, projection)
-  -> L2 domain (authorization, config, profiles, theme, workspace)
-  -> L1 platform (fs, process, io, time, mutex policy)
-  -> L0 kernel (ids, values, errors, limits)
+api/adapters      app、runtime/facade、api::*
+application       application、operations、services、session、events、tools、projection
+product domain    authorization、config、profiles、theme、workspace、kernel vocabulary
+composition deps  workspace/tool/journal/change/extension/index/agent/provider crates
 ```
 
-高层可以使用更低层，低层不得反向引用。适配器不应把当前目录结构当作 API；唯一公开
-边界仍是上表中的 `api::*`。
+`kernel` 保存产品 vocabulary，`domain` 保存产品事实与 projection，`application`、
+`operations`、`services` 和 `session` 承担用例编排，`app` 与 `runtime/facade` 是
+composition/API adapter。Phase 9 使用的 AST 路径分类已经删除：它需要把 `domain/projection`
+例外归到 application、把部分 `app` 例外归到 application target，目录启发式会把重构中的
+路径误当成真实编译边界。长期约束改由 Cargo crate graph、私有模块、`api_contract` 以及
+CLI/Desktop 只能访问 `coding_agent::api` 的 architecture gate 共同承担。
+
+适配器不应把当前目录结构当作 API；唯一公开边界仍是上表中的 `api::*`。
+
+## Product DTO 的 crate 决策
+
+当前不拆 `coding-agent-protocol`。CLI、Desktop 与 `scenario-testing` 都是同一 workspace
+中的 in-process Rust consumer，直接依赖同版本的 `coding-agent::api`；CLI 的 JSONL RPC
+wire 由 CLI adapter 自己拥有，不把 Rust ProductEvent/operation DTO 当成独立进程协议发布。
+因此新建 protocol crate 只会增加 re-export、版本同步和转换层，不会形成新的 authority。
+
+只有出现第二个需要独立版本、独立发布或跨进程复用 ProductEvent/operation schema 的客户端时，
+才把纯 DTO 与 protocol version 抽出；抽取时 `coding-agent` 继续拥有业务构造、校验、持久化和
+projection，不把 session repository 或 runtime handle 一并下沉。
+
+## 可观测性边界
+
+`coding-agent` 只在 operation/session/tool 的 authority 边界产生结构化 `tracing` lifecycle
+event。字段只允许 opaque ID、kind/state、计数和 duration；prompt、tool arguments、文件内容、
+路径、command、provider error message 不得写入 tracing。
+
+subscriber、telemetry config、consent/schema、crash report 和外发 scrub/budget 均由独立
+`observability` crate 拥有，并由 CLI/Desktop composition 在进程启动时安装。telemetry 默认
+关闭；宿主只有在获得明确 consent 后才能构造 enabled config。不要在 `coding-agent` 内新增
+日志文件、远程 exporter、panic hook 或第二套 redaction helper。
 
 ## Provider transport 设置
 

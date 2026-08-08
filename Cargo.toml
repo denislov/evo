@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/agent-core", "crates/ai-protocol", 'crates/ai', "crates/change-tracker", "crates/cli", "crates/coding-agent", "crates/code-intelligence", "crates/desktop", "crates/event-journal", "crates/extension-host", "crates/scenario-testing", "crates/tool-contract", "crates/tool-runtime", "crates/tui", "crates/workspace-runtime",
+  "crates/agent-core", "crates/ai-protocol", 'crates/ai', "crates/change-tracker", "crates/cli", "crates/coding-agent", "crates/code-intelligence", "crates/desktop", "crates/event-journal", "crates/extension-host", "crates/observability", "crates/release-updater", "crates/scenario-testing", "crates/tool-contract", "crates/tool-runtime", "crates/tui", "crates/workspace-runtime",
 ]
 # The vendored `gpui-component` checkout carries its own workspace; leave it to
 # resolve against that one rather than inheriting this manifest's settings.
@@ -22,6 +22,8 @@ code-intelligence = { path = "crates/code-intelligence" }
 change-tracker = { path = "crates/change-tracker" }
 event-journal = { path = "crates/event-journal" }
 extension-host = { path = "crates/extension-host" }
+observability = { path = "crates/observability" }
+release-updater = { path = "crates/release-updater" }
 scenario-testing = { path = "crates/scenario-testing" }
 tool-contract = { path = "crates/tool-contract" }
 tool-runtime = { path = "crates/tool-runtime" }
@@ -40,6 +42,7 @@ schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+semver = "1"
 sha2 = "0.10"
 syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
@@ -48,6 +51,8 @@ time = "0.3"
 tokio = "1"
 tokio-util = "0.7"
 toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 tree-sitter = "0.25.10"
 tree-sitter-go = "0.25.0"
 tree-sitter-javascript = "0.25.0"

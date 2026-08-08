@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux x86_64 assets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install desktop build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          libasound2-dev libfontconfig1-dev libgl1-mesa-dev libwayland-dev
+          libxkbcommon-dev libxkbcommon-x11-dev libxcb-shape0-dev libxcb-xfixes0-dev
+          libxkbcommon0 libx11-xcb-dev
+      - name: Vendor patched gpui-component
+        run: bash scripts/vendor-gpui-component.sh
+      - name: Build release binaries
+        run: cargo build --locked --release -p cli -p desktop
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          tar --create --gzip --file "dist/evo-cli-${version}-x86_64-unknown-linux-gnu.tar.gz" -C target/release coding-agent
+          tar --create --gzip --file "dist/evo-desktop-${version}-x86_64-unknown-linux-gnu.tar.gz" -C target/release desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows x86_64 assets
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Vendor patched gpui-component
+        shell: bash
+        run: bash scripts/vendor-gpui-component.sh
+      - name: Build release binaries
+        run: cargo build --locked --release -p cli -p desktop
+      - name: Package release assets
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -LiteralPath target/release/coding-agent.exe -DestinationPath "dist/evo-cli-$version-x86_64-pc-windows-msvc.zip"
+          Compress-Archive -LiteralPath target/release/desktop.exe -DestinationPath "dist/evo-desktop-$version-x86_64-pc-windows-msvc.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          find artifacts -type f -print0 | while IFS= read -r -d '' asset; do
+            cp "$asset" "release/$(basename "$asset")"
+          done
+          (
+            cd release
+            find . -maxdepth 1 -type f ! -name checksums.txt -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > checksums.txt
+          )
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release create "$GITHUB_REF_NAME" release/* --title "$GITHUB_REF_NAME" --generate-notes

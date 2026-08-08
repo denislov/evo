@@ -35,6 +35,7 @@ use extension_host::api::{
     DiagnosticLevel, DiagnosticRecord, DiagnosticSink, ExtensionEvent, HookLifecycle,
     HookRunOutcome, HookSpec,
 };
+use workspace_runtime::api::{FilesystemReviewTargetError, OpenedEditFile, WorkspaceAccessHandle};
 
 use crate::mutex::MutexExt;
 use crate::tools::filesystem::diff::generate_unified_patch;
@@ -58,7 +59,7 @@ struct BaselineEntry {
 #[derive(Debug)]
 pub(crate) struct HookEditAttribution {
     tracker: Arc<Mutex<Option<HunkTrackerHandle>>>,
-    workspace_root: PathBuf,
+    workspace: Option<WorkspaceAccessHandle>,
     baseline: Arc<Mutex<Option<BTreeMap<PathBuf, BaselineEntry>>>>,
     diagnostics: Option<Arc<dyn DiagnosticSink>>,
 }
@@ -67,7 +68,7 @@ impl Clone for HookEditAttribution {
     fn clone(&self) -> Self {
         Self {
             tracker: Arc::clone(&self.tracker),
-            workspace_root: self.workspace_root.clone(),
+            workspace: self.workspace.clone(),
             baseline: Arc::clone(&self.baseline),
             diagnostics: self.diagnostics.clone(),
         }
@@ -80,9 +81,11 @@ impl HookEditAttribution {
         workspace_root: impl Into<PathBuf>,
         diagnostics: Option<Arc<dyn DiagnosticSink>>,
     ) -> Self {
+        let workspace_root = workspace_root.into();
+        let workspace = WorkspaceAccessHandle::open_source(workspace_root).ok();
         Self {
             tracker,
-            workspace_root: workspace_root.into(),
+            workspace,
             baseline: Arc::new(Mutex::new(None)),
             diagnostics,
         }
@@ -108,11 +111,43 @@ impl HookEditAttribution {
             .cloned()
     }
 
-    /// 读取磁盘内容（上限截断；文件缺失返回 `None`）。
-    fn read_workspace_file(&self, relative: &Path) -> Option<Vec<u8>> {
-        let path = self.workspace_root.join(relative);
-        let Ok(bytes) = std::fs::read(&path) else {
+    /// 通过 workspace capability 读取内容（上限截断；文件缺失返回 `None`）。
+    async fn read_workspace_file(&self, relative: &Path) -> Option<Vec<u8>> {
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        let Some(workspace) = &self.workspace else {
+            self.record_failure("hook edit attribution has no workspace capability");
             return None;
+        };
+        let target = match workspace.prepare_workspace_review_target(&relative).await {
+            Ok(target) => target,
+            Err(FilesystemReviewTargetError::NotFound) => return None,
+            Err(error) => {
+                self.record_failure(format!(
+                    "hook edit attribution could not open {relative}: {error:?}"
+                ));
+                return None;
+            }
+        };
+        let opened = match target.opened_file() {
+            Ok(opened) => opened,
+            Err(error) => {
+                self.record_failure(format!(
+                    "hook edit attribution could not bind {relative}: {error}"
+                ));
+                return None;
+            }
+        };
+        let bytes = match OpenedEditFile::new(opened, target.display_path().to_path_buf())
+            .read_file()
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.record_failure(format!(
+                    "hook edit attribution could not read {relative}: {error}"
+                ));
+                return None;
+            }
         };
         (bytes.len() <= MAX_ATTRIBUTION_BYTES).then_some(bytes)
     }
@@ -124,7 +159,7 @@ impl HookEditAttribution {
         };
         let mut baseline = BTreeMap::new();
         for path in tracked_paths(&snapshot) {
-            let content = self.read_workspace_file(&path);
+            let content = self.read_workspace_file(&path).await;
             let before_revision = content.as_deref().map(content_revision);
             baseline.insert(
                 path,
@@ -157,7 +192,7 @@ impl HookEditAttribution {
         };
         for path in tracked_paths(&snapshot) {
             let before = baseline.get(&path).cloned().unwrap_or_default();
-            let after = self.read_workspace_file(&path);
+            let after = self.read_workspace_file(&path).await;
             let unchanged = before.exists == after.is_some()
                 && before.before_revision == after.as_deref().map(content_revision);
             if unchanged {
@@ -177,16 +212,11 @@ impl HookEditAttribution {
         after: Option<Vec<u8>>,
     ) {
         let relative = path.to_string_lossy().replace('\\', "/");
-        let filesystem = match workspace_runtime::api::WorkspaceAccessHandle::open_source(
-            self.workspace_root.clone(),
-        ) {
-            Ok(filesystem) => filesystem,
-            Err(error) => {
-                self.record_failure(format!(
-                    "hook edit attribution skipped for {relative}: {error}"
-                ));
-                return;
-            }
+        let Some(filesystem) = &self.workspace else {
+            self.record_failure(format!(
+                "hook edit attribution skipped for {relative}: workspace capability unavailable"
+            ));
+            return;
         };
         // fingerprint 与 review 动作（accept/reject）同源：存在用
         // review 目标、被删除用 vacant write 目标。

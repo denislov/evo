@@ -27,7 +27,10 @@ use coding_agent::api::settings::{
 };
 use coding_agent::api::view::ProfileId;
 
-pub async fn run_interactive_mode(startup: CodingAgentInteractiveStartup) -> CliOutput {
+pub async fn run_interactive_mode(
+    startup: CodingAgentInteractiveStartup,
+    update_check: Option<tokio::task::JoinHandle<Option<String>>>,
+) -> CliOutput {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return CliOutput {
             exit_code: 1,
@@ -37,7 +40,9 @@ pub async fn run_interactive_mode(startup: CodingAgentInteractiveStartup) -> Cli
     }
 
     let terminal = ProcessTerminal::new();
-    match run_interactive_loop_with_input(startup, terminal, InputPump::from_stdin).await {
+    match run_interactive_loop_with_input(startup, terminal, InputPump::from_stdin, update_check)
+        .await
+    {
         Ok(mut result) => {
             let shutdown_error = match result.coding_session.as_mut() {
                 Some(session) => session.shutdown().await.err(),

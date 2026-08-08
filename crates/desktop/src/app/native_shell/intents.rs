@@ -204,6 +204,19 @@ impl NativeShell {
                 self.navigate_center(CenterNavigationTarget::Session(session_id), window, cx);
             }
             UiIntent::CloseSearch => self.dismiss_modal(window, cx),
+            UiIntent::InstallUpdate => self.install_available_update(cx),
+            UiIntent::DismissUpdate => {
+                if self
+                    .ui
+                    .available_update
+                    .as_ref()
+                    .is_some_and(|update| update.installing)
+                {
+                    return;
+                }
+                self.ui.available_update = None;
+                self.dismiss_modal(window, cx);
+            }
         }
     }
 }

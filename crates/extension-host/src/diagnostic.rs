@@ -54,6 +54,7 @@ pub struct DiagnosticsCollector {
     sink: Option<Arc<dyn DiagnosticSink>>,
     buffer: VecDeque<DiagnosticRecord>,
     capacity: usize,
+    outbound: observability::OutboundPolicy,
 }
 
 impl DiagnosticsCollector {
@@ -62,11 +63,13 @@ impl DiagnosticsCollector {
             sink,
             buffer: VecDeque::with_capacity(capacity),
             capacity: capacity.max(1),
+            outbound: observability::OutboundPolicy::default(),
         }
     }
 
     /// 记录一条诊断；超过容量时丢弃最老的记录。
     pub fn record(&mut self, record: DiagnosticRecord) {
+        let record = sanitize_record(record, &self.outbound);
         if let Some(sink) = &self.sink {
             sink.emit(record.clone());
         }
@@ -93,6 +96,29 @@ impl DiagnosticsCollector {
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }
+}
+
+fn sanitize_record(
+    mut record: DiagnosticRecord,
+    outbound: &observability::OutboundPolicy,
+) -> DiagnosticRecord {
+    record.code = outbound.sanitize_with_budget(&record.code, 128);
+    record.message = outbound.sanitize_field(&record.message);
+    record.extension_id = record
+        .extension_id
+        .map(|id| outbound.sanitize_with_budget(&id, 128));
+    record.context = record
+        .context
+        .into_iter()
+        .take(32)
+        .map(|(key, value)| {
+            (
+                outbound.sanitize_with_budget(&key, 128),
+                outbound.sanitize_field(&value),
+            )
+        })
+        .collect();
+    record
 }
 
 #[cfg(test)]
@@ -166,6 +192,31 @@ mod tests {
         assert_eq!(value["level"], "error");
         let back: DiagnosticRecord = serde_json::from_value(value).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn outbound_sink_receives_only_scrubbed_bounded_diagnostics() {
+        let sink = Arc::new(CollectingSink::default());
+        let mut collector = DiagnosticsCollector::new(Some(sink.clone()), 4);
+        collector.record(DiagnosticRecord {
+            level: DiagnosticLevel::Error,
+            code: "provider_error".into(),
+            message: format!(
+                "api_key=secret-value at /home/user/private/{}",
+                "x".repeat(800)
+            ),
+            extension_id: Some("extension".into()),
+            context: BTreeMap::from([(
+                "authorization".into(),
+                "Bearer eyJhbGciOiJub25lIn0".into(),
+            )]),
+        });
+        let records = sink.records.lock().unwrap();
+        let record = &records[0];
+        assert!(record.message.len() <= 512);
+        assert!(!record.message.contains("secret-value"));
+        assert!(!record.message.contains("/home/user"));
+        assert!(!record.context["authorization"].contains("eyJhbGci"));
     }
 
     #[derive(Default)]

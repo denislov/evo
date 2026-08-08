@@ -74,6 +74,7 @@ pub struct CliArgs {
     pub verbose: bool,
     pub json: bool,
     pub offline: bool,
+    pub update: bool,
 }
 
 impl Default for CliArgs {
@@ -121,6 +122,7 @@ impl Default for CliArgs {
             verbose: false,
             json: false,
             offline: false,
+            update: false,
         }
     }
 }
@@ -182,7 +184,11 @@ pub fn help_text() -> String {
         "coding-agent {}\n\nUsage:\n  coding-agent -p <prompt>\n\nOptions:\n  -p, --print              Run one prompt and print the assistant response\n  --mode <mode>            Headless mode: print|json|rpc\n  --provider <id>          Provider preference for model selection\n  --model <id>             Model id from the built-in Rust model table\n  --models <list>          Comma-separated model rotation globs, optionally model:thinking\n  --list-models [search]   List models, optionally fuzzy-filtered by search text\n  --json                   Emit JSON for --list-models\n  --api-key <key>          API key passed to the selected provider\n  --system-prompt <text>   System prompt override\n  --append-system-prompt <text> Append to system prompt (repeatable)\n  --max-turns <n>          Optional cap on agent loop turns (default: unlimited, matches TS pi)\n  --thinking <level>       Thinking level: off|minimal|low|medium|high|xhigh\n                           DeepSeek effective effort: minimal/low/medium/high=high, xhigh=max\n  --permission-mode <mode> Permission mode: plan (read-only) | ask (prompt first) | yolo (auto)\n  --tool-execution <mode>  Tool execution mode: parallel|sequential\n  --tools, -t <names>      Comma-separated builtin tool allowlist\n  --exclude-tools, -xt <names> Comma-separated builtin tool denylist\n  --no-tools               Disable all tools\n  --no-builtin-tools       Do not register builtin tools\n  --skills <dir>           Directory to load skills from (repeatable)\n  --prompt-templates <p>   Path to load prompt templates from (repeatable)\n  --no-context-files       Disable AGENTS.md / CLAUDE.md discovery\n  --no-skills              Disable skill discovery\n  --no-prompt-templates    Disable prompt template discovery\n  --no-themes              Disable theme discovery\n  --theme <path>            Load a theme file or directory (repeatable)\n  --skill <name>           Invoke a loaded skill by name\n  --prompt-template <name> Invoke a prompt template by name\n  --template-arg <value>   Argument for prompt template (repeatable)\n  --verbose                Emit verbose diagnostics\n  --offline                Avoid network-dependent behavior where supported\n  -h, --help               Show help\n  -v, --version            Show version\n\nSession Options:\n  -c, --continue           Continue the most recent session\n  -r, --resume             Resume the most recent session\n  --no-session             Disable session persistence\n  --session <path|id>      Open a specific session by path or id prefix\n  --session-id <id>        Open or create a session by exact id\n  --fork <path|id>         Fork an existing session\n  --session-dir <dir>      Directory to store session files\n  --name <name>            Name for the current session\n  -n <name>                Short form of --name\n",
         env!("CARGO_PKG_VERSION")
     );
-    help
+    help.replace("Usage:\n", "Usage:\n  coding-agent update\n")
+        .replace(
+            "Options:\n",
+            "Options:\n  update                   Download and install the latest GitHub Release\n",
+        )
 }
 
 fn take_value(raw: &[String], index: &mut usize, flag: &str) -> Result<String, CliError> {
@@ -224,6 +230,12 @@ where
     while i < raw.len() {
         let arg = &raw[i];
         match arg.as_str() {
+            "update" if parsed.update => {
+                return Err(CliError::InvalidInput(
+                    "update may only be specified once".into(),
+                ));
+            }
+            "update" => parsed.update = true,
             "-p" | "--print" => {
                 parsed.print = true;
                 if let Some(next) = raw.get(i + 1)
@@ -399,6 +411,22 @@ where
         ));
     }
 
+    if parsed.update
+        && (parsed.prompt.is_some()
+            || parsed.print
+            || parsed.mode_explicit
+            || parsed.list_models.is_some()
+            || parsed.json
+            || parsed.provider.is_some()
+            || parsed.model.is_some()
+            || parsed.models.is_some()
+            || parsed.api_key.is_some())
+    {
+        return Err(CliError::InvalidInput(
+            "update cannot be combined with prompt, mode, model, provider, or JSON options".into(),
+        ));
+    }
+
     Ok(parsed)
 }
 
@@ -409,4 +437,28 @@ fn split_csv(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_is_a_dedicated_command() {
+        let parsed = parse_args(["update".into()]).expect("update command parses");
+        assert!(parsed.update);
+        assert!(parsed.prompt.is_none());
+    }
+
+    #[test]
+    fn update_rejects_prompt_and_model_inputs() {
+        assert!(matches!(
+            parse_args(["update".into(), "describe this".into()]),
+            Err(CliError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            parse_args(["update".into(), "--model".into(), "model-a".into()]),
+            Err(CliError::InvalidInput(_))
+        ));
+    }
 }

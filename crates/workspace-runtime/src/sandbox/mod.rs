@@ -76,10 +76,13 @@ pub struct SandboxProfile {
 
 /// System directories a product shell needs to read/execute from. Kept
 /// explicit instead of granting `/` so that paths outside these roots stay
-/// denied.
+/// denied. `/nix` covers NixOS-only package storage: home-manager user
+/// configs (e.g. `~/.config/git/config`) are symlinks into `/nix/store`, and
+/// git follows them when reading config; on non-Nix systems the path does not
+/// exist and the rule is skipped without weakening anything.
 const SYSTEM_READ_ROOTS: &[&str] = &[
     "/bin", "/sbin", "/usr", "/lib", "/lib64", "/etc", "/opt", "/var", "/proc", "/dev", "/run",
-    "/tmp",
+    "/tmp", "/nix",
 ];
 
 impl SandboxProfile {

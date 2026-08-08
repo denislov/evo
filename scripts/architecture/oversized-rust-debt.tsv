@@ -1,6 +1,2 @@
 # kind	limit	baseline-max-lines	clear-by	path
 production	900	1199	Phase 5	crates/agent-core/src/agent/turn/nodes.rs
-production	900	909	Phase 10	crates/coding-agent/src/app/embedding.rs
-production	900	930	Phase 10	crates/coding-agent/src/application/operation/contract.rs
-production	900	965	Phase 10	crates/coding-agent/src/application/operation/dispatch.rs
-production	900	908	Phase 10	crates/coding-agent/src/operations/team_invocation/runner.rs

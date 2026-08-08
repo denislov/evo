@@ -270,6 +270,23 @@ impl NativeShell {
                     self.ui.pending_delete_session = None;
                     self.dismiss_modal(window, cx);
                 }
+                DesktopModalKind::UpdateAvailable => {
+                    if self
+                        .ui
+                        .available_update
+                        .as_ref()
+                        .is_some_and(|update| update.installing)
+                    {
+                        self.app.workspaces.active_mut().set_preference_notice(
+                            "The verified update is still being installed. Please wait.".into(),
+                        );
+                        self.ui.modal_focus.focus(window, cx);
+                        cx.notify();
+                        return;
+                    }
+                    self.ui.available_update = None;
+                    self.dismiss_modal(window, cx);
+                }
             }
             return;
         }

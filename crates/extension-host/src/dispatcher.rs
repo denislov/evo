@@ -108,6 +108,7 @@ pub(crate) async fn dispatch_observe(
     shared: &Arc<crate::host::HostShared>,
     event: &ExtensionEvent,
 ) -> usize {
+    let observation_started = std::time::Instant::now();
     let Some(hooks) = non_gate_hooks(registry, event.kind) else {
         return 0;
     };
@@ -116,7 +117,16 @@ pub(crate) async fn dispatch_observe(
     let budget_max_run_secs = shared.budget_max_run_secs();
     let workspace_root = event.workspace_root.clone();
     let cancel = shared.cancel();
-    let event_json = serde_json::to_string(event).unwrap_or_default();
+    let Some(event_json) = outbound_event_json(event) else {
+        record_diagnostic(
+            shared,
+            DiagnosticLevel::Warning,
+            "hook_event_budget_exceeded",
+            "extension event exceeded the outbound byte budget",
+            None,
+        );
+        return 0;
+    };
     let lifecycle = shared.hook_lifecycle().clone();
     let mut executed = 0;
     for spec in hooks {
@@ -135,7 +145,22 @@ pub(crate) async fn dispatch_observe(
         lifecycle.after(event, spec, &outcome).await;
         executed += 1;
         record_hook_outcome(shared, spec, &outcome);
+        tracing::info!(
+            target: "evo::lifecycle",
+            domain = "extension",
+            phase = "hook_finished",
+            event_kind = event.kind.as_str(),
+            outcome = outcome_label(&outcome),
+        );
     }
+    tracing::info!(
+        target: "evo::lifecycle",
+        domain = "extension",
+        phase = "dispatch_finished",
+        event_kind = event.kind.as_str(),
+        hook_count = executed as u64,
+        duration_ms = observation_started.elapsed().as_millis() as u64,
+    );
     executed
 }
 
@@ -272,7 +297,18 @@ impl HookGate {
         let budget_max_run_secs = self.shared.budget_max_run_secs();
         let workspace_root = event.workspace_root.clone();
         let cancel = self.shared.cancel();
-        let event_json = serde_json::to_string(event).unwrap_or_default();
+        let Some(event_json) = outbound_event_json(event) else {
+            record_diagnostic(
+                &self.shared,
+                DiagnosticLevel::Error,
+                "hook_event_budget_exceeded",
+                "tool gate event exceeded the outbound byte budget",
+                None,
+            );
+            return ToolGateDecision::ClosedByEnvironment {
+                reason: "tool gate event could not cross the bounded extension boundary".into(),
+            };
+        };
         for spec in hooks {
             if !spec.matcher.matches(&context) {
                 continue;
@@ -286,6 +322,13 @@ impl HookGate {
             let timeout = hook_timeout(spec, budget_max_run_secs);
             let outcome = run_hook(spec, &event_json, &ctx, timeout, GateKind::Tool).await;
             record_hook_outcome(&self.shared, spec, &outcome);
+            tracing::info!(
+                target: "evo::lifecycle",
+                domain = "extension",
+                phase = "gate_hook_finished",
+                event_kind = event.kind.as_str(),
+                outcome = outcome_label(&outcome),
+            );
             match outcome {
                 HookRunOutcome::Success | HookRunOutcome::OutputLimited => continue,
                 HookRunOutcome::ToolDecision {
@@ -374,7 +417,16 @@ impl HookGate {
         let budget_max_run_secs = self.shared.budget_max_run_secs();
         let workspace_root = event.workspace_root.clone();
         let cancel = self.shared.cancel();
-        let event_json = serde_json::to_string(event).unwrap_or_default();
+        let Some(event_json) = outbound_event_json(event) else {
+            record_diagnostic(
+                &self.shared,
+                DiagnosticLevel::Warning,
+                "hook_event_budget_exceeded",
+                "stop gate event exceeded the outbound byte budget",
+                None,
+            );
+            return decision;
+        };
         for spec in hooks {
             if !spec.matcher.matches(&context) {
                 continue;
@@ -388,6 +440,13 @@ impl HookGate {
             let timeout = hook_timeout(spec, budget_max_run_secs);
             let outcome = run_hook(spec, &event_json, &ctx, timeout, GateKind::Stop).await;
             record_hook_outcome(&self.shared, spec, &outcome);
+            tracing::info!(
+                target: "evo::lifecycle",
+                domain = "extension",
+                phase = "gate_hook_finished",
+                event_kind = event.kind.as_str(),
+                outcome = outcome_label(&outcome),
+            );
             match outcome.clone() {
                 HookRunOutcome::StopSignals(signals) => {
                     if let Some(block) = signals.block {
@@ -435,13 +494,24 @@ impl HookGate {
     }
 }
 
+fn outbound_event_json(event: &ExtensionEvent) -> Option<String> {
+    let serialized = serde_json::to_string(event).ok()?;
+    let scrubbed = observability::SecretsScrubber::new().scrub(&serialized);
+    (scrubbed.len() <= 256 * 1024).then_some(scrubbed)
+}
+
 fn outcome_label(outcome: &HookRunOutcome) -> &'static str {
     match outcome {
+        HookRunOutcome::Success => "success",
+        HookRunOutcome::ToolDecision { allow: true, .. } => "allowed",
+        HookRunOutcome::ToolDecision { allow: false, .. } => "denied",
+        HookRunOutcome::StopSignals(_) => "stop_signals",
         HookRunOutcome::TimedOut => "timed out",
         HookRunOutcome::Cancelled => "cancelled",
+        HookRunOutcome::OutputLimited => "output limited",
+        HookRunOutcome::Failed { .. } => "failed",
         HookRunOutcome::SpawnFailed { .. } => "spawn failed",
         HookRunOutcome::SandboxUnsupported { .. } => "sandbox unavailable",
-        _ => "failed",
     }
 }
 

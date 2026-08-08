@@ -29,6 +29,7 @@ use crate::contract::{
 };
 
 mod cleanup;
+mod lifecycle_trace;
 mod storage;
 use cleanup::{dir_size, remove_materialization};
 pub(super) use storage::write_record_atomic;
@@ -178,6 +179,7 @@ impl WorktreeRegistry {
         mode: WorkingTreeMode,
         cancellation: &CancellationToken,
     ) -> Result<WorktreeRecord, RegistryError> {
+        let observation_started = std::time::Instant::now();
         let _writer = self.acquire_writer()?;
         self.check_capacity_unlocked()?;
         let value = unique_worktree_value(source, owner_operation);
@@ -209,6 +211,7 @@ impl WorktreeRegistry {
             updated_at: now,
         };
         self.register_unlocked(&creating)?;
+        lifecycle_trace::creating(&creating, owner_operation);
         let managed = WorktreeBuilder::new(source.clone(), &dest, owner_operation)
             .parent_session(parent_session.map(str::to_owned))
             .worktree_id(id)
@@ -222,9 +225,23 @@ impl WorktreeRegistry {
                 // remove its durable Creating record immediately. If the process
                 // crashes instead, startup recovery still handles the record.
                 self.remove_unlocked(&creating.id)?;
+                lifecycle_trace::terminal(
+                    "cancelled",
+                    &creating.id,
+                    owner_operation,
+                    observation_started,
+                );
                 return Err(RegistryError::Worktree(error));
             }
-            Err(error) => return Err(RegistryError::Worktree(error)),
+            Err(error) => {
+                lifecycle_trace::terminal(
+                    "failed",
+                    &creating.id,
+                    owner_operation,
+                    observation_started,
+                );
+                return Err(RegistryError::Worktree(error));
+            }
         };
         let record = WorktreeRecord::from_managed(&managed, &source_root, now);
         if let Err(error) = super::merge::create_baseline(self, &record, cancellation) {
@@ -235,6 +252,7 @@ impl WorktreeRegistry {
             });
         }
         self.register_unlocked(&record)?;
+        lifecycle_trace::ready(&record, owner_operation, observation_started);
         Ok(record)
     }
 
@@ -256,6 +274,8 @@ impl WorktreeRegistry {
     /// the durable record is deleted only when identity checks pass. Missing
     /// records are idempotent no-ops; anything else is fail-closed.
     pub fn discard(&self, id: &str) -> Result<(), RegistryError> {
+        let observation_started = std::time::Instant::now();
+        lifecycle_trace::discarding(id);
         let _writer = self.acquire_writer()?;
         let parsed = parse_registry_id(id)?;
         let Some(mut record) = self.load_unlocked(parsed.as_str())? else {
@@ -284,7 +304,9 @@ impl WorktreeRegistry {
         remove_materialization(self, &record)?;
         record.transition(WorkspaceLifecycle::Removed, unix_seconds())?;
         write_record_atomic(&self.record_path(&record.id), &record)?;
-        self.remove_unlocked(&record.id)
+        let result = self.remove_unlocked(&record.id);
+        lifecycle_trace::discarded(id, observation_started, result.is_ok());
+        result
     }
 
     fn check_capacity_unlocked(&self) -> Result<(), RegistryError> {
@@ -363,6 +385,7 @@ impl WorktreeRegistry {
             .ok_or_else(|| RegistryError::UnknownWorktree { id: id.to_owned() })?;
         record.transition(next, now)?;
         write_record_atomic(&self.record_path(parsed.as_str()), &record)?;
+        lifecycle_trace::transitioned(&record);
         Ok(record)
     }
 

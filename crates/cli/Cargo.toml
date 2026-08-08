@@ -12,9 +12,12 @@ default = []
 [dependencies]
 libc.workspace = true
 coding-agent.workspace = true
+observability.workspace = true
+release-updater.workspace = true
 tui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+semver.workspace = true
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "time", "io-util", "io-std", "sync", "signal"] }

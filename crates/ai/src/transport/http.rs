@@ -12,8 +12,8 @@ use crate::model::Model;
 use crate::protocol::stream::EventStream;
 use crate::protocol::{AssistantMessage, AssistantMessageEvent, StopReason, StreamOptions};
 use crate::registry::options_contain_automatic_credentials;
-use crate::scrub::SecretsScrubber;
 use crate::transport::retry::RetryConfig;
+use observability::SecretsScrubber;
 
 /// Refresh callback: re-resolve credentials and return the updated options,
 /// or `None` when no fresher credential is available.

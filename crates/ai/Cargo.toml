@@ -15,6 +15,7 @@ required-features = ["test-support"]
 
 [dependencies]
 ai-protocol.workspace = true
+observability.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "net", "time", "io-util"] }
 futures.workspace = true
 async-stream.workspace = true

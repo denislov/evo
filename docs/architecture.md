@@ -20,62 +20,47 @@
 
 ### 部分关键设计约束
 
-- **版本锁定**：所有 6 个 crate 通过 `workspace.package.version` 共享同一版本号，确保版本一致性
+- **版本锁定**：15 个 workspace crate 通过 `workspace.package.version` 共享同一版本号
 - **稳定性承诺**：每个 crate 通过 `api` 命名空间暴露分类的稳定公共 API；多数 crate 使用
   `api.rs`，`coding-agent` 在 `lib.rs` 内联定义该门面，实现细节完全私有
-- **零循环依赖**：依赖方向严格单向：`ai` ← `agent-core` ← `coding-agent` ← `cli`/`desktop`；`tui` 作为独立通用组件库被 `cli` 依赖
+- **零循环依赖**：第一方依赖图由 `scripts/architecture/internal-dependencies.tsv` 固定，并由
+  `scripts/architecture-gate.sh` 对照 Cargo metadata、执行环检测
+- **产品边界**：CLI/Desktop 只能访问 `coding_agent::api`；workspace、tool、journal、extension、
+  code-intelligence 的底层 authority 不向 UI adapter 泄漏
 
 ---
 
 ## 2. 分层架构总览
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                     UI 适配器层（Presentation）                │
-│  ┌──────────────┐  ┌──────────────────┐  ┌────────────────┐  │
-│  │  CLI (cli)   │  │ Desktop (desktop) │  │ 未来第三方客户端  │  │
-│  │ • TUI 全屏   │  │ • gpui GUI       │  │                │  │
-│  │ • 无头模式   │  │ • 原生 Shell      │  │                │  │
-│  │ • 无头模式   │  │ • 外部编辑器       │  │                │  │
-│  │ • RPC 模式   │  │                   │  │                │  │
-│  └──────┬───────┘  └────────┬─────────┘  └───────┬────────┘  │
-│         │                   │                    │            │
-│  ┌──────┴───────────────────┴────────────────────┴────────┐  │
-│  │              coding-agent（产品层 / Product Layer）       │  │
-│  │  • 会话生命周期管理  • 事件溯源持久化  • 操作调度引擎      │  │
-│  │  • 工具授权与审查    • 代理/团队配置文件  • 客户端投映     │  │
-│  │  • 配置/主题管理     • 自愈编辑         • 压缩策略        │  │
-│  └──────────┬──────────────────────────┬───────────────────┘  │
-│             │                          │                      │
-│  ┌──────────┴──────────┐   ┌───────────┴──────────────────┐  │
-│  │    agent-core       │   │          tui                 │  │
-│  │  （代理运行时层）     │   │    （通用终端 UI 组件库）     │  │
-│  │  • Agent 回合引擎    │   │  • 终端能力协商              │  │
-│  │  • 钩子系统          │   │  • 组件系统 (Markdown/Editor) │  │
-│  │  • 压缩/摘要         │   │  • 输入/按键绑定              │  │
-│  │  • 文件系统/Shell    │   │  • 渲染/样式引擎              │  │
-│  │  • 资源加载器        │   │  • iTerm2/Kitty 图像协议     │  │
-│  └──────────┬──────────┘   └──────────────────────────────┘  │
-│             │                                                  │
-│  ┌──────────┴──────────────────────┐                          │
-│  │            ai                   │                          │
-│  │     （AI 提供商抽象层）           │                          │
-│  │  • 提供商注册与路由              │                          │
-│  │  • 模型目录 (100+ 模型)          │                          │
-│  │  • 协议无关的请求/响应类型        │                          │
-│  │  • HTTP 传输与 SSE 流解析        │                          │
-│  │  • 跨提供商兼容性适配             │                          │
-│  └─────────────────────────────────┘                          │
-└──────────────────────────────────────────────────────────────┘
+以下箭头表示“上层依赖下层”。`coding-agent` 是唯一产品 facade；基础能力以编译边界
+下沉，CLI/Desktop 不直接依赖这些基础 crate。
+
+```text
+observability     -> （无第一方 crate 依赖）
+ai                -> ai-protocol + observability
+tool-runtime      -> tool-contract
+agent-core        -> ai-protocol + tool-contract + tool-runtime
+change-tracker    -> workspace-runtime
+extension-host    -> observability + tool-contract + tool-runtime + workspace-runtime
+code-intelligence -> change-tracker + tool-contract + tool-runtime + workspace-runtime
+coding-agent      -> agent-core + ai + ai-protocol + change-tracker + code-intelligence
+                     + event-journal + extension-host + tool-contract + tool-runtime
+                     + workspace-runtime + observability
+cli               -> coding-agent + observability + tui
+desktop           -> coding-agent + observability
+scenario-testing  -> coding-agent + tui
 ```
 
-**依赖方向**（严格单向，不可逆）：
+关键所有权：
 
-```
-ai  ←  agent-core  ←  coding-agent  ←  cli
-                                    ←  desktop
-                         tui  ←  cli
-```
+- `workspace-runtime`：bounded FS、mutation fence、process tree、sandbox、worktree、background task；
+- `tool-contract` / `tool-runtime`：tool vocabulary、registry、执行上下文、取消/超时/进度；
+- `event-journal`：append-only frame、lease、tail repair、checkpoint；
+- `change-tracker`：semantic FS events、hunk identity、review/rewind 文件事实；
+- `extension-host`：hook/MCP lifecycle、trust、budget、external tool provider；
+- `code-intelligence`：增量 graph、LSP lifecycle、只读代码查询；
+- `observability`：统一 secrets/path scrub、大小预算、telemetry consent/schema、crash report；
+- `coding-agent`：product domain、application orchestration、composition、分类 `api` facade。
 
 ---
 
@@ -83,7 +68,8 @@ ai  ←  agent-core  ←  coding-agent  ←  cli
 
 ### 3.1 `ai` — AI 提供商抽象层
 
-**定位**：整个架构的最底层，封装与 AI 服务商通信的全部细节。
+**定位**：具体 AI provider 与网络传输实现；provider-neutral 类型和端口位于
+`ai-protocol`，因此 `agent-core` 不依赖本 crate。
 
 ```
 crates/ai/src/
@@ -146,12 +132,13 @@ crates/ai/src/
 ```
 crates/agent-core/src/
 ├── lib.rs              # 私有模块 + 公开 api 模块
-├── api.rs              # 分类稳定 API（6 个子领域）
-├── agent/              # 代理运行时
-│   ├── runtime.rs      # Agent：Arc<RwLock<AgentState>> 线程安全运行时
+├── api.rs              # 分类稳定 API
+├── agent/              # bounded Agent actor 与回合运行时
+│   ├── actor.rs        # actor 独占 AgentState，command 通过 mpsc/oneshot
+│   ├── runtime.rs      # AgentHandle 与 runtime 组装
 │   ├── turn/           # 回合引擎（状态机）
-│   │   ├── runtime.rs  # AgentTurnRunner：有界状态机
-│   │   ├── context.rs  # AgentTurnContext
+│   │   ├── runtime.rs  # TurnRunner：有界状态机
+│   │   ├── context.rs  # turn context
 │   │   └── nodes.rs    # 每个状态的执行节点
 │   └── types/          # AgentConfig/AgentMessage/AgentEvent 等
 ├── compaction/         # 压缩与摘要
@@ -159,9 +146,7 @@ crates/agent-core/src/
 │   ├── prepare.rs      # 压缩判定
 │   └── summarize.rs    # 摘要生成
 ├── context/            # AgentMessage → Provider Context 转换
-├── execution/          # 执行环境抽象
-│   ├── capture.rs      # Shell 输出捕获
-│   └── truncate.rs     # 输出截断
+├── execution/          # provider/tool adapter 所需的中性执行值与输出截断
 ├── hooks/              # 代理生命周期钩子（7 种）
 ├── resources/          # 技能和提示模板加载器
 └── transcript/         # 会话记录和树投映
@@ -190,12 +175,12 @@ Start
 
 | 抽象 | 说明 |
 |---|---|
-| `Agent` | 线程安全的代理运行时，`Arc<RwLock<AgentState>>` |
+| `AgentHandle` | bounded command sender；actor task 独占 `AgentState` |
 | `AgentConfig` | 代理配置（工具列表、系统提示、压缩设置等） |
 | `AgentMessage` | 代理消息（用户消息、工具结果等） |
 | `AgentEvent` | 代理事件（流增量、错误、使用量等） |
 | `AgentHooks` | 7 种生命周期钩子（BeforeToolCall/AfterToolCall 等） |
-| `FileSystem` / `Shell` | 文件系统和 Shell 抽象接口 |
+| `ExecutableTool` | `tool-runtime` DynamicTool 到 turn engine 的中性适配 |
 
 **公共 API 分类**：
 
@@ -215,30 +200,33 @@ Start
 **定位**：产品策略、会话事实和适配器边界的承载层。CLI/Desktop 只依赖公开 facade，
 不直接操作 repository、provider、tool 或 outbox。
 
-生产代码采用五层单向依赖；`tests/module_layering.rs` 解析 Rust AST，阻止反向引用和
-layer cycle：
+源码按产品职责分组：
 
 ```text
-L4 api / adapters   app、runtime/facade、lib.rs 中的 api::*
+api / adapters      app、runtime/facade、lib.rs 中的 api::*
         |
         v
-L3 application      application、operations、services、session、events、tools、
+application         application、operations、services、session、events、tools、
                     runtime（facade 除外）、domain/projection、resources
         |
         v
-L2 domain           authorization、config、profiles、theme、workspace
+product domain      authorization、config、profiles、theme、workspace、kernel vocabulary
         |
         v
-L1 platform         fs/process/io/time ports、mutex policy
-        |
-        v
-L0 kernel           ids、operation/control/capability values、errors、limits
+composition deps    agent-core、workspace-runtime、change-tracker、event-journal、
+                    extension-host、code-intelligence、ai、tool-runtime
 ```
 
-高层可以直接依赖任意更低层，但低层不能引用高层。`domain/projection` 名称表达的是
-事实投影用途；由于它跨多种 representation 做集成转换，依赖守卫将它归为 L3。
-有状态 service 通过 `SessionWriter`、`EventSink`、`CapabilityQuery` 等窄 port 协作，
-composition root 才装配具体实现。
+Phase 9 的 `tests/module_layering.rs` 曾按首级目录猜测 layer，并为
+`domain/projection`、`app`、`runtime/facade` 保留例外分类。ARC-1000 已删除该过渡 AST
+分类：它没有形成 Rust 编译边界，继续维护只会把目录名误当成 authority。长期约束由 Cargo
+crate graph、模块私有性、窄 port、`api_contract` 以及 architecture gate 共同承担。
+
+`coding-agent` 不重复实现 workspace FS/process、tool runtime、journal frame/lease 或 index。
+内建工具在这里保留的是产品 schema、授权风险、输出 DTO 与 receipt/event 接线；实际文件
+authority、mutation fence、process、sandbox 和 background ownership 均由 `workspace-runtime`
+提供。Session manifest/codec/replay/rewind checkpoint 属于产品持久化，journal 的通用 durable
+frame 与 lease 由 `event-journal` 提供。
 
 **API 边界**：crate root 唯一公共模块是 `coding_agent::api`，并按 `embedding`、
 `settings`、`authorization`、`runtime`、`error`、`review`、`operation`、`event`、
@@ -257,7 +245,8 @@ composition root 才装配具体实现。
 ```
 
 公开的 `ProductEventKind` 顶层 family 为 Session、Agent、Team、Message、Tool、Runtime、
-Delegation、Workflow、Diagnostic、Capability。跨 representation 的转换集中在
+Delegation、Merge、Workflow、Diagnostic、Capability、Review、BackgroundTask。跨
+representation 的转换集中在
 `domain/projection/`，并由覆盖全部 family 的 golden fixture 固定 wire round-trip。
 
 **取消语义**：取消是 cooperative request，不是任意位置的线程中断。prompt 的
@@ -273,7 +262,7 @@ continuation。该路径只修复 torn tail，不创建 writer、不读取 outbo
 startup replay；客户端 projection 仍保留相同数量/字节预算作为二次防线。只有显式
 `SessionExport` API 可以触发完整 replay，适配器不能把 UI bootstrap 当作完整归档。
 
-**公共 API 分类**（10 个子领域）：
+**公共 API 分类**（11 个子领域）：
 
 | 类别 | 说明 |
 |---|---|
@@ -285,6 +274,7 @@ startup replay；客户端 projection 仍保留相同数量/字节预算作为�
 | `api::review` | 文件审查请求/响应 |
 | `api::operation` | 操作命令和结果 |
 | `api::event` | 可持续和实时的产品事件契约 |
+| `api::background` | background task 查询、输出、等待与取消 DTO |
 | `api::client` | 客户端连接、提交、快照、恢复 |
 | `api::view` | 只读视图和展现 DTO |
 
@@ -517,6 +507,44 @@ credential、command dispatch 或新的 session owner。reduced-motion 会停止
 
 ---
 
+### 3.7 `observability` — 安全外发边界
+
+**定位**：所有日志/telemetry/crash/extension diagnostic 的进程外或持久化出口。
+领域 owner 只使用 `tracing` 产生结构化事实，不依赖 subscriber、文件格式或远程后端；
+CLI/Desktop 在 composition 启动时安装唯一全局 subscriber 和 panic hook。
+
+```text
+operation/session/tool/worktree/task/extension/index
+                    |
+                    | tracing event（opaque ID / kind / state / count / duration）
+                    v
+        observability SafeTelemetryLayer
+          | field allowlist
+          | exact + structural secret scrub
+          | absolute/relative path scrub
+          | UTF-8 field budget + JSON event budget
+          +------------------+
+          |                  |
+          v                  v
+ telemetry sink          bounded recent ring
+ (default off)               |
+                             v
+                       crash report writer
+```
+
+`TelemetryConfig::default()` 为关闭状态。开启必须通过
+`TelemetryConfig::enabled(TelemetryConsent)` 提供 consent；每个 sink payload 都包含
+telemetry schema version、consent schema/version/granted timestamp。`TelemetrySink` 只能收到
+已经 scrub 且满足总字节预算的 JSON bytes，不能访问 raw tracing fields。
+
+crash report 不保存 panic payload message、source location 或 backtrace，也不读取 prompt/file
+content。writer 会对 recent ring 再做一次字段 allowlist、secret/path scrub 和报告总预算，使用
+同目录临时文件 + `sync_all` + rename 原子提交；Unix 下目录权限固定为 `0700`、文件为 `0600`。
+CLI 与 Desktop 默认都安装 crash reporter 到全局配置目录下的 `crash-reports/`，telemetry 仍保持关闭。
+
+`ai` 的 credential scrubber 与 `coding-agent` 的 public error redaction 已统一迁入本 crate；
+`extension-host` 在调用 `DiagnosticSink` 或启动 hook 子进程前同样执行 scrub 和 byte budget。
+
 ## 4. 核心数据流
 
 ### 4.1 用户提交提示 → AI 响应 → 工具执行
@@ -602,7 +630,8 @@ crate::<private_module>   ←  仅 crate 内部访问
 关键抽象均通过 Trait 定义，支持注入和可测试性：
 
 - **`ApiProvider`**：AI 提供商通信
-- **`FileSystem` / `Shell`**：文件系统和 Shell 操作
+- **workspace/runtime ports**：`WorkspaceAccessHandle`、`SessionWriter`、`EventSink`、
+  `CapabilityQuery` 等窄边界
 - **`ProviderAuthResolver`**：认证方案
 
 单元测试通过 `#[cfg(test)]` 私有 fixture 或窄 port fake 注入模拟实现。
@@ -611,15 +640,17 @@ crate::<private_module>   ←  仅 crate 内部访问
 
 核心设计原则：所有产品级状态变更都记录为不可变的领域事件。
 
-- 事件类型：`CodingAgentProductEvent`（10 个顶层 family）
-- 事件持久化：`EventService` → 文件系统
+- 事件类型：`CodingAgentProductEvent`（13 个顶层 family）
+- 事件持久化：产品 codec/transaction 在 `coding-agent`，durable frame/lease/tail repair 在
+  `event-journal`
 - 状态重建：重放事件流到 `ClientProjection`
 - 协议版本管理：`PRODUCT_EVENT_PROTOCOL_VERSION`
 
 ### 5.4 Actor 模式
 
-- **`Agent`** 使用 `Arc<RwLock<AgentState>>` 实现线程安全的内部可变性
-- **`CodingAgentSession`** 作为中心 Session Actor，管理所有操作和事件
+- **`AgentHandle`** 只持 bounded sender/read-only channel，actor task 独占 `AgentState`
+- **`CodingAgentSession`** 串行化 operation admission、capability generation、session commit 和
+  client publication；磁盘 writer 保持独立 bounded worker
 - **DesktopRuntime** 通过 `mpsc` 通道与 GUI 线程通信
 
 ### 5.5 状态机模式
@@ -663,6 +694,7 @@ crate::<private_module>   ←  仅 crate 内部访问
 | Markdown 渲染 | `pulldown-cmark` |
 | 语法高亮 | `syntect` |
 | 序列化 | `serde` + `serde_json` + `serde_yaml` + `toml` |
+| 结构化 tracing | `tracing` + `tracing-subscriber`（自定义安全 Layer） |
 | 图像处理 | `image`（PNG/JPEG/GIF/WebP） |
 | UUID | `uuid`（v7，时间排序） |
 | 文件系统沙箱 | `cap-std` |
@@ -701,7 +733,7 @@ crate::<private_module>   ←  仅 crate 内部访问
 
 ```toml
 [workspace]
-members = ["crates/agent-core", "crates/ai", "crates/cli", "crates/coding-agent", "crates/desktop", "crates/tui"]
+members = ["crates/*"] # 文档简写；真实显式清单见根 Cargo.toml
 
 [workspace.package]
 version = "0.7.2"
@@ -776,7 +808,9 @@ cargo test --workspace --no-fail-fast
 
 ### ADR-001：分层架构
 
-**决策**：采用严格的 4 层架构（ai → agent-core → coding-agent → UI），依赖方向单向不可逆。
+**决策**：以 Cargo crate 作为主要 authority 边界，`coding-agent` 作为产品 facade 依赖
+provider、agent、tool、workspace、journal、extension 与 code-intelligence 基础 crate；UI
+adapter 只依赖 `coding-agent::api`。
 
 **理由**：
 - 清晰的关注点分离：传输层、运行时、产品逻辑、UI 各自独立
@@ -803,14 +837,15 @@ cargo test --workspace --no-fail-fast
 - 版本稳定：实现可重构不影响 API 消费者
 - 清晰的边界：工具和 linter 可以验证 API 边界不被违反
 
-### ADR-004：基于 Trait 的执行环境
+### ADR-004：基于 Capability 的执行环境
 
-**决策**：使用 `FileSystem` 和 `Shell` Trait 抽象执行环境，而非直接调用 OS API。
+**决策**：产品层持有 opaque `WorkspaceAccessHandle`，文件与进程能力在
+`workspace-runtime` 内实现；异步协作通过窄 trait/handle，而非在 `coding-agent` 重复 OS API。
 
 **理由**：
-- 测试性：内存文件系统用于测试，不创建真实文件
-- 安全性：能力系统（cap-std）限制文件访问范围
-- 可移植性：不同 OS 可以有不同的实现
+- 测试性：capability、clock、provider、writer 与 event port 可注入
+- 安全性：cap-std、mutation fence、Landlock/平台 capability 与 process-tree teardown 集中治理
+- 可移植性：Unix/Windows 差异留在 workspace/process boundary
 
 ---
 
@@ -833,4 +868,4 @@ cargo test --workspace --no-fail-fast
 
 ---
 
-<sub>文档版本：1.0 | 对应代码版本：0.7.2</sub>
+<sub>文档版本：1.1 | 对应代码版本：0.7.2 | 更新：2026-08-07（ARC-1000）</sub>

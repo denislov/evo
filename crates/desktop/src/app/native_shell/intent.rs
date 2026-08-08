@@ -83,6 +83,8 @@ pub(crate) enum UiIntent {
     CloseFullMessage,
     NavigateSearch(String),
     CloseSearch,
+    InstallUpdate,
+    DismissUpdate,
 }
 
 impl From<&ConversationPaneEvent> for UiIntent {
@@ -215,6 +217,8 @@ impl From<&RootModalHostEvent> for UiIntent {
                 Self::NavigateSearch(session_id.clone())
             }
             RootModalHostEvent::CloseSearch => Self::CloseSearch,
+            RootModalHostEvent::InstallUpdate => Self::InstallUpdate,
+            RootModalHostEvent::DismissUpdate => Self::DismissUpdate,
         }
     }
 }
@@ -294,6 +298,10 @@ mod tests {
         assert_eq!(
             UiIntent::from(&RootModalHostEvent::CopyFullMessage),
             UiIntent::CopyFullMessage
+        );
+        assert_eq!(
+            UiIntent::from(&RootModalHostEvent::InstallUpdate),
+            UiIntent::InstallUpdate
         );
     }
 }

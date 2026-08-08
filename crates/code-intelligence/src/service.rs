@@ -268,6 +268,17 @@ impl CodeIntelligenceService {
             shared: self.shared.clone(),
             tx,
         };
+        let cache_status = match &*self.shared.cache_status.lock().unwrap() {
+            CacheStatus::Missing => "missing",
+            CacheStatus::Ready => "ready",
+            CacheStatus::RebuildRequired { .. } => "rebuild_required",
+        };
+        tracing::info!(
+            target: "evo::lifecycle",
+            domain = "index",
+            phase = "started",
+            cache_status,
+        );
         let task = CodeIntelligenceTask { join };
         Ok((handle, task))
     }
@@ -411,6 +422,14 @@ async fn dispatch_loop(
                 let Some(envelope) = envelope else {
                     break; // 所有 sender 已 drop。
                 };
+                let query_kind = envelope.request.kind;
+                let query_started = std::time::Instant::now();
+                tracing::info!(
+                    target: "evo::lifecycle",
+                    domain = "index",
+                    phase = "query_started",
+                    query_kind = query_kind.as_str(),
+                );
                 if envelope.request.kind == QueryKind::Status {
                     let response = QueryResponse {
                         kind: QueryKind::Status,
@@ -419,6 +438,13 @@ async fn dispatch_loop(
                     };
                     let _ = envelope.reply.send(Ok(response));
                     handled += 1;
+                    tracing::info!(
+                        target: "evo::lifecycle",
+                        domain = "index",
+                        phase = "query_completed",
+                        query_kind = query_kind.as_str(),
+                        duration_ms = query_started.elapsed().as_millis() as u64,
+                    );
                     if *shutdown_rx.borrow() {
                         break;
                     }
@@ -433,6 +459,13 @@ async fn dispatch_loop(
                         response.status = current_index_status(&shared, &identity);
                         let _ = envelope.reply.send(Ok(response));
                         handled += 1;
+                        tracing::info!(
+                            target: "evo::lifecycle",
+                            domain = "index",
+                            phase = "query_completed",
+                            query_kind = query_kind.as_str(),
+                            duration_ms = query_started.elapsed().as_millis() as u64,
+                        );
                         // shutdown 信号已到：完成当前请求后确定性退出
                         // （避免 select 公平性导致已排队的请求被继续处理）。
                         if *shutdown_rx.borrow() {
@@ -442,6 +475,13 @@ async fn dispatch_loop(
                     Ok(Err(error)) => {
                         let _ = envelope.reply.send(Err(error));
                         handled += 1;
+                        tracing::info!(
+                            target: "evo::lifecycle",
+                            domain = "index",
+                            phase = "query_failed",
+                            query_kind = query_kind.as_str(),
+                            duration_ms = query_started.elapsed().as_millis() as u64,
+                        );
                         if *shutdown_rx.borrow() {
                             break;
                         }
@@ -482,6 +522,14 @@ async fn dispatch_loop(
         ServiceShutdownReason::SendersDropped
     };
     *shared.state.lock().unwrap() = ServiceState::Stopped;
+    tracing::info!(
+        target: "evo::lifecycle",
+        domain = "index",
+        phase = "stopped",
+        shutdown_reason = ?reason,
+        handled_queries = handled,
+        panicked,
+    );
 
     ServiceExit {
         reason,

@@ -112,6 +112,7 @@ impl CodingAgentSession {
     pub(crate) async fn shutdown_internal(
         &mut self,
     ) -> Result<CodingAgentShutdownOutcome, CodingSessionError> {
+        let observation_started = std::time::Instant::now();
         if self
             .runtime_host
             .client_projection
@@ -160,6 +161,13 @@ impl CodingAgentSession {
             .client_projection
             .snapshots
             .finish_shutdown()?;
+        tracing::info!(
+            target: "evo::lifecycle",
+            domain = "session",
+            phase = "stopped",
+            session_id = session_id.as_str(),
+            duration_ms = observation_started.elapsed().as_millis() as u64,
+        );
         Ok(CodingAgentShutdownOutcome::ShutDown)
     }
 

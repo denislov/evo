@@ -74,6 +74,7 @@ impl NativeShell {
                 Some(DesktopModalKind::ConfirmDeleteSession) => {
                     self.ui.modal_focus.focus(window, cx)
                 }
+                Some(DesktopModalKind::UpdateAvailable) => self.ui.modal_focus.focus(window, cx),
                 None => self.focus_composer_input(window, cx),
             },
         }

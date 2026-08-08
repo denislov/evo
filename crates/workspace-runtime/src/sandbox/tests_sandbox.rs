@@ -36,7 +36,7 @@ fn product_default_grants_workspace_system_and_home_reads() {
             .read_roots
             .contains(&PathBuf::from("/workspace/evo"))
     );
-    for root in ["/bin", "/usr", "/etc", "/proc", "/tmp"] {
+    for root in ["/bin", "/usr", "/etc", "/proc", "/tmp", "/nix"] {
         assert!(
             profile.read_roots.contains(&PathBuf::from(root)),
             "{root} readable"

@@ -43,11 +43,11 @@ pub mod transport {
 /// [`SecretsScrubber`](SecretsScrubber) output into logs, telemetry, hook
 /// payloads, and crash reports.
 pub mod resilience {
-    pub use crate::scrub::{SecretStore, SecretsScrubber, scrub_text};
     pub use crate::transport::circuit_breaker::{
         BreakerKey, BreakerStateName, BreakerVerdict, CircuitBreaker, CircuitBreakerConfig,
         CircuitBreakerRegistry, Clock, SystemClock,
     };
+    pub use observability::{SecretStore, SecretsScrubber, scrub_text};
 }
 
 /// SSRF-hardened HTTP fetch for product tools: every hop re-validates the

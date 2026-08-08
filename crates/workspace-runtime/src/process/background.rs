@@ -90,6 +90,16 @@ impl TaskState {
     pub fn is_running(&self) -> bool {
         matches!(self, Self::Running)
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed { .. } => "completed",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+            Self::Failed { .. } => "failed",
+        }
+    }
 }
 
 /// Explicit marker for output that was dropped before the reader observed it.
@@ -378,6 +388,15 @@ async fn background_driver(
         PendingTermination::Cancelled => TaskState::Cancelled,
         PendingTermination::Failed(message) => TaskState::Failed { message },
     };
+    tracing::info!(
+        target: "evo::lifecycle",
+        domain = "task",
+        phase = "finished",
+        task_id = shared.id.get(),
+        owner_kind = shared.owner.kind(),
+        owner_id = shared.owner.id(),
+        state = state.as_str(),
+    );
     shared.finish(state);
 }
 
@@ -464,6 +483,15 @@ impl TaskRegistry {
             spool: Mutex::new(OutputSpool::new(spec.output_budget.max_bytes)),
             notify: Notify::new(),
         });
+        tracing::info!(
+            target: "evo::lifecycle",
+            domain = "task",
+            phase = "started",
+            task_id = task_id.get(),
+            owner_kind = owner.kind(),
+            owner_id = owner.id(),
+            has_timeout = timeout.is_some(),
+        );
         let driver_shared = shared.clone();
         let driver = tokio::spawn(background_driver(driver_shared, process, timeout, None));
         let handle = TaskHandle { shared };

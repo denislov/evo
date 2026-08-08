@@ -18,6 +18,7 @@ mod projection;
 mod projection_scenario_tests;
 mod runtime;
 mod ui;
+mod update;
 
 #[cfg(test)]
 mod allocation_probe {

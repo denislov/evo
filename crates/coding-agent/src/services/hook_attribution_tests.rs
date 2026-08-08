@@ -153,6 +153,38 @@ async fn unbound_observer_is_a_noop() {
     attribution.after(&event, &spec, &succeeded()).await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_reads_use_capability_and_reject_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("notes.txt"), b"inside\n").unwrap();
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, b"outside\n").unwrap();
+    symlink(&outside, workspace.join("link.txt")).unwrap();
+
+    let sink = Arc::new(CollectingSink::default());
+    let attribution =
+        HookEditAttribution::new(Arc::new(Mutex::new(None)), &workspace, Some(sink.clone()));
+
+    assert_eq!(
+        attribution
+            .read_workspace_file(std::path::Path::new("notes.txt"))
+            .await,
+        Some(b"inside\n".to_vec())
+    );
+    assert_eq!(
+        attribution
+            .read_workspace_file(std::path::Path::new("link.txt"))
+            .await,
+        None
+    );
+    assert_eq!(sink.failures.load(Ordering::SeqCst), 1);
+}
+
 /// hook 修改已 track 文件 → after 自动归因 `HookEdit`（review 快照可见、
 /// 有 hunks）；未修改不产生新事实。
 #[tokio::test]

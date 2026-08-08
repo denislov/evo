@@ -96,6 +96,44 @@ fn native_shell_command_palette_smoke_uses_modal_focus_and_restores_it(cx: &mut 
 }
 
 #[gpui::test]
+fn update_modal_is_explicit_and_later_keeps_the_current_binary(cx: &mut TestAppContext) {
+    initialize_visual_test(cx);
+    let (shell, cx) = add_visual_shell(
+        cx,
+        DesktopRuntimeBridge::disconnected_for_test(),
+        visual_test_projection(),
+    );
+    shell.update(cx, |shell, cx| {
+        shell.ui.available_update = Some(DesktopUpdateAvailable {
+            version: "9.9.9".into(),
+            installing: false,
+            installed: false,
+            status: None,
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.ui.active_modal),
+        Some(DesktopModalKind::UpdateAvailable)
+    );
+    assert!(
+        cx.debug_bounds("desktop-update-available-dialog").is_some(),
+        "an available update must require an explicit user choice"
+    );
+    assert_minimum_hit_target(cx, "desktop-install-update");
+
+    let later = cx
+        .debug_bounds("desktop-dismiss-update")
+        .expect("Later button is rendered");
+    cx.simulate_click(later.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |shell, _| shell.ui.active_modal), None);
+    assert!(shell.read_with(cx, |shell, _| shell.ui.available_update.is_none()));
+}
+
+#[gpui::test]
 fn authorization_modal_preempts_the_drawer_and_restores_its_root_focus_owner(
     cx: &mut TestAppContext,
 ) {

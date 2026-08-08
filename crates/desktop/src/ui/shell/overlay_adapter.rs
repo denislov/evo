@@ -21,6 +21,7 @@ impl NativeShell {
             DesktopModalKind::FullMessage => self.ui.full_message_focus.focus(window, cx),
             DesktopModalKind::Search => self.ui.search_focus.focus(window, cx),
             DesktopModalKind::ConfirmDeleteSession => self.ui.modal_focus.focus(window, cx),
+            DesktopModalKind::UpdateAvailable => self.ui.modal_focus.focus(window, cx),
         }
         self.refresh_views(
             UiChangeSet::from_regions(&[UiRegion::ConversationHeader, UiRegion::Modal]),
@@ -32,6 +33,10 @@ impl NativeShell {
     pub(super) fn dismiss_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ui.active_modal = None;
         self.ui.focus.close_modal(self.layout(window));
+        if self.ui.available_update.is_some() {
+            self.activate_modal(DesktopModalKind::UpdateAvailable, window, cx);
+            return;
+        }
         self.focus_active_target(window, cx);
         self.refresh_views(
             UiChangeSet::from_regions(&[UiRegion::ConversationHeader, UiRegion::Modal]),
@@ -193,6 +198,9 @@ impl NativeShell {
                 }
                 DesktopModalKind::ConfirmDeleteSession => {
                     "Confirm or cancel the session deletion before using workspace shortcuts."
+                }
+                DesktopModalKind::UpdateAvailable => {
+                    "Install the available update or choose Later before using workspace shortcuts."
                 }
             }
             .into(),

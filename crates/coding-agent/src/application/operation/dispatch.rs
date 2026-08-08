@@ -6,7 +6,6 @@ use super::submission::SubmissionCommitGuard;
 use super::{OperationDispatchMode, OperationExecution, OperationOutcome};
 use crate::kernel::capability::SessionWriteCapability;
 use crate::kernel::error::CodingSessionError;
-use crate::kernel::operation::OperationKind;
 use crate::mutex::report_infallible_resource_error;
 use crate::operations::compaction::runner::ManualCompactionOptions;
 use crate::platform::time::{Clock, SystemClock};
@@ -19,6 +18,7 @@ impl CodingAgentSession {
         mut operation: CodingAgentOperation,
         mut submission: Option<SubmissionCommitGuard>,
     ) -> Result<OperationOutcome, CodingSessionError> {
+        let observation_started = std::time::Instant::now();
         let dispatch_mode = operation.descriptor().dispatch_mode;
         if dispatch_mode == OperationDispatchMode::Async {
             self.prepare_operation_for_admission(&mut operation)?;
@@ -56,6 +56,15 @@ impl CodingAgentSession {
         }
 
         let execution = operation_permit.execution().clone();
+        tracing::info!(
+            target: "evo::lifecycle",
+            domain = "operation",
+            phase = "started",
+            operation_id = execution.operation_id.as_str(),
+            session_id = execution.session_identity.as_deref().unwrap_or("transient"),
+            kind = execution.kind.as_str(),
+            dispatch = ?dispatch_mode,
+        );
         let session_naming_seed = match &operation {
             CodingAgentOperation::Prompt(options) => {
                 crate::operations::session_naming::SessionNamingSeed::from_prompt(
@@ -112,6 +121,15 @@ impl CodingAgentSession {
             self.refresh_snapshot_projection()?;
         }
         self.schedule_session_naming_after_prompt(session_naming_seed, &result);
+        tracing::info!(
+            target: "evo::lifecycle",
+            domain = "operation",
+            phase = if result.is_ok() { "completed" } else { "failed" },
+            operation_id = execution.operation_id.as_str(),
+            session_id = execution.session_identity.as_deref().unwrap_or("transient"),
+            kind = execution.kind.as_str(),
+            duration_ms = observation_started.elapsed().as_millis() as u64,
+        );
         result
     }
 
@@ -858,108 +876,6 @@ impl CodingAgentSession {
             }
         }
     }
-
-    async fn persist_operation_terminal_outbox(
-        &self,
-        decision: &super::finalize::FinalizationDecision,
-        result: &Result<OperationOutcome, CodingSessionError>,
-        commit_result: &super::finalize::FinalizationCommitResult,
-    ) -> Result<(), CodingSessionError> {
-        if !matches!(
-            decision.operation_kind,
-            OperationKind::Prompt
-                | OperationKind::Compact
-                | OperationKind::SelfHealingEdit
-                | OperationKind::AgentInvocation
-                | OperationKind::AgentTeam
-        ) || !matches!(
-            commit_result,
-            super::finalize::FinalizationCommitResult::Committed
-                | super::finalize::FinalizationCommitResult::DefinitelyFailed { .. }
-        ) {
-            return Ok(());
-        }
-        let (draft, prompt_outcome) = match decision.operation_kind {
-            OperationKind::Prompt => {
-                let Some(OperationOutcome::Prompt(outcome)) = result.as_ref().ok() else {
-                    return Ok(());
-                };
-                let Some(draft) =
-                    crate::services::event::EventService::prompt_terminal_draft(outcome)
-                else {
-                    return Ok(());
-                };
-                (draft, Some(outcome))
-            }
-            OperationKind::Compact => {
-                let Some(OperationOutcome::ManualCompaction(outcome)) = result.as_ref().ok() else {
-                    return Ok(());
-                };
-                let Some(draft) = self
-                    .runtime_host
-                    .events
-                    .take_deferred_terminal_draft(&decision.operation_id)?
-                else {
-                    return Ok(());
-                };
-                (draft, Some(outcome))
-            }
-            OperationKind::SelfHealingEdit => {
-                let Some(draft) = self
-                    .runtime_host
-                    .events
-                    .take_deferred_terminal_draft(&decision.operation_id)?
-                else {
-                    return Ok(());
-                };
-                (draft, None)
-            }
-            OperationKind::AgentInvocation | OperationKind::AgentTeam => {
-                let Some(draft) = self
-                    .runtime_host
-                    .events
-                    .take_deferred_terminal_draft(&decision.operation_id)?
-                else {
-                    return Ok(());
-                };
-                (draft, None)
-            }
-            _ => return Ok(()),
-        };
-        let compact_terminal_is_session_event = matches!(
-            &draft.event,
-            crate::events::CodingAgentProductEventKind::Session(
-                crate::events::CodingAgentSessionProductEvent::CompactionCompleted { .. }
-            )
-        );
-        let live_draft = draft.clone();
-        if matches!(
-            decision.operation_kind,
-            OperationKind::AgentInvocation | OperationKind::AgentTeam
-        ) {
-            self.runtime_host
-                .events
-                .emit_committed_terminal_draft(live_draft, decision.operation_kind)?;
-            return Ok(());
-        }
-        self.runtime_host
-            .session_coordinator
-            .persist_terminal_decision(decision, draft)
-            .await?;
-        if matches!(
-            decision.operation_kind,
-            OperationKind::Compact | OperationKind::SelfHealingEdit
-        ) {
-            self.runtime_host
-                .events
-                .emit_committed_terminal_draft(live_draft, decision.operation_kind)?;
-        }
-        if let Some(outcome) = prompt_outcome
-            && (decision.operation_kind == OperationKind::Prompt
-                || compact_terminal_is_session_event)
-        {
-            self.runtime_host.events.emit_prompt_terminal(outcome)?;
-        }
-        Ok(())
-    }
 }
+
+mod terminal;

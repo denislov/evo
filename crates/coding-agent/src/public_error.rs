@@ -5,8 +5,8 @@ use crate::limits::{
     MAX_PUBLIC_ERROR_CONTEXT_BYTES,
 };
 use crate::operations::prompt::context::{CodingDiagnostic, CodingDiagnosticSeverity};
-use crate::platform::io::redaction::redact_and_bound;
 use crate::profiles::{ProfileDiagnostic, ProfileKind};
+use observability::scrub_and_bound;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -113,7 +113,7 @@ impl CodingAgentPublicDiagnostic {
     ) -> Self {
         Self {
             severity,
-            code: redact_and_bound(code, MAX_PUBLIC_DIAGNOSTIC_CODE_BYTES),
+            code: scrub_and_bound(code, MAX_PUBLIC_DIAGNOSTIC_CODE_BYTES),
             summary: safe_public_summary(summary),
             origin,
             operation_id: operation_id.map(public_context_text),
@@ -168,7 +168,7 @@ impl CodingAgentPublicDiagnostic {
 }
 
 pub(crate) fn safe_public_summary(text: &str) -> String {
-    redact_and_bound(text, MAX_PUBLIC_DIAGNOSTIC_SUMMARY_BYTES)
+    scrub_and_bound(text, MAX_PUBLIC_DIAGNOSTIC_SUMMARY_BYTES)
 }
 
 impl From<&CodingSessionError> for CodingAgentPublicError {
@@ -445,5 +445,5 @@ impl From<ApplicationError> for CodingAgentPublicError {
 }
 
 fn public_context_text(text: &str) -> String {
-    redact_and_bound(text, MAX_PUBLIC_ERROR_CONTEXT_BYTES)
+    scrub_and_bound(text, MAX_PUBLIC_ERROR_CONTEXT_BYTES)
 }

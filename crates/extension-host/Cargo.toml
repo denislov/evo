@@ -10,8 +10,10 @@ regex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+observability.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tracing.workspace = true
 tokio-util.workspace = true
 toml = { workspace = true }
 tool-contract = { workspace = true }

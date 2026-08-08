@@ -5,6 +5,7 @@ use tui::api::input::{InputEvent, StdinBuffer};
 use tui::api::render::{RenderScheduler, Tui, TuiError};
 use tui::api::terminal::{Terminal, TerminalSize, detect_terminal_capabilities_from_env};
 
+use crate::interactive::TranscriptItem;
 use crate::interactive::app::{PromptContext, session_label};
 use crate::interactive::error::CliError;
 use crate::interactive::input::InputPump;
@@ -107,6 +108,16 @@ enum InteractiveLoopEvent {
     Prompt(Box<PromptSourceEvent>),
     Client(Box<Result<CodingAgentReconnectDelivery, CodingAgentPublicError>>),
     Theme(Box<CodingAgentThemeSnapshot>),
+    UpdateNotice(Option<String>),
+}
+
+async fn receive_update_notice(
+    update_check: &mut Option<tokio::task::JoinHandle<Option<String>>>,
+) -> Option<String> {
+    match update_check.as_mut() {
+        Some(check) => check.await.ok().flatten(),
+        None => std::future::pending().await,
+    }
 }
 
 async fn receive_prompt_source(task: Option<&mut PromptTask>) -> PromptSourceEvent {
@@ -183,6 +194,7 @@ pub(super) async fn run_interactive_loop_with_input<T, F>(
     startup: CodingAgentInteractiveStartup,
     terminal: T,
     make_input: F,
+    update_check: Option<tokio::task::JoinHandle<Option<String>>>,
 ) -> Result<LoopResult<T>, CliError>
 where
     T: Terminal,
@@ -200,8 +212,15 @@ where
     let mut input = make_input();
 
     let clock = SystemInteractiveClock;
-    let loop_result =
-        run_started_interactive_loop(&mut tui, root_id, &mut input, prompt_context, &clock).await;
+    let loop_result = run_started_interactive_loop(
+        &mut tui,
+        root_id,
+        &mut input,
+        prompt_context,
+        update_check,
+        &clock,
+    )
+    .await;
     // Drain in-flight Kitty key release events before stopping.
     let _ = tui
         .terminal_mut()
@@ -397,6 +416,7 @@ async fn run_started_interactive_loop<T, C>(
     root_id: usize,
     input: &mut InputPump,
     mut prompt_context: PromptContext,
+    mut update_check: Option<tokio::task::JoinHandle<Option<String>>>,
     clock: &C,
 ) -> Result<(i32, Option<CodingAgentSession>), CliError>
 where
@@ -461,6 +481,9 @@ where
                 InteractiveLoopEvent::Client(Box::new(delivery))
             }
             Some(reload) = theme_reload.recv() => InteractiveLoopEvent::Theme(Box::new(reload)),
+            notice = receive_update_notice(&mut update_check), if update_check.is_some() => {
+                InteractiveLoopEvent::UpdateNotice(notice)
+            }
         };
 
         match event {
@@ -625,6 +648,15 @@ where
             InteractiveLoopEvent::Theme(reload) => {
                 apply_theme_reload(tui, root_id, *reload);
                 render_scheduler.request(true);
+            }
+            InteractiveLoopEvent::UpdateNotice(notice) => {
+                update_check = None;
+                if let Some(notice) = notice {
+                    root_mut(tui, root_id)?
+                        .transcript
+                        .push(TranscriptItem::system(notice));
+                    render_scheduler.request(true);
+                }
             }
         }
     }

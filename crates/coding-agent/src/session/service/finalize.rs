@@ -551,7 +551,7 @@ impl SessionService {
                 message: "recovery resolution reason exceeds 1200 characters".into(),
             });
         }
-        let reason = crate::platform::io::redaction::redact_sensitive_text(reason);
+        let reason = observability::scrub_sensitive_text(reason);
         let operation_kind = self
             .store
             .read_events(&self.handle)?

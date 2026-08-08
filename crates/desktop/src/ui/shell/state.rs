@@ -5,8 +5,8 @@ use gpui::FocusHandle;
 use super::drawer::CenterDrawerKind;
 use crate::actions::DesktopCommandPalette;
 use crate::app::native_shell::{
-    ConversationFullMessageView, DesktopModalKind, FocusInputModality, PanelResizeState,
-    SessionDeleteConfirm,
+    ConversationFullMessageView, DesktopModalKind, DesktopUpdateAvailable, FocusInputModality,
+    PanelResizeState, SessionDeleteConfirm,
 };
 use crate::application::workspace::WorkspaceKey;
 use crate::ui::shell::{FocusState, FocusTarget};
@@ -44,6 +44,7 @@ pub(crate) struct ShellUiState {
     pub(crate) drawer_restore_focus: Option<FocusTarget>,
     pub(crate) conversation_full_message: Option<ConversationFullMessageView>,
     pub(crate) pending_delete_session: Option<SessionDeleteConfirm>,
+    pub(crate) available_update: Option<DesktopUpdateAvailable>,
     pub(crate) conversation_announcement: Option<(WorkspaceKey, u64, String)>,
     conversation_announcement_sequence: u64,
     pub(crate) panel_resize: Option<PanelResizeState>,
@@ -85,6 +86,7 @@ impl ShellUiState {
             drawer_restore_focus: None,
             conversation_full_message: None,
             pending_delete_session: None,
+            available_update: None,
             conversation_announcement: None,
             conversation_announcement_sequence: 0,
             panel_resize: None,

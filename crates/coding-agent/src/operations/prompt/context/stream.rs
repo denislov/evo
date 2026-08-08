@@ -359,8 +359,9 @@ impl PromptTurnContext {
     ) -> Result<(), CodingSessionError> {
         let session_tool_call_id =
             self.ensure_tool_session_call_started(agent_tool_call_id, tool_name, None)?;
+        let observed_tool_call_id = session_tool_call_id.clone();
         let delegation_update = terminal_delegation_update(tool_name, &result.content);
-        if result.is_error {
+        let transaction_result = if result.is_error {
             self.transaction_mut_required()?.record_tool_failed(
                 session_tool_call_id.clone(),
                 content_blocks_text(&result.content),
@@ -398,7 +399,19 @@ impl PromptTurnContext {
                     )?;
             }
             Ok(())
-        }
+        };
+        tracing::info!(
+            target: "evo::lifecycle",
+            domain = "tool",
+            phase = if transaction_result.is_ok() {
+                if result.is_error { "failed" } else { "completed" }
+            } else {
+                "persistence_failed"
+            },
+            tool_call_id = observed_tool_call_id.as_str(),
+            tool_name,
+        );
+        transaction_result
     }
 
     pub(super) fn ensure_assistant_session_message_started(
@@ -450,6 +463,13 @@ impl PromptTurnContext {
         let tool_call_id = self
             .transaction_mut_required()?
             .record_tool_started(tool_name, arguments)?;
+        tracing::info!(
+            target: "evo::lifecycle",
+            domain = "tool",
+            phase = "started",
+            tool_call_id = tool_call_id.as_str(),
+            tool_name,
+        );
         self.tool_session_call_ids
             .insert(agent_tool_call_id.to_owned(), tool_call_id.clone());
         Ok(tool_call_id)

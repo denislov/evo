@@ -12,7 +12,6 @@ use crate::protocol::{
     StopReason, StreamOptions,
 };
 use crate::registry::ApiProvider;
-use crate::scrub::SecretsScrubber;
 use crate::transport::circuit_breaker::{
     BreakerKey, BreakerVerdict, CircuitBreaker, CircuitBreakerConfig,
 };
@@ -21,6 +20,7 @@ use crate::transport::http::{
     AuthRefresh, SendResilience, credential_refresh_slot, scrub_error_message,
     send_json_stream_with_resilience,
 };
+use observability::SecretsScrubber;
 
 struct MockServer {
     url: String,

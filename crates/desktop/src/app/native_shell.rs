@@ -65,6 +65,7 @@ mod intent;
 mod intents;
 mod presentation;
 mod session;
+mod updater;
 
 pub(crate) use self::presentation::{
     NativeDesktopState, NativeShell, SessionWorkspace, build_session_workspace,
@@ -131,6 +132,15 @@ pub(crate) enum DesktopModalKind {
     FullMessage,
     Search,
     ConfirmDeleteSession,
+    UpdateAvailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DesktopUpdateAvailable {
+    pub(crate) version: String,
+    pub(crate) installing: bool,
+    pub(crate) installed: bool,
+    pub(crate) status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,6 +420,7 @@ impl NativeShell {
             ]),
             cx,
         );
+        shell.start_update_check(cx);
         shell
     }
     #[cfg(feature = "desktop-devtools")]

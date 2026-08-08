@@ -13,13 +13,16 @@ desktop-devtools = []
 gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "bc174a7ec4534b2a4174fddde314b38d30d69093", default-features = false }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component.git", rev = "bc174a7ec4534b2a4174fddde314b38d30d69093" }
 coding-agent.workspace = true
+observability.workspace = true
+release-updater.workspace = true
 futures.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["parsing"] }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
-tracing = "0.1"
+tracing.workspace = true
 unicode-width = "0.2"
 
 [target.'cfg(unix)'.dependencies]

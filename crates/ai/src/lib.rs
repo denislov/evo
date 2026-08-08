@@ -10,7 +10,6 @@ mod providers;
 mod registry;
 #[cfg(test)]
 mod regression_tests;
-mod scrub;
 mod transport;
 
 /// Stable facade for embedding `ai`.

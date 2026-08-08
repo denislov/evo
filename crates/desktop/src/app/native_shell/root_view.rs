@@ -5,9 +5,9 @@ use gpui::{
 };
 
 use super::{
-    CONVERSATION_CONTENT_MAX_WIDTH, CONVERSATION_RESIZE_DEBOUNCE, CenterSurface, DesktopTimerKind,
-    NativeShell, ResizablePanel, SemanticTheme, ShellLayout, UI_FONT_FAMILY, actions,
-    conversation_width_bucket,
+    CONVERSATION_CONTENT_MAX_WIDTH, CONVERSATION_RESIZE_DEBOUNCE, CenterSurface, DesktopModalKind,
+    DesktopTimerKind, NativeShell, ResizablePanel, SemanticTheme, ShellLayout, UI_FONT_FAMILY,
+    actions, conversation_width_bucket,
 };
 use crate::ui::components::style::{DesignRadius, DesignSpace, DesignText, DesktopStyledExt as _};
 
@@ -58,6 +58,9 @@ impl NativeShell {
             .as_ref()
             .is_some_and(|projection| !projection.snapshot().pending_authorizations.is_empty());
         self.reconcile_authorization_modal(authorization_present, window, cx);
+        if self.ui.active_modal.is_none() && self.ui.available_update.is_some() {
+            self.activate_modal(DesktopModalKind::UpdateAvailable, window, cx);
+        }
         (layout, theme)
     }
 }

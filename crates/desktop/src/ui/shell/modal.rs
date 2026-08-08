@@ -7,7 +7,7 @@ use gpui::{
     SharedString, Styled as _, Subscription, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::{
-    Icon, Selectable as _, Sizable as _,
+    Disableable as _, Icon, Selectable as _, Sizable as _,
     button::Button,
     input::{Input, InputEvent, InputState},
 };
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use super::ShellUiState;
 use crate::actions::{self, DesktopPaletteCommand, PALETTE_ENTRIES};
 use crate::app::native_shell::{
-    ConversationFullMessageView, NativeDesktopState, SessionDeleteConfirm,
+    ConversationFullMessageView, DesktopUpdateAvailable, NativeDesktopState, SessionDeleteConfirm,
 };
 use crate::ui::components::{
     controls::{
@@ -43,6 +43,8 @@ pub(crate) enum RootModalHostEvent {
     CloseFullMessage,
     NavigateSearch(String),
     CloseSearch,
+    InstallUpdate,
+    DismissUpdate,
     ConfirmDeleteSession,
     CancelDeleteSession,
     DecideAuthorization {
@@ -68,6 +70,7 @@ pub(crate) struct RootModalViewModel {
     pub(crate) search_sessions: Arc<[GlobalSearchSession]>,
     pub(crate) active_session_id: Arc<str>,
     pub(crate) delete_confirm: Option<SessionDeleteConfirm>,
+    pub(crate) update: Option<DesktopUpdateAvailable>,
 }
 
 /// One result category in the global search surface.
@@ -145,6 +148,10 @@ pub(crate) fn view_model(app: &NativeDesktopState, ui: &ShellUiState) -> RootMod
         search_sessions: search_sessions.into(),
         active_session_id: Arc::from(active_session_id),
         delete_confirm: ui.pending_delete_session.clone(),
+        update: (ui.active_modal
+            == Some(crate::app::native_shell::DesktopModalKind::UpdateAvailable))
+        .then(|| ui.available_update.clone())
+        .flatten(),
     }
 }
 
@@ -743,6 +750,122 @@ impl Render for RootModalHost {
                 )
         });
 
+        let update_overlay = view_model.update.as_ref().map(|update| {
+            let installing = update.installing;
+            let installed = update.installed;
+            let status = update.status.clone();
+            overlay_surface("update-available-overlay", &self.modal_focus)
+                .role(Role::AlertDialog)
+                .aria_label("Evo update available")
+                .aria_description(if installed {
+                    status.clone().unwrap_or_else(|| "Update installed.".into())
+                } else {
+                    format!(
+                        "Evo {} is available. Choose whether to download and install it now.",
+                        update.version
+                    )
+                })
+                .child(
+                    div()
+                        .id("update-available-dialog")
+                        .debug_selector(|| "desktop-update-available-dialog".to_owned())
+                        .w_full()
+                        .max_w(px(520.))
+                        .rounded_token(DesignRadius::Md)
+                        .border_1()
+                        .border_color(rgb(theme.accent.value()))
+                        .bg(rgb(theme.elevated.value()))
+                        .p_token(DesignSpace::Xl)
+                        .flex()
+                        .flex_col()
+                        .gap_token(DesignSpace::Md)
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .text_color(rgb(theme.accent.value()))
+                                .child("UPDATE AVAILABLE")
+                                .child(if installing {
+                                    "downloading and verifying…".to_owned()
+                                } else if installed {
+                                    "installed".to_owned()
+                                } else {
+                                    format!("Evo {}", update.version)
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(theme.text.value()))
+                                .whitespace_normal()
+                                .child(if installed {
+                                    "The verified release has been installed.".to_owned()
+                                } else {
+                                    format!(
+                                        "Evo {} is available. Download and install it now?",
+                                        update.version
+                                    )
+                                }),
+                        )
+                        .when_some(status, |dialog, status| {
+                            dialog.child(
+                                div()
+                                    .id("update-available-status")
+                                    .role(Role::Status)
+                                    .whitespace_normal()
+                                    .text_color(rgb(if installed {
+                                        theme.accent.value()
+                                    } else {
+                                        theme.danger.value()
+                                    }))
+                                    .child(status),
+                            )
+                        })
+                        .child(
+                            div()
+                                .debug_selector(|| "desktop-update-available-actions".into())
+                                .flex()
+                                .justify_end()
+                                .gap_token(DesignSpace::Sm)
+                                .child(
+                                    Button::new("dismiss-update")
+                                        .debug_selector(|| "desktop-dismiss-update".into())
+                                        .label(if installed { "Close" } else { "Later" })
+                                        .tooltip(if installed {
+                                            "Close the update message"
+                                        } else {
+                                            "Keep the current version"
+                                        })
+                                        .disabled(installing)
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(RootModalHostEvent::DismissUpdate);
+                                        })),
+                                )
+                                .when(!installed, |actions| {
+                                    actions.child(
+                                        DesktopCriticalButton::new(
+                                            "install-update",
+                                            if installing {
+                                                "Installing…"
+                                            } else {
+                                                "Install update"
+                                            },
+                                            "Download, verify, and install the GitHub Release",
+                                            DesktopCriticalTone::Affirmative,
+                                        )
+                                        .disabled(installing)
+                                        .build()
+                                        .debug_selector(|| "desktop-install-update".into())
+                                        .on_click(
+                                            cx.listener(|_, _, _, cx| {
+                                                cx.emit(RootModalHostEvent::InstallUpdate);
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        ),
+                )
+        });
+
         div()
             .id("root-modal-host")
             .absolute()
@@ -752,6 +875,7 @@ impl Render for RootModalHost {
             .children(full_message_overlay)
             .children(authorization_overlay)
             .children(delete_confirm_overlay)
+            .children(update_overlay)
             .into_any_element()
     }
 }

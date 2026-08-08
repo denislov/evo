@@ -10,9 +10,9 @@ use crate::protocol::{
     StreamOptions,
 };
 use crate::registry::{ProviderAuth, ProviderAuthResolver, ProviderRegistry};
-use crate::scrub::SecretsScrubber;
 use crate::transport::circuit_breaker::{BreakerKey, CircuitBreaker, CircuitBreakerConfig};
 use crate::transport::http::SendResilience;
+use observability::SecretsScrubber;
 
 type CapturedInvocation = (Option<StreamOptions>, SendResilience);
 
