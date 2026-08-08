@@ -299,7 +299,11 @@ impl InteractiveRoot {
         &mut self,
         snapshot: CodingAgentSnapshot,
     ) {
-        self.shared_projection = UiProjection::from_snapshot(snapshot);
+        // Preserve operation timings: a fresh snapshot arrives for every new
+        // connection handoff, and rebuilding the projection would reset all
+        // op elapsed times to zero.
+        self.shared_projection
+            .replace_snapshot_retaining_timings(snapshot);
         Self::update_context_local_state(&mut self.local, self.shared_projection.context());
         self.clamp_context_navigation();
     }

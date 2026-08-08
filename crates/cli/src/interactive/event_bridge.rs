@@ -149,7 +149,15 @@ impl UiProjection {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_snapshot(snapshot: CodingAgentSnapshot) -> Self {
+        Self::from_snapshot_with_timings(snapshot, HashMap::new())
+    }
+
+    fn from_snapshot_with_timings(
+        snapshot: CodingAgentSnapshot,
+        previous_timings: HashMap<String, UiOperationTiming>,
+    ) -> Self {
         let product = CodingAgentClientProjection::new(snapshot)
             .expect("product-owned snapshot must satisfy the shared projection contract");
         let context = product.snapshot().context.clone();
@@ -160,7 +168,7 @@ impl UiProjection {
             resync_notified: false,
             pending: Vec::new(),
             context,
-            operation_timings: HashMap::new(),
+            operation_timings: previous_timings,
             child_pending: HashMap::new(),
             child_order: VecDeque::new(),
             child_summaries: HashMap::new(),
@@ -190,6 +198,21 @@ impl UiProjection {
             }
         }
         projection
+    }
+
+    /// Reinstall a replacement snapshot while keeping the operation timings
+    /// observed so far.
+    ///
+    /// Every prompt (or operation) submission hands off a brand-new client
+    /// connection carrying a fresh full snapshot. Rebuilding the projection
+    /// from scratch would reset `operation_timings`, re-anchor every op's
+    /// `first_seen` to the handoff instant, and freeze already-terminal ops
+    /// at 0ms. Seeding the new projection with the previous timings preserves
+    /// the elapsed time of historical ops; entries for ops absent from the
+    /// replacement snapshot are pruned by `replace_product_context`.
+    pub(crate) fn replace_snapshot_retaining_timings(&mut self, snapshot: CodingAgentSnapshot) {
+        let previous_timings = std::mem::take(&mut self.operation_timings);
+        *self = Self::from_snapshot_with_timings(snapshot, previous_timings);
     }
 
     pub(crate) fn apply_product_event(&mut self, event: &ProductEvent) {

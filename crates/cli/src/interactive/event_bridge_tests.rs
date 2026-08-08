@@ -670,3 +670,117 @@ fn coding_event_bridge_ignores_session_write_and_capability_events() {
         assert!(bridge.push_product_event(&product_event(event)).is_empty());
     }
 }
+
+#[test]
+fn ui_projection_retains_operation_timings_across_snapshot_reinstall() {
+    use std::time::Duration;
+
+    use super::event_bridge::UiProjection;
+    use coding_agent::api::client::{
+        CodingAgentOperationSnapshot, CodingAgentOperationStatus, CodingAgentSnapshot,
+    };
+    use coding_agent::api::event::{
+        CodingAgentProductEventTerminalOperation, CodingAgentProductEventTerminalOperationKind,
+        CodingAgentProductEventTerminalStatus,
+    };
+    use scenario_testing::initial_snapshot;
+
+    // Live product events with a stream/sequence matching the test snapshot.
+    fn product_event_for_projection(
+        sequence: u64,
+        event: CodingAgentProductEventKind,
+        operation_id: Option<&str>,
+        terminal_operation: Option<CodingAgentProductEventTerminalOperation>,
+    ) -> coding_agent::api::event::CodingAgentProductEvent {
+        serde_json::from_value(serde_json::json!({
+            "stream_id": "test-stream",
+            "sequence": sequence,
+            "event": event,
+            "operation_id": operation_id,
+            "terminal_status": terminal_operation.as_ref().map(|terminal| terminal.status),
+            "terminal_operation": terminal_operation,
+            "durability": { "state": "live_only" },
+            "delivery_class": if terminal_operation.is_some() { "terminal" } else { "data" },
+        }))
+        .expect("product-event fixture must deserialize")
+    }
+
+    fn snapshot_with_operation(
+        mut snapshot: CodingAgentSnapshot,
+        operation: CodingAgentOperationSnapshot,
+    ) -> CodingAgentSnapshot {
+        snapshot.context.operations.push(operation);
+        snapshot
+    }
+
+    let mut projection = UiProjection::from_snapshot(initial_snapshot());
+
+    // op_1 starts and completes through live events on the connection.
+    projection.apply_product_event(&product_event_for_projection(
+        1,
+        CodingAgentProductEventKind::Workflow(CodingAgentWorkflowProductEvent::PromptStarted {
+            operation_id: "op_1".to_string(),
+            turn_id: "turn_1".to_string(),
+        }),
+        Some("op_1"),
+        None,
+    ));
+    std::thread::sleep(Duration::from_millis(30));
+    projection.apply_product_event(&product_event_for_projection(
+        2,
+        CodingAgentProductEventKind::Workflow(CodingAgentWorkflowProductEvent::PromptCompleted {
+            operation_id: "op_1".to_string(),
+            turn_id: "turn_1".to_string(),
+        }),
+        Some("op_1"),
+        Some(CodingAgentProductEventTerminalOperation {
+            kind: CodingAgentProductEventTerminalOperationKind::Prompt,
+            status: CodingAgentProductEventTerminalStatus::Completed,
+        }),
+    ));
+
+    let op_1 = projection
+        .context()
+        .operations
+        .iter()
+        .find(|operation| operation.operation_id == "op_1")
+        .expect("op_1 must be folded into the context");
+    let completed_elapsed = projection
+        .operation_elapsed(op_1)
+        .expect("completed op_1 must keep its measured duration");
+    assert!(
+        completed_elapsed >= Duration::from_millis(30),
+        "op_1 must have run for at least its sleep duration, got {completed_elapsed:?}"
+    );
+
+    // A new connection handoff reinstalls a fresh full snapshot that still
+    // contains the completed op_1. The elapsed time of historical ops must
+    // survive the reinstall instead of resetting to zero.
+    let handoff_snapshot = snapshot_with_operation(
+        initial_snapshot(),
+        CodingAgentOperationSnapshot {
+            operation_id: "op_1".to_string(),
+            kind: "prompt".to_string(),
+            parent_operation_id: None,
+            root_operation_id: None,
+            status: CodingAgentOperationStatus::Completed,
+            started_sequence: 1,
+            updated_sequence: 2,
+            diagnostics: Vec::new(),
+            failure: None,
+        },
+    );
+    projection.replace_snapshot_retaining_timings(handoff_snapshot);
+
+    let retained_elapsed = projection
+        .context()
+        .operations
+        .iter()
+        .find(|operation| operation.operation_id == "op_1")
+        .and_then(|operation| projection.operation_elapsed(operation))
+        .expect("op_1 must keep its elapsed time after the snapshot reinstall");
+    assert_eq!(
+        retained_elapsed, completed_elapsed,
+        "historical op elapsed time must survive a connection handoff snapshot"
+    );
+}
