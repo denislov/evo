@@ -265,7 +265,7 @@ desktop ───> coding-agent
 | Markdown checkpoint/virtual pager | `tui` | 只借鉴设计 | 9 | 不复制 pager 聚合层和 44 万行 UI |
 | PTY e2e/scenario runner | workspace test support | 适配方法论 | 9 | mock provider + terminal emulator + 声明式场景 |
 | `xai-sqlite-journal` | worktree/index registry | 条件移植 | 3/8 | 只有采用 SQLite 时引入，连同 NFS/WAL 保护 |
-| `xai-grok-update` | 发布工具 | 条件适配 | 10 | 发布渠道、签名和 rollback 确定后才实施 |
+| `xai-grok-update` | 发布工具 | 条件适配 | 10 | GitHub Release 渠道、哈希校验和 rollback 确定后才实施；不移植发布签名体系 |
 
 ---
 
@@ -883,9 +883,25 @@ Phase 9 Gate：通过（2026-08-07）。CLI/Desktop 无超限 production 文件�
 
 ### ARC-1020 Updater/发布
 
-- 先确定 CLI/Desktop 安装渠道、签名和 rollback 策略，再决定是否适配 Grok updater。
-- updater 必须校验签名/哈希、支持 staged download、原子切换和失败回滚。
-- 未确定发布渠道前不引入 updater crate。
+- 发布源固定为 GitHub Releases：`https://github.com/denislov/evo/releases`；首版不接入
+  crates.io、系统包管理器、企业分发或其他更新服务。
+- 首版只支持 Linux `x86_64` 与 Windows `x86_64`；暂不支持 macOS 和 ARM 架构。
+- CLI 与 Desktop 均发布独立资产。资产命名固定为：
+  `evo-cli-<version>-x86_64-unknown-linux-gnu.tar.gz`、
+  `evo-cli-<version>-x86_64-pc-windows-msvc.zip`、
+  `evo-desktop-<version>-x86_64-unknown-linux-gnu.tar.gz`、
+  `evo-desktop-<version>-x86_64-pc-windows-msvc.zip`。
+- 新建 Linux shell 与 Windows PowerShell 初始安装脚本；安装脚本根据当前平台选择
+  对应资产，下载、校验 SHA-256 后再安装。
+- Release 同时发布 `checksums.txt`；首版信任边界为 GitHub Release HTTPS 分发加
+  SHA-256 完整性校验，不引入独立发布签名、公钥、密钥轮换或签名验证依赖。
+- CLI 启动时执行有界、非阻塞的最新 Release 检查；只提示可用更新。`coding-agent update`
+  执行用户明确请求的下载、SHA-256 校验、临时目录解包和原子替换。
+- Desktop 启动时执行同样的有界检查；发现更新后通过确认弹窗交由用户决定是否下载和安装。
+- 更新必须先 staged download，完成哈希校验后才切换；下载中断、校验失败、解包失败或
+  替换失败时保留当前版本，不静默覆盖。首版不做灰度发布和自动启动失败回滚。
+- 在上述发布渠道和资产契约确定后实现 updater；不适配 `xai-grok-update` 的签名体系，
+  仅按需要借鉴其 staged download、原子切换和失败保留旧版本的测试方法。
 
 ### ARC-1030 最终清算
 
